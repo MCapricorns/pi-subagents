@@ -1,6 +1,6 @@
 {
   "name": "@ferris1225/pi-subagents",
-  "version": "0.3.0",
+  "version": "0.4.0",
   "description": "Focused sub-agent delegation for pi: explore / plan / worker / reviewer agents in isolated context, with proactive dispatch injection and per-agent model selection.",
   "type": "module",
   "license": "MIT",
@@ -32,10 +32,10 @@
     "prepack": "npm run check && npm test"
   },
   "peerDependencies": {
-    "@earendil-works/pi-agent-core": "*",
-    "@earendil-works/pi-ai": "*",
-    "@earendil-works/pi-coding-agent": "*",
-    "@earendil-works/pi-tui": "*",
+    "@earendil-works/pi-agent-core": ">=0.80.6",
+    "@earendil-works/pi-ai": ">=0.80.6",
+    "@earendil-works/pi-coding-agent": ">=0.80.6",
+    "@earendil-works/pi-tui": ">=0.80.6",
     "typebox": "*"
   },
   "devDependencies": {
