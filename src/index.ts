@@ -38,7 +38,7 @@ import {
 	type SubagentLiveEvent,
 	type UsageStats,
 } from "./spawn.ts";
-import { monitor, openSubagentOverlay, statusIcon } from "./monitor.ts";
+import { monitor, statusColor, statusIcon, statusLabel } from "./monitor.ts";
 
 const TaskItem = Type.Object({
 	agent: Type.String({ description: "Name of the agent to invoke" }),
@@ -218,17 +218,23 @@ export default function (pi: ExtensionAPI): void {
 								}
 							}
 						: undefined;
-					const result = await runSingleAgent({
-						defaultCwd: ctx.cwd,
-						agent: agents.find((a) => a.name === t.agent),
-						agentName: t.agent,
-						task: t.task,
-						cwd: t.cwd,
-						signal,
-						onUpdate: perTaskUpdate,
-						onLive,
-						makeDetails: makeDetails("parallel"),
-					});
+					let result: SingleResult;
+					try {
+						result = await runSingleAgent({
+							defaultCwd: ctx.cwd,
+							agent: agents.find((a) => a.name === t.agent),
+							agentName: t.agent,
+							task: t.task,
+							cwd: t.cwd,
+							signal,
+							onUpdate: perTaskUpdate,
+							onLive,
+							makeDetails: makeDetails("parallel"),
+						});
+					} catch (err) {
+						monitor.setStatus(runId, "failed");
+						throw err;
+					}
 					allResults[index] = result;
 					emitParallelUpdate();
 					return result;
@@ -274,17 +280,23 @@ export default function (pi: ExtensionAPI): void {
 						break;
 				}
 			};
-			const result = await runSingleAgent({
-				defaultCwd: ctx.cwd,
-				agent: agents.find((a) => a.name === params.agent),
-				agentName: params.agent as string,
-				task: params.task as string,
-				cwd: params.cwd,
-				signal,
-				onUpdate,
-				onLive,
-				makeDetails: makeDetails("single"),
-			});
+			let result: SingleResult;
+			try {
+				result = await runSingleAgent({
+					defaultCwd: ctx.cwd,
+					agent: agents.find((a) => a.name === params.agent),
+					agentName: params.agent as string,
+					task: params.task as string,
+					cwd: params.cwd,
+					signal,
+					onUpdate,
+					onLive,
+					makeDetails: makeDetails("single"),
+				});
+			} catch (err) {
+				monitor.setStatus(runId, "failed");
+				throw err;
+			}
 
 			if (isFailedResult(result)) {
 				return {
@@ -359,46 +371,35 @@ export default function (pi: ExtensionAPI): void {
 			"pi-subagents",
 			(tui, theme) => {
 				const unsub = monitor.subscribe(() => tui.requestRender());
+				// Tick once a second so elapsed time stays live while runs are active.
+				const timer = setInterval(() => {
+					if (monitor.getRuns().some((r) => r.status === "queued" || r.status === "running")) {
+						tui.requestRender();
+					}
+				}, 1000);
 				return {
 					render(width: number): string[] {
 						const runs = monitor.getRuns();
 						if (runs.length === 0) return [];
-						const lines = runs.map((r) => {
+						const lines: string[] = [];
+						for (const r of runs) {
 							const icon = statusIcon(r.status, theme);
-							return truncateToWidth(` ${icon} ${monitor.summarize(r)}`, width, "");
-						});
-						lines.push(truncateToWidth(theme.fg("dim", " ctrl+shift+a / /subagents to inspect"), width, ""));
+							const label = theme.fg(statusColor(r.status), statusLabel(r.status));
+							lines.push(truncateToWidth(` ${icon} ${monitor.summarize(r)} · ${label}`, width, ""));
+							const activity = monitor.lastActivity(r);
+							if (activity) lines.push(truncateToWidth(theme.fg("dim", `   ${activity}`), width, ""));
+						}
 						return lines;
 					},
 					invalidate() {},
 					dispose() {
 						unsub();
+						clearInterval(timer);
 					},
 				};
 			},
 			{ placement: "aboveEditor" },
 		);
-	});
-
-	// Drill-down overlay command.
-	pi.registerCommand("subagents", {
-		description: "Inspect running/recent sub-agents (model, tokens, live transcript)",
-		handler: async (_args, ctx) => {
-			if (ctx.mode !== "tui") {
-				ctx.ui.notify("The sub-agent monitor requires Pi's interactive TUI.", "warning");
-				return;
-			}
-			await openSubagentOverlay(ctx);
-		},
-	});
-
-	// Keyboard shortcut for the overlay.
-	pi.registerShortcut("ctrl+shift+a", {
-		description: "Open sub-agent monitor",
-		handler: async (ctx) => {
-			if (ctx.mode !== "tui") return;
-			await openSubagentOverlay(ctx);
-		},
 	});
 
 	// Proactive dispatch: inject the delegation directive into the parent system prompt.

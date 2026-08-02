@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { MonitorStore } from "../src/monitor.ts";
+import { MonitorStore, formatDuration, formatElapsed, statusLabel } from "../src/monitor.ts";
 
 describe("MonitorStore", () => {
 	it("addRun creates a queued run with zero usage", () => {
@@ -106,6 +106,41 @@ describe("MonitorStore.subscribe", () => {
 		expect(line).toContain("worker");
 		expect(line).toContain("anthropic/claude-sonnet-4-5");
 		expect(line).toContain("↑1.2k");
-		expect(line).toContain("queued");
+	});
+});
+
+describe("status labels and timing", () => {
+	it("statusLabel maps statuses to user-facing words", () => {
+		expect(statusLabel("queued")).toBe("ready");
+		expect(statusLabel("running")).toBe("running");
+		expect(statusLabel("done")).toBe("done");
+		expect(statusLabel("failed")).toBe("stopped");
+	});
+
+	it("formatDuration renders seconds, minutes and hours", () => {
+		expect(formatDuration(0)).toBe("0s");
+		expect(formatDuration(5_000)).toBe("5s");
+		expect(formatDuration(65_000)).toBe("1m05s");
+		expect(formatDuration(3_725_000)).toBe("1h02m");
+	});
+
+	it("records startedAt on running and endedAt on completion", () => {
+		const store = new MonitorStore();
+		const id = store.addRun("worker");
+		expect(store.getRuns()[0].startedAt).toBeUndefined();
+		store.setStatus(id, "running");
+		const startedAt = store.getRuns()[0].startedAt;
+		expect(startedAt).toBeTypeOf("number");
+		store.setStatus(id, "done");
+		const run = store.getRuns()[0];
+		expect(run.endedAt).toBeTypeOf("number");
+		expect(formatElapsed(run)).toBe(formatDuration((run.endedAt as number) - (run.startedAt as number)));
+	});
+
+	it("summarize includes elapsed time once running", () => {
+		const store = new MonitorStore();
+		const id = store.addRun("worker");
+		store.setStatus(id, "running");
+		expect(store.summarize(store.getRuns()[0])).toMatch(/\d+s/);
 	});
 });

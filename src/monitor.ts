@@ -1,20 +1,14 @@
 /**
  * Sub-agent monitor: a module-level singleton store that tracks subagent runs
- * for the current turn, plus a drill-down overlay component for live inspection.
+ * for the current turn.
  *
- * The store notifies subscribers on every mutation so the persistent widget and
- * the overlay can re-render. The overlay shows a list of runs (↑/↓ + Enter) and
- * a detail view with the live transcript (auto-tailing, scrollable).
+ * The store notifies subscribers on every mutation so the persistent widget
+ * above the editor can re-render. Each run carries timing information
+ * (started/ended) and a transcript whose most recent entry is surfaced as the
+ * run's current activity.
  */
 
-import {
-	matchesKey,
-	truncateToWidth,
-	type Component,
-	type Focusable,
-	type TUI,
-} from "@earendil-works/pi-tui";
-import type { ExtensionContext, Theme } from "@earendil-works/pi-coding-agent";
+import type { Theme } from "@earendil-works/pi-coding-agent";
 import type { UsageStats } from "./spawn.ts";
 
 // ---------------------------------------------------------------------------
@@ -35,6 +29,10 @@ export interface RunView {
 	status: RunStatus;
 	usage: UsageStats;
 	transcript: TranscriptLine[];
+	/** Epoch ms when the run started executing (set on first "running" status). */
+	startedAt?: number;
+	/** Epoch ms when the run finished (set on "done"/"failed"). */
+	endedAt?: number;
 }
 
 // ---------------------------------------------------------------------------
@@ -54,6 +52,23 @@ export function formatUsageCompact(usage: UsageStats): string {
 	if (usage.cacheRead) parts.push(`R${formatTokens(usage.cacheRead)}`);
 	if (usage.cost) parts.push(`$${usage.cost.toFixed(4)}`);
 	return parts.join(" ");
+}
+
+export function formatDuration(ms: number): string {
+	const totalSeconds = Math.max(0, Math.floor(ms / 1000));
+	if (totalSeconds < 60) return `${totalSeconds}s`;
+	const minutes = Math.floor(totalSeconds / 60);
+	const seconds = totalSeconds % 60;
+	if (minutes < 60) return `${minutes}m${String(seconds).padStart(2, "0")}s`;
+	const hours = Math.floor(minutes / 60);
+	return `${hours}h${String(minutes % 60).padStart(2, "0")}m`;
+}
+
+/** Elapsed wall time of a run: live while running, final once finished. */
+export function formatElapsed(run: RunView, now: number = Date.now()): string {
+	if (run.startedAt === undefined) return "";
+	const end = run.endedAt ?? now;
+	return formatDuration(end - run.startedAt);
 }
 
 // ---------------------------------------------------------------------------
@@ -90,9 +105,13 @@ export class MonitorStore {
 		const run = this.find(id);
 		if (!run) return;
 		run.status = status;
+		if (status === "running" && run.startedAt === undefined) {
+			run.startedAt = Date.now();
+		} else if ((status === "done" || status === "failed") && run.endedAt === undefined) {
+			run.endedAt = Date.now();
+		}
 		this.notify();
 	}
-
 	setUsage(id: number, usage: UsageStats, model?: string): void {
 		const run = this.find(id);
 		if (!run) return;
@@ -142,8 +161,18 @@ export class MonitorStore {
 		const parts = [run.agent];
 		if (run.model) parts.push(run.model);
 		if (usage) parts.push(usage);
-		parts.push(run.status);
+		const elapsed = formatElapsed(run);
+		if (elapsed) parts.push(elapsed);
 		return parts.join(" · ");
+	}
+
+	/** Text of the most recent transcript entry (what the run is doing now). */
+	lastActivity(run: RunView): string | undefined {
+		for (let i = run.transcript.length - 1; i >= 0; i--) {
+			const text = run.transcript[i].text.trim();
+			if (text.length > 0) return text;
+		}
+		return undefined;
 	}
 
 	private find(id: number): RunView | undefined {
@@ -180,191 +209,30 @@ export function statusIcon(status: RunStatus, theme: Theme): string {
 	}
 }
 
-// ---------------------------------------------------------------------------
-// Overlay component
-// ---------------------------------------------------------------------------
-
-class SubagentOverlay implements Component, Focusable {
-	private _focused = false;
-	private mode: "list" | "detail" = "list";
-	private cursor = 0;
-	private scroll = 0;
-	private cachedWidth = -1;
-	private cachedLines: string[] = [];
-	private closed = false;
-
-	private readonly unsub: () => void;
-
-	constructor(
-		private readonly tui: TUI,
-		private readonly theme: Theme,
-		private readonly done: (result: void) => void,
-	) {
-		this.unsub = monitor.subscribe(() => {
-			this.invalidate();
-			this.tui.requestRender();
-		});
-	}
-
-	get focused(): boolean {
-		return this._focused;
-	}
-
-	set focused(value: boolean) {
-		this._focused = value;
-	}
-
-	invalidate(): void {
-		this.cachedWidth = -1;
-		this.cachedLines = [];
-	}
-
-	handleInput(data: string): void {
-		if (this.mode === "list") {
-			const runs = monitor.getRuns();
-			if (matchesKey(data, "up")) {
-				if (runs.length > 0) this.cursor = this.cursor === 0 ? runs.length - 1 : this.cursor - 1;
-			} else if (matchesKey(data, "down")) {
-				if (runs.length > 0) this.cursor = this.cursor === runs.length - 1 ? 0 : this.cursor + 1;
-			} else if (matchesKey(data, "return")) {
-				if (runs.length > 0) {
-					this.mode = "detail";
-					this.scrollToBottom();
-				}
-			} else if (matchesKey(data, "escape")) {
-				this.close();
-				return;
-			}
-		} else {
-			if (matchesKey(data, "up")) {
-				this.scroll = Math.max(0, this.scroll - 1);
-			} else if (matchesKey(data, "down")) {
-				this.scroll++;
-			} else if (matchesKey(data, "escape")) {
-				this.mode = "list";
-			}
-		}
-		this.invalidate();
-		this.tui.requestRender();
-	}
-
-	render(width: number): string[] {
-		if (this.cachedWidth === width && this.cachedLines.length > 0) return this.cachedLines;
-
-		const t = this.theme;
-		const fit = (line: string): string => truncateToWidth(line, width, "");
-		const border = fit(t.fg("border", "─".repeat(Math.max(1, width))));
-
-		const lines: string[] = [];
-
-		if (this.mode === "list") {
-			lines.push(border);
-			lines.push(fit(t.fg("accent", t.bold(" Sub-agents"))));
-			lines.push(border);
-
-			const runs = monitor.getRuns();
-			if (runs.length === 0) {
-				lines.push(fit(t.fg("dim", "  (no sub-agent runs this turn)")));
-			} else {
-				this.cursor = Math.max(0, Math.min(this.cursor, runs.length - 1));
-				for (let i = 0; i < runs.length; i++) {
-					const run = runs[i];
-					const isCursor = i === this.cursor;
-					const mark = isCursor ? t.fg("accent", "❯ ") : "  ";
-					const icon = statusIcon(run.status, t);
-					const usage = formatUsageCompact(run.usage);
-					const parts = [run.agent];
-					if (run.model) parts.push(run.model);
-					if (usage) parts.push(usage);
-					parts.push(run.status);
-					const label = isCursor ? t.fg("accent", t.bold(parts.join(" · "))) : parts.join(" · ");
-					lines.push(fit(`${mark}${icon} ${label}`));
-				}
-			}
-
-			lines.push(border);
-			lines.push(fit(t.fg("dim", " ↑↓ select · enter open · esc close")));
-			lines.push(border);
-		} else {
-			const runs = monitor.getRuns();
-			const run = runs[this.cursor];
-
-			lines.push(border);
-			if (run) {
-				const headerParts = [run.agent];
-				if (run.model) headerParts.push(run.model);
-				lines.push(fit(t.fg("accent", t.bold(` ${headerParts.join(" · ")}`))));
-				const usage = formatUsageCompact(run.usage);
-				const statusLine = ` ${statusIcon(run.status, t)} ${run.status}${usage ? ` · ${usage}` : ""}`;
-				lines.push(fit(statusLine));
-			} else {
-				lines.push(fit(t.fg("dim", " (no run selected)")));
-			}
-			lines.push(border);
-
-			if (run) {
-				// Available height for transcript: total minus header(4) + footer(2)
-				const transcriptLines = run.transcript;
-				const availHeight = Math.max(1, 40 - 6); // reasonable default; actual height varies
-				this.scroll = Math.max(0, Math.min(this.scroll, Math.max(0, transcriptLines.length - availHeight)));
-
-				// Auto-tail: if scroll is at the bottom, keep it there
-				const maxScroll = Math.max(0, transcriptLines.length - availHeight);
-				if (this.scroll >= maxScroll - 1) this.scroll = maxScroll;
-
-				const visible = transcriptLines.slice(this.scroll, this.scroll + availHeight);
-				for (const entry of visible) {
-					const color =
-						entry.kind === "tool"
-							? "accent"
-							: entry.kind === "error"
-								? "error"
-								: entry.kind === "status"
-									? "dim"
-									: "text";
-					lines.push(fit(t.fg(color, ` ${entry.text}`)));
-				}
-				if (transcriptLines.length === 0) {
-					lines.push(fit(t.fg("dim", " (waiting for output…)")));
-				}
-			}
-
-			lines.push(border);
-			lines.push(fit(t.fg("dim", " ↑↓ scroll · esc back")));
-			lines.push(border);
-		}
-
-		this.cachedWidth = width;
-		this.cachedLines = lines;
-		return lines;
-	}
-
-	dispose(): void {
-		if (!this.closed) {
-			this.closed = true;
-			this.unsub();
-		}
-	}
-
-	private scrollToBottom(): void {
-		const runs = monitor.getRuns();
-		const run = runs[this.cursor];
-		if (run) this.scroll = Math.max(0, run.transcript.length);
-	}
-
-	private close(): void {
-		this.closed = true;
-		this.unsub();
-		this.done();
+/** User-facing status label shown in the widget. */
+export function statusLabel(status: RunStatus): string {
+	switch (status) {
+		case "queued":
+			return "ready";
+		case "running":
+			return "running";
+		case "done":
+			return "done";
+		case "failed":
+			return "stopped";
 	}
 }
 
-// ---------------------------------------------------------------------------
-// Public entry point
-// ---------------------------------------------------------------------------
-
-export async function openSubagentOverlay(ctx: ExtensionContext): Promise<void> {
-	await ctx.ui.custom<void>((tui, theme, _kb, done) => new SubagentOverlay(tui, theme, done), {
-		overlay: true,
-	});
+/** Theme color matching the status label. */
+export function statusColor(status: RunStatus): "accent" | "success" | "error" | "dim" {
+	switch (status) {
+		case "running":
+			return "accent";
+		case "done":
+			return "success";
+		case "failed":
+			return "error";
+		default:
+			return "dim";
+	}
 }
