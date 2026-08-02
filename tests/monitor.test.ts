@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { MonitorStore, formatDuration, formatElapsed, statusLabel } from "../src/monitor.ts";
+import { MonitorStore, formatDuration, formatElapsed, formatToolActivity, statusLabel } from "../src/monitor.ts";
 
 describe("MonitorStore", () => {
 	it("addRun creates a queued run with zero usage", () => {
@@ -12,7 +12,7 @@ describe("MonitorStore", () => {
 		expect(runs[0].model).toBe("anthropic/claude-sonnet-4-5");
 		expect(runs[0].status).toBe("queued");
 		expect(runs[0].usage.input).toBe(0);
-		expect(runs[0].transcript).toEqual([]);
+		expect(runs[0].activity).toBeUndefined();
 	});
 
 	it("beginTurn clears finished runs but keeps active ones", () => {
@@ -40,47 +40,66 @@ describe("MonitorStore", () => {
 	});
 });
 
-describe("MonitorStore.appendTextDelta", () => {
-	it("merges consecutive deltas into a single coherent text line", () => {
+describe("MonitorStore activity", () => {
+	it("setActivity records the current one-line activity, last writer wins", () => {
 		const store = new MonitorStore();
 		const id = store.addRun("worker");
-		store.appendTextDelta(id, "Hel");
-		store.appendTextDelta(id, "lo ");
-		store.appendTextDelta(id, "world");
-		const t = store.getRuns()[0].transcript;
-		expect(t).toEqual([{ kind: "text", text: "Hello world" }]);
+		store.setActivity(id, "thinking");
+		expect(store.getRuns()[0].activity).toBe("thinking");
+		store.setActivity(id, "read src/index.ts");
+		expect(store.getRuns()[0].activity).toBe("read src/index.ts");
 	});
 
-	it("splits on real newlines into separate lines", () => {
+	it("ignores activity for unknown runs", () => {
+		const store = new MonitorStore();
+		store.setActivity(999, "thinking");
+		expect(store.getRuns()).toHaveLength(0);
+	});
+});
+
+describe("MonitorStore.removeRun", () => {
+	it("removes the run and returns it for the completion notification", () => {
 		const store = new MonitorStore();
 		const id = store.addRun("worker");
-		store.appendTextDelta(id, "line1\nline2");
-		const t = store.getRuns()[0].transcript;
-		expect(t).toEqual([
-			{ kind: "text", text: "line1" },
-			{ kind: "text", text: "line2" },
-		]);
+		store.setStatus(id, "running");
+		store.setStatus(id, "done");
+		const removed = store.removeRun(id);
+		expect(removed?.agent).toBe("worker");
+		expect(removed?.endedAt).toBeTypeOf("number");
+		expect(store.getRuns()).toHaveLength(0);
 	});
 
-	it("does not merge text across an intervening tool line", () => {
+	it("returns undefined for unknown ids, so finishing twice is a no-op", () => {
 		const store = new MonitorStore();
-		const id = store.addRun("worker");
-		store.appendTextDelta(id, "before");
-		store.appendTranscript(id, { kind: "tool", text: "▸ read(x)" });
-		store.appendTextDelta(id, "after");
-		const t = store.getRuns()[0].transcript;
-		expect(t).toEqual([
-			{ kind: "text", text: "before" },
-			{ kind: "tool", text: "▸ read(x)" },
-			{ kind: "text", text: "after" },
-		]);
+		expect(store.removeRun(42)).toBeUndefined();
+	});
+});
+
+describe("formatToolActivity", () => {
+	it("shows the file being read, not a JSON args blob", () => {
+		expect(formatToolActivity("read", { path: "src/index.ts" })).toBe("read src/index.ts");
 	});
 
-	it("ignores empty deltas", () => {
-		const store = new MonitorStore();
-		const id = store.addRun("worker");
-		store.appendTextDelta(id, "");
-		expect(store.getRuns()[0].transcript).toEqual([]);
+	it("shows the command being run", () => {
+		expect(formatToolActivity("bash", { command: "npm test" })).toBe("bash npm test");
+	});
+
+	it("shows grep patterns and search queries", () => {
+		expect(formatToolActivity("grep", { pattern: "finishRun", path: "src/" })).toBe("grep finishRun");
+		expect(formatToolActivity("web_search", { query: "pi thinking levels" })).toBe("web_search pi thinking levels");
+	});
+
+	it("falls back to the bare tool name when no telling argument exists", () => {
+		expect(formatToolActivity("todo", {})).toBe("todo");
+		expect(formatToolActivity("read", undefined)).toBe("read");
+		expect(formatToolActivity("read", 42)).toBe("read");
+	});
+
+	it("collapses whitespace and truncates long targets", () => {
+		expect(formatToolActivity("bash", { command: "a\nb   c" })).toBe("bash a b c");
+		const out = formatToolActivity("bash", { command: "x".repeat(100) });
+		expect(out.length).toBeLessThanOrEqual("bash ".length + 60);
+		expect(out).toContain("…");
 	});
 });
 

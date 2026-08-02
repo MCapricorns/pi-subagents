@@ -44,6 +44,9 @@ Pi ships no sub-agents on purpose. The community fills the gap two ways, and bot
 pi install npm:@ferris1225/pi-subagents
 ```
 
+Requires pi **≥ 0.80.6** — sub-agents request `--thinking max`, which that version
+introduced (older pi builds would reject the flag value).
+
 Then run the setup wizard (selection-only):
 
 ```text
@@ -124,6 +127,22 @@ Tool shape:
 // parallel
 { "tasks": [ { "agent": "explore", "task": "..." }, { "agent": "explore", "task": "..." } ] }
 ```
+
+## Live status & notifications
+
+While sub-agents run, a widget above the editor shows one line per run — status
+icon, agent, model, token usage, elapsed time — plus a second, indented line
+with what the agent is doing right now: `thinking`, `writing`,
+`read src/index.ts`, `bash npm test`, … (never a raw JSON args blob).
+
+When a run finishes (done **or** failed), its row disappears from the widget and
+the main window gets a notification with the final summary
+(`✓ worker · openai/gpt-5 · ↑12.4k ↓3.1k · 47s`). The tool result itself
+remains the durable record in the conversation.
+
+Sub-agents always request the **strongest thinking level** (`--thinking max`);
+pi clamps it adaptively to what the resolved model supports
+(`max → xhigh → high → … → off`), so weaker models degrade gracefully.
 
 ## Development
 

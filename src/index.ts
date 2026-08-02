@@ -38,7 +38,7 @@ import {
 	type SubagentLiveEvent,
 	type UsageStats,
 } from "./spawn.ts";
-import { monitor, statusColor, statusIcon, statusLabel } from "./monitor.ts";
+import { formatToolActivity, monitor, statusColor, statusIcon, statusLabel } from "./monitor.ts";
 
 const TaskItem = Type.Object({
 	agent: Type.String({ description: "Name of the agent to invoke" }),
@@ -124,6 +124,42 @@ export default function (pi: ExtensionAPI): void {
 		async execute(_toolCallId, params, signal, onUpdate, ctx) {
 			monitor.beginTurn();
 			const config = await loadConfig(configPath);
+
+			// Finished runs leave the widget immediately; the main window gets a
+			// notification instead (the tool result remains the durable record).
+			const finishRun = (runId: number, status: "done" | "failed"): void => {
+				monitor.setStatus(runId, status); // stamps endedAt for the elapsed time
+				const run = monitor.removeRun(runId);
+				if (!run) return; // already finished — stay idempotent
+				const icon = status === "done" ? "✓" : "✗";
+				ctx.ui.notify(`${icon} ${monitor.summarize(run)}`, status === "done" ? "info" : "error");
+			};
+
+			// Live sub-agent activity → concise one-line status ("thinking",
+			// "read src/index.ts", ...), never a raw args blob.
+			const makeLiveHandler = (runId: number) => (e: SubagentLiveEvent): void => {
+				switch (e.kind) {
+					case "status":
+						if (e.status === "done" || e.status === "failed") finishRun(runId, e.status);
+						else monitor.setStatus(runId, e.status);
+						break;
+					case "usage":
+						monitor.setUsage(runId, e.usage, e.model);
+						break;
+					case "tool_start":
+						monitor.setActivity(runId, formatToolActivity(e.toolName, e.args));
+						break;
+					case "tool_end":
+						if (e.isError) monitor.setActivity(runId, `✗ ${e.toolName} failed`);
+						break;
+					case "thinking":
+						monitor.setActivity(runId, "thinking");
+						break;
+					case "text":
+						monitor.setActivity(runId, "writing");
+						break;
+				}
+			};
 			const discovery = discoverAgents(ctx.cwd, {
 				scope: config.agentScope,
 				enabledNames: config.enabledAgents,
@@ -190,25 +226,7 @@ export default function (pi: ExtensionAPI): void {
 				const results = await mapWithConcurrencyLimit(params.tasks, MAX_CONCURRENCY, async (t, index) => {
 					const resolvedModel = agents.find((a) => a.name === t.agent)?.model;
 					const runId = monitor.addRun(t.agent, resolvedModel);
-					const onLive = (e: SubagentLiveEvent): void => {
-						switch (e.kind) {
-							case "status":
-								monitor.setStatus(runId, e.status);
-								break;
-							case "usage":
-								monitor.setUsage(runId, e.usage, e.model);
-								break;
-							case "tool_start":
-								monitor.appendTranscript(runId, { kind: "tool", text: `▸ ${e.toolName}(${typeof e.args === "object" ? JSON.stringify(e.args).slice(0, 120) : String(e.args).slice(0, 120)})` });
-								break;
-							case "tool_end":
-								monitor.appendTranscript(runId, { kind: e.isError ? "error" : "status", text: `${e.isError ? "✗" : "✓"} ${e.toolName}` });
-								break;
-							case "text_delta":
-								monitor.appendTextDelta(runId, e.delta);
-								break;
-						}
-					};
+					const onLive = makeLiveHandler(runId);
 					const perTaskUpdate: OnUpdateCallback | undefined = onUpdate
 						? (partial) => {
 								const current = partial.details?.results[0];
@@ -232,7 +250,7 @@ export default function (pi: ExtensionAPI): void {
 							makeDetails: makeDetails("parallel"),
 						});
 					} catch (err) {
-						monitor.setStatus(runId, "failed");
+						finishRun(runId, "failed");
 						throw err;
 					}
 					allResults[index] = result;
@@ -261,25 +279,7 @@ export default function (pi: ExtensionAPI): void {
 			// ---- Single mode ----
 			const resolvedModel = agents.find((a) => a.name === params.agent)?.model;
 			const runId = monitor.addRun(params.agent as string, resolvedModel);
-			const onLive = (e: SubagentLiveEvent): void => {
-				switch (e.kind) {
-					case "status":
-						monitor.setStatus(runId, e.status);
-						break;
-					case "usage":
-						monitor.setUsage(runId, e.usage, e.model);
-						break;
-					case "tool_start":
-						monitor.appendTranscript(runId, { kind: "tool", text: `▸ ${e.toolName}(${typeof e.args === "object" ? JSON.stringify(e.args).slice(0, 120) : String(e.args).slice(0, 120)})` });
-						break;
-					case "tool_end":
-						monitor.appendTranscript(runId, { kind: e.isError ? "error" : "status", text: `${e.isError ? "✗" : "✓"} ${e.toolName}` });
-						break;
-					case "text_delta":
-						monitor.appendTextDelta(runId, e.delta);
-						break;
-				}
-			};
+			const onLive = makeLiveHandler(runId);
 			let result: SingleResult;
 			try {
 				result = await runSingleAgent({
@@ -294,7 +294,7 @@ export default function (pi: ExtensionAPI): void {
 					makeDetails: makeDetails("single"),
 				});
 			} catch (err) {
-				monitor.setStatus(runId, "failed");
+				finishRun(runId, "failed");
 				throw err;
 			}
 
@@ -386,8 +386,8 @@ export default function (pi: ExtensionAPI): void {
 							const icon = statusIcon(r.status, theme);
 							const label = theme.fg(statusColor(r.status), statusLabel(r.status));
 							lines.push(truncateToWidth(` ${icon} ${monitor.summarize(r)} · ${label}`, width, ""));
-							const activity = monitor.lastActivity(r);
-							if (activity) lines.push(truncateToWidth(theme.fg("dim", `   ${activity}`), width, ""));
+							// Activity sits one indent level below the agent name.
+							if (r.activity) lines.push(truncateToWidth(theme.fg("dim", `     ${r.activity}`), width, ""));
 						}
 						return lines;
 					},

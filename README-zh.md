@@ -41,6 +41,8 @@ pi 故意不内置 sub-agent。社区的补位方案分两种，但都没踩中�
 pi install npm:@ferris1225/pi-subagents
 ```
 
+要求 pi **≥ 0.80.6**——子代理会请求 `--thinking max`，该级别自这个版本引入（旧版 pi 会拒绝该参数值）。
+
 然后运行配置向导（纯选择）：
 
 ```text
@@ -116,6 +118,19 @@ agentModels[name]  →  当前 session 模型  →  agent frontmatter 里的默�
 // 并行
 { "tasks": [ { "agent": "explore", "task": "..." }, { "agent": "explore", "task": "..." } ] }
 ```
+
+## 实时状态与通知
+
+子代理运行期间，编辑器上方的挂件为每个运行显示一行状态（图标、agent、模型、
+token 用量、耗时），其下缩进一行显示它正在做什么：`thinking`、`writing`、
+`read src/index.ts`、`bash npm test`……（不会是一坨 JSON 参数）。
+
+运行结束（成功**或**失败）时，该行立即从挂件消失，主窗口收到一条通知，
+给出最终摘要（`✓ worker · openai/gpt-5 · ↑12.4k ↓3.1k · 47s`）。工具结果
+本身仍是对话里的持久记录。
+
+子代理一律请求**最强思考强度**（`--thinking max`）；pi 会按目标模型实际支持
+的级别自适应降级（`max → xhigh → high → … → off`），弱模型也能平稳运行。
 
 ## 开发
 

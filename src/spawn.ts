@@ -20,6 +20,10 @@ import type { AgentConfig, AgentSource } from "./agents.ts";
 
 export const MAX_PARALLEL_TASKS = 8;
 export const MAX_CONCURRENCY = 4;
+/** Thinking level requested for every sub-agent: the strongest pi offers. pi's
+ * session layer clamps it adaptively to what the resolved model supports
+ * (max → xhigh → high → … → off), so weaker models degrade gracefully. */
+export const SUBAGENT_THINKING_LEVEL = "max";
 /** Max nesting depth for sub-agent -> sub-agent spawning (recursion guard). */
 export const MAX_SUBAGENT_DEPTH = 2;
 export const DEPTH_ENV_VAR = "PI_SUBAGENT_DEPTH";
@@ -59,7 +63,8 @@ export type SubagentLiveEvent =
 	| { kind: "usage"; usage: UsageStats; model?: string }
 	| { kind: "tool_start"; toolName: string; args: unknown }
 	| { kind: "tool_end"; toolName: string; isError: boolean }
-	| { kind: "text_delta"; delta: string };
+	| { kind: "thinking" }
+	| { kind: "text" };
 
 function emptyUsage(): UsageStats {
 	return { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, cost: 0, contextTokens: 0, turns: 0 };
@@ -168,6 +173,8 @@ export async function runSingleAgent(options: RunSingleOptions): Promise<SingleR
 
 	const args: string[] = ["--mode", "json", "-p", "--no-session"];
 	if (agent.model) args.push("--model", agent.model);
+	// Strongest thinking by default; clamped adaptively per model by pi.
+	args.push("--thinking", SUBAGENT_THINKING_LEVEL);
 	if (agent.tools && agent.tools.length > 0) args.push("--tools", agent.tools.join(","));
 
 	let tmpPromptDir: string | null = null;
@@ -237,12 +244,15 @@ export async function runSingleAgent(options: RunSingleOptions): Promise<SingleR
 					}
 				}
 
-				// Live event: streamed assistant text
-				if (event.type === "message_update" && event.assistantMessageEvent?.type === "text_delta") {
-					if (onLive) {
-						try {
-							onLive({ kind: "text_delta", delta: event.assistantMessageEvent.delta ?? "" });
-						} catch { /* never throw from event handling */ }
+				// Live event: streamed assistant reasoning / output text
+				if (event.type === "message_update") {
+					const t = event.assistantMessageEvent?.type;
+					if (t === "thinking_delta" || t === "text_delta") {
+						if (onLive) {
+							try {
+								onLive({ kind: t === "thinking_delta" ? "thinking" : "text" });
+							} catch { /* never throw from event handling */ }
+						}
 					}
 				}
 
@@ -309,17 +319,32 @@ export async function runSingleAgent(options: RunSingleOptions): Promise<SingleR
 
 			proc.on("close", (code) => {
 				if (buffer.trim()) processLine(buffer);
-				// Live event: final status derived from exit code
+				// Live event: final status derived from exit code / abort state.
+				// code is null on signal termination (e.g. our own Esc abort), which
+				// must read as failure — never as a false "done".
 				if (onLive) {
 					try {
-						const failed = (code ?? 0) !== 0 || currentResult.stopReason === "error" || currentResult.stopReason === "aborted";
+						const failed =
+							code !== 0 ||
+							wasAborted ||
+							(signal?.aborted ?? false) ||
+							currentResult.stopReason === "error" ||
+							currentResult.stopReason === "aborted";
 						onLive({ kind: "status", status: failed ? "failed" : "done" });
 					} catch { /* never throw from event handling */ }
 				}
 				resolve(code ?? 0);
 			});
 
-			proc.on("error", () => resolve(1));
+			proc.on("error", () => {
+				// Spawn itself failed; close may never fire, so finish the run here.
+				if (onLive) {
+					try {
+						onLive({ kind: "status", status: "failed" });
+					} catch { /* never throw from event handling */ }
+				}
+				resolve(1);
+			});
 
 			if (signal) {
 				const killProc = (): void => {

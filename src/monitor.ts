@@ -4,8 +4,10 @@
  *
  * The store notifies subscribers on every mutation so the persistent widget
  * above the editor can re-render. Each run carries timing information
- * (started/ended) and a transcript whose most recent entry is surfaced as the
- * run's current activity.
+ * (started/ended) plus a concise activity string describing what the run is
+ * doing right now ("thinking", "read src/index.ts", ...). Runs are removed
+ * as soon as they finish: the tool result is the durable record in the main
+ * conversation, so a stale "done" row must not linger in the widget.
  */
 
 import type { Theme } from "@earendil-works/pi-coding-agent";
@@ -17,18 +19,14 @@ import type { UsageStats } from "./spawn.ts";
 
 export type RunStatus = "queued" | "running" | "done" | "failed";
 
-export interface TranscriptLine {
-	kind: "tool" | "text" | "status" | "error";
-	text: string;
-}
-
 export interface RunView {
 	id: number;
 	agent: string;
 	model?: string;
 	status: RunStatus;
 	usage: UsageStats;
-	transcript: TranscriptLine[];
+	/** Concise current activity ("thinking", "read src/index.ts"); last writer wins. */
+	activity?: string;
 	/** Epoch ms when the run started executing (set on first "running" status). */
 	startedAt?: number;
 	/** Epoch ms when the run finished (set on "done"/"failed"). */
@@ -71,6 +69,63 @@ export function formatElapsed(run: RunView, now: number = Date.now()): string {
 	return formatDuration(end - run.startedAt);
 }
 
+/** Max length of the argument target inside a formatted activity line. */
+export const ACTIVITY_TARGET_MAX = 60;
+
+function shortTarget(value: unknown): string {
+	if (typeof value !== "string") return "";
+	const oneLine = value.replace(/\s+/g, " ").trim();
+	// Slice by code point so emoji / CJK-ext never leave a lone surrogate.
+	const chars = [...oneLine];
+	return chars.length > ACTIVITY_TARGET_MAX ? `${chars.slice(0, ACTIVITY_TARGET_MAX - 1).join("")}…` : oneLine;
+}
+
+/** Concise "what is it doing" text for a tool call: the tool name plus its single
+ * most telling argument (path, command, pattern, ...) — never a raw JSON blob. */
+export function formatToolActivity(toolName: string, args: unknown): string {
+	const a = (typeof args === "object" && args !== null ? args : {}) as Record<string, unknown>;
+	const pick = (...keys: string[]): string => {
+		for (const key of keys) {
+			const s = shortTarget(a[key]);
+			if (s) return s;
+		}
+		return "";
+	};
+	let target: string;
+	switch (toolName) {
+		case "bash":
+		case "shell":
+			target = pick("command");
+			break;
+		case "read":
+		case "edit":
+		case "write":
+		case "ls":
+			target = pick("path", "file", "filePath");
+			break;
+		case "grep":
+		case "find":
+		case "glob":
+			target = pick("pattern", "query", "path");
+			break;
+		case "web_search":
+		case "search":
+			target = pick("query");
+			break;
+		case "fetch":
+		case "web_fetch":
+		case "fetch_content":
+			target = pick("url");
+			break;
+		case "subagent":
+			target = pick("agent", "task");
+			break;
+		default:
+			target = pick("path", "command", "query", "pattern", "url", "file", "task");
+	}
+	return target ? `${toolName} ${target}` : toolName;
+}
+
 // ---------------------------------------------------------------------------
 // MonitorStore
 // ---------------------------------------------------------------------------
@@ -95,7 +150,6 @@ export class MonitorStore {
 			model,
 			status: "queued",
 			usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, cost: 0, contextTokens: 0, turns: 0 },
-			transcript: [],
 		});
 		this.notify();
 		return id;
@@ -120,29 +174,21 @@ export class MonitorStore {
 		this.notify();
 	}
 
-	appendTranscript(id: number, line: TranscriptLine): void {
+	/** Update the run's current one-line activity (what it is doing now). */
+	setActivity(id: number, text: string): void {
 		const run = this.find(id);
 		if (!run) return;
-		run.transcript.push(line);
+		run.activity = text;
 		this.notify();
 	}
 
-	/** Append streamed assistant text, merging consecutive deltas into coherent
-	 * lines (split only on real newlines) instead of one line per token fragment. */
-	appendTextDelta(id: number, delta: string): void {
-		const run = this.find(id);
-		if (!run || delta.length === 0) return;
-		const segments = delta.split("\n");
-		for (let i = 0; i < segments.length; i++) {
-			const seg = segments[i];
-			const last = run.transcript[run.transcript.length - 1];
-			if (i === 0 && last && last.kind === "text") {
-				last.text += seg;
-			} else {
-				run.transcript.push({ kind: "text", text: seg });
-			}
-		}
+	/** Remove a run (finished runs leave the widget). Returns the removed run. */
+	removeRun(id: number): RunView | undefined {
+		const index = this.runs.findIndex((r) => r.id === id);
+		if (index === -1) return undefined;
+		const [run] = this.runs.splice(index, 1);
 		this.notify();
+		return run;
 	}
 
 	getRuns(): RunView[] {
@@ -164,15 +210,6 @@ export class MonitorStore {
 		const elapsed = formatElapsed(run);
 		if (elapsed) parts.push(elapsed);
 		return parts.join(" · ");
-	}
-
-	/** Text of the most recent transcript entry (what the run is doing now). */
-	lastActivity(run: RunView): string | undefined {
-		for (let i = run.transcript.length - 1; i >= 0; i--) {
-			const text = run.transcript[i].text.trim();
-			if (text.length > 0) return text;
-		}
-		return undefined;
 	}
 
 	private find(id: number): RunView | undefined {
