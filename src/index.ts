@@ -16,7 +16,7 @@
 import type { AgentToolResult } from "@earendil-works/pi-agent-core";
 import { StringEnum } from "@earendil-works/pi-ai";
 import { getAgentDir, type ExtensionAPI } from "@earendil-works/pi-coding-agent";
-import { Text } from "@earendil-works/pi-tui";
+import { Text, truncateToWidth } from "@earendil-works/pi-tui";
 import { Type } from "typebox";
 import { discoverAgents, type AgentConfig } from "./agents.ts";
 import { getConfigPath, loadConfig } from "./config.ts";
@@ -32,12 +32,13 @@ import {
 	isFailedResult,
 	mapWithConcurrencyLimit,
 	runSingleAgent,
-	truncateParallelOutput,
 	type OnUpdateCallback,
 	type SingleResult,
 	type SubagentDetails,
+	type SubagentLiveEvent,
 	type UsageStats,
 } from "./spawn.ts";
+import { monitor, openSubagentOverlay, statusIcon } from "./monitor.ts";
 
 const TaskItem = Type.Object({
 	agent: Type.String({ description: "Name of the agent to invoke" }),
@@ -121,6 +122,7 @@ export default function (pi: ExtensionAPI): void {
 		parameters: SubagentParams,
 
 		async execute(_toolCallId, params, signal, onUpdate, ctx) {
+			monitor.beginTurn();
 			const config = await loadConfig(configPath);
 			const discovery = discoverAgents(ctx.cwd, {
 				scope: config.agentScope,
@@ -186,6 +188,27 @@ export default function (pi: ExtensionAPI): void {
 				};
 
 				const results = await mapWithConcurrencyLimit(params.tasks, MAX_CONCURRENCY, async (t, index) => {
+					const resolvedModel = agents.find((a) => a.name === t.agent)?.model;
+					const runId = monitor.addRun(t.agent, resolvedModel);
+					const onLive = (e: SubagentLiveEvent): void => {
+						switch (e.kind) {
+							case "status":
+								monitor.setStatus(runId, e.status);
+								break;
+							case "usage":
+								monitor.setUsage(runId, e.usage, e.model);
+								break;
+							case "tool_start":
+								monitor.appendTranscript(runId, { kind: "tool", text: `▸ ${e.toolName}(${typeof e.args === "object" ? JSON.stringify(e.args).slice(0, 120) : String(e.args).slice(0, 120)})` });
+								break;
+							case "tool_end":
+								monitor.appendTranscript(runId, { kind: e.isError ? "error" : "status", text: `${e.isError ? "✗" : "✓"} ${e.toolName}` });
+								break;
+							case "text_delta":
+								monitor.appendTextDelta(runId, e.delta);
+								break;
+						}
+					};
 					const perTaskUpdate: OnUpdateCallback | undefined = onUpdate
 						? (partial) => {
 								const current = partial.details?.results[0];
@@ -203,6 +226,7 @@ export default function (pi: ExtensionAPI): void {
 						cwd: t.cwd,
 						signal,
 						onUpdate: perTaskUpdate,
+						onLive,
 						makeDetails: makeDetails("parallel"),
 					});
 					allResults[index] = result;
@@ -212,7 +236,7 @@ export default function (pi: ExtensionAPI): void {
 
 				const successCount = results.filter((r) => !isFailedResult(r)).length;
 				const summaries = results.map((r) => {
-					const output = truncateParallelOutput(getResultOutput(r));
+					const output = getResultOutput(r);
 					const status = isFailedResult(r) ? "failed" : "completed";
 					const usage = formatUsage(r.usage);
 					return `### [${r.agent}] ${status}${usage ? ` (${usage})` : ""}\n\n${output}`;
@@ -229,6 +253,27 @@ export default function (pi: ExtensionAPI): void {
 			}
 
 			// ---- Single mode ----
+			const resolvedModel = agents.find((a) => a.name === params.agent)?.model;
+			const runId = monitor.addRun(params.agent as string, resolvedModel);
+			const onLive = (e: SubagentLiveEvent): void => {
+				switch (e.kind) {
+					case "status":
+						monitor.setStatus(runId, e.status);
+						break;
+					case "usage":
+						monitor.setUsage(runId, e.usage, e.model);
+						break;
+					case "tool_start":
+						monitor.appendTranscript(runId, { kind: "tool", text: `▸ ${e.toolName}(${typeof e.args === "object" ? JSON.stringify(e.args).slice(0, 120) : String(e.args).slice(0, 120)})` });
+						break;
+					case "tool_end":
+						monitor.appendTranscript(runId, { kind: e.isError ? "error" : "status", text: `${e.isError ? "✗" : "✓"} ${e.toolName}` });
+						break;
+					case "text_delta":
+						monitor.appendTextDelta(runId, e.delta);
+						break;
+				}
+			};
 			const result = await runSingleAgent({
 				defaultCwd: ctx.cwd,
 				agent: agents.find((a) => a.name === params.agent),
@@ -237,6 +282,7 @@ export default function (pi: ExtensionAPI): void {
 				cwd: params.cwd,
 				signal,
 				onUpdate,
+				onLive,
 				makeDetails: makeDetails("single"),
 			});
 
@@ -275,13 +321,27 @@ export default function (pi: ExtensionAPI): void {
 		renderResult(result, _options, theme) {
 			const details = result.details as SubagentDetails | undefined;
 			if (!details || details.results.length === 0) return new Text(theme.fg("dim", "(no output)"), 0, 0);
-			const usage = formatUsage(aggregateUsage(details.results));
-			const header =
-				details.mode === "parallel"
-					? `${theme.fg("toolTitle", theme.bold("subagent "))}${theme.fg("accent", `parallel (${details.results.length})`)}`
-					: `${theme.fg("toolTitle", theme.bold("subagent "))}${theme.fg("accent", details.results[0].agent)}`;
-			const suffix = usage ? `  ${theme.fg("dim", usage)}` : "";
-			return new Text(header + suffix, 0, 0);
+
+			if (details.mode === "single") {
+				const r = details.results[0];
+				const icon = statusIcon(isFailedResult(r) ? "failed" : "done", theme);
+				const usage = formatUsage(r.usage);
+				const model = r.model ?? "?";
+				const line = `${theme.fg("toolTitle", theme.bold("subagent "))}${icon} ${theme.fg("accent", r.agent)} ${theme.fg("dim", `· ${model}${usage ? ` · ${usage}` : ""}`)}`;
+				return new Text(line, 0, 0);
+			}
+
+			// Parallel mode: header + one compact line per agent
+			const lines: string[] = [
+				`${theme.fg("toolTitle", theme.bold("subagent "))}${theme.fg("accent", `parallel (${details.results.length})`)}`,
+			];
+			for (const r of details.results) {
+				const icon = statusIcon(isFailedResult(r) ? "failed" : "done", theme);
+				const usage = formatUsage(r.usage);
+				const model = r.model ?? "?";
+				lines.push(`  ${icon} ${theme.fg("accent", r.agent)} ${theme.fg("dim", `· ${model}${usage ? ` · ${usage}` : ""}`)}`);
+			}
+			return new Text(lines.join("\n"), 0, 0);
 		},
 	});
 
@@ -289,6 +349,55 @@ export default function (pi: ExtensionAPI): void {
 		description: "Configure pi-subagents: enable agents, pick per-agent models, toggle proactive injection",
 		handler: async (_args, ctx) => {
 			await runSetup(ctx, configPath);
+		},
+	});
+
+	// Persistent widget above the editor showing live sub-agent status.
+	pi.on("session_start", (_e, ctx) => {
+		if (ctx.mode !== "tui") return;
+		ctx.ui.setWidget(
+			"pi-subagents",
+			(tui, theme) => {
+				const unsub = monitor.subscribe(() => tui.requestRender());
+				return {
+					render(width: number): string[] {
+						const runs = monitor.getRuns();
+						if (runs.length === 0) return [];
+						const lines = runs.map((r) => {
+							const icon = statusIcon(r.status, theme);
+							return truncateToWidth(` ${icon} ${monitor.summarize(r)}`, width, "");
+						});
+						lines.push(truncateToWidth(theme.fg("dim", " ctrl+shift+a / /subagents to inspect"), width, ""));
+						return lines;
+					},
+					invalidate() {},
+					dispose() {
+						unsub();
+					},
+				};
+			},
+			{ placement: "aboveEditor" },
+		);
+	});
+
+	// Drill-down overlay command.
+	pi.registerCommand("subagents", {
+		description: "Inspect running/recent sub-agents (model, tokens, live transcript)",
+		handler: async (_args, ctx) => {
+			if (ctx.mode !== "tui") {
+				ctx.ui.notify("The sub-agent monitor requires Pi's interactive TUI.", "warning");
+				return;
+			}
+			await openSubagentOverlay(ctx);
+		},
+	});
+
+	// Keyboard shortcut for the overlay.
+	pi.registerShortcut("ctrl+shift+a", {
+		description: "Open sub-agent monitor",
+		handler: async (ctx) => {
+			if (ctx.mode !== "tui") return;
+			await openSubagentOverlay(ctx);
 		},
 	});
 

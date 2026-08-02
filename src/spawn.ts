@@ -20,7 +20,6 @@ import type { AgentConfig, AgentSource } from "./agents.ts";
 
 export const MAX_PARALLEL_TASKS = 8;
 export const MAX_CONCURRENCY = 4;
-export const PER_TASK_OUTPUT_CAP = 50 * 1024;
 /** Max nesting depth for sub-agent -> sub-agent spawning (recursion guard). */
 export const MAX_SUBAGENT_DEPTH = 2;
 export const DEPTH_ENV_VAR = "PI_SUBAGENT_DEPTH";
@@ -55,6 +54,13 @@ export interface SubagentDetails {
 
 export type OnUpdateCallback = (partial: AgentToolResult<SubagentDetails>) => void;
 
+export type SubagentLiveEvent =
+	| { kind: "status"; status: "queued" | "running" | "done" | "failed" }
+	| { kind: "usage"; usage: UsageStats; model?: string }
+	| { kind: "tool_start"; toolName: string; args: unknown }
+	| { kind: "tool_end"; toolName: string; isError: boolean }
+	| { kind: "text_delta"; delta: string };
+
 function emptyUsage(): UsageStats {
 	return { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, cost: 0, contextTokens: 0, turns: 0 };
 }
@@ -80,15 +86,6 @@ export function getResultOutput(result: SingleResult): string {
 		return result.errorMessage || result.stderr || getFinalOutput(result.messages) || "(no output)";
 	}
 	return getFinalOutput(result.messages) || "(no output)";
-}
-
-export function truncateParallelOutput(output: string): string {
-	const byteLength = Buffer.byteLength(output, "utf8");
-	if (byteLength <= PER_TASK_OUTPUT_CAP) return output;
-	let truncated = output.slice(0, PER_TASK_OUTPUT_CAP);
-	while (Buffer.byteLength(truncated, "utf8") > PER_TASK_OUTPUT_CAP) truncated = truncated.slice(0, -1);
-	const omitted = byteLength - Buffer.byteLength(truncated, "utf8");
-	return `${truncated}\n\n[Output truncated: ${omitted} bytes omitted. Full output preserved in tool details.]`;
 }
 
 export async function mapWithConcurrencyLimit<TIn, TOut>(
@@ -148,13 +145,14 @@ export interface RunSingleOptions {
 	cwd?: string;
 	signal?: AbortSignal;
 	onUpdate?: OnUpdateCallback;
+	onLive?: (e: SubagentLiveEvent) => void;
 	makeDetails: (results: SingleResult[]) => SubagentDetails;
 	env?: NodeJS.ProcessEnv;
 }
 
 /** Spawn one agent as an isolated pi child process and collect its output. */
 export async function runSingleAgent(options: RunSingleOptions): Promise<SingleResult> {
-	const { agent, agentName, task, cwd, signal, onUpdate, makeDetails } = options;
+	const { agent, agentName, task, cwd, signal, onUpdate, onLive, makeDetails } = options;
 
 	if (!agent) {
 		return {
@@ -230,6 +228,42 @@ export async function runSingleAgent(options: RunSingleOptions): Promise<SingleR
 					return;
 				}
 
+				// Live event: agent started
+				if (event.type === "agent_start" || event.type === "turn_start") {
+					if (onLive) {
+						try {
+							onLive({ kind: "status", status: "running" });
+						} catch { /* never throw from event handling */ }
+					}
+				}
+
+				// Live event: streamed assistant text
+				if (event.type === "message_update" && event.assistantMessageEvent?.type === "text_delta") {
+					if (onLive) {
+						try {
+							onLive({ kind: "text_delta", delta: event.assistantMessageEvent.delta ?? "" });
+						} catch { /* never throw from event handling */ }
+					}
+				}
+
+				// Live event: tool execution started
+				if (event.type === "tool_execution_start") {
+					if (onLive) {
+						try {
+							onLive({ kind: "tool_start", toolName: event.toolName ?? "unknown", args: event.args });
+						} catch { /* never throw from event handling */ }
+					}
+				}
+
+				// Live event: tool execution ended
+				if (event.type === "tool_execution_end") {
+					if (onLive) {
+						try {
+							onLive({ kind: "tool_end", toolName: event.toolName ?? "unknown", isError: Boolean(event.isError) });
+						} catch { /* never throw from event handling */ }
+					}
+				}
+
 				if (event.type === "message_end" && event.message) {
 					const msg = event.message as Message;
 					currentResult.messages.push(msg);
@@ -248,6 +282,12 @@ export async function runSingleAgent(options: RunSingleOptions): Promise<SingleR
 						if ((msg as any).stopReason) currentResult.stopReason = (msg as any).stopReason;
 						if ((msg as any).errorMessage) currentResult.errorMessage = (msg as any).errorMessage;
 					}
+					// Live event: usage snapshot after accumulation
+					if (onLive) {
+						try {
+							onLive({ kind: "usage", usage: { ...currentResult.usage }, model: currentResult.model });
+						} catch { /* never throw from event handling */ }
+					}
 					emitUpdate();
 				}
 
@@ -256,7 +296,6 @@ export async function runSingleAgent(options: RunSingleOptions): Promise<SingleR
 					emitUpdate();
 				}
 			};
-
 			proc.stdout.on("data", (data) => {
 				buffer += data.toString();
 				const lines = buffer.split("\n");
@@ -270,6 +309,13 @@ export async function runSingleAgent(options: RunSingleOptions): Promise<SingleR
 
 			proc.on("close", (code) => {
 				if (buffer.trim()) processLine(buffer);
+				// Live event: final status derived from exit code
+				if (onLive) {
+					try {
+						const failed = (code ?? 0) !== 0 || currentResult.stopReason === "error" || currentResult.stopReason === "aborted";
+						onLive({ kind: "status", status: failed ? "failed" : "done" });
+					} catch { /* never throw from event handling */ }
+				}
 				resolve(code ?? 0);
 			});
 
@@ -289,7 +335,14 @@ export async function runSingleAgent(options: RunSingleOptions): Promise<SingleR
 		});
 
 		currentResult.exitCode = exitCode;
-		if (wasAborted) throw new Error("Subagent was aborted");
+		if (wasAborted) {
+			if (onLive) {
+				try {
+					onLive({ kind: "status", status: "failed" });
+				} catch { /* never throw from event handling */ }
+			}
+			throw new Error("Subagent was aborted");
+		}
 		return currentResult;
 	} finally {
 		if (tmpPromptPath)

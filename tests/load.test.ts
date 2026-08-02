@@ -16,6 +16,7 @@ function makeStub(): StubPi {
 	stub.api = {
 		registerTool: (tool: any) => stub.tools.push(tool),
 		registerCommand: (name: string) => stub.commands.push(name),
+		registerShortcut: (_key: string, _opts: any) => {},
 		on: (event: string, handler: any) => {
 			stub.hooks[event] = handler;
 		},

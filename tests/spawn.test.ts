@@ -4,8 +4,6 @@ import {
 	getFinalOutput,
 	isFailedResult,
 	mapWithConcurrencyLimit,
-	truncateParallelOutput,
-	PER_TASK_OUTPUT_CAP,
 	type SingleResult,
 } from "../src/spawn.ts";
 
@@ -46,18 +44,6 @@ describe("isFailedResult", () => {
 	});
 	it("passes on clean exit", () => {
 		expect(isFailedResult(result({ exitCode: 0, stopReason: "end" }))).toBe(false);
-	});
-});
-
-describe("truncateParallelOutput", () => {
-	it("leaves short output untouched", () => {
-		expect(truncateParallelOutput("hello")).toBe("hello");
-	});
-	it("truncates oversized output with a marker", () => {
-		const big = "x".repeat(PER_TASK_OUTPUT_CAP + 1000);
-		const out = truncateParallelOutput(big);
-		expect(out).toContain("[Output truncated:");
-		expect(out.length).toBeLessThan(big.length);
 	});
 });
 
