@@ -1,0 +1,157 @@
+/**
+ * Agent discovery.
+ *
+ * Agents are Markdown files (YAML frontmatter + body-as-system-prompt) loaded from
+ * three scopes with override priority  builtin < user < project  (same `name` wins
+ * at the higher scope). Discovery is re-run on every invocation so editing a file or
+ * dropping a new one takes effect mid-session without a reload.
+ *
+ *   builtin : <package>/agents            (shipped with this extension)
+ *   user    : <agentDir>/agents           (~/.pi/agent/agents)
+ *   project : <cwd...>/.pi/agents         (nearest, walking up)
+ */
+
+import { type Dirent, existsSync, readdirSync, readFileSync, statSync } from "node:fs";
+import { dirname, join } from "node:path";
+import { fileURLToPath } from "node:url";
+import { CONFIG_DIR_NAME, getAgentDir, parseFrontmatter } from "@earendil-works/pi-coding-agent";
+import type { AgentScope } from "./config.ts";
+
+export type AgentSource = "builtin" | "user" | "project";
+
+export interface AgentConfig {
+	name: string;
+	description: string;
+	tools?: string[];
+	model?: string;
+	systemPrompt: string;
+	source: AgentSource;
+	filePath: string;
+}
+
+export interface AgentDiscoveryResult {
+	agents: AgentConfig[];
+	projectAgentsDir: string | null;
+}
+
+const here = dirname(fileURLToPath(import.meta.url));
+/** <package>/agents — the agents shipped with this extension. */
+export const BUILTIN_AGENTS_DIR = join(here, "..", "agents");
+
+function loadAgentsFromDir(dir: string, source: AgentSource): AgentConfig[] {
+	const agents: AgentConfig[] = [];
+	if (!existsSync(dir)) return agents;
+
+	let entries: Dirent[];
+	try {
+		entries = readdirSync(dir, { withFileTypes: true });
+	} catch {
+		return agents;
+	}
+
+	for (const entry of entries) {
+		if (!entry.name.endsWith(".md")) continue;
+		if (!entry.isFile() && !entry.isSymbolicLink()) continue;
+
+		const filePath = join(dir, entry.name);
+		let content: string;
+		try {
+			content = readFileSync(filePath, "utf-8");
+		} catch {
+			continue;
+		}
+
+		const { frontmatter, body } = parseFrontmatter<Record<string, string>>(content);
+		// name + description are required; skip malformed files silently.
+		if (!frontmatter.name || !frontmatter.description) continue;
+
+		const tools = frontmatter.tools
+			?.split(",")
+			.map((t) => t.trim())
+			.filter(Boolean);
+
+		agents.push({
+			name: frontmatter.name,
+			description: frontmatter.description,
+			tools: tools && tools.length > 0 ? tools : undefined,
+			model: frontmatter.model,
+			systemPrompt: body,
+			source,
+			filePath,
+		});
+	}
+
+	return agents;
+}
+
+function isDirectory(p: string): boolean {
+	try {
+		return statSync(p).isDirectory();
+	} catch {
+		return false;
+	}
+}
+
+function findNearestProjectAgentsDir(cwd: string): string | null {
+	let currentDir = cwd;
+	while (true) {
+		const candidate = join(currentDir, CONFIG_DIR_NAME, "agents");
+		if (isDirectory(candidate)) return candidate;
+		const parentDir = dirname(currentDir);
+		if (parentDir === currentDir) return null;
+		currentDir = parentDir;
+	}
+}
+
+export interface DiscoverOptions {
+	/** Which directories to read from. Default: "user". */
+	scope?: AgentScope;
+	/** If provided and non-empty, only agents whose name is listed are returned. */
+	enabledNames?: readonly string[];
+	/** Per-agent model override ("provider/model-id"), keyed by agent name. */
+	modelOverrides?: Record<string, string>;
+	/** Override the built-in agents directory (used by tests). */
+	builtinDir?: string;
+}
+
+/**
+ * Discover agents across scopes, apply enable-filter and model overrides.
+ * Override priority for the same name: project > user > builtin.
+ */
+export function discoverAgents(cwd: string, options: DiscoverOptions = {}): AgentDiscoveryResult {
+	const scope = options.scope ?? "user";
+	const builtinDir = options.builtinDir ?? BUILTIN_AGENTS_DIR;
+	const projectAgentsDir = findNearestProjectAgentsDir(cwd);
+
+	const builtin = loadAgentsFromDir(builtinDir, "builtin");
+	const user = scope === "project" ? [] : loadAgentsFromDir(join(getAgentDir(), "agents"), "user");
+	const project =
+		scope === "user" || !projectAgentsDir ? [] : loadAgentsFromDir(projectAgentsDir, "project");
+
+	// Merge with override priority builtin < user < project.
+	const byName = new Map<string, AgentConfig>();
+	for (const agent of builtin) byName.set(agent.name, agent);
+	for (const agent of user) byName.set(agent.name, agent);
+	for (const agent of project) byName.set(agent.name, agent);
+
+	let agents = Array.from(byName.values());
+
+	if (options.enabledNames && options.enabledNames.length > 0) {
+		const enabled = new Set(options.enabledNames);
+		agents = agents.filter((agent) => enabled.has(agent.name));
+	}
+
+	if (options.modelOverrides) {
+		agents = agents.map((agent) => {
+			const override = options.modelOverrides?.[agent.name];
+			return override ? { ...agent, model: override } : agent;
+		});
+	}
+
+	return { agents, projectAgentsDir };
+}
+
+/** One-line catalog entry for system-prompt injection and error messages. */
+export function formatCatalogEntry(agent: AgentConfig): string {
+	return `- ${agent.name}: ${agent.description}`;
+}

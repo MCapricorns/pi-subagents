@@ -1,0 +1,222 @@
+/**
+ * Interactive configuration wizard for /subagents-setup.
+ *
+ * Everything is selection-driven (no free-text answers): a multi-select for which
+ * agents to enable, a per-agent single-select for model overrides (fuzzy filter +
+ * paging), and simple menus for the injection toggle and agent scope. Config is
+ * written to <agentDir>/pi-subagents.json.
+ */
+
+import { stat } from "node:fs/promises";
+import type { ExtensionCommandContext } from "@earendil-works/pi-coding-agent";
+import {
+	AGENT_SCOPE_VALUES,
+	BUILTIN_AGENT_NAMES,
+	DEFAULT_CONFIG,
+	DEFAULT_ENABLED_AGENTS,
+	type AgentScope,
+	type SubagentsConfig,
+	errorMessage,
+	getConfigPath,
+	loadConfig,
+	saveConfig,
+} from "./config.ts";
+import { promptSelectMany, promptSelectOne } from "./ui.ts";
+
+const INHERIT = "__inherit__";
+
+/** Short, selection-friendly descriptions for the built-in agents. */
+const MODULE_HINTS: Record<string, string> = {
+	explore: "read-only codebase recon (fast model)",
+	plan: "implementation plan before code (opt-in)",
+	worker: "implement / fix / refactor / test (full tools)",
+	reviewer: "adversarial pre-commit review (read-only)",
+};
+
+function moduleLabel(name: string): string {
+	const hint = MODULE_HINTS[name];
+	return hint ? `${name} — ${hint}` : name;
+}
+
+async function configExists(configPath: string): Promise<boolean> {
+	try {
+		await stat(configPath);
+		return true;
+	} catch {
+		return false;
+	}
+}
+
+/** Ordered "provider/model-id" references, with the active model first. */
+function availableModelRefs(ctx: ExtensionCommandContext): string[] {
+	const refs = new Set<string>();
+	if (ctx.model) refs.add(`${ctx.model.provider}/${ctx.model.id}`);
+	const models =
+		ctx.scopedModels.length > 0 ? ctx.scopedModels.map((entry) => entry.model) : ctx.modelRegistry.getAvailable();
+	for (const model of models) refs.add(`${model.provider}/${model.id}`);
+	return [...refs];
+}
+
+async function pickEnabledAgents(
+	ctx: ExtensionCommandContext,
+	current: readonly string[],
+): Promise<string[] | undefined> {
+	const items = BUILTIN_AGENT_NAMES.map((name) => ({ value: name, label: moduleLabel(name) }));
+	return promptSelectMany(
+		ctx,
+		"Enable which sub-agents?",
+		"Space toggles • Enter confirms • Esc cancels",
+		items,
+		current,
+	);
+}
+
+async function pickAgentModels(
+	ctx: ExtensionCommandContext,
+	enabledAgents: readonly string[],
+	current: Record<string, string>,
+): Promise<Record<string, string> | undefined> {
+	const refs = availableModelRefs(ctx);
+	if (refs.length === 0) {
+		ctx.ui.notify("No Pi models are currently available; model overrides left unchanged.", "warning");
+		return { ...current };
+	}
+
+	const result: Record<string, string> = {};
+	for (const name of enabledAgents) {
+		const currentRef = current[name];
+		const items = [
+			{
+				value: INHERIT,
+				label: currentRef
+					? `(use main session's model — drop override "${currentRef}")`
+					: "(use main session's current model — no override)",
+			},
+			...refs.map((ref) => ({ value: ref, label: ref === currentRef ? `${ref} (current)` : ref })),
+		];
+		const choice = await promptSelectOne(
+			ctx,
+			`Model for "${name}"`,
+			"Type to filter • ↑/↓ • PgUp/PgDn • Enter selects • Esc cancels setup",
+			items,
+		);
+		if (choice === undefined) return undefined; // Esc aborts the whole wizard
+		if (choice !== INHERIT) result[name] = choice;
+	}
+	return result;
+}
+
+async function pickInjection(ctx: ExtensionCommandContext, current: boolean): Promise<boolean | undefined> {
+	const on = "On — inject the delegation directive into the system prompt (recommended)";
+	const off = "Off — do not inject (rely on the tool description alone)";
+	const choice = await ctx.ui.select("Proactive dispatch injection?", [current ? `${on} (current)` : on, current ? off : `${off} (current)`]);
+	if (choice === undefined) return undefined;
+	return choice.startsWith("On");
+}
+
+async function pickScope(ctx: ExtensionCommandContext, current: AgentScope): Promise<AgentScope | undefined> {
+	const labels: Record<AgentScope, string> = {
+		user: "user — built-in + ~/.pi/agent/agents (default)",
+		project: "project — built-in + nearest .pi/agents only",
+		both: "both — user agents, overridden by project agents",
+	};
+	const options = AGENT_SCOPE_VALUES.map((scope) =>
+		scope === current ? `${labels[scope]} (current)` : labels[scope],
+	);
+	const choice = await ctx.ui.select("Which agent directories to discover from?", options);
+	if (choice === undefined) return undefined;
+	const scope = AGENT_SCOPE_VALUES.find((s) => choice.startsWith(s));
+	return scope;
+}
+
+/** Validate that every configured model override still resolves; drop stale ones. */
+function pruneStaleModels(ctx: ExtensionCommandContext, agentModels: Record<string, string>): Record<string, string> {
+	const clean: Record<string, string> = {};
+	for (const [name, ref] of Object.entries(agentModels)) {
+		const slash = ref.indexOf("/");
+		if (slash <= 0) continue;
+		const model = ctx.modelRegistry.find(ref.slice(0, slash), ref.slice(slash + 1));
+		if (model) clean[name] = ref;
+		else ctx.ui.notify(`Dropped stale model override for "${name}": ${ref}`, "warning");
+	}
+	return clean;
+}
+
+async function runFullSetup(ctx: ExtensionCommandContext, configPath: string, base: SubagentsConfig): Promise<void> {
+	const enabled = await pickEnabledAgents(ctx, base.enabledAgents);
+	if (enabled === undefined) return notifyCancelled(ctx);
+
+	const models = await pickAgentModels(ctx, enabled, base.agentModels);
+	if (models === undefined) return notifyCancelled(ctx);
+
+	const injection = await pickInjection(ctx, base.proactiveInjection);
+	if (injection === undefined) return notifyCancelled(ctx);
+
+	const scope = await pickScope(ctx, base.agentScope);
+	if (scope === undefined) return notifyCancelled(ctx);
+
+	const next: SubagentsConfig = {
+		enabledAgents: enabled,
+		agentModels: pruneStaleModels(ctx, models),
+		proactiveInjection: injection,
+		agentScope: scope,
+	};
+	await saveConfig(next, configPath);
+	ctx.ui.notify(`pi-subagents configured. Saved to ${configPath}`, "info");
+}
+
+async function runMenu(ctx: ExtensionCommandContext, configPath: string, config: SubagentsConfig): Promise<void> {
+	const choice = await ctx.ui.select("pi-subagents is already configured. What would you like to change?", [
+		"Enable/disable agents",
+		"Change agent models",
+		"Toggle proactive injection",
+		"Change agent scope",
+		"Full re-setup",
+	]);
+	if (choice === undefined) return notifyCancelled(ctx);
+
+	if (choice.startsWith("Full")) return runFullSetup(ctx, configPath, config);
+
+	let next: SubagentsConfig = { ...config, agentModels: { ...config.agentModels } };
+
+	if (choice.startsWith("Enable")) {
+		const enabled = await pickEnabledAgents(ctx, config.enabledAgents);
+		if (enabled === undefined) return notifyCancelled(ctx);
+		next.enabledAgents = enabled;
+	} else if (choice.startsWith("Change agent models")) {
+		const models = await pickAgentModels(ctx, config.enabledAgents, config.agentModels);
+		if (models === undefined) return notifyCancelled(ctx);
+		next.agentModels = pruneStaleModels(ctx, models);
+	} else if (choice.startsWith("Toggle")) {
+		const injection = await pickInjection(ctx, config.proactiveInjection);
+		if (injection === undefined) return notifyCancelled(ctx);
+		next.proactiveInjection = injection;
+	} else if (choice.startsWith("Change agent scope")) {
+		const scope = await pickScope(ctx, config.agentScope);
+		if (scope === undefined) return notifyCancelled(ctx);
+		next.agentScope = scope;
+	}
+
+	await saveConfig(next, configPath);
+	ctx.ui.notify(`pi-subagents updated. Saved to ${configPath}`, "info");
+}
+
+function notifyCancelled(ctx: ExtensionCommandContext): void {
+	ctx.ui.notify("pi-subagents setup cancelled.", "info");
+}
+
+/** Entry point for the /subagents-setup command. */
+export async function runSetup(ctx: ExtensionCommandContext, configPath: string = getConfigPath()): Promise<void> {
+	if (ctx.mode !== "tui") {
+		ctx.ui.notify("/subagents-setup requires Pi's interactive TUI.", "error");
+		return;
+	}
+	try {
+		const exists = await configExists(configPath);
+		const config = await loadConfig(configPath);
+		if (exists) await runMenu(ctx, configPath, config);
+		else await runFullSetup(ctx, configPath, { ...DEFAULT_CONFIG, enabledAgents: [...DEFAULT_ENABLED_AGENTS] });
+	} catch (error) {
+		ctx.ui.notify(`pi-subagents setup failed: ${errorMessage(error)}`, "error");
+	}
+}
