@@ -1,6 +1,6 @@
 {
   "name": "@ferris1225/pi-subagents",
-  "version": "0.6.0",
+  "version": "0.7.0",
   "description": "Focused sub-agent delegation for pi: explore / plan / worker / reviewer agents in isolated context, with proactive dispatch injection and per-agent model selection.",
   "type": "module",
   "license": "MIT",
@@ -18,7 +18,6 @@
     "src",
     "agents",
     "README.md",
-    "README-zh.md",
     "LICENSE"
   ],
   "pi": {

@@ -38,18 +38,18 @@ export function buildDelegationDirective(agents: AgentConfig[]): string {
 ## Sub-agent delegation (pi-subagents)
 
 You have a \`subagent\` tool that starts specialized agents in ISOLATED background processes.
-It immediately ends the current main-agent turn so the user can keep working. Completed
-findings are added before a later user prompt; do not assume a launched result is available
-in the same turn.
+It immediately ends the current main-agent turn so the user can keep working. When a child
+finishes, its result is sent back as a message that automatically resumes the main agent;
+if the main agent is busy, the result waits as a follow-up.
 
 Available agents:
 ${catalog}
 
 ${routing ? `Routing:\n${routing}\n` : ""}Dispatch discipline:
-- Default to delegating every discrete task to a sub-agent; use completed findings in a later user turn for orchestration and verification.
+- Default to delegating every discrete task to a sub-agent; use the automatically delivered findings for orchestration and verification.
 - Only handle inline: pure Q&A, a single trivial edit/lookup, or when the user explicitly says to do it directly. When in doubt, delegate.
 - For an already-known or trivial target, use a direct search/read tool (e.g. grep/find/read) — do not over-delegate a one-line lookup.
-${hasMultiple ? "- Run INDEPENDENT tasks in parallel: one subagent call with a `tasks` array, and track them with your todo list. Launch dependent work only after its prerequisite result arrives (e.g. explore, then worker, then reviewer).\n" : ""}- Brief each sub-agent as self-contained: goal, exact paths, constraints, expected output. It has NO memory of this conversation.
+${hasMultiple ? "- Run INDEPENDENT tasks in parallel: one subagent call with a `tasks` array, and track them with your todo list. Let the automatically resumed main agent launch dependent work only after its prerequisite result arrives (e.g. explore, then worker, then reviewer).\n" : ""}- Brief each sub-agent as self-contained: goal, exact paths, constraints, expected output. It has NO memory of this conversation.
 - Treat delegated agents as leaf workers: do not ask a sub-agent to dispatch another sub-agent; child processes do not have this tool.
 - Trust but verify: a sub-agent's summary describes intent, not outcome. Check the actual changes/results before reporting work done.
 

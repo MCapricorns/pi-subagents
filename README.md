@@ -6,37 +6,25 @@
 ![platform](https://img.shields.io/badge/platform-Windows%20%7C%20macOS%20%7C%20Linux-lightgrey)
 ![pi](https://img.shields.io/badge/pi-extension-orange)
 
-English | [中文](./README-zh.md)
+Focused background delegation for [pi](https://pi.dev). `pi-subagents` adds a small set of
+specialized agents that run in isolated child processes, report results back to the main
+agent, and keep the workflow moving without manual polling.
 
-A focused [pi](https://pi.dev) extension that gives the main model **sub-agents it will
-actually use**: `explore`, `worker`, and `reviewer` (plus an opt-in `plan`), each running
-in an isolated `pi` process. The differentiator is not the agents themselves — it is the
-**proactive dispatch injection** that makes the model delegate on its own, so you can
-delete the dispatch/review rules from your global `AGENTS.md`.
+## Highlights
 
-## Why pi-subagents?
-
-Pi ships no sub-agents on purpose. The community fills the gap two ways, and both miss:
-
-- **Too heavy** — frameworks with 9 agents, chain pipelines, worktree swarms, and a
-  slash-command for everything. Powerful, but a lot of machinery to carry.
-- **Too quiet** — a bare `subagent` tool that the model *rarely calls*, because pi only
-  shows the parent model the tool, never the per-agent descriptions. So the agents sit
-  idle unless you force them in a global prompt.
-
-`pi-subagents` takes the middle path:
-
-| Advantage | What it means for you |
-|-----------|----------------------|
-| **Actually gets used** | A `before_agent_start` hook injects the agent catalog + a dispatch/review directive into the system prompt every turn, reinforced by tool `promptGuidelines` and `Use PROACTIVELY when …` descriptions. This is the lever the heavy frameworks rely on too — we just make it the default. |
-| **Right-sized** | 3 focused agents (+1 opt-in), not 9. No chain/worktree/swarm machinery. Single and parallel modes only. |
-| **Replaces your AGENTS.md rules** | The injected directive is a self-contained replacement for the "Sub-agent Dispatch" and "Review, Verification & Commit" sections. Install it, then delete those sections. |
-| **True isolation** | Each agent is a separate `pi` process (`--no-session`), so delegated work never pollutes the main context. |
-| **Read-only where it matters** | `explore`, `plan`, and `reviewer` are read-only. The `reviewer` runs in a *separate* context to avoid self-confirmation bias. |
-| **Selection-only setup** | No typing of values: a checkbox module picker and a fuzzy-filter, paginated model picker. |
-| **Sensible model defaults** | Per-agent model override; if you skip one, it uses the **main session's current model**. Unavailable saved overrides are repaired and persisted automatically. |
-| **Leaf sub-agents** | Child processes never receive the `subagent` tool, so delegation cannot recurse or run away. |
-| **Zero runtime deps** | Pure pi extension, peer dependencies only, no build step. |
+- **Automatic delegation guidance** — injects the enabled agent catalog and routing rules into
+  the main agent's system prompt.
+- **Isolated execution** — every sub-agent runs in its own `pi` process with `--no-session`.
+- **Automatic continuation** — a completed result is sent to the main session as a custom
+  message and automatically starts a follow-up turn. If the main agent is busy, the result
+  waits in the follow-up queue.
+- **Parallel fan-out** — run independent tasks together, with a bounded background queue.
+- **Live progress** — a TUI widget shows each agent's status, activity, model, usage, and
+  elapsed time; completion also produces a concise notification.
+- **Per-agent configuration** — enable agents, select models, set thinking strength, and
+  choose discovery scope from `/subagents-setup`.
+- **Leaf processes** — child agents cannot access the `subagent` tool, so delegation cannot
+  recurse.
 
 ## Install
 
@@ -44,130 +32,145 @@ Pi ships no sub-agents on purpose. The community fills the gap two ways, and bot
 pi install npm:@ferris1225/pi-subagents
 ```
 
-Requires pi **≥ 0.80.6** — sub-agent thinking levels use the `--thinking` values
-introduced by that version.
+Requires pi **>= 0.80.6**.
 
-Then run the setup wizard (selection-only):
+After installation, open the setup wizard in an interactive TUI session:
 
 ```text
 /subagents-setup
 ```
 
-## Agents
+The default configuration enables `explore`, `worker`, and `reviewer`. `plan` is available
+but opt-in.
 
-| Agent | Default | Tools | Role |
-|-------|:-------:|-------|------|
-| `explore` | ✅ | read-only | Fast codebase reconnaissance; returns compressed findings for handoff. |
-| `worker` | ✅ | all | Implements / fixes / refactors / tests a self-contained task. **Plans internally.** |
-| `reviewer` | ✅ | read-only | Adversarial pre-commit review in a separate context. |
-| `plan` | opt-in | read-only | A separate, human-reviewable implementation plan. A worker already plans internally, so this is only for when you want the plan as its own artifact. |
+## Included agents
 
-Each agent is a Markdown file (`agents/*.md`: YAML frontmatter + body as system prompt).
-Override any of them by dropping a file with the same `name` into `~/.pi/agent/agents/`
-(user) or `.pi/agents/` (project).
+| Agent | Default | Access | Purpose |
+| --- | :---: | --- | --- |
+| `explore` | Yes | Read-only | Fast codebase reconnaissance and structured findings. |
+| `worker` | Yes | Full | Implements, fixes, refactors, and tests a self-contained task. |
+| `reviewer` | Yes | Read-only | Independent adversarial review of a diff before completion. |
+| `plan` | No | Read-only | Produces a separate implementation plan when one is useful. |
 
-## How proactive dispatch works
+Agents are Markdown files in `agents/`. Each file contains YAML frontmatter and a system
+prompt. User and project scopes can override a built-in agent with the same name.
 
-Pi never shows the parent model the per-agent descriptions — it only sees the `subagent`
-tool. Three levers fix that:
+## Workflow
 
-1. **`before_agent_start` injection** — every turn, the enabled agents plus a
-   dispatch/review directive are appended to the parent system prompt.
-2. **Tool `promptSnippet` / `promptGuidelines`** — reinforce "when to delegate" whenever
-   the tool is active.
-3. **`Use PROACTIVELY when …`** descriptions — the trigger phrasing proven across the
-   Claude Code agent ecosystem.
+A typical flow is:
 
-The directive encourages a clean flow: **`explore` → `worker` → `reviewer`**, parallel
-fan-out for independent tasks, and trust-but-verify handoffs. Because runs are backgrounded,
-start dependent steps only after the preceding result is delivered.
+```text
+main agent
+    │
+    ├─ subagent(explore / worker / reviewer)
+    │       └─ isolated pi child process
+    │                 └─ result message
+    │
+    └─ automatic follow-up turn with the result
+```
+
+1. The main agent calls `subagent` with a self-contained brief.
+2. The tool returns immediately and ends that foreground tool turn, leaving the editor ready
+   for input.
+3. The child process works independently. Up to four queued runs execute at once; a single
+   parallel request may contain up to eight tasks.
+4. On completion or failure, the extension sends a durable result message to the main
+   session. That message automatically wakes the main agent, or waits until its current turn
+   finishes.
+5. The main agent uses the result to verify the work and continue dependent steps. No later
+   user prompt is required to collect a result.
+
+Switching sessions, reloading, or shutting down cancels remaining background runs.
+
+## Usage
+
+The main agent is encouraged to delegate automatically, but you can also ask directly:
+
+```text
+Use explore to map how authentication is wired up.
+Ask worker to implement the API change after the exploration is complete.
+Run reviewer on the final diff before reporting completion.
+```
+
+### Single task
+
+```json
+{
+  "agent": "worker",
+  "task": "Implement the requested change. Inspect the existing conventions, update tests, and report the files changed and checks run."
+}
+```
+
+Optional `cwd` selects the working directory for that child.
+
+### Parallel tasks
+
+Use parallel mode only for independent work:
+
+```json
+{
+  "tasks": [
+    { "agent": "explore", "task": "Map the API layer and its tests." },
+    { "agent": "explore", "task": "Map the database layer and its tests." }
+  ]
+}
+```
+
+Start dependent work after the relevant result has been delivered to the main agent.
 
 ## Configuration
 
-Stored at `~/.pi/agent/pi-subagents.json` (honors `PI_CODING_AGENT_DIR`):
+Configuration is stored at `~/.pi/agent/pi-subagents.json`. The location follows
+`PI_CODING_AGENT_DIR` when set.
 
 ```json
 {
   "enabledAgents": ["explore", "worker", "reviewer"],
-  "agentModels": { "explore": "anthropic/claude-haiku-4-5" },
+  "agentModels": {
+    "explore": "anthropic/claude-haiku-4-5"
+  },
   "thinkingLevel": "max",
   "proactiveInjection": true,
   "agentScope": "user"
 }
 ```
 
-- `enabledAgents` — which agents are discoverable and injected.
-- `agentModels` — per-agent model override (`"provider/model-id"`). If a saved model is unavailable, it is replaced with the current main-window model and written back to this file.
-- `thinkingLevel` — sub-agent reasoning strength: `off`, `minimal`, `low`, `medium`, `high`, `xhigh`, or `max` (default).
-- `proactiveInjection` — toggle the system-prompt injection.
-- `agentScope` — `"user"` (default), `"project"`, or `"both"`.
+| Field | Description |
+| --- | --- |
+| `enabledAgents` | Agent names exposed to discovery and prompt injection. An empty array disables all agents. |
+| `agentModels` | Optional `provider/model-id` override per agent. |
+| `thinkingLevel` | `off`, `minimal`, `low`, `medium`, `high`, `xhigh`, or `max`. |
+| `proactiveInjection` | Whether to add the delegation directive to the main system prompt. |
+| `agentScope` | `user`, `project`, or `both`; controls which user/project agent directories are discovered. |
 
-**Model precedence** for each agent:
-
-```
-available agentModels[name]  →  current session model  →  the agent's frontmatter default
-```
-
-If a configured model is no longer available, it is switched to the current main-window model and persisted before the next run.
-
-## Usage
-
-The main model calls `subagent` on its own, but you can also ask directly:
+Model selection uses this precedence:
 
 ```text
-# single
-Use the explore sub-agent to map how authentication is wired up.
-
-# parallel (independent tasks)
-Run these in parallel sub-agents: explore the API layer, and explore the DB layer.
+configured agent model → current main-session model → agent frontmatter model
 ```
 
-Tool shape:
+Unavailable configured models are replaced with a usable current-session model when possible
+and the repaired configuration is saved.
 
-```jsonc
-// single
-{ "agent": "worker", "task": "<self-contained brief>" }
-// parallel
-{ "tasks": [ { "agent": "explore", "task": "..." }, { "agent": "explore", "task": "..." } ] }
-```
+## Agent discovery and overrides
 
-Every run starts in the background. The tool immediately ends the current main-agent turn,
-so the editor is ready for another request without pressing Escape. The completed output is
-shown and added to the context before a later user prompt. Escape only interrupts foreground
-work after launch; session switch, reload, or exit cancels remaining background processes.
+- Built-in agents are shipped with the package.
+- User agents live in `~/.pi/agent/agents/`.
+- Project agents live in the nearest `.pi/agents/` directory.
+- For duplicate names, project overrides user and user overrides built-in.
 
-## Live status & notifications
-
-While sub-agents run, a widget above the editor shows one line per run — status
-icon, agent, model, token usage, elapsed time — plus a second, indented line
-with what the agent is doing right now: `thinking`, `responding`,
-`read src/index.ts`, `bash npm test`, … (never a raw JSON args blob).
-`responding` means the model is streaming normal text, **not** writing to the filesystem.
-
-When a run finishes (done **or** failed), its row disappears from the widget and
-the main window gets a notification with the final summary
-(`✓ worker · openai/gpt-5 · ↑12.4k ↓3.1k · 47s`). Its completed result message
-is the durable record in the conversation and context for a later request.
-
-Sub-agents use the configured thinking level (default `--thinking max`);
-pi clamps it adaptively to what the resolved model supports
-(`max → xhigh → high → … → off`), so weaker models degrade gracefully.
-The task is sent through stdin; only the agent system prompt uses a short-lived
-file. Child output is streamed in memory. Runs have no default time limit;
-explicit cancellation cleans up the process tree.
+Use a matching Markdown filename and `name` field to replace a built-in agent. Keep the task
+brief explicit: include the goal, relevant paths, constraints, and expected handoff.
 
 ## Development
 
 ```bash
 npm install
-npm run check   # tsc --noEmit
-npm test        # vitest
+npm run check
+npm test
 ```
 
-## See also
-
-- [pi-querit-search](https://www.npmjs.com/package/pi-querit-search) — live web search &
-  page fetching for pi, by the same author.
+The package has no runtime dependencies beyond pi peer dependencies.
 
 ## License
 

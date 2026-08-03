@@ -146,18 +146,18 @@ export default function (pi: ExtensionAPI): void {
 			"Delegate a discrete, self-contained task to a specialized sub-agent running in an ISOLATED context window.",
 			"Agents: explore (read-only codebase recon), plan (implementation plan, opt-in), worker (implement/fix/refactor/test, full tools), reviewer (adversarial pre-commit review, read-only).",
 			"Modes: single ({agent, task}) or parallel ({tasks: [{agent, task}, ...]}).",
-			"It starts agents in the background and immediately returns control to the main window; completed results arrive in a later user prompt.",
+			"It starts agents in the background and immediately returns control to the main window; completion messages automatically wake the main agent to continue.",
 			"Each agent has no memory of this conversation — brief it fully (goal, exact paths, constraints, expected output)."
 		].join(" "),
 		promptSnippet:
-			"Start background subagents: explore (read-only search), worker (implement), reviewer (adversarial review); completed results arrive in a later prompt.",
+			"Start background subagents: explore (read-only search), worker (implement), reviewer (adversarial review); completion automatically resumes the main agent.",
 		promptGuidelines: [
 			"Use subagent to delegate discrete, self-contained tasks so the main context stays clean; do orchestration and verification yourself.",
 			"Use subagent with agent 'explore' for broad or open-ended code search before large changes.",
 			"Use subagent with agent 'worker' to implement a well-scoped task; it plans internally.",
 			"Use subagent with agent 'reviewer' for a fresh read-only review before reporting work done or committing.",
-			"subagent launches work in the background and ends the current turn; do not assume a result is available until a later user prompt.",
-			"Run independent tasks in parallel by passing a tasks array to subagent; start dependent work only after its result arrives.",
+			"subagent launches work in the background and ends the current turn; when a result arrives, the main agent is automatically resumed with it.",
+			"Run independent tasks in parallel by passing a tasks array to subagent; let the automatically resumed main agent start dependent work after results arrive.",
 		],
 		parameters: SubagentParams,
 
@@ -183,8 +183,8 @@ export default function (pi: ExtensionAPI): void {
 				}
 			}
 
-			// Finished runs leave the widget immediately. Their final findings arrive
-			// as a custom message before the next foreground prompt.
+			// Finished runs leave the widget immediately. Their final findings are sent
+			// back as a custom message that automatically starts a follow-up turn.
 			const finishRun = (runId: number, status: "done" | "failed"): void => {
 				monitor.setStatus(runId, status); // stamps endedAt for the elapsed time
 				const run = monitor.removeRun(runId);
@@ -297,7 +297,9 @@ export default function (pi: ExtensionAPI): void {
 								content: `### [${result.agent}] ${status}${usage ? ` (${usage})` : ""}\n\n${getResultOutput(result)}`,
 								display: true,
 							},
-							{ deliverAs: "nextTurn" },
+							// The result is both durable context and a wake-up signal. If the
+							// main agent is busy, followUp queues it until the current turn ends.
+							{ deliverAs: "followUp", triggerTurn: true },
 						);
 					},
 					() => finishRun(runId, "failed"),
@@ -307,7 +309,7 @@ export default function (pi: ExtensionAPI): void {
 			};
 
 			// Sub-agents intentionally detach from the foreground turn. This makes the
-			// editor available immediately; completed findings arrive before the next prompt.
+			// editor available immediately; completion messages later wake the main agent.
 			if (params.tasks && params.tasks.length > 0) {
 				if (params.tasks.length > MAX_PARALLEL_TASKS) {
 					return {
@@ -327,7 +329,7 @@ export default function (pi: ExtensionAPI): void {
 							type: "text",
 							text:
 								started > 0
-									? `Started ${started} background subagent${started === 1 ? "" : "s"}. Completed results will be added before a later user prompt.`
+									? `Started ${started} background subagent${started === 1 ? "" : "s"}. Results will automatically resume the main agent when ready.`
 									: failures.map((result) => getResultOutput(result)).join("\n"),
 						},
 					],
@@ -346,7 +348,7 @@ export default function (pi: ExtensionAPI): void {
 				};
 			}
 			return {
-				content: [{ type: "text", text: `Started ${result.agent} in the background. Its completed result will be added before a later user prompt.` }],
+				content: [{ type: "text", text: `Started ${result.agent} in the background. Its result will automatically resume the main agent when ready.` }],
 				details: makeDetails("single", true)([result]),
 				terminate: true,
 			};
