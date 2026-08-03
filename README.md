@@ -79,7 +79,8 @@ tool. Three levers fix that:
    Claude Code agent ecosystem.
 
 The directive encourages a clean flow: **`explore` → `worker` → `reviewer`**, parallel
-fan-out for independent tasks, and trust-but-verify handoffs.
+fan-out for independent tasks, and trust-but-verify handoffs. Because runs are backgrounded,
+start dependent steps only after the preceding result is delivered.
 
 ## Configuration
 
@@ -130,24 +131,30 @@ Tool shape:
 { "tasks": [ { "agent": "explore", "task": "..." }, { "agent": "explore", "task": "..." } ] }
 ```
 
+Every run starts in the background. The tool immediately ends the current main-agent turn,
+so the editor is ready for another request without pressing Escape. The completed output is
+shown and added to the context before a later user prompt. Escape only interrupts foreground
+work after launch; session switch, reload, or exit cancels remaining background processes.
+
 ## Live status & notifications
 
 While sub-agents run, a widget above the editor shows one line per run — status
 icon, agent, model, token usage, elapsed time — plus a second, indented line
-with what the agent is doing right now: `thinking`, `writing`,
+with what the agent is doing right now: `thinking`, `responding`,
 `read src/index.ts`, `bash npm test`, … (never a raw JSON args blob).
+`responding` means the model is streaming normal text, **not** writing to the filesystem.
 
 When a run finishes (done **or** failed), its row disappears from the widget and
 the main window gets a notification with the final summary
-(`✓ worker · openai/gpt-5 · ↑12.4k ↓3.1k · 47s`). The tool result itself
-remains the durable record in the conversation.
+(`✓ worker · openai/gpt-5 · ↑12.4k ↓3.1k · 47s`). Its completed result message
+is the durable record in the conversation and context for a later request.
 
 Sub-agents use the configured thinking level (default `--thinking max`);
 pi clamps it adaptively to what the resolved model supports
 (`max → xhigh → high → … → off`), so weaker models degrade gracefully.
 The task is sent through stdin; only the agent system prompt uses a short-lived
-file. Child output is streamed in memory, with a watchdog and process-tree cleanup
-for aborted or stuck runs.
+file. Child output is streamed in memory. Runs have no default time limit;
+explicit cancellation cleans up the process tree.
 
 ## Development
 

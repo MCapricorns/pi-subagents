@@ -13,11 +13,11 @@
  */
 
 import type { AgentToolResult } from "@earendil-works/pi-agent-core";
-import { StringEnum } from "@earendil-works/pi-ai";
 import { getAgentDir, type ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { Text, truncateToWidth } from "@earendil-works/pi-tui";
 import { Type } from "typebox";
 import { discoverAgents, type AgentConfig } from "./agents.ts";
+import { BackgroundTaskQueue } from "./background.ts";
 import { getConfigPath, loadConfig, saveConfig } from "./config.ts";
 import { repairUnavailableModelOverrides } from "./models.ts";
 import { buildDelegationDirective } from "./prompt.ts";
@@ -30,9 +30,7 @@ import {
 	getFinalOutput,
 	getResultOutput,
 	isFailedResult,
-	mapWithConcurrencyLimit,
 	runSingleAgent,
-	type OnUpdateCallback,
 	type SingleResult,
 	type SubagentDetails,
 	type SubagentLiveEvent,
@@ -55,6 +53,32 @@ const SubagentParams = Type.Object({
 
 function emptyUsage(): UsageStats {
 	return { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, cost: 0, contextTokens: 0, turns: 0 };
+}
+
+function queuedResult(agent: AgentConfig, task: string): SingleResult {
+	return {
+		agent: agent.name,
+		agentSource: agent.source,
+		task,
+		exitCode: -1,
+		messages: [],
+		stderr: "",
+		usage: emptyUsage(),
+		model: agent.model,
+	};
+}
+
+function failedStartResult(agentName: string, task: string, errorMessage: string): SingleResult {
+	return {
+		agent: agentName,
+		agentSource: "unknown",
+		task,
+		exitCode: 1,
+		messages: [],
+		stderr: errorMessage,
+		usage: emptyUsage(),
+		errorMessage,
+	};
 }
 
 function aggregateUsage(results: SingleResult[]): UsageStats {
@@ -88,6 +112,8 @@ function formatUsage(usage: UsageStats): string {
 
 export default function (pi: ExtensionAPI): void {
 	const configPath = getConfigPath(getAgentDir());
+	const backgroundQueue = new BackgroundTaskQueue(MAX_CONCURRENCY);
+	let sessionActive = true;
 
 	// Recursion guard: child sub-agents are leaf processes and cannot delegate again.
 	if (currentSubagentDepth() >= MAX_SUBAGENT_DEPTH) {
@@ -100,6 +126,19 @@ export default function (pi: ExtensionAPI): void {
 		return;
 	}
 
+	pi.registerMessageRenderer("subagent-result", (message, _options, theme) =>
+		new Text(
+			`${theme.fg("toolTitle", theme.bold("subagent result"))}\n${message.content}`,
+			0,
+			0,
+		),
+	);
+
+	pi.on("session_shutdown", () => {
+		sessionActive = false;
+		backgroundQueue.cancelAll();
+	});
+
 	pi.registerTool({
 		name: "subagent",
 		label: "Subagent",
@@ -107,17 +146,18 @@ export default function (pi: ExtensionAPI): void {
 			"Delegate a discrete, self-contained task to a specialized sub-agent running in an ISOLATED context window.",
 			"Agents: explore (read-only codebase recon), plan (implementation plan, opt-in), worker (implement/fix/refactor/test, full tools), reviewer (adversarial pre-commit review, read-only).",
 			"Modes: single ({agent, task}) or parallel ({tasks: [{agent, task}, ...]}).",
-			"Use it to keep the main conversation clean: delegate the work, then orchestrate and verify the results yourself.",
-			"Each agent has no memory of this conversation — brief it fully (goal, exact paths, constraints, expected output).",
+			"It starts agents in the background and immediately returns control to the main window; completed results arrive in a later user prompt.",
+			"Each agent has no memory of this conversation — brief it fully (goal, exact paths, constraints, expected output)."
 		].join(" "),
 		promptSnippet:
-			"Delegate discrete tasks to isolated sub-agents: explore (read-only search), worker (implement), reviewer (adversarial pre-commit review); plan is opt-in.",
+			"Start background subagents: explore (read-only search), worker (implement), reviewer (adversarial review); completed results arrive in a later prompt.",
 		promptGuidelines: [
 			"Use subagent to delegate discrete, self-contained tasks so the main context stays clean; do orchestration and verification yourself.",
 			"Use subagent with agent 'explore' for broad or open-ended code search before large changes.",
 			"Use subagent with agent 'worker' to implement a well-scoped task; it plans internally.",
 			"Use subagent with agent 'reviewer' for a fresh read-only review before reporting work done or committing.",
-			"Run independent tasks in parallel by passing a tasks array to subagent; keep dependent work sequential.",
+			"subagent launches work in the background and ends the current turn; do not assume a result is available until a later user prompt.",
+			"Run independent tasks in parallel by passing a tasks array to subagent; start dependent work only after its result arrives.",
 		],
 		parameters: SubagentParams,
 
@@ -143,12 +183,13 @@ export default function (pi: ExtensionAPI): void {
 				}
 			}
 
-			// Finished runs leave the widget immediately; the main window gets a
-			// notification instead (the tool result remains the durable record).
+			// Finished runs leave the widget immediately. Their final findings arrive
+			// as a custom message before the next foreground prompt.
 			const finishRun = (runId: number, status: "done" | "failed"): void => {
 				monitor.setStatus(runId, status); // stamps endedAt for the elapsed time
 				const run = monitor.removeRun(runId);
 				if (!run) return; // already finished — stay idempotent
+				if (!sessionActive) return;
 				const icon = status === "done" ? "✓" : "✗";
 				ctx.ui.notify(`${icon} ${monitor.summarize(run)}`, status === "done" ? "info" : "error");
 			};
@@ -174,7 +215,8 @@ export default function (pi: ExtensionAPI): void {
 						monitor.setActivity(runId, "thinking");
 						break;
 					case "text":
-						monitor.setActivity(runId, "writing");
+						// A text delta is model output, not a filesystem write.
+						monitor.setActivity(runId, "responding");
 						break;
 				}
 			};
@@ -194,8 +236,8 @@ export default function (pi: ExtensionAPI): void {
 			const hasSingle = Boolean(params.agent && params.task);
 
 			const makeDetails =
-				(mode: "single" | "parallel") =>
-				(results: SingleResult[]): SubagentDetails => ({ mode, results });
+				(mode: "single" | "parallel", background = false) =>
+				(results: SingleResult[]): SubagentDetails => ({ mode, results, background });
 
 			const catalog = agents.map((a) => a.name).join(", ") || "none";
 
@@ -211,124 +253,104 @@ export default function (pi: ExtensionAPI): void {
 				};
 			}
 
-			// ---- Parallel mode ----
+			const startBackground = (agentName: string, task: string, cwd?: string): SingleResult => {
+				const agent = agents.find((candidate) => candidate.name === agentName);
+				if (!agent) return failedStartResult(agentName, task, `Unknown agent: "${agentName}".`);
+
+				const pending = queuedResult(agent, task);
+				const runId = monitor.addRun(agent.name, agent.model);
+				const onLive = makeLiveHandler(runId);
+
+				backgroundQueue.enqueue(
+					async (backgroundSignal) => {
+						let result: SingleResult;
+						try {
+							result = await runSingleAgent({
+								defaultCwd: ctx.cwd,
+								agent,
+								agentName,
+								task,
+								cwd,
+								thinkingLevel: config.thinkingLevel,
+								signal: backgroundSignal,
+								onLive,
+								makeDetails: makeDetails("single", true),
+							});
+						} catch (error) {
+							const errorMessage = error instanceof Error ? error.message : String(error);
+							result = {
+								...pending,
+								exitCode: 1,
+								stderr: errorMessage,
+								stopReason: backgroundSignal.aborted ? "aborted" : "error",
+								errorMessage,
+							};
+							finishRun(runId, "failed");
+						}
+
+						if (!sessionActive) return;
+						const status = isFailedResult(result) ? "failed" : "completed";
+						const usage = formatUsage(result.usage);
+						pi.sendMessage(
+							{
+								customType: "subagent-result",
+								content: `### [${result.agent}] ${status}${usage ? ` (${usage})` : ""}\n\n${getResultOutput(result)}`,
+								display: true,
+							},
+							{ deliverAs: "nextTurn" },
+						);
+					},
+					() => finishRun(runId, "failed"),
+				);
+
+				return pending;
+			};
+
+			// Sub-agents intentionally detach from the foreground turn. This makes the
+			// editor available immediately; completed findings arrive before the next prompt.
 			if (params.tasks && params.tasks.length > 0) {
 				if (params.tasks.length > MAX_PARALLEL_TASKS) {
 					return {
 						content: [
 							{ type: "text", text: `Too many parallel tasks (${params.tasks.length}). Max is ${MAX_PARALLEL_TASKS}.` },
 						],
-						details: makeDetails("parallel")([]),
+						details: makeDetails("parallel", true)([]),
 					};
 				}
 
-				const allResults: SingleResult[] = params.tasks.map((t) => ({
-					agent: t.agent,
-					agentSource: "unknown",
-					task: t.task,
-					exitCode: -1,
-					messages: [],
-					stderr: "",
-					usage: emptyUsage(),
-				}));
-
-				const emitParallelUpdate = (): void => {
-					if (!onUpdate) return;
-					const done = allResults.filter((r) => r.exitCode !== -1).length;
-					onUpdate({
-						content: [{ type: "text", text: `Parallel: ${done}/${allResults.length} done...` }],
-						details: makeDetails("parallel")([...allResults]),
-					});
-				};
-
-				const results = await mapWithConcurrencyLimit(params.tasks, MAX_CONCURRENCY, async (t, index) => {
-					const resolvedModel = agents.find((a) => a.name === t.agent)?.model;
-					const runId = monitor.addRun(t.agent, resolvedModel);
-					const onLive = makeLiveHandler(runId);
-					const perTaskUpdate: OnUpdateCallback | undefined = onUpdate
-						? (partial) => {
-								const current = partial.details?.results[0];
-								if (current) {
-									allResults[index] = current;
-									emitParallelUpdate();
-								}
-							}
-						: undefined;
-					let result: SingleResult;
-					try {
-						result = await runSingleAgent({
-							defaultCwd: ctx.cwd,
-							agent: agents.find((a) => a.name === t.agent),
-							agentName: t.agent,
-							task: t.task,
-							cwd: t.cwd,
-							thinkingLevel: config.thinkingLevel,
-							signal,
-							onUpdate: perTaskUpdate,
-							onLive,
-							makeDetails: makeDetails("parallel"),
-						});
-					} catch (err) {
-						finishRun(runId, "failed");
-						throw err;
-					}
-					allResults[index] = result;
-					emitParallelUpdate();
-					return result;
-				});
-
-				const successCount = results.filter((r) => !isFailedResult(r)).length;
-				const summaries = results.map((r) => {
-					const output = getResultOutput(r);
-					const status = isFailedResult(r) ? "failed" : "completed";
-					const usage = formatUsage(r.usage);
-					return `### [${r.agent}] ${status}${usage ? ` (${usage})` : ""}\n\n${output}`;
-				});
+				const results = params.tasks.map((task) => startBackground(task.agent, task.task, task.cwd));
+				const started = results.filter((result) => result.exitCode === -1).length;
+				const failures = results.filter((result) => result.exitCode !== -1);
 				return {
 					content: [
 						{
 							type: "text",
-							text: `Parallel: ${successCount}/${results.length} succeeded\n\n${summaries.join("\n\n---\n\n")}`,
+							text:
+								started > 0
+									? `Started ${started} background subagent${started === 1 ? "" : "s"}. Completed results will be added before a later user prompt.`
+									: failures.map((result) => getResultOutput(result)).join("\n"),
 						},
 					],
-					details: makeDetails("parallel")(results),
+					details: makeDetails("parallel", true)(results),
+					isError: failures.length > 0,
+					terminate: true,
 				};
 			}
 
-			// ---- Single mode ----
-			const resolvedModel = agents.find((a) => a.name === params.agent)?.model;
-			const runId = monitor.addRun(params.agent as string, resolvedModel);
-			const onLive = makeLiveHandler(runId);
-			let result: SingleResult;
-			try {
-				result = await runSingleAgent({
-					defaultCwd: ctx.cwd,
-					agent: agents.find((a) => a.name === params.agent),
-					agentName: params.agent as string,
-					task: params.task as string,
-					cwd: params.cwd,
-					thinkingLevel: config.thinkingLevel,
-					signal,
-					onUpdate,
-					onLive,
-					makeDetails: makeDetails("single"),
-				});
-			} catch (err) {
-				finishRun(runId, "failed");
-				throw err;
-			}
-
-			if (isFailedResult(result)) {
+			const result = startBackground(params.agent as string, params.task as string, params.cwd);
+			if (result.exitCode !== -1) {
 				return {
-					content: [{ type: "text", text: `Agent ${result.agent} ${result.stopReason || "failed"}: ${getResultOutput(result)}` }],
+					content: [{ type: "text", text: getResultOutput(result) }],
 					details: makeDetails("single")([result]),
 					isError: true,
 				};
 			}
 			return {
-				content: [{ type: "text", text: getFinalOutput(result.messages) || "(no output)" }],
-				details: makeDetails("single")([result]),
+				content: [{ type: "text", text: `Started ${result.agent} in the background. Its completed result will be added before a later user prompt.` }],
+				details: makeDetails("single", true)([result]),
+				terminate: true,
 			};
+
 		},
 
 		renderCall(args, theme) {
@@ -356,10 +378,11 @@ export default function (pi: ExtensionAPI): void {
 
 			if (details.mode === "single") {
 				const r = details.results[0];
-				const icon = statusIcon(isFailedResult(r) ? "failed" : "done", theme);
+				const pending = r.exitCode === -1;
+				const icon = statusIcon(pending ? "running" : isFailedResult(r) ? "failed" : "done", theme);
 				const usage = formatUsage(r.usage);
 				const model = r.model ?? "?";
-				const line = `${theme.fg("toolTitle", theme.bold("subagent "))}${icon} ${theme.fg("accent", r.agent)} ${theme.fg("dim", `· ${model}${usage ? ` · ${usage}` : ""}`)}`;
+				const line = `${theme.fg("toolTitle", theme.bold("subagent "))}${icon} ${theme.fg("accent", r.agent)} ${theme.fg("dim", `· ${model}${pending ? " · background" : ""}${usage ? ` · ${usage}` : ""}`)}`;
 				return new Text(line, 0, 0);
 			}
 
@@ -368,10 +391,11 @@ export default function (pi: ExtensionAPI): void {
 				`${theme.fg("toolTitle", theme.bold("subagent "))}${theme.fg("accent", `parallel (${details.results.length})`)}`,
 			];
 			for (const r of details.results) {
-				const icon = statusIcon(isFailedResult(r) ? "failed" : "done", theme);
+				const pending = r.exitCode === -1;
+				const icon = statusIcon(pending ? "running" : isFailedResult(r) ? "failed" : "done", theme);
 				const usage = formatUsage(r.usage);
 				const model = r.model ?? "?";
-				lines.push(`  ${icon} ${theme.fg("accent", r.agent)} ${theme.fg("dim", `· ${model}${usage ? ` · ${usage}` : ""}`)}`);
+				lines.push(`  ${icon} ${theme.fg("accent", r.agent)} ${theme.fg("dim", `· ${model}${pending ? " · background" : ""}${usage ? ` · ${usage}` : ""}`)}`);
 			}
 			return new Text(lines.join("\n"), 0, 0);
 		},

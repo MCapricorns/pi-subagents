@@ -4,6 +4,7 @@ import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 import {
 	currentSubagentDepth,
+	SUBAGENT_TIMEOUT_MS,
 	getFinalOutput,
 	isFailedResult,
 	runSingleAgent,
@@ -64,6 +65,10 @@ describe("currentSubagentDepth", () => {
 });
 
 describe("runSingleAgent transport and lifecycle", () => {
+	it("has no default timeout", () => {
+		expect(SUBAGENT_TIMEOUT_MS).toBe(0);
+	});
+
 	const agent = {
 		name: "fake",
 		description: "fake",
@@ -103,7 +108,7 @@ process.stdin.on("end", () => process.stdout.write(JSON.stringify({ type: "messa
 		}
 	});
 
-	it("terminates a child that exceeds the watchdog timeout", async () => {
+	it("terminates a child that exceeds an explicitly configured timeout", async () => {
 		const dir = mkdtempSync(join(tmpdir(), "pi-subagents-timeout-"));
 		const script = join(dir, "stuck-child.mjs");
 		writeFileSync(script, "process.stdin.resume(); setInterval(() => {}, 1000);\n", "utf8");

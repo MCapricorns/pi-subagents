@@ -27,8 +27,8 @@ export const SUBAGENT_THINKING_LEVEL: ThinkingLevel = DEFAULT_THINKING_LEVEL;
 /** Child processes are leaf agents: they never receive the subagent tool. */
 export const MAX_SUBAGENT_DEPTH = 1;
 export const DEPTH_ENV_VAR = "PI_SUBAGENT_DEPTH";
-/** Absolute limit so a child that stops emitting events cannot hang the parent forever. */
-export const SUBAGENT_TIMEOUT_MS = 10 * 60 * 1000;
+/** No default deadline: sub-agents may run until completion or explicit cancellation. */
+export const SUBAGENT_TIMEOUT_MS = 0;
 export const SUBAGENT_KILL_GRACE_MS = 5_000;
 
 export interface UsageStats {
@@ -57,6 +57,8 @@ export interface SingleResult {
 export interface SubagentDetails {
 	mode: "single" | "parallel";
 	results: SingleResult[];
+	/** The tool returned immediately while the child process continues in the background. */
+	background?: boolean;
 }
 
 export type OnUpdateCallback = (partial: AgentToolResult<SubagentDetails>) => void;
@@ -179,7 +181,7 @@ export interface RunSingleOptions {
 	cwd?: string;
 	/** Thinking level passed to the child pi process. */
 	thinkingLevel?: ThinkingLevel;
-	/** Override the watchdog timeout; intended for tests and controlled callers. */
+	/** Optional timeout; zero (the default) disables it. Intended for tests and controlled callers. */
 	timeoutMs?: number;
 	signal?: AbortSignal;
 	onUpdate?: OnUpdateCallback;
