@@ -25,6 +25,7 @@ describe("buildDelegationDirective", () => {
 		expect(directive).toContain("Dispatch discipline");
 		expect(directive).toContain("Review & verification");
 		expect(directive).toContain("Trust but verify");
+		expect(directive).toContain("leaf workers");
 	});
 
 	it("mentions parallel only when multiple agents are enabled", () => {

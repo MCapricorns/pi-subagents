@@ -1,8 +1,12 @@
+import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 import {
 	currentSubagentDepth,
 	getFinalOutput,
 	isFailedResult,
+	runSingleAgent,
 	mapWithConcurrencyLimit,
 	type SingleResult,
 } from "../src/spawn.ts";
@@ -56,6 +60,71 @@ describe("currentSubagentDepth", () => {
 	});
 	it("ignores garbage", () => {
 		expect(currentSubagentDepth({ PI_SUBAGENT_DEPTH: "abc" })).toBe(0);
+	});
+});
+
+describe("runSingleAgent transport and lifecycle", () => {
+	const agent = {
+		name: "fake",
+		description: "fake",
+		systemPrompt: "",
+		source: "builtin" as const,
+		filePath: "/agents/fake.md",
+	};
+
+	it("sends the task through stdin", async () => {
+		const dir = mkdtempSync(join(tmpdir(), "pi-subagents-spawn-"));
+		const script = join(dir, "stdin-child.mjs");
+		writeFileSync(
+			script,
+			`let input = "";
+process.stdin.setEncoding("utf8");
+process.stdin.on("data", (chunk) => input += chunk);
+process.stdin.on("end", () => process.stdout.write(JSON.stringify({ type: "message_end", message: { role: "assistant", content: [{ type: "text", text: input }] } }) + "\\n"));
+`,
+			"utf8",
+		);
+		const previousScript = process.argv[1];
+		process.argv[1] = script;
+		try {
+			const result = await runSingleAgent({
+				defaultCwd: process.cwd(),
+				agent,
+				agentName: agent.name,
+				task: "hello from stdin",
+				makeDetails: (results) => ({ mode: "single", results }),
+				timeoutMs: 2_000,
+			});
+			expect(getFinalOutput(result.messages)).toBe("Task: hello from stdin");
+			expect(result.exitCode).toBe(0);
+		} finally {
+			process.argv[1] = previousScript;
+			rmSync(dir, { recursive: true, force: true });
+		}
+	});
+
+	it("terminates a child that exceeds the watchdog timeout", async () => {
+		const dir = mkdtempSync(join(tmpdir(), "pi-subagents-timeout-"));
+		const script = join(dir, "stuck-child.mjs");
+		writeFileSync(script, "process.stdin.resume(); setInterval(() => {}, 1000);\n", "utf8");
+		const previousScript = process.argv[1];
+		process.argv[1] = script;
+		try {
+			const result = await runSingleAgent({
+				defaultCwd: process.cwd(),
+				agent,
+				agentName: agent.name,
+				task: "hang",
+				makeDetails: (results) => ({ mode: "single", results }),
+				timeoutMs: 20,
+			});
+			expect(result.stopReason).toBe("error");
+			expect(result.errorMessage).toContain("timed out");
+			expect(result.exitCode).not.toBe(0);
+		} finally {
+			process.argv[1] = previousScript;
+			rmSync(dir, { recursive: true, force: true });
+		}
 	});
 });
 

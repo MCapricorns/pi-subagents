@@ -54,12 +54,19 @@ describe("extension registration", () => {
 		expect(tool.description).toContain("explore");
 	});
 
-	it("does not register the tool at or beyond max depth", () => {
-		process.env.PI_SUBAGENT_DEPTH = "2";
+	it("does not register the tool inside any child sub-agent process", () => {
+		process.env.PI_SUBAGENT_DEPTH = "1";
 		const stub = makeStub();
 		register(stub.api);
 		expect(stub.tools.map((t) => t.name)).not.toContain("subagent");
 		expect(stub.commands).toContain("subagents-setup");
+	});
+
+	it("also blocks a deeper inherited depth", () => {
+		process.env.PI_SUBAGENT_DEPTH = "2";
+		const stub = makeStub();
+		register(stub.api);
+		expect(stub.tools.map((t) => t.name)).not.toContain("subagent");
 	});
 });
 

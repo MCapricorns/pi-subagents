@@ -34,8 +34,8 @@ Pi ships no sub-agents on purpose. The community fills the gap two ways, and bot
 | **True isolation** | Each agent is a separate `pi` process (`--no-session`), so delegated work never pollutes the main context. |
 | **Read-only where it matters** | `explore`, `plan`, and `reviewer` are read-only. The `reviewer` runs in a *separate* context to avoid self-confirmation bias. |
 | **Selection-only setup** | No typing of values: a checkbox module picker and a fuzzy-filter, paginated model picker. |
-| **Sensible model defaults** | Per-agent model override; if you skip one, it uses the **main session's current model**. |
-| **Recursion guard** | The tool is not registered beyond depth 2, preventing runaway nesting. |
+| **Sensible model defaults** | Per-agent model override; if you skip one, it uses the **main session's current model**. Unavailable saved overrides are repaired and persisted automatically. |
+| **Leaf sub-agents** | Child processes never receive the `subagent` tool, so delegation cannot recurse or run away. |
 | **Zero runtime deps** | Pure pi extension, peer dependencies only, no build step. |
 
 ## Install
@@ -44,8 +44,8 @@ Pi ships no sub-agents on purpose. The community fills the gap two ways, and bot
 pi install npm:@ferris1225/pi-subagents
 ```
 
-Requires pi **≥ 0.80.6** — sub-agents request `--thinking max`, which that version
-introduced (older pi builds would reject the flag value).
+Requires pi **≥ 0.80.6** — sub-agent thinking levels use the `--thinking` values
+introduced by that version.
 
 Then run the setup wizard (selection-only):
 
@@ -89,23 +89,25 @@ Stored at `~/.pi/agent/pi-subagents.json` (honors `PI_CODING_AGENT_DIR`):
 {
   "enabledAgents": ["explore", "worker", "reviewer"],
   "agentModels": { "explore": "anthropic/claude-haiku-4-5" },
+  "thinkingLevel": "max",
   "proactiveInjection": true,
   "agentScope": "user"
 }
 ```
 
 - `enabledAgents` — which agents are discoverable and injected.
-- `agentModels` — per-agent model override (`"provider/model-id"`).
+- `agentModels` — per-agent model override (`"provider/model-id"`). If a saved model is unavailable, it is replaced with the current main-window model and written back to this file.
+- `thinkingLevel` — sub-agent reasoning strength: `off`, `minimal`, `low`, `medium`, `high`, `xhigh`, or `max` (default).
 - `proactiveInjection` — toggle the system-prompt injection.
 - `agentScope` — `"user"` (default), `"project"`, or `"both"`.
 
 **Model precedence** for each agent:
 
 ```
-agentModels[name]  →  current session model  →  the agent's frontmatter default
+available agentModels[name]  →  current session model  →  the agent's frontmatter default
 ```
 
-So if you don't pick a model in setup, the agent uses the main window's current model.
+If a configured model is no longer available, it is switched to the current main-window model and persisted before the next run.
 
 ## Usage
 
@@ -140,9 +142,12 @@ the main window gets a notification with the final summary
 (`✓ worker · openai/gpt-5 · ↑12.4k ↓3.1k · 47s`). The tool result itself
 remains the durable record in the conversation.
 
-Sub-agents always request the **strongest thinking level** (`--thinking max`);
+Sub-agents use the configured thinking level (default `--thinking max`);
 pi clamps it adaptively to what the resolved model supports
 (`max → xhigh → high → … → off`), so weaker models degrade gracefully.
+The task is sent through stdin; only the agent system prompt uses a short-lived
+file. Child output is streamed in memory, with a watchdog and process-tree cleanup
+for aborted or stuck runs.
 
 ## Development
 

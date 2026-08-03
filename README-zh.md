@@ -31,8 +31,8 @@ pi 故意不内置 sub-agent。社区的补位方案分两种，但都没踩中�
 | **真隔离** | 每个 agent 都是独立 `pi` 进程（`--no-session`），委派出去的活绝不污染主上下文。 |
 | **该只读就只读** | `explore`、`plan`、`reviewer` 都是只读。`reviewer` 跑在**独立**上下文，避免自我确认偏差。 |
 | **纯选择式配置** | 不用手敲值：勾选式模块选择器 + 模糊过滤、可翻页的模型选择器。 |
-| **合理的模型默认** | 每 agent 可单独覆盖模型；不选就**用主窗口当前 session 的模型**。 |
-| **递归守卫** | 深度超过 2 不再注册该工具，防止无限嵌套。 |
+| **合理的模型默认** | 每 agent 可单独覆盖模型；不选就**用主窗口当前 session 的模型**。配置中的不可用模型会自动修复并写回。 |
+| **子代理是叶节点** | 子进程不会获得 `subagent` 工具，因此不会递归派发或无限运行。 |
 | **零运行时依赖** | 纯 pi 扩展，仅 peer 依赖，无需构建步骤。 |
 
 ## 安装
@@ -41,7 +41,7 @@ pi 故意不内置 sub-agent。社区的补位方案分两种，但都没踩中�
 pi install npm:@ferris1225/pi-subagents
 ```
 
-要求 pi **≥ 0.80.6**——子代理会请求 `--thinking max`，该级别自这个版本引入（旧版 pi 会拒绝该参数值）。
+要求 pi **≥ 0.80.6**——子代理思考强度使用该版本引入的 `--thinking` 参数值。
 
 然后运行配置向导（纯选择）：
 
@@ -80,23 +80,25 @@ pi 从不把每个 agent 的描述展示给主模型——它只看到 `subagent
 {
   "enabledAgents": ["explore", "worker", "reviewer"],
   "agentModels": { "explore": "anthropic/claude-haiku-4-5" },
+  "thinkingLevel": "max",
   "proactiveInjection": true,
   "agentScope": "user"
 }
 ```
 
 - `enabledAgents` —— 哪些 agent 可被发现并注入。
-- `agentModels` —— 每 agent 的模型覆盖（`"provider/model-id"`）。
+- `agentModels` —— 每 agent 的模型覆盖（`"provider/model-id"`）。如果已保存的模型不可用，会切换到主窗口当前模型并写回此文件。
+- `thinkingLevel` —— 子代理思考强度：`off`、`minimal`、`low`、`medium`、`high`、`xhigh` 或 `max`（默认）。
 - `proactiveInjection` —— 开关系统提示词注入。
 - `agentScope` —— `"user"`（默认）、`"project"` 或 `"both"`。
 
 **每个 agent 的模型优先级**：
 
 ```
-agentModels[name]  →  当前 session 模型  →  agent frontmatter 里的默认
+可用的 agentModels[name]  →  当前 session 模型  →  agent frontmatter 里的默认
 ```
 
-所以如果你在配置里没选模型，该 agent 就用主窗口当前的模型。
+如果配置的模型不再可用，会切换到主窗口当前模型，并在下一次运行前写回配置文件。
 
 ## 使用
 
@@ -129,8 +131,10 @@ token 用量、耗时），其下缩进一行显示它正在做什么：`thinkin
 给出最终摘要（`✓ worker · openai/gpt-5 · ↑12.4k ↓3.1k · 47s`）。工具结果
 本身仍是对话里的持久记录。
 
-子代理一律请求**最强思考强度**（`--thinking max`）；pi 会按目标模型实际支持
+子代理使用配置的思考强度（默认 `--thinking max`）；pi 会按目标模型实际支持
 的级别自适应降级（`max → xhigh → high → … → off`），弱模型也能平稳运行。
+任务内容通过 stdin 传递，只有 agent system prompt 使用短生命周期临时文件。
+子进程输出在内存中流式处理；中止或卡住时会通过 watchdog 清理整个进程树。
 
 ## 开发
 

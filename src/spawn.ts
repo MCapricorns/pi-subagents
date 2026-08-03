@@ -2,31 +2,34 @@
  * Sub-agent dispatch: each agent runs as an isolated `pi` child process
  * (`--mode json -p --no-session`). The agent's system prompt (the .md body) is
  * written to a temp file and passed via `--append-system-prompt` (which accepts a
- * file path). Child stdout is a JSON-lines event stream; we accumulate assistant
- * messages from `message_end` events and stream partial output back via onUpdate.
+ * file path). The task itself is sent through the child's stdin pipe, not another
+ * temp file or command-line argument. Child stdout is a JSON-lines event stream;
+ * we accumulate assistant messages from `message_end` events and stream partial
+ * output back via onUpdate.
  *
  * Adapted from the official pi example `examples/extensions/subagent`.
  */
 
-import { spawn } from "node:child_process";
+import { spawn, type ChildProcess } from "node:child_process";
 import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import { existsSync, unlinkSync, rmdirSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { basename, join } from "node:path";
 import type { AgentToolResult } from "@earendil-works/pi-agent-core";
 import type { Message } from "@earendil-works/pi-ai";
-import { withFileMutationQueue } from "@earendil-works/pi-coding-agent";
 import type { AgentConfig, AgentSource } from "./agents.ts";
+import { DEFAULT_THINKING_LEVEL, type ThinkingLevel } from "./config.ts";
 
 export const MAX_PARALLEL_TASKS = 8;
 export const MAX_CONCURRENCY = 4;
-/** Thinking level requested for every sub-agent: the strongest pi offers. pi's
- * session layer clamps it adaptively to what the resolved model supports
- * (max → xhigh → high → … → off), so weaker models degrade gracefully. */
-export const SUBAGENT_THINKING_LEVEL = "max";
-/** Max nesting depth for sub-agent -> sub-agent spawning (recursion guard). */
-export const MAX_SUBAGENT_DEPTH = 2;
+/** Default thinking level for sub-agents. pi clamps it to the resolved model's support. */
+export const SUBAGENT_THINKING_LEVEL: ThinkingLevel = DEFAULT_THINKING_LEVEL;
+/** Child processes are leaf agents: they never receive the subagent tool. */
+export const MAX_SUBAGENT_DEPTH = 1;
 export const DEPTH_ENV_VAR = "PI_SUBAGENT_DEPTH";
+/** Absolute limit so a child that stops emitting events cannot hang the parent forever. */
+export const SUBAGENT_TIMEOUT_MS = 10 * 60 * 1000;
+export const SUBAGENT_KILL_GRACE_MS = 5_000;
 
 export interface UsageStats {
 	input: number;
@@ -117,9 +120,7 @@ async function writePromptToTempFile(agentName: string, prompt: string): Promise
 	const dir = await mkdtemp(join(tmpdir(), "pi-subagents-"));
 	const safeName = agentName.replace(/[^\w.-]+/g, "_");
 	const filePath = join(dir, `prompt-${safeName}.md`);
-	await withFileMutationQueue(filePath, async () => {
-		await writeFile(filePath, prompt, "utf8");
-	});
+	await writeFile(filePath, prompt, "utf8");
 	return { dir, filePath };
 }
 
@@ -136,6 +137,34 @@ export function getPiInvocation(args: string[]): { command: string; args: string
 	return { command: "pi", args };
 }
 
+/** Terminate the child and any tool processes it left behind. */
+function terminateProcessTree(proc: ChildProcess, force: boolean): void {
+	if (process.platform === "win32" && proc.pid !== undefined) {
+		const killer = spawn("taskkill", ["/pid", String(proc.pid), "/t", "/f"], {
+			stdio: "ignore",
+			windowsHide: true,
+		});
+		const fallback = (): void => {
+			try {
+				proc.kill(force ? "SIGKILL" : "SIGTERM");
+			} catch {
+				/* process may already be gone */
+			}
+		};
+		killer.on("error", fallback);
+		killer.on("close", (code) => {
+			if (code !== 0) fallback();
+		});
+		return;
+	}
+
+	try {
+		proc.kill(force ? "SIGKILL" : "SIGTERM");
+	} catch {
+		/* process may already be gone */
+	}
+}
+
 export function currentSubagentDepth(env: NodeJS.ProcessEnv = process.env): number {
 	const raw = env[DEPTH_ENV_VAR];
 	const parsed = raw === undefined ? 0 : Number.parseInt(raw, 10);
@@ -148,6 +177,10 @@ export interface RunSingleOptions {
 	agentName: string;
 	task: string;
 	cwd?: string;
+	/** Thinking level passed to the child pi process. */
+	thinkingLevel?: ThinkingLevel;
+	/** Override the watchdog timeout; intended for tests and controlled callers. */
+	timeoutMs?: number;
 	signal?: AbortSignal;
 	onUpdate?: OnUpdateCallback;
 	onLive?: (e: SubagentLiveEvent) => void;
@@ -157,7 +190,18 @@ export interface RunSingleOptions {
 
 /** Spawn one agent as an isolated pi child process and collect its output. */
 export async function runSingleAgent(options: RunSingleOptions): Promise<SingleResult> {
-	const { agent, agentName, task, cwd, signal, onUpdate, onLive, makeDetails } = options;
+	const {
+		agent,
+		agentName,
+		task,
+		cwd,
+		thinkingLevel = SUBAGENT_THINKING_LEVEL,
+		timeoutMs = SUBAGENT_TIMEOUT_MS,
+		signal,
+		onUpdate,
+		onLive,
+		makeDetails,
+	} = options;
 
 	if (!agent) {
 		return {
@@ -171,10 +215,12 @@ export async function runSingleAgent(options: RunSingleOptions): Promise<SingleR
 		};
 	}
 
-	const args: string[] = ["--mode", "json", "-p", "--no-session"];
+	// Defense in depth: even if another extension ignores the depth marker, a
+	// child process can never expose a tool named `subagent` back to its model.
+	const args: string[] = ["--mode", "json", "-p", "--no-session", "--exclude-tools", "subagent"];
 	if (agent.model) args.push("--model", agent.model);
-	// Strongest thinking by default; clamped adaptively per model by pi.
-	args.push("--thinking", SUBAGENT_THINKING_LEVEL);
+	// The configured level is clamped adaptively per model by pi.
+	args.push("--thinking", thinkingLevel);
 	if (agent.tools && agent.tools.length > 0) args.push("--tools", agent.tools.join(","));
 
 	let tmpPromptDir: string | null = null;
@@ -206,8 +252,8 @@ export async function runSingleAgent(options: RunSingleOptions): Promise<SingleR
 			args.push("--append-system-prompt", tmpPromptPath);
 		}
 
-		args.push(`Task: ${task}`);
 		let wasAborted = false;
+		let timedOut = false;
 
 		// Increment depth so nested sub-agents can be guarded against runaway recursion.
 		const childDepth = currentSubagentDepth(options.env) + 1;
@@ -221,10 +267,37 @@ export async function runSingleAgent(options: RunSingleOptions): Promise<SingleR
 			const proc = spawn(invocation.command, invocation.args, {
 				cwd: cwd ?? options.defaultCwd,
 				shell: false,
-				stdio: ["ignore", "pipe", "pipe"],
+				stdio: ["pipe", "pipe", "pipe"],
 				env: childEnv,
 			});
 			let buffer = "";
+			let closed = false;
+			let termSent = false;
+			let forceKillTimer: ReturnType<typeof setTimeout> | undefined;
+			let timeoutTimer: ReturnType<typeof setTimeout> | undefined;
+			let abortHandler: (() => void) | undefined;
+
+			const finish = (code: number | null): void => {
+				if (closed) return;
+				closed = true;
+				if (forceKillTimer) clearTimeout(forceKillTimer);
+				if (timeoutTimer) clearTimeout(timeoutTimer);
+				if (signal && abortHandler) signal.removeEventListener("abort", abortHandler);
+				resolve(code ?? 1);
+			};
+
+			const terminate = (): void => {
+				if (closed) return;
+				if (!termSent) {
+					termSent = true;
+					terminateProcessTree(proc, false);
+				}
+				if (!forceKillTimer) {
+					forceKillTimer = setTimeout(() => {
+						if (!closed) terminateProcessTree(proc, true);
+					}, SUBAGENT_KILL_GRACE_MS);
+				}
+			};
 
 			const processLine = (line: string): void => {
 				if (!line.trim()) return;
@@ -306,6 +379,12 @@ export async function runSingleAgent(options: RunSingleOptions): Promise<SingleR
 					emitUpdate();
 				}
 			};
+			// Send the task through the child stdin pipe instead of the process
+			// command line. This avoids OS argument-length limits and does not
+			// require another temporary file for conversation data.
+			proc.stdin?.on("error", () => undefined);
+			proc.stdin?.end(`Task: ${task}`);
+
 			proc.stdout.on("data", (data) => {
 				buffer += data.toString();
 				const lines = buffer.split("\n");
@@ -319,43 +398,51 @@ export async function runSingleAgent(options: RunSingleOptions): Promise<SingleR
 
 			proc.on("close", (code) => {
 				if (buffer.trim()) processLine(buffer);
-				// Live event: final status derived from exit code / abort state.
-				// code is null on signal termination (e.g. our own Esc abort), which
-				// must read as failure — never as a false "done".
+				// A null exit code means the process was terminated by a signal and
+				// must be reported as failure, never as a false clean completion.
+				const failed =
+					code !== 0 ||
+					wasAborted ||
+					timedOut ||
+					(signal?.aborted ?? false) ||
+					currentResult.stopReason === "error" ||
+					currentResult.stopReason === "aborted";
 				if (onLive) {
 					try {
-						const failed =
-							code !== 0 ||
-							wasAborted ||
-							(signal?.aborted ?? false) ||
-							currentResult.stopReason === "error" ||
-							currentResult.stopReason === "aborted";
 						onLive({ kind: "status", status: failed ? "failed" : "done" });
 					} catch { /* never throw from event handling */ }
 				}
-				resolve(code ?? 0);
+				finish(code);
 			});
 
 			proc.on("error", () => {
 				// Spawn itself failed; close may never fire, so finish the run here.
+				currentResult.stopReason = "error";
+				currentResult.errorMessage ??= "Failed to start the sub-agent process.";
 				if (onLive) {
 					try {
 						onLive({ kind: "status", status: "failed" });
 					} catch { /* never throw from event handling */ }
 				}
-				resolve(1);
+				finish(1);
 			});
 
+			if (timeoutMs > 0) {
+				timeoutTimer = setTimeout(() => {
+					timedOut = true;
+					currentResult.stopReason = "error";
+					currentResult.errorMessage = `Subagent timed out after ${Math.ceil(timeoutMs / 1000)} seconds.`;
+					terminate();
+				}, timeoutMs);
+			}
+
 			if (signal) {
-				const killProc = (): void => {
+				abortHandler = (): void => {
 					wasAborted = true;
-					proc.kill("SIGTERM");
-					setTimeout(() => {
-						if (!proc.killed) proc.kill("SIGKILL");
-					}, 5000);
+					terminate();
 				};
-				if (signal.aborted) killProc();
-				else signal.addEventListener("abort", killProc, { once: true });
+				if (signal.aborted) abortHandler();
+				else signal.addEventListener("abort", abortHandler, { once: true });
 			}
 		});
 

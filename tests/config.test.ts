@@ -2,7 +2,12 @@ import { mkdtempSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
-import { DEFAULT_ENABLED_AGENTS, loadConfig, normalizeConfig } from "../src/config.ts";
+import {
+	DEFAULT_ENABLED_AGENTS,
+	DEFAULT_THINKING_LEVEL,
+	loadConfig,
+	normalizeConfig,
+} from "../src/config.ts";
 
 describe("normalizeConfig", () => {
 	it("returns defaults for non-object input", () => {
@@ -11,6 +16,7 @@ describe("normalizeConfig", () => {
 		expect(config.proactiveInjection).toBe(true);
 		expect(config.agentScope).toBe("user");
 		expect(config.agentModels).toEqual({});
+		expect(config.thinkingLevel).toBe(DEFAULT_THINKING_LEVEL);
 	});
 
 	it("keeps valid enabledAgents and drops non-strings", () => {
@@ -27,6 +33,11 @@ describe("normalizeConfig", () => {
 			agentModels: { explore: "anthropic/claude-haiku-4-5", bad: "noslash", empty: "  " },
 		});
 		expect(config.agentModels).toEqual({ explore: "anthropic/claude-haiku-4-5" });
+	});
+
+	it("validates the configured thinking level", () => {
+		expect(normalizeConfig({ thinkingLevel: "high" }).thinkingLevel).toBe("high");
+		expect(normalizeConfig({ thinkingLevel: "invalid" }).thinkingLevel).toBe(DEFAULT_THINKING_LEVEL);
 	});
 
 	it("accepts a boolean proactiveInjection", () => {

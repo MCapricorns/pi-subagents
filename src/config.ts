@@ -21,6 +21,11 @@ export const DEFAULT_ENABLED_AGENTS: readonly string[] = ["explore", "worker", "
 export const AGENT_SCOPE_VALUES = ["user", "project", "both"] as const;
 export type AgentScope = (typeof AGENT_SCOPE_VALUES)[number];
 
+/** Thinking levels accepted by pi's `--thinking` option. */
+export const THINKING_LEVEL_VALUES = ["off", "minimal", "low", "medium", "high", "xhigh", "max"] as const;
+export type ThinkingLevel = (typeof THINKING_LEVEL_VALUES)[number];
+export const DEFAULT_THINKING_LEVEL: ThinkingLevel = "max";
+
 export const CONFIG_FILE_NAME = "pi-subagents.json";
 
 export interface SubagentsConfig {
@@ -28,6 +33,8 @@ export interface SubagentsConfig {
 	enabledAgents: string[];
 	/** Per-agent model override, keyed by agent name, as "provider/model-id". */
 	agentModels: Record<string, string>;
+	/** Thinking level passed to every sub-agent. Default: "max". */
+	thinkingLevel: ThinkingLevel;
 	/** Whether to inject the delegation directive into the parent system prompt. Default: true. */
 	proactiveInjection: boolean;
 	/** Which agent directories to discover from. Default: "user". */
@@ -37,6 +44,7 @@ export interface SubagentsConfig {
 export const DEFAULT_CONFIG: SubagentsConfig = {
 	enabledAgents: [...DEFAULT_ENABLED_AGENTS],
 	agentModels: {},
+	thinkingLevel: DEFAULT_THINKING_LEVEL,
 	proactiveInjection: true,
 	agentScope: "user",
 };
@@ -70,6 +78,7 @@ export function normalizeConfig(raw: unknown): SubagentsConfig {
 	const config: SubagentsConfig = {
 		enabledAgents: [...DEFAULT_CONFIG.enabledAgents],
 		agentModels: {},
+		thinkingLevel: DEFAULT_CONFIG.thinkingLevel,
 		proactiveInjection: DEFAULT_CONFIG.proactiveInjection,
 		agentScope: DEFAULT_CONFIG.agentScope,
 	};
@@ -86,6 +95,10 @@ export function normalizeConfig(raw: unknown): SubagentsConfig {
 		for (const [key, value] of Object.entries(raw.agentModels)) {
 			if (isModelReference(value)) config.agentModels[key.trim()] = value.trim();
 		}
+	}
+
+	if (typeof raw.thinkingLevel === "string" && (THINKING_LEVEL_VALUES as readonly string[]).includes(raw.thinkingLevel)) {
+		config.thinkingLevel = raw.thinkingLevel as ThinkingLevel;
 	}
 
 	if (typeof raw.proactiveInjection === "boolean") {

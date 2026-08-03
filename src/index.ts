@@ -8,9 +8,8 @@
  *   - a `before_agent_start` hook that injects a delegation directive into the
  *     parent system prompt so the main model uses the tool proactively.
  *
- * The tool is NOT registered inside nested sub-agent processes beyond
- * MAX_SUBAGENT_DEPTH, which both prevents runaway recursion and keeps child
- * context windows clean.
+ * The tool is not registered inside child sub-agent processes, which prevents
+ * runaway recursion and keeps child context windows clean.
  */
 
 import type { AgentToolResult } from "@earendil-works/pi-agent-core";
@@ -19,7 +18,8 @@ import { getAgentDir, type ExtensionAPI } from "@earendil-works/pi-coding-agent"
 import { Text, truncateToWidth } from "@earendil-works/pi-tui";
 import { Type } from "typebox";
 import { discoverAgents, type AgentConfig } from "./agents.ts";
-import { getConfigPath, loadConfig } from "./config.ts";
+import { getConfigPath, loadConfig, saveConfig } from "./config.ts";
+import { repairUnavailableModelOverrides } from "./models.ts";
 import { buildDelegationDirective } from "./prompt.ts";
 import { runSetup } from "./setup.ts";
 import {
@@ -89,7 +89,7 @@ function formatUsage(usage: UsageStats): string {
 export default function (pi: ExtensionAPI): void {
 	const configPath = getConfigPath(getAgentDir());
 
-	// Recursion guard: do not register the tool deep inside nested sub-agents.
+	// Recursion guard: child sub-agents are leaf processes and cannot delegate again.
 	if (currentSubagentDepth() >= MAX_SUBAGENT_DEPTH) {
 		pi.registerCommand("subagents-setup", {
 			description: "Configure pi-subagents (disabled in nested sub-agent processes)",
@@ -123,7 +123,25 @@ export default function (pi: ExtensionAPI): void {
 
 		async execute(_toolCallId, params, signal, onUpdate, ctx) {
 			monitor.beginTurn();
-			const config = await loadConfig(configPath);
+			let config = await loadConfig(configPath);
+			const repairedModels = repairUnavailableModelOverrides(ctx, config.agentModels);
+			if (repairedModels.changed) {
+				config = { ...config, agentModels: repairedModels.agentModels };
+				try {
+					await saveConfig(config, configPath);
+					ctx.ui.notify(
+						repairedModels.fallbackRef
+							? `Unavailable sub-agent models switched to ${repairedModels.fallbackRef} and saved to config.`
+							: "Unavailable sub-agent model overrides removed; no main-window model is available.",
+						"warning",
+					);
+				} catch (error) {
+					ctx.ui.notify(
+						`Could not persist repaired sub-agent model config: ${error instanceof Error ? error.message : String(error)}`,
+						"warning",
+					);
+				}
+			}
 
 			// Finished runs leave the widget immediately; the main window gets a
 			// notification instead (the tool result remains the durable record).
@@ -244,6 +262,7 @@ export default function (pi: ExtensionAPI): void {
 							agentName: t.agent,
 							task: t.task,
 							cwd: t.cwd,
+							thinkingLevel: config.thinkingLevel,
 							signal,
 							onUpdate: perTaskUpdate,
 							onLive,
@@ -288,6 +307,7 @@ export default function (pi: ExtensionAPI): void {
 					agentName: params.agent as string,
 					task: params.task as string,
 					cwd: params.cwd,
+					thinkingLevel: config.thinkingLevel,
 					signal,
 					onUpdate,
 					onLive,

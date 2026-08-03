@@ -14,13 +14,16 @@ import {
 	BUILTIN_AGENT_NAMES,
 	DEFAULT_CONFIG,
 	DEFAULT_ENABLED_AGENTS,
+	THINKING_LEVEL_VALUES,
 	type AgentScope,
 	type SubagentsConfig,
+	type ThinkingLevel,
 	errorMessage,
 	getConfigPath,
 	loadConfig,
 	saveConfig,
 } from "./config.ts";
+import { availableModelRefs, repairUnavailableModelOverrides } from "./models.ts";
 import { promptSelectMany, promptSelectOne } from "./ui.ts";
 
 const INHERIT = "__inherit__";
@@ -45,16 +48,6 @@ async function configExists(configPath: string): Promise<boolean> {
 	} catch {
 		return false;
 	}
-}
-
-/** Ordered "provider/model-id" references, with the active model first. */
-function availableModelRefs(ctx: ExtensionCommandContext): string[] {
-	const refs = new Set<string>();
-	if (ctx.model) refs.add(`${ctx.model.provider}/${ctx.model.id}`);
-	const models =
-		ctx.scopedModels.length > 0 ? ctx.scopedModels.map((entry) => entry.model) : ctx.modelRegistry.getAvailable();
-	for (const model of models) refs.add(`${model.provider}/${model.id}`);
-	return [...refs];
 }
 
 async function pickEnabledAgents(
@@ -106,6 +99,28 @@ async function pickAgentModels(
 	return result;
 }
 
+const THINKING_LEVEL_HINTS: Record<ThinkingLevel, string> = {
+	off: "no reasoning tokens (fastest)",
+	minimal: "minimal reasoning",
+	low: "light reasoning",
+	medium: "balanced reasoning",
+	high: "deep reasoning",
+	xhigh: "extra-deep reasoning",
+	max: "strongest reasoning (default)",
+};
+
+async function pickThinkingLevel(
+	ctx: ExtensionCommandContext,
+	current: ThinkingLevel,
+): Promise<ThinkingLevel | undefined> {
+	const options = THINKING_LEVEL_VALUES.map((level) =>
+		level === current ? `${level} — ${THINKING_LEVEL_HINTS[level]} (current)` : `${level} — ${THINKING_LEVEL_HINTS[level]}`,
+	);
+	const choice = await ctx.ui.select("Sub-agent thinking strength?", options);
+	if (choice === undefined) return undefined;
+	return THINKING_LEVEL_VALUES.find((level) => choice.startsWith(`${level} —`));
+}
+
 async function pickInjection(ctx: ExtensionCommandContext, current: boolean): Promise<boolean | undefined> {
 	const on = "On — inject the delegation directive into the system prompt (recommended)";
 	const off = "Off — do not inject (rely on the tool description alone)";
@@ -129,17 +144,34 @@ async function pickScope(ctx: ExtensionCommandContext, current: AgentScope): Pro
 	return scope;
 }
 
-/** Validate that every configured model override still resolves; drop stale ones. */
-function pruneStaleModels(ctx: ExtensionCommandContext, agentModels: Record<string, string>): Record<string, string> {
-	const clean: Record<string, string> = {};
-	for (const [name, ref] of Object.entries(agentModels)) {
-		const slash = ref.indexOf("/");
-		if (slash <= 0) continue;
-		const model = ctx.modelRegistry.find(ref.slice(0, slash), ref.slice(slash + 1));
-		if (model) clean[name] = ref;
-		else ctx.ui.notify(`Dropped stale model override for "${name}": ${ref}`, "warning");
+/** Replace unavailable overrides with a model usable by the current main window. */
+function repairStaleModels(ctx: ExtensionCommandContext, agentModels: Record<string, string>): Record<string, string> {
+	const repair = repairUnavailableModelOverrides(ctx, agentModels);
+	if (repair.changed) {
+		const detail = repair.fallbackRef
+			? `Switched ${repair.replaced} unavailable model override(s) to ${repair.fallbackRef}.`
+			: `Removed ${repair.removed} unavailable model override(s); no model is currently available.`;
+		ctx.ui.notify(detail, "warning");
 	}
-	return clean;
+	return repair.agentModels;
+}
+
+async function repairConfigModels(
+	ctx: ExtensionCommandContext,
+	configPath: string,
+	config: SubagentsConfig,
+): Promise<SubagentsConfig> {
+	const repairedModels = repairUnavailableModelOverrides(ctx, config.agentModels);
+	if (!repairedModels.changed) return config;
+
+	const repaired = { ...config, agentModels: repairedModels.agentModels };
+	try {
+		await saveConfig(repaired, configPath);
+		ctx.ui.notify(`Repaired unavailable model overrides in ${configPath}.`, "warning");
+	} catch (error) {
+		ctx.ui.notify(`Could not persist repaired model overrides: ${errorMessage(error)}`, "warning");
+	}
+	return repaired;
 }
 
 async function runFullSetup(ctx: ExtensionCommandContext, configPath: string, base: SubagentsConfig): Promise<void> {
@@ -149,6 +181,9 @@ async function runFullSetup(ctx: ExtensionCommandContext, configPath: string, ba
 	const models = await pickAgentModels(ctx, enabled, base.agentModels);
 	if (models === undefined) return notifyCancelled(ctx);
 
+	const thinkingLevel = await pickThinkingLevel(ctx, base.thinkingLevel);
+	if (thinkingLevel === undefined) return notifyCancelled(ctx);
+
 	const injection = await pickInjection(ctx, base.proactiveInjection);
 	if (injection === undefined) return notifyCancelled(ctx);
 
@@ -157,7 +192,8 @@ async function runFullSetup(ctx: ExtensionCommandContext, configPath: string, ba
 
 	const next: SubagentsConfig = {
 		enabledAgents: enabled,
-		agentModels: pruneStaleModels(ctx, models),
+		agentModels: repairStaleModels(ctx, models),
+		thinkingLevel,
 		proactiveInjection: injection,
 		agentScope: scope,
 	};
@@ -169,6 +205,7 @@ async function runMenu(ctx: ExtensionCommandContext, configPath: string, config:
 	const choice = await ctx.ui.select("pi-subagents is already configured. What would you like to change?", [
 		"Enable/disable agents",
 		"Change agent models",
+		"Change thinking strength",
 		"Toggle proactive injection",
 		"Change agent scope",
 		"Full re-setup",
@@ -186,7 +223,11 @@ async function runMenu(ctx: ExtensionCommandContext, configPath: string, config:
 	} else if (choice.startsWith("Change agent models")) {
 		const models = await pickAgentModels(ctx, config.enabledAgents, config.agentModels);
 		if (models === undefined) return notifyCancelled(ctx);
-		next.agentModels = pruneStaleModels(ctx, models);
+		next.agentModels = repairStaleModels(ctx, models);
+	} else if (choice.startsWith("Change thinking")) {
+		const thinkingLevel = await pickThinkingLevel(ctx, config.thinkingLevel);
+		if (thinkingLevel === undefined) return notifyCancelled(ctx);
+		next.thinkingLevel = thinkingLevel;
 	} else if (choice.startsWith("Toggle")) {
 		const injection = await pickInjection(ctx, config.proactiveInjection);
 		if (injection === undefined) return notifyCancelled(ctx);
@@ -213,7 +254,8 @@ export async function runSetup(ctx: ExtensionCommandContext, configPath: string 
 	}
 	try {
 		const exists = await configExists(configPath);
-		const config = await loadConfig(configPath);
+		const loaded = await loadConfig(configPath);
+		const config = await repairConfigModels(ctx, configPath, loaded);
 		if (exists) await runMenu(ctx, configPath, config);
 		else await runFullSetup(ctx, configPath, { ...DEFAULT_CONFIG, enabledAgents: [...DEFAULT_ENABLED_AGENTS] });
 	} catch (error) {
