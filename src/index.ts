@@ -35,7 +35,7 @@ import {
 	getResultOutput,
 	isFailedResult,
 	reviewVerdict,
-	runSingleAgent,
+	runSingleAgentWithModelFallback,
 	truncateResultOutput,
 	writeResultArtifact,
 	type SingleResult,
@@ -131,7 +131,10 @@ function formatCompletionBlock(result: SingleResult, maxResultLines: number): st
 	const usage = formatUsage(result.usage);
 	const output = getResultOutput(result);
 	const { text, truncated } = truncateResultOutput(output, maxResultLines);
-	const lines = [`### [${result.agent}] ${status}${usage ? ` (${usage})` : ""}`, "", `Task: ${formatTaskSummary(result.task)}`, "", text];
+	const fallbackNote = result.modelFallbackFrom
+		? ` (model fell back from ${result.modelFallbackFrom} to ${result.model ?? "main-window model"})`
+		: "";
+	const lines = [`### [${result.agent}] ${status}${usage ? ` (${usage})` : ""}${fallbackNote}`, "", `Task: ${formatTaskSummary(result.task)}`, "", text];
 	if (truncated) {
 		// The full text lives on disk so the main agent can read it on demand.
 		lines.push("", `(output truncated to ${maxResultLines} lines; full result: ${writeResultArtifact(output, result.agent)})`);
@@ -352,16 +355,19 @@ export default function (pi: ExtensionAPI): void {
 				const runId = monitor.addRun(agent.name, task, agent.model, thinkingLevel, meta);
 				const onLive = makeLiveHandler(runId);
 				try {
-					const result = await runSingleAgent({
-						defaultCwd: ctx.cwd,
-						agent,
-						agentName,
-						task,
-						thinkingLevel,
-						signal,
-						onLive,
-						makeDetails: makeDetails("single", true),
-					});
+					const result = await runSingleAgentWithModelFallback(
+						{
+							defaultCwd: ctx.cwd,
+							agent,
+							agentName,
+							task,
+							thinkingLevel,
+							signal,
+							onLive,
+							makeDetails: makeDetails("single", true),
+						},
+						sessionRef,
+					);
 					finishRun(runId, isFailedResult(result) ? "failed" : "done");
 					return result;
 				} catch (error) {
@@ -438,17 +444,20 @@ export default function (pi: ExtensionAPI): void {
 					async (backgroundSignal) => {
 						let result: SingleResult;
 						try {
-							result = await runSingleAgent({
-								defaultCwd: ctx.cwd,
-								agent,
-								agentName,
-								task,
-								cwd,
-								thinkingLevel,
-								signal: backgroundSignal,
-								onLive,
-								makeDetails: makeDetails("single", true),
-							});
+							result = await runSingleAgentWithModelFallback(
+								{
+									defaultCwd: ctx.cwd,
+									agent,
+									agentName,
+									task,
+									cwd,
+									thinkingLevel,
+									signal: backgroundSignal,
+									onLive,
+									makeDetails: makeDetails("single", true),
+								},
+								sessionRef,
+							);
 						} catch (error) {
 							const errorMessage = error instanceof Error ? error.message : String(error);
 							result = {
@@ -570,7 +579,7 @@ export default function (pi: ExtensionAPI): void {
 				const pending = r.exitCode === -1;
 				const icon = statusIcon(pending ? "running" : isFailedResult(r) ? "failed" : "done", theme);
 				const usage = formatUsage(r.usage);
-				const model = r.model ?? "?";
+				const model = `${r.model ?? "?"}${r.modelFallbackFrom ? ` (fell back from ${r.modelFallbackFrom})` : ""}`;
 				const line = `${theme.fg("toolTitle", theme.bold("subagent "))}${icon} ${theme.fg("accent", r.agent)} ${theme.fg("dim", `· ${model}${r.thinking ? ` · thinking ${r.thinking}` : ""}${pending ? " · background" : ""}${usage ? ` · ${usage}` : ""}`)}`;
 				return new Text(line, 0, 0);
 			}
@@ -583,7 +592,7 @@ export default function (pi: ExtensionAPI): void {
 				const pending = r.exitCode === -1;
 				const icon = statusIcon(pending ? "running" : isFailedResult(r) ? "failed" : "done", theme);
 				const usage = formatUsage(r.usage);
-				const model = r.model ?? "?";
+				const model = `${r.model ?? "?"}${r.modelFallbackFrom ? ` (fell back from ${r.modelFallbackFrom})` : ""}`;
 				lines.push(`  ${icon} ${theme.fg("accent", r.agent)} ${theme.fg("dim", `· ${model}${r.thinking ? ` · thinking ${r.thinking}` : ""}${pending ? " · background" : ""}${usage ? ` · ${usage}` : ""}`)}`);
 			}
 			return new Text(lines.join("\n"), 0, 0);

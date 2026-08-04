@@ -183,6 +183,13 @@ configured agent model → current main-session model → agent frontmatter mode
 Unavailable configured models are replaced with a usable current-session model when possible
 and the repaired configuration is saved.
 
+At runtime, if an agent's model fails at the provider level before producing any output (bad
+model id, auth, thinking level, quota, ...), the run is retried **once** with the main window's
+current model. This per-run degradation is never persisted — a transient provider hiccup must
+not silently downgrade the configured model — and it does not apply to task-level failures
+(the model worked, the task failed), aborts, or timeouts. Results carry a `model fell back
+from …` note when it happened.
+
 Thinking strength uses this precedence: `agentThinkingLevels` entry → agent frontmatter `thinking` → `thinkingLevel` default.
 
 ## Agent discovery and overrides

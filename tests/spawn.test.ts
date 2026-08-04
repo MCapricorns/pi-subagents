@@ -7,9 +7,11 @@ import {
 	SUBAGENT_TIMEOUT_MS,
 	getFinalOutput,
 	isFailedResult,
+	isModelLevelFailure,
 	RESULT_LINE_MAX,
 	reviewVerdict,
 	runSingleAgent,
+	runSingleAgentWithModelFallback,
 	truncateResultOutput,
 	writeResultArtifact,
 	mapWithConcurrencyLimit,
@@ -149,6 +151,153 @@ process.stdin.on("end", () => process.stdout.write(JSON.stringify({ type: "messa
 			expect(result.stopReason).toBe("error");
 			expect(result.errorMessage).toContain("timed out");
 			expect(result.exitCode).not.toBe(0);
+		} finally {
+			process.argv[1] = previousScript;
+			rmSync(dir, { recursive: true, force: true });
+		}
+	});
+});
+
+describe("isModelLevelFailure", () => {
+	it("fails when the provider rejected the run before any text was produced", () => {
+		const failed = result({
+			exitCode: 1,
+			stopReason: "error",
+			messages: [{ role: "assistant", content: [], stopReason: "error", errorMessage: "model not found" } as any],
+		});
+		expect(isModelLevelFailure(failed)).toBe(true);
+	});
+
+	it("is false for clean runs", () => {
+		expect(isModelLevelFailure(result({ exitCode: 0, stopReason: "end" }))).toBe(false);
+	});
+
+	it("is false when the model produced text (task-level failure)", () => {
+		expect(
+			isModelLevelFailure(result({ exitCode: 1, stopReason: "error", messages: [assistant("build failed")] })),
+		).toBe(false);
+	});
+
+	it("is false for aborts and timeouts", () => {
+		expect(isModelLevelFailure(result({ exitCode: 1, stopReason: "aborted" }))).toBe(false);
+		expect(
+			isModelLevelFailure(result({ exitCode: 1, stopReason: "error", errorMessage: "Subagent timed out after 5 seconds." })),
+		).toBe(false);
+	});
+
+	it("is false without any evidence of a model/provider error", () => {
+		expect(isModelLevelFailure(result({ exitCode: 1 }))).toBe(false);
+	});
+});
+
+describe("runSingleAgentWithModelFallback", () => {
+	const agent = {
+		name: "fake",
+		description: "fake",
+		systemPrompt: "",
+		source: "builtin" as const,
+		filePath: "/agents/fake.md",
+	};
+
+	// Child script: fails fast when launched with the broken model, succeeds on
+	// any other model; appends one line per attempt so tests can count retries.
+	const fallbackChildScript = (attemptLog: string): string => `
+const fs = require("node:fs");
+fs.appendFileSync(${JSON.stringify(attemptLog)}, "attempt\\n");
+const modelArg = process.argv.indexOf("--model");
+const model = modelArg !== -1 ? process.argv[modelArg + 1] : "";
+if (model.startsWith("openai-codex")) {
+  process.stdout.write(JSON.stringify({ type: "message_end", message: { role: "assistant", content: [], stopReason: "error", errorMessage: "model not found" } }) + "\\n");
+  process.exit(1);
+}
+process.stdout.write(JSON.stringify({ type: "message_end", message: { role: "assistant", content: [{ type: "text", text: "recovered on main model" }], stopReason: "end" } }) + "\\n");
+process.exit(0);
+`;
+
+	it("retries once with the fallback model after a model-level failure", async () => {
+		const dir = mkdtempSync(join(tmpdir(), "pi-subagents-fallback-"));
+		const script = join(dir, "fallback-child.cjs");
+		const log = join(dir, "attempts.log");
+		writeFileSync(script, fallbackChildScript(log), "utf8");
+		const previousScript = process.argv[1];
+		process.argv[1] = script;
+		try {
+			const result = await runSingleAgentWithModelFallback(
+				{
+					defaultCwd: process.cwd(),
+					agent: { ...agent, model: "openai-codex/gpt-5.6-sol" },
+					agentName: agent.name,
+					task: "review",
+					makeDetails: (results) => ({ mode: "single", results }),
+					timeoutMs: 2_000,
+				},
+				"deepseek/deepseek-v4-flash",
+			);
+			expect(result.exitCode).toBe(0);
+			expect(getFinalOutput(result.messages)).toBe("recovered on main model");
+			expect(result.model).toBe("deepseek/deepseek-v4-flash");
+			expect(result.modelFallbackFrom).toBe("openai-codex/gpt-5.6-sol");
+			expect(readFileSync(log, "utf8").split("\n").filter(Boolean)).toHaveLength(2);
+		} finally {
+			process.argv[1] = previousScript;
+			rmSync(dir, { recursive: true, force: true });
+		}
+	});
+
+	it("reports the retried failure with the fallback origin when both attempts fail", async () => {
+		const dir = mkdtempSync(join(tmpdir(), "pi-subagents-fallback-"));
+		const script = join(dir, "always-fail-child.mjs");
+		writeFileSync(
+			script,
+			`process.stdout.write(JSON.stringify({ type: "message_end", message: { role: "assistant", content: [], stopReason: "error", errorMessage: "provider down" } }) + "\\n");
+process.exit(1);
+`,
+			"utf8",
+		);
+		const previousScript = process.argv[1];
+		process.argv[1] = script;
+		try {
+			const result = await runSingleAgentWithModelFallback(
+				{
+					defaultCwd: process.cwd(),
+					agent: { ...agent, model: "openai-codex/gpt-5.6-sol" },
+					agentName: agent.name,
+					task: "review",
+					makeDetails: (results) => ({ mode: "single", results }),
+					timeoutMs: 2_000,
+				},
+				"deepseek/deepseek-v4-flash",
+			);
+			expect(result.exitCode).toBe(1);
+			expect(result.stopReason).toBe("error");
+			expect(result.errorMessage).toBe("provider down");
+			expect(result.modelFallbackFrom).toBe("openai-codex/gpt-5.6-sol");
+			expect(result.model).toBe("deepseek/deepseek-v4-flash");
+		} finally {
+			process.argv[1] = previousScript;
+			rmSync(dir, { recursive: true, force: true });
+		}
+	});
+
+	it("does not retry without a fallback model ref", async () => {
+		const dir = mkdtempSync(join(tmpdir(), "pi-subagents-fallback-"));
+		const script = join(dir, "fallback-child.cjs");
+		const log = join(dir, "attempts.log");
+		writeFileSync(script, fallbackChildScript(log), "utf8");
+		const previousScript = process.argv[1];
+		process.argv[1] = script;
+		try {
+			const result = await runSingleAgentWithModelFallback({
+				defaultCwd: process.cwd(),
+				agent: { ...agent, model: "openai-codex/gpt-5.6-sol" },
+				agentName: agent.name,
+				task: "review",
+				makeDetails: (results) => ({ mode: "single", results }),
+				timeoutMs: 2_000,
+			});
+			expect(result.exitCode).toBe(1);
+			expect(result.modelFallbackFrom).toBeUndefined();
+			expect(readFileSync(log, "utf8").split("\n").filter(Boolean)).toHaveLength(1);
 		} finally {
 			process.argv[1] = previousScript;
 			rmSync(dir, { recursive: true, force: true });

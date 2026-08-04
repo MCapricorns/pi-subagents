@@ -55,6 +55,8 @@ export interface SingleResult {
 	thinking?: string;
 	stopReason?: string;
 	errorMessage?: string;
+	/** Model the run degraded from: set when a failed run was retried with the main-window model. */
+	modelFallbackFrom?: string;
 }
 
 export interface SubagentDetails {
@@ -140,6 +142,23 @@ export function writeResultArtifact(output: string, agentName: string): string {
 
 export function isFailedResult(result: SingleResult): boolean {
 	return result.exitCode !== 0 || result.stopReason === "error" || result.stopReason === "aborted";
+}
+
+/**
+ * True when a failed run never got usable output from its model: the provider
+ * rejected the call before the model produced any text (bad model id, auth,
+ * thinking level, quota, ...). Task-level failures — the model worked and the
+ * task failed — and aborts/timeouts are NOT model-level and must not degrade.
+ */
+export function isModelLevelFailure(result: SingleResult): boolean {
+	if (!isFailedResult(result)) return false;
+	if (result.stopReason === "aborted") return false;
+	// The model produced text: the failure belongs to the task, not the model.
+	if (getFinalOutput(result.messages)) return false;
+	if (result.errorMessage?.includes("timed out")) return false;
+	// Require evidence the failure came from the model/provider (an error
+	// message or stderr), not from the child process failing to start.
+	return result.messages.length > 0 || result.stderr.trim().length > 0;
 }
 
 export function getResultOutput(result: SingleResult): string {
@@ -524,4 +543,25 @@ export async function runSingleAgent(options: RunSingleOptions): Promise<SingleR
 				/* ignore */
 			}
 	}
+}
+
+/**
+ * Run one agent; when the configured model fails at the provider level before
+ * producing any output (see isModelLevelFailure), retry once with the main
+ * window's current model. The retried result is returned with `modelFallbackFrom`
+ * set so callers can surface the degradation. The fallback is per-run only and
+ * never persisted: a transient provider hiccup must not silently downgrade the
+ * configured agent model.
+ */
+export async function runSingleAgentWithModelFallback(
+	options: RunSingleOptions,
+	fallbackModelRef?: string,
+): Promise<SingleResult> {
+	const result = await runSingleAgent(options);
+	const agent = options.agent;
+	const launchedRef = agent?.model;
+	if (!agent || !launchedRef || !fallbackModelRef || launchedRef === fallbackModelRef) return result;
+	if (!isModelLevelFailure(result)) return result;
+	const retried = await runSingleAgent({ ...options, agent: { ...agent, model: fallbackModelRef } });
+	return { ...retried, modelFallbackFrom: launchedRef };
 }
