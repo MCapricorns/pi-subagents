@@ -36,6 +36,27 @@ describe("BackgroundTaskQueue", () => {
 		second.resolve();
 	});
 
+	it("starts more queued work when the concurrency limit is raised", async () => {
+		const queue = new BackgroundTaskQueue(1);
+		const gates = [deferred(), deferred(), deferred()];
+		const started: number[] = [];
+
+		for (let i = 0; i < 3; i++) {
+			const index = i;
+			queue.enqueue(async () => {
+				started.push(index);
+				await gates[index].promise;
+			});
+		}
+
+		expect(started).toEqual([0]);
+		queue.setConcurrency(3);
+		await nextTask();
+		expect(started).toEqual([0, 1, 2]);
+		for (const gate of gates) gate.resolve();
+		await nextTask();
+	});
+
 	it("cancels queued and active work", async () => {
 		const queue = new BackgroundTaskQueue(1);
 		const gate = deferred();

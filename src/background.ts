@@ -14,13 +14,23 @@ interface PendingTask {
 }
 
 export class BackgroundTaskQueue {
-	private readonly concurrency: number;
+	private concurrency: number;
 	private readonly pending: PendingTask[] = [];
 	private readonly active = new Set<AbortController>();
 	private stopped = false;
 
 	constructor(concurrency: number) {
 		this.concurrency = Math.max(1, concurrency);
+	}
+
+	/**
+	 * Update the concurrency limit (e.g. after a config change). Raising it
+	 * immediately starts more queued work; lowering it takes effect as running
+	 * tasks finish — already-running tasks are never interrupted.
+	 */
+	setConcurrency(concurrency: number): void {
+		this.concurrency = Math.max(1, concurrency);
+		this.drain();
 	}
 
 	enqueue(task: BackgroundTask, onCancelled?: () => void): AbortController {

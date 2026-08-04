@@ -17,7 +17,6 @@ import { formatCatalogEntry } from "./agents.ts";
 /** Compact role routing hints, emitted only for roles that are enabled. */
 const ROLE_ROUTING: Record<string, string> = {
 	explore: "explore — broad/open-ended code search, \"where is X\", multi-file lookups (read-only, cheap).",
-	plan: "plan — a separate, human-reviewable implementation plan before any code (read-only).",
 	worker: "worker — implement/fix/refactor/test a well-scoped task (full tools; plans internally).",
 	reviewer: "reviewer — adversarial pre-commit review of a diff (read-only; independent context).",
 };

@@ -2,7 +2,7 @@
  * pi-subagents — focused sub-agent delegation for pi.
  *
  * Registers:
- *   - a `subagent` tool that runs explore/plan/worker/reviewer agents as isolated
+ *   - a `subagent` tool that runs explore/worker/reviewer agents as isolated
  *     `pi` child processes (single or parallel),
  *   - a `/subagents-setup` command for selection-only configuration,
  *   - a `before_agent_start` hook that injects a delegation directive into the
@@ -18,14 +18,11 @@ import { Text, truncateToWidth } from "@earendil-works/pi-tui";
 import { Type } from "typebox";
 import { discoverAgents, type AgentConfig } from "./agents.ts";
 import { BackgroundTaskQueue } from "./background.ts";
-import { getConfigPath, loadConfig, saveConfig } from "./config.ts";
+import { getConfigPath, loadConfig, loadConfigSync, saveConfig } from "./config.ts";
 import { repairUnavailableModelOverrides } from "./models.ts";
 import { buildDelegationDirective } from "./prompt.ts";
 import { runSetup } from "./setup.ts";
 import {
-	MAX_CONCURRENCY,
-	MAX_PARALLEL_TASKS,
-	MAX_SUBAGENT_DEPTH,
 	currentSubagentDepth,
 	getFinalOutput,
 	getResultOutput,
@@ -112,15 +109,23 @@ function formatUsage(usage: UsageStats): string {
 
 export default function (pi: ExtensionAPI): void {
 	const configPath = getConfigPath(getAgentDir());
-	const backgroundQueue = new BackgroundTaskQueue(MAX_CONCURRENCY);
+	// Init-time decisions need the config synchronously; the full (migrating)
+	// async load runs per tool call.
+	const initialConfig = loadConfigSync(configPath);
+	const backgroundQueue = new BackgroundTaskQueue(initialConfig.maxConcurrency);
 	let sessionActive = true;
 
-	// Recursion guard: child sub-agents are leaf processes and cannot delegate again.
-	if (currentSubagentDepth() >= MAX_SUBAGENT_DEPTH) {
+	// Recursion guard: sub-agents at the configured depth are leaf processes and
+	// cannot delegate again. maxSubagentDepth 0 disables the tool entirely.
+	if (currentSubagentDepth() >= initialConfig.maxSubagentDepth) {
+		const reason =
+			initialConfig.maxSubagentDepth === 0
+				? "disabled by maxSubagentDepth 0 in pi-subagents.json"
+				: "disabled in nested sub-agent processes";
 		pi.registerCommand("subagents-setup", {
-			description: "Configure pi-subagents (disabled in nested sub-agent processes)",
+			description: `Configure pi-subagents (${reason})`,
 			handler: async (_args, ctx) => {
-				ctx.ui.notify("pi-subagents setup is unavailable inside a nested sub-agent.", "warning");
+				ctx.ui.notify(`pi-subagents setup is unavailable here (${reason}).`, "warning");
 			},
 		});
 		return;
@@ -144,7 +149,7 @@ export default function (pi: ExtensionAPI): void {
 		label: "Subagent",
 		description: [
 			"Delegate a discrete, self-contained task to a specialized sub-agent running in an ISOLATED context window.",
-			"Agents: explore (read-only codebase recon), plan (implementation plan, opt-in), worker (implement/fix/refactor/test, full tools), reviewer (adversarial pre-commit review, read-only).",
+			"Agents: explore (read-only codebase recon), worker (implement/fix/refactor/test, full tools), reviewer (adversarial pre-commit review, read-only).",
 			"Modes: single ({agent, task}) or parallel ({tasks: [{agent, task}, ...]}).",
 			"It starts agents in the background and immediately returns control to the main window; completion messages automatically wake the main agent to continue.",
 			"Each agent has no memory of this conversation — brief it fully (goal, exact paths, constraints, expected output)."
@@ -164,6 +169,8 @@ export default function (pi: ExtensionAPI): void {
 		async execute(_toolCallId, params, signal, onUpdate, ctx) {
 			monitor.beginTurn();
 			let config = await loadConfig(configPath);
+			// Pick up concurrency changes from /subagents-setup without a restart.
+			backgroundQueue.setConcurrency(config.maxConcurrency);
 			const repairedModels = repairUnavailableModelOverrides(ctx, config.agentModels);
 			if (repairedModels.changed) {
 				config = { ...config, agentModels: repairedModels.agentModels };
@@ -311,14 +318,17 @@ export default function (pi: ExtensionAPI): void {
 			// Sub-agents intentionally detach from the foreground turn. This makes the
 			// editor available immediately; completion messages later wake the main agent.
 			if (params.tasks && params.tasks.length > 0) {
-				if (params.tasks.length > MAX_PARALLEL_TASKS) {
-					return {
-						content: [
-							{ type: "text", text: `Too many parallel tasks (${params.tasks.length}). Max is ${MAX_PARALLEL_TASKS}.` },
-						],
-						details: makeDetails("parallel", true)([]),
-					};
-				}
+			if (params.tasks.length > config.maxParallelTasks) {
+				return {
+					content: [
+						{
+							type: "text",
+							text: `Too many parallel tasks (${params.tasks.length}). Max is ${config.maxParallelTasks} (configurable via /subagents-setup).`,
+						},
+					],
+					details: makeDetails("parallel", true)([]),
+				};
+			}
 
 				const results = params.tasks.map((task) => startBackground(task.agent, task.task, task.cwd));
 				const started = results.filter((result) => result.exitCode === -1).length;

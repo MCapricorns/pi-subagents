@@ -20,12 +20,13 @@ import type { Message } from "@earendil-works/pi-ai";
 import type { AgentConfig, AgentSource } from "./agents.ts";
 import { DEFAULT_THINKING_LEVEL, type ThinkingLevel } from "./config.ts";
 
-export const MAX_PARALLEL_TASKS = 8;
-export const MAX_CONCURRENCY = 4;
+/**
+ * Limits are configurable: see maxConcurrency / maxParallelTasks /
+ * maxSubagentDepth in config.ts (defaults 4 / 8 / 1, via /subagents-setup
+ * or pi-subagents.json).
+ */
 /** Default thinking level for sub-agents. pi clamps it to the resolved model's support. */
 export const SUBAGENT_THINKING_LEVEL: ThinkingLevel = DEFAULT_THINKING_LEVEL;
-/** Child processes are leaf agents: they never receive the subagent tool. */
-export const MAX_SUBAGENT_DEPTH = 1;
 export const DEPTH_ENV_VAR = "PI_SUBAGENT_DEPTH";
 /** No default deadline: sub-agents may run until completion or explicit cancellation. */
 export const SUBAGENT_TIMEOUT_MS = 0;

@@ -5,18 +5,30 @@
  * and honors PI_CODING_AGENT_DIR). Parsing is defensive: invalid fields fall back
  * to defaults instead of throwing, so a hand-edited or partially-written file can
  * never break the extension at runtime.
+ *
+ * Schema upgrades happen transparently on load: a config written by an older
+ * version (missing newer keys, holding removed agents, or containing invalid
+ * values) is normalized and persisted back with the new fields filled in.
  */
 
 import { mkdir, readFile, rename, rm, writeFile } from "node:fs/promises";
+import { readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { getAgentDir, withFileMutationQueue } from "@earendil-works/pi-coding-agent";
 
 /** Full catalog of agents shipped with the package (selectable in /subagents-setup). */
-export const BUILTIN_AGENT_NAMES = ["explore", "plan", "worker", "reviewer"] as const;
+export const BUILTIN_AGENT_NAMES = ["explore", "worker", "reviewer"] as const;
 export type BuiltinAgentName = (typeof BUILTIN_AGENT_NAMES)[number];
 
-/** Agents enabled out of the box. `plan` ships but is opt-in: a worker plans internally. */
+/** Agents enabled out of the box. */
 export const DEFAULT_ENABLED_AGENTS: readonly string[] = ["explore", "worker", "reviewer"];
+
+/**
+ * Agents that used to ship but were removed. normalizeConfig strips them from
+ * enabledAgents/agentModels so upgraded installs clean their config automatically
+ * (the schema-upgrade save in loadConfig then persists the cleanup).
+ */
+export const REMOVED_AGENT_NAMES: readonly string[] = ["plan"];
 
 export const AGENT_SCOPE_VALUES = ["user", "project", "both"] as const;
 export type AgentScope = (typeof AGENT_SCOPE_VALUES)[number];
@@ -27,6 +39,22 @@ export type ThinkingLevel = (typeof THINKING_LEVEL_VALUES)[number];
 export const DEFAULT_THINKING_LEVEL: ThinkingLevel = "max";
 
 export const CONFIG_FILE_NAME = "pi-subagents.json";
+
+/** How many sub-agent processes may run at once. Default: 4. */
+export const DEFAULT_MAX_CONCURRENCY = 4;
+/** Upper bound accepted for maxConcurrency (defensive clamp). */
+export const MAX_CONCURRENCY_LIMIT = 16;
+/** How many tasks a single parallel `subagent` call may contain. Default: 8. */
+export const DEFAULT_MAX_PARALLEL_TASKS = 8;
+/** Upper bound accepted for maxParallelTasks (defensive clamp). */
+export const MAX_PARALLEL_TASKS_LIMIT = 32;
+/**
+ * Depth at which the subagent tool stops being available. 1 = the main session
+ * delegates and child processes are leaves; 0 disables the tool entirely.
+ */
+export const DEFAULT_MAX_SUBAGENT_DEPTH = 1;
+/** Upper bound accepted for maxSubagentDepth (defensive clamp). */
+export const MAX_SUBAGENT_DEPTH_LIMIT = 4;
 
 export interface SubagentsConfig {
 	/** Agent names that are discoverable and injected. Default: explore, worker, reviewer. */
@@ -39,6 +67,12 @@ export interface SubagentsConfig {
 	proactiveInjection: boolean;
 	/** Which agent directories to discover from. Default: "user". */
 	agentScope: AgentScope;
+	/** Max sub-agent processes running at once (extra work queues). Default: 4. */
+	maxConcurrency: number;
+	/** Max tasks accepted by one parallel `subagent` call. Default: 8. */
+	maxParallelTasks: number;
+	/** Depth at which the subagent tool is no longer registered. Default: 1. */
+	maxSubagentDepth: number;
 }
 
 export const DEFAULT_CONFIG: SubagentsConfig = {
@@ -47,6 +81,9 @@ export const DEFAULT_CONFIG: SubagentsConfig = {
 	thinkingLevel: DEFAULT_THINKING_LEVEL,
 	proactiveInjection: true,
 	agentScope: "user",
+	maxConcurrency: DEFAULT_MAX_CONCURRENCY,
+	maxParallelTasks: DEFAULT_MAX_PARALLEL_TASKS,
+	maxSubagentDepth: DEFAULT_MAX_SUBAGENT_DEPTH,
 };
 
 export function getConfigPath(agentDir: string = getAgentDir()): string {
@@ -68,6 +105,12 @@ function isModelReference(value: unknown): value is string {
 	return slash > 0 && slash < normalized.length - 1 && !/\s/u.test(normalized);
 }
 
+/** Clamp a raw value to a positive integer within [1, upper]; undefined when invalid. */
+function clampCount(value: unknown, upper: number): number | undefined {
+	if (typeof value !== "number" || !Number.isFinite(value)) return undefined;
+	return Math.max(1, Math.min(upper, Math.round(value)));
+}
+
 /**
  * Merge a raw parsed JSON value over the defaults, dropping invalid fields.
  * Exported for tests.
@@ -81,6 +124,9 @@ export function normalizeConfig(raw: unknown): SubagentsConfig {
 		thinkingLevel: DEFAULT_CONFIG.thinkingLevel,
 		proactiveInjection: DEFAULT_CONFIG.proactiveInjection,
 		agentScope: DEFAULT_CONFIG.agentScope,
+		maxConcurrency: DEFAULT_CONFIG.maxConcurrency,
+		maxParallelTasks: DEFAULT_CONFIG.maxParallelTasks,
+		maxSubagentDepth: DEFAULT_CONFIG.maxSubagentDepth,
 	};
 
 	if (Array.isArray(raw.enabledAgents)) {
@@ -88,11 +134,15 @@ export function normalizeConfig(raw: unknown): SubagentsConfig {
 			(name): name is string => typeof name === "string" && name.trim().length > 0,
 		);
 		// An explicitly empty array is honored (disables all agents); otherwise keep valid names.
-		config.enabledAgents = [...new Set(names.map((name) => name.trim()))];
+		// Agents removed from the package (e.g. plan) are stripped from upgraded configs.
+		config.enabledAgents = [...new Set(names.map((name) => name.trim()))].filter(
+			(name) => !REMOVED_AGENT_NAMES.includes(name),
+		);
 	}
 
 	if (isRecord(raw.agentModels)) {
 		for (const [key, value] of Object.entries(raw.agentModels)) {
+			if (REMOVED_AGENT_NAMES.includes(key.trim())) continue;
 			if (isModelReference(value)) config.agentModels[key.trim()] = value.trim();
 		}
 	}
@@ -109,33 +159,71 @@ export function normalizeConfig(raw: unknown): SubagentsConfig {
 		config.agentScope = raw.agentScope;
 	}
 
+	const maxConcurrency = clampCount(raw.maxConcurrency, MAX_CONCURRENCY_LIMIT);
+	if (maxConcurrency !== undefined) config.maxConcurrency = maxConcurrency;
+
+	const maxParallelTasks = clampCount(raw.maxParallelTasks, MAX_PARALLEL_TASKS_LIMIT);
+	if (maxParallelTasks !== undefined) config.maxParallelTasks = maxParallelTasks;
+
+	// 0 is meaningful here (disables the tool), so clamp to [0, limit] instead.
+	if (typeof raw.maxSubagentDepth === "number" && Number.isFinite(raw.maxSubagentDepth)) {
+		config.maxSubagentDepth = Math.max(0, Math.min(MAX_SUBAGENT_DEPTH_LIMIT, Math.round(raw.maxSubagentDepth)));
+	}
+
 	return config;
+}
+
+function defaultConfig(): SubagentsConfig {
+	return { ...DEFAULT_CONFIG, enabledAgents: [...DEFAULT_CONFIG.enabledAgents], agentModels: {} };
 }
 
 /**
  * Load config. A missing file is a normal state and yields the defaults (not an error).
  * A corrupt file also falls back to defaults rather than throwing, so startup never breaks.
+ * A file from an older version (missing newer keys or holding removed agents) is
+ * normalized and persisted back, so the on-disk config stays current.
  */
 export async function loadConfig(configPath: string = getConfigPath()): Promise<SubagentsConfig> {
 	let text: string;
 	try {
 		text = await readFile(configPath, "utf8");
-	} catch (error) {
-		if (isNodeError(error) && error.code === "ENOENT") {
-			return { ...DEFAULT_CONFIG, enabledAgents: [...DEFAULT_CONFIG.enabledAgents] };
-		}
-		// Unreadable for another reason: fall back to defaults but do not crash startup.
-		return { ...DEFAULT_CONFIG, enabledAgents: [...DEFAULT_CONFIG.enabledAgents] };
+	} catch {
+		// Missing or unreadable: fall back to defaults but do not crash startup.
+		return defaultConfig();
 	}
 
 	let parsed: unknown;
 	try {
 		parsed = JSON.parse(text);
 	} catch {
-		return { ...DEFAULT_CONFIG, enabledAgents: [...DEFAULT_CONFIG.enabledAgents] };
+		return defaultConfig();
 	}
 
-	return normalizeConfig(parsed);
+	const config = normalizeConfig(parsed);
+
+	// Schema upgrade: persist the normalized shape when the file gained fields
+	// (new version) or dropped invalid/removed ones.
+	if (JSON.stringify(config) !== JSON.stringify(parsed)) {
+		try {
+			await saveConfig(config, configPath);
+		} catch {
+			// Non-fatal: keep the in-memory config for this run.
+		}
+	}
+
+	return config;
+}
+
+/**
+ * Synchronous load for the extension's init-time decisions (e.g. the recursion
+ * guard). Runs before any async context is available; never migrates or saves.
+ */
+export function loadConfigSync(configPath: string = getConfigPath()): SubagentsConfig {
+	try {
+		return normalizeConfig(JSON.parse(readFileSync(configPath, "utf8")));
+	} catch {
+		return defaultConfig();
+	}
 }
 
 /**
@@ -157,10 +245,6 @@ export async function saveConfig(
 			await rm(temporaryPath, { force: true }).catch(() => undefined);
 		}
 	});
-}
-
-function isNodeError(error: unknown): error is NodeJS.ErrnoException {
-	return error instanceof Error;
 }
 
 export function errorMessage(error: unknown): string {

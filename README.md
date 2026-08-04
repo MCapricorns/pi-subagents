@@ -21,8 +21,8 @@ agent, and keep the workflow moving without manual polling.
 - **Parallel fan-out** — run independent tasks together, with a bounded background queue.
 - **Live progress** — a TUI widget shows each agent's status, activity, model, usage, and
   elapsed time; completion also produces a concise notification.
-- **Per-agent configuration** — enable agents, select models, set thinking strength, and
-  choose discovery scope from `/subagents-setup`.
+- **Per-agent configuration** — enable agents, select models, set thinking strength, tune
+  concurrency limits, and choose discovery scope from `/subagents-setup`.
 - **Leaf processes** — child agents cannot access the `subagent` tool, so delegation cannot
   recurse.
 
@@ -40,8 +40,7 @@ After installation, open the setup wizard in an interactive TUI session:
 /subagents-setup
 ```
 
-The default configuration enables `explore`, `worker`, and `reviewer`. `plan` is available
-but opt-in.
+The default configuration enables `explore`, `worker`, and `reviewer`.
 
 ## Included agents
 
@@ -50,7 +49,6 @@ but opt-in.
 | `explore` | Yes | Read-only | Fast codebase reconnaissance and structured findings. |
 | `worker` | Yes | Full | Implements, fixes, refactors, and tests a self-contained task. |
 | `reviewer` | Yes | Read-only | Independent adversarial review of a diff before completion. |
-| `plan` | No | Read-only | Produces a separate implementation plan when one is useful. |
 
 Agents are Markdown files in `agents/`. Each file contains YAML frontmatter and a system
 prompt. User and project scopes can override a built-in agent with the same name.
@@ -72,8 +70,9 @@ main agent
 1. The main agent calls `subagent` with a self-contained brief.
 2. The tool returns immediately and ends that foreground tool turn, leaving the editor ready
    for input.
-3. The child process works independently. Up to four queued runs execute at once; a single
-   parallel request may contain up to eight tasks.
+3. The child process works independently. By default up to four queued runs execute at
+   once and a single parallel request may contain up to eight tasks; both limits are
+   configurable (`maxConcurrency` / `maxParallelTasks`).
 4. On completion or failure, the extension sends a durable result message to the main
    session. That message automatically wakes the main agent, or waits until its current turn
    finishes.
@@ -131,7 +130,10 @@ Configuration is stored at `~/.pi/agent/pi-subagents.json`. The location follows
   },
   "thinkingLevel": "max",
   "proactiveInjection": true,
-  "agentScope": "user"
+  "agentScope": "user",
+  "maxConcurrency": 4,
+  "maxParallelTasks": 8,
+  "maxSubagentDepth": 1
 }
 ```
 
@@ -142,6 +144,18 @@ Configuration is stored at `~/.pi/agent/pi-subagents.json`. The location follows
 | `thinkingLevel` | `off`, `minimal`, `low`, `medium`, `high`, `xhigh`, or `max`. |
 | `proactiveInjection` | Whether to add the delegation directive to the main system prompt. |
 | `agentScope` | `user`, `project`, or `both`; controls which user/project agent directories are discovered. |
+| `maxConcurrency` | How many sub-agent processes run at once (1–16, default 4). Extra work waits in the queue. |
+| `maxParallelTasks` | Maximum tasks accepted by one parallel `subagent` call (1–32, default 8). |
+| `maxSubagentDepth` | Depth at which the `subagent` tool is no longer registered (default 1: the main session delegates, children are leaf processes). `0` disables the tool entirely. Read once at extension load. |
+
+### Configuration migration
+
+The config file migrates itself on load — no manual steps after an upgrade:
+
+- **Schema upgrades** — a config written by an older version (missing newer keys or
+  holding invalid values) is normalized and saved back with the new fields filled in.
+- **Removed agents** — agents no longer shipped (e.g. the old `plan` agent) are stripped
+  from `enabledAgents` and `agentModels` automatically.
 
 Model selection uses this precedence:
 

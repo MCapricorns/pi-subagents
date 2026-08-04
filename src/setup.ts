@@ -14,6 +14,8 @@ import {
 	BUILTIN_AGENT_NAMES,
 	DEFAULT_CONFIG,
 	DEFAULT_ENABLED_AGENTS,
+	DEFAULT_MAX_CONCURRENCY,
+	DEFAULT_MAX_PARALLEL_TASKS,
 	THINKING_LEVEL_VALUES,
 	type AgentScope,
 	type SubagentsConfig,
@@ -31,7 +33,6 @@ const INHERIT = "__inherit__";
 /** Short, selection-friendly descriptions for the built-in agents. */
 const MODULE_HINTS: Record<string, string> = {
 	explore: "read-only codebase recon (fast model)",
-	plan: "implementation plan before code (opt-in)",
 	worker: "implement / fix / refactor / test (full tools)",
 	reviewer: "adversarial pre-commit review (read-only)",
 };
@@ -129,6 +130,29 @@ async function pickInjection(ctx: ExtensionCommandContext, current: boolean): Pr
 	return choice.startsWith("On");
 }
 
+/** Preset steps offered for the two numeric limits (selection-only wizard). */
+const CONCURRENCY_STEPS = [1, 2, 3, 4, 6, 8, 12, 16];
+const PARALLEL_TASK_STEPS = [2, 4, 6, 8, 12, 16, 24, 32];
+
+async function pickCount(
+	ctx: ExtensionCommandContext,
+	title: string,
+	steps: readonly number[],
+	current: number,
+	defaultValue: number,
+): Promise<number | undefined> {
+	const values = [...new Set([...steps, current])].sort((a, b) => a - b);
+	const options = values.map((value) => {
+		const tags = [value === current ? "current" : "", value === defaultValue ? "default" : ""]
+			.filter(Boolean)
+			.join(", ");
+		return tags ? `${value} (${tags})` : String(value);
+	});
+	const choice = await ctx.ui.select(title, options);
+	if (choice === undefined) return undefined;
+	return Number.parseInt(choice, 10);
+}
+
 async function pickScope(ctx: ExtensionCommandContext, current: AgentScope): Promise<AgentScope | undefined> {
 	const labels: Record<AgentScope, string> = {
 		user: "user — built-in + ~/.pi/agent/agents (default)",
@@ -190,12 +214,33 @@ async function runFullSetup(ctx: ExtensionCommandContext, configPath: string, ba
 	const scope = await pickScope(ctx, base.agentScope);
 	if (scope === undefined) return notifyCancelled(ctx);
 
+	const maxConcurrency = await pickCount(
+		ctx,
+		"Max sub-agents running at once? (extra work queues)",
+		CONCURRENCY_STEPS,
+		base.maxConcurrency,
+		DEFAULT_MAX_CONCURRENCY,
+	);
+	if (maxConcurrency === undefined) return notifyCancelled(ctx);
+
+	const maxParallelTasks = await pickCount(
+		ctx,
+		"Max tasks in one parallel subagent call?",
+		PARALLEL_TASK_STEPS,
+		base.maxParallelTasks,
+		DEFAULT_MAX_PARALLEL_TASKS,
+	);
+	if (maxParallelTasks === undefined) return notifyCancelled(ctx);
+
 	const next: SubagentsConfig = {
 		enabledAgents: enabled,
 		agentModels: repairStaleModels(ctx, models),
 		thinkingLevel,
 		proactiveInjection: injection,
 		agentScope: scope,
+		maxConcurrency,
+		maxParallelTasks,
+		maxSubagentDepth: base.maxSubagentDepth,
 	};
 	await saveConfig(next, configPath);
 	ctx.ui.notify(`pi-subagents configured. Saved to ${configPath}`, "info");
@@ -208,6 +253,8 @@ async function runMenu(ctx: ExtensionCommandContext, configPath: string, config:
 		"Change thinking strength",
 		"Toggle proactive injection",
 		"Change agent scope",
+		"Change max concurrent sub-agents",
+		"Change max parallel tasks",
 		"Full re-setup",
 	]);
 	if (choice === undefined) return notifyCancelled(ctx);
@@ -236,6 +283,26 @@ async function runMenu(ctx: ExtensionCommandContext, configPath: string, config:
 		const scope = await pickScope(ctx, config.agentScope);
 		if (scope === undefined) return notifyCancelled(ctx);
 		next.agentScope = scope;
+	} else if (choice.startsWith("Change max concurrent")) {
+		const maxConcurrency = await pickCount(
+			ctx,
+			"Max sub-agents running at once? (extra work queues)",
+			CONCURRENCY_STEPS,
+			config.maxConcurrency,
+			DEFAULT_MAX_CONCURRENCY,
+		);
+		if (maxConcurrency === undefined) return notifyCancelled(ctx);
+		next.maxConcurrency = maxConcurrency;
+	} else if (choice.startsWith("Change max parallel")) {
+		const maxParallelTasks = await pickCount(
+			ctx,
+			"Max tasks in one parallel subagent call?",
+			PARALLEL_TASK_STEPS,
+			config.maxParallelTasks,
+			DEFAULT_MAX_PARALLEL_TASKS,
+		);
+		if (maxParallelTasks === undefined) return notifyCancelled(ctx);
+		next.maxParallelTasks = maxParallelTasks;
 	}
 
 	await saveConfig(next, configPath);

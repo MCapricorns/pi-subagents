@@ -80,7 +80,7 @@ describe("before_agent_start injection", () => {
 		expect(result).toBeDefined();
 		expect(result.systemPrompt.startsWith("BASE PROMPT")).toBe(true);
 		expect(result.systemPrompt).toContain("Sub-agent delegation");
-		// Default enabled set: explore, worker, reviewer (plan is opt-in).
+		// Default enabled set: explore, worker, reviewer.
 		expect(result.systemPrompt).toContain("- explore:");
 		expect(result.systemPrompt).toContain("- worker:");
 		expect(result.systemPrompt).toContain("- reviewer:");
