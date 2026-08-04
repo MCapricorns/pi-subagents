@@ -28,7 +28,9 @@ Run the project's format/build/tests when they exist (e.g. `tsc --noEmit`, the t
 Summarize concretely so the caller can verify and, if needed, hand to a `reviewer`.
 
 ## Collaboration
-- Request `explore` first when the task needs broad code discovery you were not given.
+- You cannot dispatch sub-agents (children are leaf processes with no `subagent` tool). When the
+  brief lacks context that needs broad code discovery, state concretely what an `explore` should
+  retrieve for the caller — do not guess.
 - Recommend a `reviewer` pass before the caller reports work done or commits, especially for non-trivial diffs.
 
 ## Output format
