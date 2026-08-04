@@ -6,8 +6,10 @@ import {
 	DEFAULT_ENABLED_AGENTS,
 	DEFAULT_MAX_CONCURRENCY,
 	DEFAULT_MAX_PARALLEL_TASKS,
+	DEFAULT_MAX_RESULT_LINES,
 	DEFAULT_MAX_SUBAGENT_DEPTH,
 	DEFAULT_THINKING_LEVEL,
+	MAX_RESULT_LINES_LIMIT,
 	loadConfig,
 	normalizeConfig,
 } from "../src/config.ts";
@@ -21,6 +23,7 @@ describe("normalizeConfig", () => {
 		expect(config.agentModels).toEqual({});
 		expect(config.agentThinkingLevels).toEqual({});
 		expect(config.thinkingLevel).toBe(DEFAULT_THINKING_LEVEL);
+		expect(config.notifyOnReviewPass).toBe(false);
 		expect(config.maxConcurrency).toBe(DEFAULT_MAX_CONCURRENCY);
 		expect(config.maxParallelTasks).toBe(DEFAULT_MAX_PARALLEL_TASKS);
 		expect(config.maxSubagentDepth).toBe(DEFAULT_MAX_SUBAGENT_DEPTH);
@@ -53,6 +56,17 @@ describe("normalizeConfig", () => {
 		expect(config.agentModels).toEqual({ explore: "anthropic/claude-haiku-4-5" });
 	});
 
+	it("defaults maxResultLines to 80 and clamps invalid values", () => {
+		expect(DEFAULT_MAX_RESULT_LINES).toBe(80);
+		expect(normalizeConfig({ maxResultLines: 200 }).maxResultLines).toBe(200);
+		expect(normalizeConfig({ maxResultLines: 99_999 }).maxResultLines).toBe(MAX_RESULT_LINES_LIMIT);
+		expect(normalizeConfig({ maxResultLines: "many" }).maxResultLines).toBe(DEFAULT_MAX_RESULT_LINES);
+	});
+
+	it("defaults the global thinking level to literal high", () => {
+		expect(DEFAULT_THINKING_LEVEL).toBe("high");
+	});
+
 	it("keeps only valid thinking levels in agentThinkingLevels", () => {
 		const config = normalizeConfig({
 			agentThinkingLevels: { explore: "high", bad: "ultra", empty: "" },
@@ -63,6 +77,12 @@ describe("normalizeConfig", () => {
 	it("validates the configured thinking level", () => {
 		expect(normalizeConfig({ thinkingLevel: "high" }).thinkingLevel).toBe("high");
 		expect(normalizeConfig({ thinkingLevel: "invalid" }).thinkingLevel).toBe(DEFAULT_THINKING_LEVEL);
+	});
+
+	it("defaults notifyOnReviewPass to false and preserves an explicit true", () => {
+		expect(normalizeConfig({}).notifyOnReviewPass).toBe(false);
+		expect(normalizeConfig({ notifyOnReviewPass: true }).notifyOnReviewPass).toBe(true);
+		expect(normalizeConfig({ notifyOnReviewPass: "yes" }).notifyOnReviewPass).toBe(false);
 	});
 
 	it("accepts a boolean proactiveInjection", () => {

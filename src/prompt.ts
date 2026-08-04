@@ -16,8 +16,8 @@ import { formatCatalogEntry } from "./agents.ts";
 
 /** Compact role routing hints, emitted only for roles that are enabled. */
 const ROLE_ROUTING: Record<string, string> = {
-	explore: "explore — broad/open-ended code search, \"where is X\", multi-file lookups (read-only, cheap).",
-	worker: "worker — implement/fix/refactor/test a well-scoped task (full tools; plans internally).",
+	explore: "explore — broad/open-ended code search, multi-file lookups (read-only, cheap); NOT for one-line lookups.",
+	worker: "worker — implement/fix/refactor/test a self-contained task worth a separate context (full tools; plans internally).",
 	reviewer: "reviewer — adversarial pre-commit review of a diff (read-only; independent context).",
 };
 
@@ -45,8 +45,9 @@ Available agents:
 ${catalog}
 
 ${routing ? `Routing:\n${routing}\n` : ""}Dispatch discipline:
-- Default to delegating every discrete task to a sub-agent; use the automatically delivered findings for orchestration and verification.
-- Only handle inline: pure Q&A, a single trivial edit/lookup, or when the user explicitly says to do it directly. When in doubt, delegate.
+- Handle SIMPLE work INLINE with direct tools: a single lookup, one-line edit, or a quick question is a grep/read/edit in the main context — never a sub-agent. Sub-agents cost startup time, tokens, and a context switch.
+- Delegate only when isolation genuinely pays: broad exploration of an unfamiliar area, a self-contained implementation/fix with its own validation, or a fresh-context review gate.
+- When in doubt, start with a direct tool call in the main context; escalate to a sub-agent only if the work turns out broad.
 - For an already-known or trivial target, use a direct search/read tool (e.g. grep/find/read) — do not over-delegate a one-line lookup.
 ${hasMultiple ? "- Run INDEPENDENT tasks in parallel: one subagent call with a `tasks` array, and track them with your todo list. Let the automatically resumed main agent launch dependent work only after its prerequisite result arrives (e.g. explore, then worker, then reviewer).\n" : ""}- Brief each sub-agent as self-contained: goal, exact paths, constraints, expected output. It has NO memory of this conversation.
 - Treat delegated agents as leaf workers: do not ask a sub-agent to dispatch another sub-agent; child processes do not have this tool.

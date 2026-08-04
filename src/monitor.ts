@@ -26,6 +26,8 @@ export interface RunView {
 	agent: string;
 	task: string;
 	model?: string;
+	/** Effective thinking strength this run was launched with (frontmatter/config/global). */
+	thinking?: string;
 	status: RunStatus;
 	usage: UsageStats;
 	/** Concise current activity ("thinking", "read src/index.ts"); last writer wins. */
@@ -166,13 +168,14 @@ export class MonitorStore {
 		this.notify();
 	}
 
-	addRun(agent: string, task: string, model?: string): number {
+	addRun(agent: string, task: string, model?: string, thinking?: string): number {
 		const id = this.nextId++;
 		this.runs.push({
 			id,
 			agent,
 			task,
 			model,
+			thinking,
 			status: "queued",
 			usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, cost: 0, contextTokens: 0, turns: 0 },
 		});
@@ -231,6 +234,7 @@ export class MonitorStore {
 		const usage = formatUsageCompact(run.usage);
 		const parts = [run.agent];
 		if (run.model) parts.push(run.model);
+		if (run.thinking) parts.push(`thinking ${run.thinking}`);
 		if (usage) parts.push(usage);
 		const elapsed = formatElapsed(run);
 		if (elapsed) parts.push(elapsed);

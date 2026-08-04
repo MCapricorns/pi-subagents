@@ -11,8 +11,8 @@
  */
 
 import { spawn, type ChildProcess } from "node:child_process";
+import { existsSync, mkdirSync, unlinkSync, rmdirSync, writeFileSync } from "node:fs";
 import { mkdtemp, rm, writeFile } from "node:fs/promises";
-import { existsSync, unlinkSync, rmdirSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { basename, join } from "node:path";
 import type { AgentToolResult } from "@earendil-works/pi-agent-core";
@@ -51,6 +51,8 @@ export interface SingleResult {
 	stderr: string;
 	usage: UsageStats;
 	model?: string;
+	/** Effective thinking strength this run was launched with. */
+	thinking?: string;
 	stopReason?: string;
 	errorMessage?: string;
 }
@@ -86,6 +88,54 @@ export function getFinalOutput(messages: Message[]): string {
 		}
 	}
 	return "";
+}
+
+/**
+ * Parse the machine-readable verdict a reviewer emits (see agents/reviewer.md).
+ * Only the LAST standalone `VERDICT: REVIEW_PASS/FAIL` line counts, so a report
+ * that merely discusses the tokens cannot be misclassified. Returns undefined
+ * when no verdict marker is present, so non-review agents are never mistaken
+ * for reviews.
+ */
+export function reviewVerdict(output: string): "pass" | "fail" | undefined {
+	const lines = output.split("\n");
+	for (let index = lines.length - 1; index >= 0; index--) {
+		const match = /^\s*VERDICT:\s*REVIEW_(PASS|FAIL)\s*$/i.exec(lines[index]);
+		if (match) return match[1].toUpperCase() === "PASS" ? "pass" : "fail";
+	}
+	return undefined;
+}
+
+/** Hard cap for a single line inside a truncated result (minified blobs must not blow up). */
+export const RESULT_LINE_MAX = 200;
+
+export interface TruncatedOutput {
+	/** The result text that fits in the completion message. */
+	text: string;
+	/** True when lines were dropped or shortened, so the full text is written to disk. */
+	truncated: boolean;
+}
+
+/** Cap result text for the main conversation: keep the first `maxLines` lines, at most RESULT_LINE_MAX chars each. */
+export function truncateResultOutput(output: string, maxLines: number): TruncatedOutput {
+	const lines = output.split("\n");
+	if (lines.length <= maxLines && lines.every((line) => line.length <= RESULT_LINE_MAX)) {
+		return { text: output, truncated: false };
+	}
+	const kept = lines.slice(0, maxLines).map((line) =>
+		line.length > RESULT_LINE_MAX ? `${line.slice(0, RESULT_LINE_MAX)}…` : line,
+	);
+	return { text: kept.join("\n"), truncated: true };
+}
+
+/** Persist the full result where the main agent can read it on demand. Returns the file path. */
+export function writeResultArtifact(output: string, agentName: string): string {
+	const dir = join(tmpdir(), "pi-subagents-results");
+	mkdirSync(dir, { recursive: true });
+	const safeName = agentName.replace(/[^\w.-]+/g, "_");
+	const filePath = join(dir, `${Date.now()}-${safeName}.md`);
+	writeFileSync(filePath, output, "utf8");
+	return filePath;
 }
 
 export function isFailedResult(result: SingleResult): boolean {
@@ -238,6 +288,7 @@ export async function runSingleAgent(options: RunSingleOptions): Promise<SingleR
 		stderr: "",
 		usage: emptyUsage(),
 		model: agent.model,
+		thinking: thinkingLevel,
 	};
 
 	const emitUpdate = (): void => {

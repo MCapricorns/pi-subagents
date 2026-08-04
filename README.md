@@ -122,10 +122,11 @@ Start dependent work after the relevant result has been delivered to the main ag
 Configuration is stored at `~/.pi/agent/pi-subagents.json`. The location follows
 `PI_CODING_AGENT_DIR` when set.
 
-The `/subagents-setup` wizard drives every field interactively: for each agent, picking a
+The `/subagents-setup` wizard drives the main fields interactively: for each agent, picking a
 model is immediately followed by picking that agent's thinking strength (or inheriting the
-global default). The global `thinkingLevel` is set first and applies to every agent without
-its own entry.
+agent's default — its frontmatter `thinking`, else the global default). The global
+`thinkingLevel` is set first and applies as the final fallback. `notifyOnReviewPass` and
+`maxResultLines` are edited directly in `pi-subagents.json`.
 
 ```json
 {
@@ -137,7 +138,9 @@ its own entry.
     "explore": "low",
     "worker": "high"
   },
-  "thinkingLevel": "max",
+  "thinkingLevel": "high",
+  "notifyOnReviewPass": false,
+  "maxResultLines": 80,
   "proactiveInjection": true,
   "agentScope": "user",
   "maxConcurrency": 4,
@@ -150,8 +153,10 @@ its own entry.
 | --- | --- |
 | `enabledAgents` | Agent names exposed to discovery and prompt injection. An empty array disables all agents. |
 | `agentModels` | Optional `provider/model-id` override per agent. |
-| `agentThinkingLevels` | Optional thinking level per agent; agents without an entry use `thinkingLevel`. |
-| `thinkingLevel` | Default thinking level: `off`, `minimal`, `low`, `medium`, `high`, `xhigh`, or `max`. |
+| `agentThinkingLevels` | Optional thinking level per agent; agents without an entry use the agent's frontmatter `thinking`, then `thinkingLevel`. |
+| `thinkingLevel` | Default thinking level: `off`, `minimal`, `low`, `medium`, `high`, `xhigh`, or `max` (default `high`). |
+| `notifyOnReviewPass` | When `true`, a passing reviewer result is delivered without waking the main agent (default `false`). |
+| `maxResultLines` | Max lines of a sub-agent result carried in the completion message (default `80`). Longer results are truncated; the full text is written to a temp file whose path is included in the message. |
 | `proactiveInjection` | Whether to add the delegation directive to the main system prompt. |
 | `agentScope` | `user`, `project`, or `both`; controls which user/project agent directories are discovered. |
 | `maxConcurrency` | How many sub-agent processes run at once (1–16, default 4). Extra work waits in the queue. |
@@ -176,7 +181,7 @@ configured agent model → current main-session model → agent frontmatter mode
 Unavailable configured models are replaced with a usable current-session model when possible
 and the repaired configuration is saved.
 
-Thinking strength uses this precedence: `agentThinkingLevels` entry → `thinkingLevel` default.
+Thinking strength uses this precedence: `agentThinkingLevels` entry → agent frontmatter `thinking` → `thinkingLevel` default.
 
 ## Agent discovery and overrides
 
@@ -187,6 +192,10 @@ Thinking strength uses this precedence: `agentThinkingLevels` entry → `thinkin
 
 Use a matching Markdown filename and `name` field to replace a built-in agent. Keep the task
 brief explicit: include the goal, relevant paths, constraints, and expected handoff.
+
+Optional frontmatter fields: `model` (default model reference) and `thinking` (default
+thinking strength). Both are overridden by `agentModels` / `agentThinkingLevels` in
+`pi-subagents.json` when set.
 
 ## Development
 

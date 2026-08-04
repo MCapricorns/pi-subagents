@@ -1,4 +1,4 @@
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
@@ -7,7 +7,11 @@ import {
 	SUBAGENT_TIMEOUT_MS,
 	getFinalOutput,
 	isFailedResult,
+	RESULT_LINE_MAX,
+	reviewVerdict,
 	runSingleAgent,
+	truncateResultOutput,
+	writeResultArtifact,
 	mapWithConcurrencyLimit,
 	type SingleResult,
 } from "../src/spawn.ts";
@@ -36,6 +40,25 @@ describe("getFinalOutput", () => {
 	});
 	it("returns empty string when there is no assistant text", () => {
 		expect(getFinalOutput([{ role: "user", content: [] } as any])).toBe("");
+	});
+});
+
+describe("reviewVerdict", () => {
+	it("parses the reviewer prompt's machine-readable verdict lines", () => {
+		expect(reviewVerdict("## Verdict\nAPPROVE\nVERDICT: REVIEW_PASS")).toBe("pass");
+		expect(reviewVerdict("## Verdict\nREQUEST_CHANGES\nVERDICT: REVIEW_FAIL")).toBe("fail");
+		expect(reviewVerdict("\n\tVERDICT: review_pass\n")).toBe("pass");
+	});
+
+	it("only the last standalone VERDICT line counts", () => {
+		// Discussion that merely mentions the tokens must not be misclassified.
+		expect(reviewVerdict("Use VERDICT: REVIEW_PASS for approval...\n## Verdict\nREQUEST_CHANGES\nVERDICT: REVIEW_FAIL")).toBe("fail");
+		expect(reviewVerdict("VERDICT: REVIEW_FAIL is the bad one\nVERDICT: REVIEW_PASS")).toBe("pass");
+		expect(reviewVerdict("inline VERDICT: REVIEW_PASS not on its own line")).toBeUndefined();
+	});
+
+	it("returns undefined without a verdict marker", () => {
+		expect(reviewVerdict("## Verdict\nAPPROVE")).toBeUndefined();
 	});
 });
 
@@ -140,5 +163,44 @@ describe("mapWithConcurrencyLimit", () => {
 	});
 	it("returns empty for empty input", async () => {
 		expect(await mapWithConcurrencyLimit([], 4, async (n) => n)).toEqual([]);
+	});
+});
+
+describe("truncateResultOutput", () => {
+	it("leaves short output untouched", () => {
+		const out = "line one\nline two";
+		expect(truncateResultOutput(out, 80)).toEqual({ text: out, truncated: false });
+	});
+
+	it("keeps output at exactly maxLines untouched", () => {
+		const out = Array.from({ length: 5 }, (_, i) => `line ${i}`).join("\n");
+		expect(truncateResultOutput(out, 5)).toEqual({ text: out, truncated: false });
+	});
+
+	it("truncates long output to the first maxLines lines", () => {
+		const out = Array.from({ length: 100 }, (_, i) => `line ${i}`).join("\n");
+		const { text, truncated } = truncateResultOutput(out, 10);
+		expect(truncated).toBe(true);
+		expect(text.split("\n")).toHaveLength(10);
+		expect(text).toContain("line 0");
+		expect(text).not.toContain("line 10");
+	});
+
+	it("caps an oversized single line", () => {
+		const long = "x".repeat(500);
+		const { text, truncated } = truncateResultOutput(long, 80);
+		expect(truncated).toBe(true);
+		expect(text.length).toBeLessThanOrEqual(RESULT_LINE_MAX + 1); // + ellipsis
+		expect(text.endsWith("…")).toBe(true);
+	});
+});
+
+describe("writeResultArtifact", () => {
+	it("persists the full output and returns a readable path", () => {
+		const artifactPath = writeResultArtifact("full text\n", "reviewer");
+		expect(artifactPath).toContain("pi-subagents-results");
+		expect(artifactPath).toContain("reviewer");
+		expect(readFileSync(artifactPath, "utf8")).toBe("full text\n");
+		rmSync(artifactPath, { force: true });
 	});
 });

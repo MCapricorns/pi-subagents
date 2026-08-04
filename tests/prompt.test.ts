@@ -35,6 +35,14 @@ describe("buildDelegationDirective", () => {
 		expect(multi).toContain("INDEPENDENT tasks in parallel");
 	});
 
+	it("steers the model away from over-delegating simple work", () => {
+		const directive = buildDelegationDirective([agent("explore"), agent("worker"), agent("reviewer")]);
+		expect(directive).toContain("Handle SIMPLE work INLINE");
+		expect(directive).toContain("Delegate only when isolation genuinely pays");
+		expect(directive).toContain("When in doubt, start with a direct tool call");
+		expect(directive).not.toContain("When in doubt, delegate");
+	});
+
 	it("includes reviewer-only rules only when a reviewer is enabled", () => {
 		const withoutReviewer = buildDelegationDirective([agent("explore"), agent("worker")]);
 		expect(withoutReviewer).not.toContain("multi-model cross-review");

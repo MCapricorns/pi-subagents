@@ -36,7 +36,12 @@ export type AgentScope = (typeof AGENT_SCOPE_VALUES)[number];
 /** Thinking levels accepted by pi's `--thinking` option. */
 export const THINKING_LEVEL_VALUES = ["off", "minimal", "low", "medium", "high", "xhigh", "max"] as const;
 export type ThinkingLevel = (typeof THINKING_LEVEL_VALUES)[number];
-export const DEFAULT_THINKING_LEVEL: ThinkingLevel = "max";
+export const DEFAULT_THINKING_LEVEL: ThinkingLevel = "high";
+
+/** How many lines of a sub-agent result the completion message may carry. Default: 80. */
+export const DEFAULT_MAX_RESULT_LINES = 80;
+/** Upper bound accepted for maxResultLines (defensive clamp). */
+export const MAX_RESULT_LINES_LIMIT = 2000;
 
 export const CONFIG_FILE_NAME = "pi-subagents.json";
 
@@ -63,8 +68,19 @@ export interface SubagentsConfig {
 	agentModels: Record<string, string>;
 	/** Per-agent thinking-level override, keyed by agent name. */
 	agentThinkingLevels: Record<string, ThinkingLevel>;
-	/** Thinking level for sub-agents without a per-agent override. Default: "max". */
+	/** Thinking level for sub-agents without a per-agent override or frontmatter default. Default: "high". */
 	thinkingLevel: ThinkingLevel;
+	/**
+	 * When a review passes (REVIEW_PASS verdict), deliver it without waking the
+	 * main agent. Disabled by default so passing reviews still resume orchestration.
+	 */
+	notifyOnReviewPass: boolean;
+	/**
+	 * Max lines of a sub-agent result carried in the completion message. Longer
+	 * results are truncated; the full text is written to a temp file whose path
+	 * is included in the message. Default: 80.
+	 */
+	maxResultLines: number;
 	/** Whether to inject the delegation directive into the parent system prompt. Default: true. */
 	proactiveInjection: boolean;
 	/** Which agent directories to discover from. Default: "user". */
@@ -82,6 +98,8 @@ export const DEFAULT_CONFIG: SubagentsConfig = {
 	agentModels: {},
 	agentThinkingLevels: {},
 	thinkingLevel: DEFAULT_THINKING_LEVEL,
+	notifyOnReviewPass: false,
+	maxResultLines: DEFAULT_MAX_RESULT_LINES,
 	proactiveInjection: true,
 	agentScope: "user",
 	maxConcurrency: DEFAULT_MAX_CONCURRENCY,
@@ -126,6 +144,8 @@ export function normalizeConfig(raw: unknown): SubagentsConfig {
 		agentModels: {},
 		agentThinkingLevels: {},
 		thinkingLevel: DEFAULT_CONFIG.thinkingLevel,
+		notifyOnReviewPass: DEFAULT_CONFIG.notifyOnReviewPass,
+		maxResultLines: DEFAULT_CONFIG.maxResultLines,
 		proactiveInjection: DEFAULT_CONFIG.proactiveInjection,
 		agentScope: DEFAULT_CONFIG.agentScope,
 		maxConcurrency: DEFAULT_CONFIG.maxConcurrency,
@@ -166,6 +186,13 @@ export function normalizeConfig(raw: unknown): SubagentsConfig {
 	if (typeof raw.thinkingLevel === "string" && (THINKING_LEVEL_VALUES as readonly string[]).includes(raw.thinkingLevel)) {
 		config.thinkingLevel = raw.thinkingLevel as ThinkingLevel;
 	}
+
+	if (typeof raw.notifyOnReviewPass === "boolean") {
+		config.notifyOnReviewPass = raw.notifyOnReviewPass;
+	}
+
+	const maxResultLines = clampCount(raw.maxResultLines, MAX_RESULT_LINES_LIMIT);
+	if (maxResultLines !== undefined) config.maxResultLines = maxResultLines;
 
 	if (typeof raw.proactiveInjection === "boolean") {
 		config.proactiveInjection = raw.proactiveInjection;

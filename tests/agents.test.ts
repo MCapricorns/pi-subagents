@@ -58,6 +58,30 @@ describe("discoverAgents", () => {
 		expect(agents[0].model).toBe("anthropic/override");
 	});
 
+	it("parses a valid thinking level and ignores invalid ones", () => {
+		writeAgent(builtinDir, "explore", "---\nname: explore\ndescription: d\nthinking: low\n---\nb");
+		writeAgent(builtinDir, "worker", "---\nname: worker\ndescription: d\nthinking: ultra\n---\nb");
+		writeAgent(builtinDir, "reviewer", "---\nname: reviewer\ndescription: d\n---\nb");
+
+		const { agents } = discoverAgents(cwd, { scope: "user", builtinDir });
+		const byName = new Map(agents.map((a) => [a.name, a]));
+		expect(byName.get("explore")?.thinking).toBe("low");
+		expect(byName.get("worker")?.thinking).toBeUndefined();
+		expect(byName.get("reviewer")?.thinking).toBeUndefined();
+	});
+
+	it("ignores non-string frontmatter values instead of throwing", () => {
+		writeAgent(builtinDir, "explore", "---\nname: explore\ndescription: d\nthinking: 5\n---\nb");
+		writeAgent(builtinDir, "worker", "---\nname: worker\ndescription: d\ntools: false\n---\nb");
+		writeAgent(builtinDir, "broken", "---\nname: 123\ndescription: d\n---\nb");
+
+		const { agents } = discoverAgents(cwd, { scope: "user", builtinDir });
+		const byName = new Map(agents.map((a) => [a.name, a]));
+		expect(byName.get("explore")?.thinking).toBeUndefined();
+		expect(byName.get("worker")?.tools).toBeUndefined();
+		expect(byName.has("broken")).toBe(false);
+	});
+
 	it("user agents override builtin agents of the same name", () => {
 		writeAgent(builtinDir, "explore", "---\nname: explore\ndescription: builtin version\n---\nb");
 		writeAgent(join(agentDir, "agents"), "explore", "---\nname: explore\ndescription: user version\n---\nb");

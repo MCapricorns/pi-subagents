@@ -192,6 +192,24 @@ describe("MonitorStore.subscribe", () => {
 		expect(line).toContain("anthropic/claude-sonnet-4-5");
 		expect(line).toContain("↑1.2k");
 	});
+
+	it("records and summarizes the thinking strength", () => {
+		const store = new MonitorStore();
+		const id = store.addRun("worker", "Implement the change", "anthropic/claude-sonnet-4-5", "high");
+		const run = store.getRuns()[0];
+		expect(run.thinking).toBe("high");
+		expect(store.summarize(run)).toContain("thinking high");
+		store.setUsage(id, { input: 1200, output: 300, cacheRead: 0, cacheWrite: 0, cost: 0, contextTokens: 0, turns: 2 });
+		expect(store.summarize(run)).toContain("thinking high");
+		expect(store.summarize(run)).toContain("↑1.2k");
+	});
+
+	it("omits the thinking segment when absent", () => {
+		const store = new MonitorStore();
+		store.addRun("explore", "Map the codebase");
+		const run = store.getRuns()[0];
+		expect(store.summarize(run)).not.toContain("thinking");
+	});
 });
 
 describe("status labels and timing", () => {

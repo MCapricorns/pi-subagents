@@ -15,7 +15,7 @@ import { type Dirent, existsSync, readdirSync, readFileSync, statSync } from "no
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { CONFIG_DIR_NAME, getAgentDir, parseFrontmatter } from "@earendil-works/pi-coding-agent";
-import type { AgentScope } from "./config.ts";
+import { THINKING_LEVEL_VALUES, type AgentScope, type ThinkingLevel } from "./config.ts";
 
 export type AgentSource = "builtin" | "user" | "project";
 
@@ -24,6 +24,8 @@ export interface AgentConfig {
 	description: string;
 	tools?: string[];
 	model?: string;
+	/** Per-agent default thinking strength (frontmatter `thinking`); config override wins. */
+	thinking?: ThinkingLevel;
 	systemPrompt: string;
 	source: AgentSource;
 	filePath: string;
@@ -37,6 +39,11 @@ export interface AgentDiscoveryResult {
 const here = dirname(fileURLToPath(import.meta.url));
 /** <package>/agents — the agents shipped with this extension. */
 export const BUILTIN_AGENTS_DIR = join(here, "..", "agents");
+
+/** Agents shipped with the package (used by the setup wizard for per-agent defaults). */
+export function loadBuiltinAgents(): AgentConfig[] {
+	return loadAgentsFromDir(BUILTIN_AGENTS_DIR, "builtin");
+}
 
 function loadAgentsFromDir(dir: string, source: AgentSource): AgentConfig[] {
 	const agents: AgentConfig[] = [];
@@ -62,19 +69,29 @@ function loadAgentsFromDir(dir: string, source: AgentSource): AgentConfig[] {
 		}
 
 		const { frontmatter, body } = parseFrontmatter<Record<string, string>>(content);
+		// YAML values are not guaranteed strings; anything non-string is invalid for these fields.
+		const str = (value: unknown): string | undefined => (typeof value === "string" ? value : undefined);
+		const name = str(frontmatter.name);
+		const description = str(frontmatter.description);
 		// name + description are required; skip malformed files silently.
-		if (!frontmatter.name || !frontmatter.description) continue;
+		if (!name || !description) continue;
 
-		const tools = frontmatter.tools
+		const rawTools = str(frontmatter.tools);
+		const tools = rawTools
 			?.split(",")
 			.map((t) => t.trim())
 			.filter(Boolean);
+		const rawThinking = str(frontmatter.thinking)?.trim();
+		const thinking = (THINKING_LEVEL_VALUES as readonly string[]).includes(rawThinking ?? "")
+			? (rawThinking as ThinkingLevel)
+			: undefined;
 
 		agents.push({
-			name: frontmatter.name,
-			description: frontmatter.description,
+			name,
+			description,
 			tools: tools && tools.length > 0 ? tools : undefined,
-			model: frontmatter.model,
+			model: str(frontmatter.model),
+			...(thinking ? { thinking } : {}),
 			systemPrompt: body,
 			source,
 			filePath,

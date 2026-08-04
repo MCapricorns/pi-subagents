@@ -1,4 +1,4 @@
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
@@ -60,6 +60,7 @@ beforeEach(() => {
 });
 
 afterEach(() => {
+	vi.useRealTimers();
 	vi.restoreAllMocks();
 	for (const run of [...monitor.getRuns()]) monitor.removeRun(run.id);
 	if (savedDepth === undefined) delete process.env.PI_SUBAGENT_DEPTH;
@@ -149,6 +150,8 @@ describe("delegated task validation", () => {
 
 describe("registered tool background dispatch", () => {
 	it("shows the task in the widget and reports its summary with cache reads on completion", async () => {
+		vi.useFakeTimers();
+		vi.setSystemTime(0);
 		const stub = makeStub();
 		const capturedTasks: BackgroundTask[] = [];
 		const backgroundController = new AbortController();
@@ -212,6 +215,8 @@ process.stdin.on("end", () => {
 
 			await capturedTasks[0](backgroundController.signal);
 
+			expect(stub.messages).toHaveLength(0);
+			vi.advanceTimersByTime(150);
 			expect(stub.messages).toHaveLength(1);
 			const completion = stub.messages[0];
 			expect(completion.message.content).toContain(`Task: ${summary}`);
@@ -220,6 +225,275 @@ process.stdin.on("end", () => {
 		} finally {
 			component?.dispose();
 			backgroundController.abort();
+			await stub.hooks["session_shutdown"]?.({}, {});
+			for (const run of [...monitor.getRuns()]) monitor.removeRun(run.id);
+			process.argv[1] = previousScript;
+			if (childDir) rmSync(childDir, { recursive: true, force: true });
+		}
+	});
+
+	it("batches sibling successes into one grouped wake-up message", async () => {
+		vi.useFakeTimers();
+		vi.setSystemTime(0);
+		const stub = makeStub();
+		const capturedTasks: BackgroundTask[] = [];
+		const controllers: AbortController[] = [];
+		vi.spyOn(BackgroundTaskQueue.prototype, "enqueue").mockImplementation((task) => {
+			capturedTasks.push(task);
+			const controller = new AbortController();
+			controllers.push(controller);
+			return controller;
+		});
+
+		let childDir: string | undefined;
+		const previousScript = process.argv[1];
+		try {
+			childDir = mkdtempSync(join(tmpdir(), "pi-subagents-batch-child-"));
+			const childScript = join(childDir, "fake-pi-child.mjs");
+			writeFileSync(
+				childScript,
+				`process.stdin.resume();
+process.stdin.on("end", () => {
+	process.stdout.write(JSON.stringify({
+		type: "message_end",
+		message: { role: "assistant", content: [{ type: "text", text: "batch result" }], stopReason: "stop" }
+	}) + "\\n");
+});
+`,
+				"utf8",
+			);
+			process.argv[1] = childScript;
+
+			register(stub.api);
+			const tool = stub.tools.find((candidate) => candidate.name === "subagent");
+			const dispatch = await tool.execute(
+				"call-batch",
+				{
+					tasks: [
+						{ agent: "worker", task: "Implement the change" },
+						{ agent: "reviewer", task: "Review the change" },
+					],
+				},
+				new AbortController().signal,
+				() => {},
+				executionContext(),
+			);
+
+			expect(dispatch.terminate).toBe(true);
+			expect(capturedTasks).toHaveLength(2);
+			for (let index = 0; index < capturedTasks.length; index++) {
+				await capturedTasks[index](controllers[index].signal);
+			}
+			expect(stub.messages).toHaveLength(0);
+
+			vi.advanceTimersByTime(150);
+			expect(stub.messages).toHaveLength(1);
+			const completion = stub.messages[0];
+			expect(completion.message.content).toContain("### Subagents completed (2): worker, reviewer");
+			expect(completion.message.content).toContain("### [worker] completed");
+			expect(completion.message.content).toContain("### [reviewer] completed");
+			expect(completion.options).toEqual({ deliverAs: "followUp", triggerTurn: true });
+		} finally {
+			for (const controller of controllers) controller.abort();
+			await stub.hooks["session_shutdown"]?.({}, {});
+			for (const run of [...monitor.getRuns()]) monitor.removeRun(run.id);
+			process.argv[1] = previousScript;
+			if (childDir) rmSync(childDir, { recursive: true, force: true });
+		}
+	});
+
+	it("delivers an opted-in passing reviewer result without waking the main agent", async () => {
+		vi.useFakeTimers();
+		vi.setSystemTime(0);
+		if (!testAgentDir) throw new Error("test agent directory was not initialized");
+		writeFileSync(
+			join(testAgentDir, "pi-subagents.json"),
+			JSON.stringify({ notifyOnReviewPass: true }),
+			"utf8",
+		);
+		const stub = makeStub();
+		let capturedTask: BackgroundTask | undefined;
+		const controller = new AbortController();
+		vi.spyOn(BackgroundTaskQueue.prototype, "enqueue").mockImplementation((task) => {
+			capturedTask = task;
+			return controller;
+		});
+
+		let childDir: string | undefined;
+		const previousScript = process.argv[1];
+		try {
+			childDir = mkdtempSync(join(tmpdir(), "pi-subagents-review-pass-child-"));
+			const childScript = join(childDir, "fake-pi-child.mjs");
+			writeFileSync(
+				childScript,
+				`process.stdin.resume();
+process.stdin.on("end", () => {
+	process.stdout.write(JSON.stringify({
+		type: "message_end",
+		message: {
+			role: "assistant",
+			content: [{ type: "text", text: "APPROVE\\nVERDICT: REVIEW_PASS" }],
+			stopReason: "stop"
+		}
+	}) + "\\n");
+});
+`,
+				"utf8",
+			);
+			process.argv[1] = childScript;
+
+			register(stub.api);
+			const tool = stub.tools.find((candidate) => candidate.name === "subagent");
+			await tool.execute(
+				"call-review-pass",
+				{ agent: "reviewer", task: "Review the change" },
+				new AbortController().signal,
+				() => {},
+				executionContext(),
+			);
+
+			expect(capturedTask).toBeDefined();
+			await capturedTask?.(controller.signal);
+			expect(stub.messages).toHaveLength(0);
+			vi.advanceTimersByTime(150);
+			expect(stub.messages).toHaveLength(1);
+			expect(stub.messages[0].options).toEqual({ deliverAs: "nextTurn" });
+		} finally {
+			controller.abort();
+			await stub.hooks["session_shutdown"]?.({}, {});
+			for (const run of [...monitor.getRuns()]) monitor.removeRun(run.id);
+			process.argv[1] = previousScript;
+			if (childDir) rmSync(childDir, { recursive: true, force: true });
+		}
+	});
+
+	it("emits a failure immediately ahead of held successes", async () => {
+		vi.useFakeTimers();
+		vi.setSystemTime(0);
+		const stub = makeStub();
+		const capturedTasks: BackgroundTask[] = [];
+		const controllers: AbortController[] = [];
+		vi.spyOn(BackgroundTaskQueue.prototype, "enqueue").mockImplementation((task) => {
+			capturedTasks.push(task);
+			const controller = new AbortController();
+			controllers.push(controller);
+			return controller;
+		});
+
+		let childDir: string | undefined;
+		const previousScript = process.argv[1];
+		try {
+			childDir = mkdtempSync(join(tmpdir(), "pi-subagents-failure-child-"));
+			const childScript = join(childDir, "fake-pi-child.mjs");
+			writeFileSync(
+				childScript,
+				`let input = "";
+process.stdin.setEncoding("utf8");
+process.stdin.on("data", (chunk) => input += chunk);
+process.stdin.on("end", () => {
+	const failed = input.includes("must fail");
+	const text = failed ? "VERDICT: REVIEW_FAIL" : "successful result";
+	process.stdout.write(JSON.stringify({
+		type: "message_end",
+		message: { role: "assistant", content: [{ type: "text", text }], stopReason: "stop" }
+	}) + "\\n");
+	process.exitCode = failed ? 1 : 0;
+});
+`,
+				"utf8",
+			);
+			process.argv[1] = childScript;
+
+			register(stub.api);
+			const tool = stub.tools.find((candidate) => candidate.name === "subagent");
+			await tool.execute(
+				"call-failure",
+				{
+					tasks: [
+						{ agent: "worker", task: "succeed first" },
+						{ agent: "reviewer", task: "must fail now" },
+					],
+				},
+				new AbortController().signal,
+				() => {},
+				executionContext(),
+			);
+
+			expect(capturedTasks).toHaveLength(2);
+			await capturedTasks[0](controllers[0].signal);
+			expect(stub.messages).toHaveLength(0);
+
+			await capturedTasks[1](controllers[1].signal);
+			expect(stub.messages).toHaveLength(2);
+			expect(stub.messages[0].message.content).toContain("### [reviewer] failed");
+			expect(stub.messages[0].options).toEqual({ deliverAs: "followUp", triggerTurn: true });
+			expect(stub.messages[1].message.content).toContain("### [worker] completed");
+
+			vi.advanceTimersByTime(1_000);
+			expect(stub.messages).toHaveLength(2);
+		} finally {
+			for (const controller of controllers) controller.abort();
+			await stub.hooks["session_shutdown"]?.({}, {});
+			for (const run of [...monitor.getRuns()]) monitor.removeRun(run.id);
+			process.argv[1] = previousScript;
+			if (childDir) rmSync(childDir, { recursive: true, force: true });
+		}
+	});
+
+	it("truncates a long result and points at the full artifact", async () => {
+		vi.useFakeTimers();
+		vi.setSystemTime(0);
+		const stub = makeStub();
+		let capturedTask: BackgroundTask | undefined;
+		const controller = new AbortController();
+		vi.spyOn(BackgroundTaskQueue.prototype, "enqueue").mockImplementation((task) => {
+			capturedTask = task;
+			return controller;
+		});
+
+		let childDir: string | undefined;
+		const previousScript = process.argv[1];
+		try {
+			childDir = mkdtempSync(join(tmpdir(), "pi-subagents-truncate-child-"));
+			const childScript = join(childDir, "fake-pi-child.mjs");
+			writeFileSync(
+				childScript,
+				`process.stdin.resume();
+process.stdin.on("end", () => {
+	const lines = Array.from({ length: 100 }, (_, i) => "line " + i).join("\\n");
+	process.stdout.write(JSON.stringify({
+		type: "message_end",
+		message: { role: "assistant", content: [{ type: "text", text: lines }], stopReason: "stop" }
+	}) + "\\n");
+});
+`,
+				"utf8",
+			);
+			process.argv[1] = childScript;
+
+			register(stub.api);
+			const tool = stub.tools.find((candidate) => candidate.name === "subagent");
+			await tool.execute(
+				"call-truncate",
+				{ agent: "reviewer", task: "Review the change" },
+				new AbortController().signal,
+				() => {},
+				executionContext(),
+			);
+
+			await capturedTask?.(controller.signal);
+			vi.advanceTimersByTime(150);
+			expect(stub.messages).toHaveLength(1);
+			const content = stub.messages[0].message.content as string;
+			expect(content).toContain("(output truncated to 80 lines; full result:");
+			expect(content).toContain("line 79");
+			expect(content).not.toContain("line 80");
+			const artifactPath = /full result: (.+)\)/.exec(content)?.[1];
+			expect(artifactPath).toBeTruthy();
+			expect(readFileSync(artifactPath!, "utf8")).toContain("line 99");
+			rmSync(artifactPath!, { force: true });
+		} finally {
+			controller.abort();
 			await stub.hooks["session_shutdown"]?.({}, {});
 			for (const run of [...monitor.getRuns()]) monitor.removeRun(run.id);
 			process.argv[1] = previousScript;

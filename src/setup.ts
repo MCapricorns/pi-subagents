@@ -27,8 +27,18 @@ import {
 } from "./config.ts";
 import { availableModelRefs, repairUnavailableModelOverrides } from "./models.ts";
 import { promptSelectMany, promptSelectOne } from "./ui.ts";
+import { loadBuiltinAgents } from "./agents.ts";
 
 const INHERIT = "__inherit__";
+
+/** Effective per-agent default strength from builtin frontmatter (config overrides win at spawn). */
+function builtinThinkingDefaults(): Map<string, ThinkingLevel> {
+	const map = new Map<string, ThinkingLevel>();
+	for (const agent of loadBuiltinAgents()) {
+		if (agent.thinking) map.set(agent.name, agent.thinking);
+	}
+	return map;
+}
 
 /** Short, selection-friendly descriptions for the built-in agents. */
 const MODULE_HINTS: Record<string, string> = {
@@ -71,6 +81,7 @@ async function pickAgentModelsAndStrength(
 	currentModels: Record<string, string>,
 	currentStrengths: Record<string, ThinkingLevel>,
 	defaultLevel: ThinkingLevel,
+	defaults: ReadonlyMap<string, ThinkingLevel>,
 ): Promise<{ models: Record<string, string>; strengths: Record<string, ThinkingLevel> } | undefined> {
 	const refs = availableModelRefs(ctx);
 	if (refs.length === 0) {
@@ -102,7 +113,7 @@ async function pickAgentModelsAndStrength(
 
 		// Convenience: the model pick is immediately followed by the strength pick,
 		// so per-agent model + strength are configured in one pass.
-		const strength = await pickAgentStrength(ctx, name, currentStrengths[name], defaultLevel);
+		const strength = await pickAgentStrength(ctx, name, currentStrengths[name], defaultLevel, defaults);
 		if (strength === undefined) return undefined; // Esc aborts the whole wizard
 		if (strength !== INHERIT) strengths[name] = strength;
 	}
@@ -119,37 +130,43 @@ const THINKING_LEVEL_HINTS: Record<ThinkingLevel, string> = {
 	max: "strongest reasoning",
 };
 
-/** Single strength pick for one agent; the inherit option keeps the global default. */
+/** Single strength pick for one agent; the inherit option keeps the effective default. */
 async function pickAgentStrength(
 	ctx: ExtensionCommandContext,
 	agentName: string,
 	current: ThinkingLevel | undefined,
 	defaultLevel: ThinkingLevel,
+	defaults: ReadonlyMap<string, ThinkingLevel>,
 ): Promise<ThinkingLevel | typeof INHERIT | undefined> {
 	const options = THINKING_LEVEL_VALUES.map((level) => ({
 		value: level,
 		label: current === level ? `${level} — ${THINKING_LEVEL_HINTS[level]} (current)` : `${level} — ${THINKING_LEVEL_HINTS[level]}`,
 	}));
+	const agentDefault = defaults.get(agentName);
+	const inheritLabel = agentDefault
+		? `(inherit agent default — ${agentDefault})`
+		: `(inherit global default — ${defaultLevel})`;
 	const choice = await promptSelectOne(
 		ctx,
 		`Thinking strength for "${agentName}"?`,
 		"Type to filter • ↑/↓ • Enter selects • Esc cancels setup",
-		[{ value: INHERIT, label: `(inherit global default — ${defaultLevel})` }, ...options],
+		[{ value: INHERIT, label: inheritLabel }, ...options],
 	);
 	if (choice === undefined) return undefined;
 	return choice === INHERIT ? INHERIT : (choice as ThinkingLevel);
 }
 
-/** Strength picks for every enabled agent (inherit keeps the global default). */
+/** Strength picks for every enabled agent (inherit keeps the effective default). */
 async function pickAgentStrengths(
 	ctx: ExtensionCommandContext,
 	enabledAgents: readonly string[],
 	currentStrengths: Record<string, ThinkingLevel>,
 	defaultLevel: ThinkingLevel,
+	defaults: ReadonlyMap<string, ThinkingLevel>,
 ): Promise<Record<string, ThinkingLevel> | undefined> {
 	const strengths: Record<string, ThinkingLevel> = {};
 	for (const name of enabledAgents) {
-		const strength = await pickAgentStrength(ctx, name, currentStrengths[name], defaultLevel);
+		const strength = await pickAgentStrength(ctx, name, currentStrengths[name], defaultLevel, defaults);
 		if (strength === undefined) return undefined; // Esc aborts
 		if (strength !== INHERIT) strengths[name] = strength;
 	}
@@ -252,7 +269,8 @@ async function runFullSetup(ctx: ExtensionCommandContext, configPath: string, ba
 	const thinkingLevel = await pickThinkingLevel(ctx, base.thinkingLevel);
 	if (thinkingLevel === undefined) return notifyCancelled(ctx);
 
-	const picked = await pickAgentModelsAndStrength(ctx, enabled, base.agentModels, base.agentThinkingLevels, thinkingLevel);
+	const defaults = builtinThinkingDefaults();
+	const picked = await pickAgentModelsAndStrength(ctx, enabled, base.agentModels, base.agentThinkingLevels, thinkingLevel, defaults);
 	if (picked === undefined) return notifyCancelled(ctx);
 
 	const injection = await pickInjection(ctx, base.proactiveInjection);
@@ -284,6 +302,8 @@ async function runFullSetup(ctx: ExtensionCommandContext, configPath: string, ba
 		agentModels: repairStaleModels(ctx, picked.models),
 		agentThinkingLevels: picked.strengths,
 		thinkingLevel,
+		notifyOnReviewPass: base.notifyOnReviewPass,
+		maxResultLines: base.maxResultLines,
 		proactiveInjection: injection,
 		agentScope: scope,
 		maxConcurrency,
@@ -316,23 +336,26 @@ async function runMenu(ctx: ExtensionCommandContext, configPath: string, config:
 		if (enabled === undefined) return notifyCancelled(ctx);
 		next.enabledAgents = enabled;
 	} else if (choice.startsWith("Change agent models")) {
+		const defaults = builtinThinkingDefaults();
 		const picked = await pickAgentModelsAndStrength(
 			ctx,
 			config.enabledAgents,
 			config.agentModels,
 			config.agentThinkingLevels,
 			config.thinkingLevel,
+			defaults,
 		);
 		if (picked === undefined) return notifyCancelled(ctx);
 		next.agentModels = repairStaleModels(ctx, picked.models);
 		next.agentThinkingLevels = picked.strengths;
 	} else if (choice.startsWith("Change thinking")) {
-		const strengths = await pickAgentStrengths(ctx, config.enabledAgents, config.agentThinkingLevels, config.thinkingLevel);
-		if (strengths === undefined) return notifyCancelled(ctx);
-		next.agentThinkingLevels = strengths;
+		// Global first so per-agent "inherit" labels reflect the value that will be stored.
 		const thinkingLevel = await pickThinkingLevel(ctx, config.thinkingLevel);
 		if (thinkingLevel === undefined) return notifyCancelled(ctx);
 		next.thinkingLevel = thinkingLevel;
+		const strengths = await pickAgentStrengths(ctx, config.enabledAgents, config.agentThinkingLevels, thinkingLevel, builtinThinkingDefaults());
+		if (strengths === undefined) return notifyCancelled(ctx);
+		next.agentThinkingLevels = strengths;
 	} else if (choice.startsWith("Toggle")) {
 		const injection = await pickInjection(ctx, config.proactiveInjection);
 		if (injection === undefined) return notifyCancelled(ctx);

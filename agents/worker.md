@@ -2,6 +2,7 @@
 name: worker
 description: General-purpose implementation agent with full tools in an isolated context. Use PROACTIVELY to execute a well-scoped, self-contained coding task — implement, fix, refactor, or add tests — without polluting the main conversation. Plans internally, then implements and verifies. Give it a complete, self-contained brief.
 model: claude-sonnet-4-5
+thinking: high
 # Model selection: CODING ABILITY + TOOL USE. The primary implementation model —
 # balance quality against cost. No `tools` field => inherits all tools (full capability).
 ---

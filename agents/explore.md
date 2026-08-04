@@ -3,6 +3,7 @@ name: explore
 description: Fast read-only codebase reconnaissance. Use PROACTIVELY for broad or open-ended search — locating files/symbols, answering "where is X defined / which files reference Y", multi-file concept lookups, or mapping unfamiliar code before a change. Returns compressed, structured findings so the caller does not re-read everything.
 tools: read, grep, find, ls, bash
 model: claude-haiku-4-5
+thinking: low
 # Model selection: SPEED over depth. Pick the fastest available model.
 # What matters: fast grep/find/read, structured output. What doesn't: deep reasoning.
 ---

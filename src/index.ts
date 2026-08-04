@@ -18,6 +18,13 @@ import { Text, truncateToWidth } from "@earendil-works/pi-tui";
 import { Type } from "typebox";
 import { discoverAgents, type AgentConfig } from "./agents.ts";
 import { BackgroundTaskQueue } from "./background.ts";
+import {
+	completionGroupTriggersTurn,
+	completionTriggersTurn,
+	createCompletionBatcher,
+	formatCompletionMessage,
+	type CompletionMessageItem,
+} from "./completion.ts";
 import { getConfigPath, loadConfig, loadConfigSync, saveConfig } from "./config.ts";
 import { repairUnavailableModelOverrides } from "./models.ts";
 import { buildDelegationDirective } from "./prompt.ts";
@@ -28,6 +35,8 @@ import {
 	getResultOutput,
 	isFailedResult,
 	runSingleAgent,
+	truncateResultOutput,
+	writeResultArtifact,
 	type SingleResult,
 	type SubagentDetails,
 	type SubagentLiveEvent,
@@ -59,7 +68,7 @@ function emptyUsage(): UsageStats {
 	return { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, cost: 0, contextTokens: 0, turns: 0 };
 }
 
-function queuedResult(agent: AgentConfig, task: string): SingleResult {
+function queuedResult(agent: AgentConfig, task: string, thinking?: string): SingleResult {
 	return {
 		agent: agent.name,
 		agentSource: agent.source,
@@ -69,6 +78,7 @@ function queuedResult(agent: AgentConfig, task: string): SingleResult {
 		stderr: "",
 		usage: emptyUsage(),
 		model: agent.model,
+		...(thinking ? { thinking } : {}),
 	};
 }
 
@@ -114,6 +124,19 @@ function formatUsage(usage: UsageStats): string {
 	return parts.join(" ");
 }
 
+function formatCompletionBlock(result: SingleResult, maxResultLines: number): string {
+	const status = isFailedResult(result) ? "failed" : "completed";
+	const usage = formatUsage(result.usage);
+	const output = getResultOutput(result);
+	const { text, truncated } = truncateResultOutput(output, maxResultLines);
+	const lines = [`### [${result.agent}] ${status}${usage ? ` (${usage})` : ""}`, "", `Task: ${formatTaskSummary(result.task)}`, "", text];
+	if (truncated) {
+		// The full text lives on disk so the main agent can read it on demand.
+		lines.push("", `(output truncated to ${maxResultLines} lines; full result: ${writeResultArtifact(output, result.agent)})`);
+	}
+	return lines.join("\n");
+}
+
 export default function (pi: ExtensionAPI): void {
 	const configPath = getConfigPath(getAgentDir());
 	// Init-time decisions need the config synchronously; the full (migrating)
@@ -121,6 +144,23 @@ export default function (pi: ExtensionAPI): void {
 	const initialConfig = loadConfigSync(configPath);
 	const backgroundQueue = new BackgroundTaskQueue(initialConfig.maxConcurrency);
 	let sessionActive = true;
+	const sendCompletionGroup = (items: CompletionMessageItem[]): void => {
+		if (!sessionActive || items.length === 0) return;
+		const message = {
+			customType: "subagent-result",
+			content: formatCompletionMessage(items),
+			display: true,
+		};
+		if (completionGroupTriggersTurn(items)) {
+			pi.sendMessage(message, { deliverAs: "followUp", triggerTurn: true });
+		} else {
+			// No-wake delivery: nextTurn rides along with the next user turn and can
+			// never start a continuation by itself. followUp would auto-continue
+			// whenever pi is already streaming, defeating the opt-out.
+			pi.sendMessage(message, { deliverAs: "nextTurn" });
+		}
+	};
+	const completionBatcher = createCompletionBatcher<CompletionMessageItem>({ emit: sendCompletionGroup });
 
 	// Recursion guard: sub-agents at the configured depth are leaf processes and
 	// cannot delegate again. maxSubagentDepth 0 disables the tool entirely.
@@ -148,6 +188,7 @@ export default function (pi: ExtensionAPI): void {
 
 	pi.on("session_shutdown", () => {
 		sessionActive = false;
+		completionBatcher.dispose();
 		backgroundQueue.cancelAll();
 	});
 
@@ -162,11 +203,11 @@ export default function (pi: ExtensionAPI): void {
 			"Each agent has no memory of this conversation — brief it fully (goal, exact paths, constraints, expected output)."
 		].join(" "),
 		promptSnippet:
-			"Start background subagents: explore (read-only search), worker (implement), reviewer (adversarial review); completion automatically resumes the main agent.",
+			"Start background subagents: explore (read-only search), worker (implement), reviewer (adversarial review); completion automatically resumes the main agent. Simple tasks: use direct tools, not subagents.",
 		promptGuidelines: [
-			"Use subagent to delegate discrete, self-contained tasks so the main context stays clean; do orchestration and verification yourself.",
-			"Use subagent with agent 'explore' for broad or open-ended code search before large changes.",
-			"Use subagent with agent 'worker' to implement a well-scoped task; it plans internally.",
+			"Delegate only when an isolated context genuinely pays: broad exploration, a self-contained implementation, or a review gate. Handle simple lookups and one-line edits inline with direct tools — never spawn a sub-agent for them.",
+			"Use subagent with agent 'explore' for broad or open-ended code search before large changes; a targeted 'where is X' is a direct grep/read.",
+			"Use subagent with agent 'worker' for a self-contained implementation task worth a separate context; it plans internally.",
 			"Use subagent with agent 'reviewer' for a fresh read-only review before reporting work done or committing.",
 			"subagent launches work in the background and ends the current turn; when a result arrives, the main agent is automatically resumed with it.",
 			"Run independent tasks in parallel by passing a tasks array to subagent; let the automatically resumed main agent start dependent work after results arrive.",
@@ -296,8 +337,10 @@ export default function (pi: ExtensionAPI): void {
 				const agent = agents.find((candidate) => candidate.name === agentName);
 				if (!agent) return failedStartResult(agentName, task, `Unknown agent: "${agentName}".`);
 
-				const pending = queuedResult(agent, task);
-				const runId = monitor.addRun(agent.name, task, agent.model);
+				// Effective strength: config override > agent frontmatter default > global default.
+				const thinkingLevel = config.agentThinkingLevels[agent.name] ?? agent.thinking ?? config.thinkingLevel;
+				const pending = queuedResult(agent, task, thinkingLevel);
+				const runId = monitor.addRun(agent.name, task, agent.model, thinkingLevel);
 				const onLive = makeLiveHandler(runId);
 
 				backgroundQueue.enqueue(
@@ -310,8 +353,7 @@ export default function (pi: ExtensionAPI): void {
 								agentName,
 								task,
 								cwd,
-								// Per-agent strength override wins; otherwise the global default applies.
-								thinkingLevel: config.agentThinkingLevels[agent.name] ?? config.thinkingLevel,
+								thinkingLevel,
 								signal: backgroundSignal,
 								onLive,
 								makeDetails: makeDetails("single", true),
@@ -329,18 +371,20 @@ export default function (pi: ExtensionAPI): void {
 						}
 
 						if (!sessionActive) return;
-						const status = isFailedResult(result) ? "failed" : "completed";
-						const usage = formatUsage(result.usage);
-						pi.sendMessage(
-							{
-								customType: "subagent-result",
-								content: `### [${result.agent}] ${status}${usage ? ` (${usage})` : ""}\n\nTask: ${formatTaskSummary(result.task)}\n\n${getResultOutput(result)}`,
-								display: true,
-							},
-							// The result is both durable context and a wake-up signal. If the
-							// main agent is busy, followUp queues it until the current turn ends.
-							{ deliverAs: "followUp", triggerTurn: true },
-						);
+						const failed = isFailedResult(result);
+						const completion: CompletionMessageItem = {
+							agent: result.agent,
+							block: formatCompletionBlock(result, config.maxResultLines),
+							triggerTurn: completionTriggersTurn(result, config.notifyOnReviewPass),
+						};
+						if (failed) {
+							// Failures never wait and never hide behind a success turn: deliver
+							// first so the wake-up leads with the failure; held successes follow.
+							sendCompletionGroup([completion]);
+							completionBatcher.flush();
+						} else {
+							completionBatcher.push(completion);
+						}
 					},
 					() => finishRun(runId, "failed"),
 				);
@@ -427,7 +471,7 @@ export default function (pi: ExtensionAPI): void {
 				const icon = statusIcon(pending ? "running" : isFailedResult(r) ? "failed" : "done", theme);
 				const usage = formatUsage(r.usage);
 				const model = r.model ?? "?";
-				const line = `${theme.fg("toolTitle", theme.bold("subagent "))}${icon} ${theme.fg("accent", r.agent)} ${theme.fg("dim", `· ${model}${pending ? " · background" : ""}${usage ? ` · ${usage}` : ""}`)}`;
+				const line = `${theme.fg("toolTitle", theme.bold("subagent "))}${icon} ${theme.fg("accent", r.agent)} ${theme.fg("dim", `· ${model}${r.thinking ? ` · thinking ${r.thinking}` : ""}${pending ? " · background" : ""}${usage ? ` · ${usage}` : ""}`)}`;
 				return new Text(line, 0, 0);
 			}
 
@@ -440,7 +484,7 @@ export default function (pi: ExtensionAPI): void {
 				const icon = statusIcon(pending ? "running" : isFailedResult(r) ? "failed" : "done", theme);
 				const usage = formatUsage(r.usage);
 				const model = r.model ?? "?";
-				lines.push(`  ${icon} ${theme.fg("accent", r.agent)} ${theme.fg("dim", `· ${model}${pending ? " · background" : ""}${usage ? ` · ${usage}` : ""}`)}`);
+				lines.push(`  ${icon} ${theme.fg("accent", r.agent)} ${theme.fg("dim", `· ${model}${r.thinking ? ` · thinking ${r.thinking}` : ""}${pending ? " · background" : ""}${usage ? ` · ${usage}` : ""}`)}`);
 			}
 			return new Text(lines.join("\n"), 0, 0);
 		},
