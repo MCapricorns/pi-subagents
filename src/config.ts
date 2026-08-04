@@ -61,7 +61,9 @@ export interface SubagentsConfig {
 	enabledAgents: string[];
 	/** Per-agent model override, keyed by agent name, as "provider/model-id". */
 	agentModels: Record<string, string>;
-	/** Thinking level passed to every sub-agent. Default: "max". */
+	/** Per-agent thinking-level override, keyed by agent name. */
+	agentThinkingLevels: Record<string, ThinkingLevel>;
+	/** Thinking level for sub-agents without a per-agent override. Default: "max". */
 	thinkingLevel: ThinkingLevel;
 	/** Whether to inject the delegation directive into the parent system prompt. Default: true. */
 	proactiveInjection: boolean;
@@ -78,6 +80,7 @@ export interface SubagentsConfig {
 export const DEFAULT_CONFIG: SubagentsConfig = {
 	enabledAgents: [...DEFAULT_ENABLED_AGENTS],
 	agentModels: {},
+	agentThinkingLevels: {},
 	thinkingLevel: DEFAULT_THINKING_LEVEL,
 	proactiveInjection: true,
 	agentScope: "user",
@@ -121,6 +124,7 @@ export function normalizeConfig(raw: unknown): SubagentsConfig {
 	const config: SubagentsConfig = {
 		enabledAgents: [...DEFAULT_CONFIG.enabledAgents],
 		agentModels: {},
+		agentThinkingLevels: {},
 		thinkingLevel: DEFAULT_CONFIG.thinkingLevel,
 		proactiveInjection: DEFAULT_CONFIG.proactiveInjection,
 		agentScope: DEFAULT_CONFIG.agentScope,
@@ -144,6 +148,18 @@ export function normalizeConfig(raw: unknown): SubagentsConfig {
 		for (const [key, value] of Object.entries(raw.agentModels)) {
 			if (REMOVED_AGENT_NAMES.includes(key.trim())) continue;
 			if (isModelReference(value)) config.agentModels[key.trim()] = value.trim();
+		}
+	}
+
+	if (isRecord(raw.agentThinkingLevels)) {
+		for (const [key, value] of Object.entries(raw.agentThinkingLevels)) {
+			if (REMOVED_AGENT_NAMES.includes(key.trim())) continue;
+			if (
+				typeof value === "string" &&
+				(THINKING_LEVEL_VALUES as readonly string[]).includes(value)
+			) {
+				config.agentThinkingLevels[key.trim()] = value as ThinkingLevel;
+			}
 		}
 	}
 
@@ -174,7 +190,12 @@ export function normalizeConfig(raw: unknown): SubagentsConfig {
 }
 
 function defaultConfig(): SubagentsConfig {
-	return { ...DEFAULT_CONFIG, enabledAgents: [...DEFAULT_CONFIG.enabledAgents], agentModels: {} };
+	return {
+		...DEFAULT_CONFIG,
+		enabledAgents: [...DEFAULT_CONFIG.enabledAgents],
+		agentModels: {},
+		agentThinkingLevels: {},
+	};
 }
 
 /**

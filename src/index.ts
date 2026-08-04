@@ -310,7 +310,8 @@ export default function (pi: ExtensionAPI): void {
 								agentName,
 								task,
 								cwd,
-								thinkingLevel: config.thinkingLevel,
+								// Per-agent strength override wins; otherwise the global default applies.
+								thinkingLevel: config.agentThinkingLevels[agent.name] ?? config.thinkingLevel,
 								signal: backgroundSignal,
 								onLive,
 								makeDetails: makeDetails("single", true),

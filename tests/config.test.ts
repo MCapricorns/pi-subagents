@@ -19,6 +19,7 @@ describe("normalizeConfig", () => {
 		expect(config.proactiveInjection).toBe(true);
 		expect(config.agentScope).toBe("user");
 		expect(config.agentModels).toEqual({});
+		expect(config.agentThinkingLevels).toEqual({});
 		expect(config.thinkingLevel).toBe(DEFAULT_THINKING_LEVEL);
 		expect(config.maxConcurrency).toBe(DEFAULT_MAX_CONCURRENCY);
 		expect(config.maxParallelTasks).toBe(DEFAULT_MAX_PARALLEL_TASKS);
@@ -34,9 +35,11 @@ describe("normalizeConfig", () => {
 		const config = normalizeConfig({
 			enabledAgents: ["explore", "plan", "worker"],
 			agentModels: { plan: "anthropic/claude-haiku-4-5", worker: "openai/gpt-5" },
+			agentThinkingLevels: { plan: "high", worker: "medium" },
 		});
 		expect(config.enabledAgents).toEqual(["explore", "worker"]);
 		expect(config.agentModels).toEqual({ worker: "openai/gpt-5" });
+		expect(config.agentThinkingLevels).toEqual({ worker: "medium" });
 	});
 
 	it("honors an explicitly empty enabledAgents array", () => {
@@ -48,6 +51,13 @@ describe("normalizeConfig", () => {
 			agentModels: { explore: "anthropic/claude-haiku-4-5", bad: "noslash", empty: "  " },
 		});
 		expect(config.agentModels).toEqual({ explore: "anthropic/claude-haiku-4-5" });
+	});
+
+	it("keeps only valid thinking levels in agentThinkingLevels", () => {
+		const config = normalizeConfig({
+			agentThinkingLevels: { explore: "high", bad: "ultra", empty: "" },
+		});
+		expect(config.agentThinkingLevels).toEqual({ explore: "high" });
 	});
 
 	it("validates the configured thinking level", () => {

@@ -21,8 +21,8 @@ agent, and keep the workflow moving without manual polling.
 - **Parallel fan-out** — run independent tasks together, with a bounded background queue.
 - **Live progress** — a TUI widget shows each agent's status, activity, model, usage, and
   elapsed time; completion also produces a concise notification.
-- **Per-agent configuration** — enable agents, select models, set thinking strength, tune
-  concurrency limits, and choose discovery scope from `/subagents-setup`.
+- **Per-agent configuration** — enable agents, pick model and thinking strength per agent,
+  tune concurrency limits, and choose discovery scope from `/subagents-setup`.
 - **Leaf processes** — child agents cannot access the `subagent` tool, so delegation cannot
   recurse.
 
@@ -122,11 +122,20 @@ Start dependent work after the relevant result has been delivered to the main ag
 Configuration is stored at `~/.pi/agent/pi-subagents.json`. The location follows
 `PI_CODING_AGENT_DIR` when set.
 
+The `/subagents-setup` wizard drives every field interactively: for each agent, picking a
+model is immediately followed by picking that agent's thinking strength (or inheriting the
+global default). The global `thinkingLevel` is set first and applies to every agent without
+its own entry.
+
 ```json
 {
   "enabledAgents": ["explore", "worker", "reviewer"],
   "agentModels": {
     "explore": "anthropic/claude-haiku-4-5"
+  },
+  "agentThinkingLevels": {
+    "explore": "low",
+    "worker": "high"
   },
   "thinkingLevel": "max",
   "proactiveInjection": true,
@@ -141,7 +150,8 @@ Configuration is stored at `~/.pi/agent/pi-subagents.json`. The location follows
 | --- | --- |
 | `enabledAgents` | Agent names exposed to discovery and prompt injection. An empty array disables all agents. |
 | `agentModels` | Optional `provider/model-id` override per agent. |
-| `thinkingLevel` | `off`, `minimal`, `low`, `medium`, `high`, `xhigh`, or `max`. |
+| `agentThinkingLevels` | Optional thinking level per agent; agents without an entry use `thinkingLevel`. |
+| `thinkingLevel` | Default thinking level: `off`, `minimal`, `low`, `medium`, `high`, `xhigh`, or `max`. |
 | `proactiveInjection` | Whether to add the delegation directive to the main system prompt. |
 | `agentScope` | `user`, `project`, or `both`; controls which user/project agent directories are discovered. |
 | `maxConcurrency` | How many sub-agent processes run at once (1–16, default 4). Extra work waits in the queue. |
@@ -155,7 +165,7 @@ The config file migrates itself on load — no manual steps after an upgrade:
 - **Schema upgrades** — a config written by an older version (missing newer keys or
   holding invalid values) is normalized and saved back with the new fields filled in.
 - **Removed agents** — agents no longer shipped (e.g. the old `plan` agent) are stripped
-  from `enabledAgents` and `agentModels` automatically.
+  from `enabledAgents`, `agentModels`, and `agentThinkingLevels` automatically.
 
 Model selection uses this precedence:
 
@@ -165,6 +175,8 @@ configured agent model → current main-session model → agent frontmatter mode
 
 Unavailable configured models are replaced with a usable current-session model when possible
 and the repaired configuration is saved.
+
+Thinking strength uses this precedence: `agentThinkingLevels` entry → `thinkingLevel` default.
 
 ## Agent discovery and overrides
 
