@@ -15,6 +15,7 @@ import { existsSync, mkdirSync, unlinkSync, rmdirSync, writeFileSync } from "nod
 import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { basename, join } from "node:path";
+import { StringDecoder } from "node:string_decoder";
 import type { AgentToolResult } from "@earendil-works/pi-agent-core";
 import type { Message } from "@earendil-works/pi-ai";
 import type { AgentConfig, AgentSource } from "./agents.ts";
@@ -134,7 +135,9 @@ export function writeResultArtifact(output: string, agentName: string): string {
 	const dir = join(tmpdir(), "pi-subagents-results");
 	mkdirSync(dir, { recursive: true });
 	const safeName = agentName.replace(/[^\w.-]+/g, "_");
-	const filePath = join(dir, `${Date.now()}-${safeName}.md`);
+	// A random suffix keeps same-millisecond writes from clobbering each other.
+	const unique = `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+	const filePath = join(dir, `${unique}-${safeName}.md`);
 	writeFileSync(filePath, output, "utf8");
 	return filePath;
 }
@@ -457,8 +460,13 @@ export async function runSingleAgent(options: RunSingleOptions): Promise<SingleR
 			proc.stdin?.on("error", () => undefined);
 			proc.stdin?.end(`Task: ${task}`);
 
+			// Decode stdout through a StringDecoder so multi-byte UTF-8 characters
+			// (CJK, emoji) split across chunk boundaries never produce U+FFFD
+			// replacement characters — a corrupted JSON line would drop the whole
+			// message (including a reviewer's verdict line) from parsing.
+			const stdoutDecoder = new StringDecoder("utf8");
 			proc.stdout.on("data", (data) => {
-				buffer += data.toString();
+				buffer += stdoutDecoder.write(data);
 				const lines = buffer.split("\n");
 				buffer = lines.pop() || "";
 				for (const line of lines) processLine(line);
@@ -469,6 +477,9 @@ export async function runSingleAgent(options: RunSingleOptions): Promise<SingleR
 			});
 
 			proc.on("close", (code) => {
+				// Flush any bytes still held by the decoder (a trailing incomplete
+				// multi-byte sequence) before processing the final buffer.
+				buffer += stdoutDecoder.end();
 				if (buffer.trim()) processLine(buffer);
 				// A null exit code means the process was terminated by a signal and
 				// must be reported as failure, never as a false clean completion.
