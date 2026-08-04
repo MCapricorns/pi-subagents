@@ -33,17 +33,24 @@ import {
 	type SubagentLiveEvent,
 	type UsageStats,
 } from "./spawn.ts";
-import { formatToolActivity, monitor, statusColor, statusIcon, statusLabel } from "./monitor.ts";
+import { formatTaskSummary, formatToolActivity, monitor, statusColor, statusIcon, statusLabel } from "./monitor.ts";
+
+const NON_BLANK_TASK_OPTIONS = { minLength: 1, pattern: "\\S" } as const;
 
 const TaskItem = Type.Object({
 	agent: Type.String({ description: "Name of the agent to invoke" }),
-	task: Type.String({ description: "Self-contained task to delegate (the agent has no memory of this conversation)" }),
+	task: Type.String({
+		...NON_BLANK_TASK_OPTIONS,
+		description: "Self-contained task to delegate (the agent has no memory of this conversation)",
+	}),
 	cwd: Type.Optional(Type.String({ description: "Working directory for the agent process" })),
 });
 
 const SubagentParams = Type.Object({
 	agent: Type.Optional(Type.String({ description: "Name of the agent to invoke (single mode)" })),
-	task: Type.Optional(Type.String({ description: "Self-contained task to delegate (single mode)" })),
+	task: Type.Optional(
+		Type.String({ ...NON_BLANK_TASK_OPTIONS, description: "Self-contained task to delegate (single mode)" }),
+	),
 	tasks: Type.Optional(Type.Array(TaskItem, { description: "Array of {agent, task} for parallel execution" })),
 	cwd: Type.Optional(Type.String({ description: "Working directory for the agent process (single mode)" })),
 });
@@ -240,7 +247,7 @@ export default function (pi: ExtensionAPI): void {
 			}));
 
 			const hasTasks = (params.tasks?.length ?? 0) > 0;
-			const hasSingle = Boolean(params.agent && params.task);
+			const hasSingle = Boolean(params.agent) && params.task !== undefined;
 
 			const makeDetails =
 				(mode: "single" | "parallel", background = false) =>
@@ -260,12 +267,37 @@ export default function (pi: ExtensionAPI): void {
 				};
 			}
 
+			if (hasTasks) {
+				const blankTaskIndex = params.tasks?.findIndex(({ task }) => task.trim().length === 0) ?? -1;
+				if (blankTaskIndex !== -1) {
+					return {
+						content: [
+							{
+								type: "text",
+								text: `Invalid parameters. tasks[${blankTaskIndex}].task must contain at least one non-whitespace character. No background tasks were started. Enabled agents: ${catalog}.`,
+							},
+						],
+						details: makeDetails("parallel")([]),
+					};
+				}
+			} else if (params.task?.trim().length === 0) {
+				return {
+					content: [
+						{
+							type: "text",
+							text: `Invalid parameters. task must contain at least one non-whitespace character. Enabled agents: ${catalog}.`,
+						},
+					],
+					details: makeDetails("single")([]),
+				};
+			}
+
 			const startBackground = (agentName: string, task: string, cwd?: string): SingleResult => {
 				const agent = agents.find((candidate) => candidate.name === agentName);
 				if (!agent) return failedStartResult(agentName, task, `Unknown agent: "${agentName}".`);
 
 				const pending = queuedResult(agent, task);
-				const runId = monitor.addRun(agent.name, agent.model);
+				const runId = monitor.addRun(agent.name, task, agent.model);
 				const onLive = makeLiveHandler(runId);
 
 				backgroundQueue.enqueue(
@@ -301,7 +333,7 @@ export default function (pi: ExtensionAPI): void {
 						pi.sendMessage(
 							{
 								customType: "subagent-result",
-								content: `### [${result.agent}] ${status}${usage ? ` (${usage})` : ""}\n\n${getResultOutput(result)}`,
+								content: `### [${result.agent}] ${status}${usage ? ` (${usage})` : ""}\n\nTask: ${formatTaskSummary(result.task)}\n\n${getResultOutput(result)}`,
 								display: true,
 							},
 							// The result is both durable context and a wake-up signal. If the
@@ -318,17 +350,17 @@ export default function (pi: ExtensionAPI): void {
 			// Sub-agents intentionally detach from the foreground turn. This makes the
 			// editor available immediately; completion messages later wake the main agent.
 			if (params.tasks && params.tasks.length > 0) {
-			if (params.tasks.length > config.maxParallelTasks) {
-				return {
-					content: [
-						{
-							type: "text",
-							text: `Too many parallel tasks (${params.tasks.length}). Max is ${config.maxParallelTasks} (configurable via /subagents-setup).`,
-						},
-					],
-					details: makeDetails("parallel", true)([]),
-				};
-			}
+				if (params.tasks.length > config.maxParallelTasks) {
+					return {
+						content: [
+							{
+								type: "text",
+								text: `Too many parallel tasks (${params.tasks.length}). Max is ${config.maxParallelTasks} (configurable via /subagents-setup).`,
+							},
+						],
+						details: makeDetails("parallel", true)([]),
+					};
+				}
 
 				const results = params.tasks.map((task) => startBackground(task.agent, task.task, task.cwd));
 				const started = results.filter((result) => result.exitCode === -1).length;
@@ -442,6 +474,9 @@ export default function (pi: ExtensionAPI): void {
 							const icon = statusIcon(r.status, theme);
 							const label = theme.fg(statusColor(r.status), statusLabel(r.status));
 							lines.push(truncateToWidth(` ${icon} ${monitor.summarize(r)} · ${label}`, width, ""));
+							if (r.status === "queued" || r.status === "running") {
+								lines.push(truncateToWidth(theme.fg("dim", `     task: ${formatTaskSummary(r.task)}`), width, ""));
+							}
 							// Activity sits one indent level below the agent name.
 							if (r.activity) lines.push(truncateToWidth(theme.fg("dim", `     ${r.activity}`), width, ""));
 						}

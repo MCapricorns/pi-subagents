@@ -10,7 +10,9 @@
  * conversation, so a stale "done" row must not linger in the widget.
  */
 
+import { stripVTControlCharacters } from "node:util";
 import type { Theme } from "@earendil-works/pi-coding-agent";
+import { visibleWidth } from "@earendil-works/pi-tui";
 import type { UsageStats } from "./spawn.ts";
 
 // ---------------------------------------------------------------------------
@@ -22,6 +24,7 @@ export type RunStatus = "queued" | "running" | "done" | "failed";
 export interface RunView {
 	id: number;
 	agent: string;
+	task: string;
 	model?: string;
 	status: RunStatus;
 	usage: UsageStats;
@@ -36,6 +39,27 @@ export interface RunView {
 // ---------------------------------------------------------------------------
 // Formatting helpers
 // ---------------------------------------------------------------------------
+
+const TASK_SUMMARY_MAX = 80;
+const TASK_SUMMARY_ELLIPSIS = "…";
+const graphemeSegmenter = new Intl.Segmenter(undefined, { granularity: "grapheme" });
+
+/** One-line task preview, capped by terminal display columns (including the ellipsis). */
+export function formatTaskSummary(task: string): string {
+	const oneLine = stripVTControlCharacters(task).replace(/\s+/g, " ").trim();
+	if (visibleWidth(oneLine) <= TASK_SUMMARY_MAX) return oneLine;
+
+	const prefixMax = TASK_SUMMARY_MAX - visibleWidth(TASK_SUMMARY_ELLIPSIS);
+	let prefix = "";
+	let prefixWidth = 0;
+	for (const { segment } of graphemeSegmenter.segment(oneLine)) {
+		const segmentWidth = visibleWidth(segment);
+		if (prefixWidth + segmentWidth > prefixMax) break;
+		prefix += segment;
+		prefixWidth += segmentWidth;
+	}
+	return `${prefix}${TASK_SUMMARY_ELLIPSIS}`;
+}
 
 function formatTokens(count: number): string {
 	if (count >= 1_000_000) return `${(count / 1_000_000).toFixed(1)}M`;
@@ -142,11 +166,12 @@ export class MonitorStore {
 		this.notify();
 	}
 
-	addRun(agent: string, model?: string): number {
+	addRun(agent: string, task: string, model?: string): number {
 		const id = this.nextId++;
 		this.runs.push({
 			id,
 			agent,
+			task,
 			model,
 			status: "queued",
 			usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, cost: 0, contextTokens: 0, turns: 0 },

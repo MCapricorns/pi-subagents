@@ -1,14 +1,25 @@
+import { visibleWidth } from "@earendil-works/pi-tui";
 import { describe, expect, it } from "vitest";
-import { MonitorStore, formatDuration, formatElapsed, formatToolActivity, statusLabel } from "../src/monitor.ts";
+import {
+	MonitorStore,
+	formatDuration,
+	formatElapsed,
+	formatTaskSummary,
+	formatToolActivity,
+	formatUsageCompact,
+	statusLabel,
+} from "../src/monitor.ts";
 
 describe("MonitorStore", () => {
-	it("addRun creates a queued run with zero usage", () => {
+	it("addRun creates a queued run with zero usage and preserves its task", () => {
 		const store = new MonitorStore();
-		const id = store.addRun("worker", "anthropic/claude-sonnet-4-5");
+		const task = "  Implement the monitor\nwithout rewriting the brief.  ";
+		const id = store.addRun("worker", task, "anthropic/claude-sonnet-4-5");
 		const runs = store.getRuns();
 		expect(runs).toHaveLength(1);
 		expect(runs[0].id).toBe(id);
 		expect(runs[0].agent).toBe("worker");
+		expect(runs[0].task).toBe(task);
 		expect(runs[0].model).toBe("anthropic/claude-sonnet-4-5");
 		expect(runs[0].status).toBe("queued");
 		expect(runs[0].usage.input).toBe(0);
@@ -17,9 +28,9 @@ describe("MonitorStore", () => {
 
 	it("beginTurn clears finished runs but keeps active ones", () => {
 		const store = new MonitorStore();
-		const done = store.addRun("explore");
+		const done = store.addRun("explore", "Map the codebase");
 		store.setStatus(done, "done");
-		const active = store.addRun("worker");
+		const active = store.addRun("worker", "Implement the change");
 		store.setStatus(active, "running");
 		store.beginTurn();
 		const runs = store.getRuns();
@@ -29,7 +40,7 @@ describe("MonitorStore", () => {
 
 	it("setUsage updates usage and model; setStatus updates status", () => {
 		const store = new MonitorStore();
-		const id = store.addRun("worker");
+		const id = store.addRun("worker", "Implement the change");
 		store.setStatus(id, "running");
 		store.setUsage(id, { input: 10, output: 5, cacheRead: 0, cacheWrite: 0, cost: 0.5, contextTokens: 0, turns: 1 }, "openai/gpt-x");
 		const run = store.getRuns()[0];
@@ -43,7 +54,7 @@ describe("MonitorStore", () => {
 describe("MonitorStore activity", () => {
 	it("setActivity records the current one-line activity, last writer wins", () => {
 		const store = new MonitorStore();
-		const id = store.addRun("worker");
+		const id = store.addRun("worker", "Implement the change");
 		store.setActivity(id, "thinking");
 		expect(store.getRuns()[0].activity).toBe("thinking");
 		store.setActivity(id, "read src/index.ts");
@@ -60,7 +71,7 @@ describe("MonitorStore activity", () => {
 describe("MonitorStore.removeRun", () => {
 	it("removes the run and returns it for the completion notification", () => {
 		const store = new MonitorStore();
-		const id = store.addRun("worker");
+		const id = store.addRun("worker", "Implement the change");
 		store.setStatus(id, "running");
 		store.setStatus(id, "done");
 		const removed = store.removeRun(id);
@@ -72,6 +83,61 @@ describe("MonitorStore.removeRun", () => {
 	it("returns undefined for unknown ids, so finishing twice is a no-op", () => {
 		const store = new MonitorStore();
 		expect(store.removeRun(42)).toBeUndefined();
+	});
+});
+
+describe("formatTaskSummary", () => {
+	it("collapses whitespace and trims the task", () => {
+		expect(formatTaskSummary("  Review\n\tsrc/index.ts   carefully.  ")).toBe("Review src/index.ts carefully.");
+	});
+
+	it("strips ANSI, OSC, and other VT control sequences", () => {
+		const task = "\x1b[31mReview\x1b[0m\n\x1b]8;;https://example.com\x07src/index.ts\x1b]8;;\x07 \x1b[2Kcarefully.";
+		expect(formatTaskSummary(task)).toBe("Review src/index.ts carefully.");
+	});
+
+	it("strips VT controls before display-width truncation", () => {
+		const summary = formatTaskSummary(`${"a".repeat(78)}\x1b[31m界\x1b[0mz`);
+		expect(summary).toBe(`${"a".repeat(78)}…`);
+		expect(summary).not.toContain("\x1b");
+		expect(visibleWidth(summary)).toBeLessThanOrEqual(80);
+	});
+
+	it("truncates CJK text by terminal display columns", () => {
+		expect(formatTaskSummary("界".repeat(40))).toBe("界".repeat(40));
+		const summary = formatTaskSummary("界".repeat(41));
+		expect(summary).toBe(`${"界".repeat(39)}…`);
+		expect(visibleWidth(summary)).toBeLessThanOrEqual(80);
+	});
+
+	it("does not split a ZWJ emoji when truncating", () => {
+		const family = "👨‍👩‍👧‍👦";
+		const summary = formatTaskSummary(`${"a".repeat(78)}${family}z`);
+		expect(summary).toBe(`${"a".repeat(78)}…`);
+		expect(visibleWidth(summary)).toBeLessThanOrEqual(80);
+	});
+
+	it("keeps a combining sequence intact at the truncation boundary", () => {
+		const combining = "e\u0301";
+		const summary = formatTaskSummary(`${"a".repeat(78)}${combining}zz`);
+		expect(summary).toBe(`${"a".repeat(78)}${combining}…`);
+		expect(visibleWidth(summary)).toBe(80);
+	});
+});
+
+describe("formatUsageCompact", () => {
+	it("formats cache-read tokens with R", () => {
+		expect(
+			formatUsageCompact({
+				input: 0,
+				output: 0,
+				cacheRead: 1200,
+				cacheWrite: 9000,
+				cost: 0,
+				contextTokens: 0,
+				turns: 0,
+			}),
+		).toBe("R1.2k");
 	});
 });
 
@@ -110,16 +176,16 @@ describe("MonitorStore.subscribe", () => {
 		const unsub = store.subscribe(() => {
 			count++;
 		});
-		store.addRun("worker");
+		store.addRun("worker", "Implement the change");
 		expect(count).toBe(1);
 		unsub();
-		store.addRun("explore");
+		store.addRun("explore", "Map the codebase");
 		expect(count).toBe(1);
 	});
 
 	it("summarize produces a compact one-liner", () => {
 		const store = new MonitorStore();
-		const id = store.addRun("worker", "anthropic/claude-sonnet-4-5");
+		const id = store.addRun("worker", "Implement the change", "anthropic/claude-sonnet-4-5");
 		store.setUsage(id, { input: 1200, output: 300, cacheRead: 0, cacheWrite: 0, cost: 0.04, contextTokens: 0, turns: 2 });
 		const line = store.summarize(store.getRuns()[0]);
 		expect(line).toContain("worker");
@@ -145,7 +211,7 @@ describe("status labels and timing", () => {
 
 	it("records startedAt on running and endedAt on completion", () => {
 		const store = new MonitorStore();
-		const id = store.addRun("worker");
+		const id = store.addRun("worker", "Implement the change");
 		expect(store.getRuns()[0].startedAt).toBeUndefined();
 		store.setStatus(id, "running");
 		const startedAt = store.getRuns()[0].startedAt;
@@ -158,7 +224,7 @@ describe("status labels and timing", () => {
 
 	it("summarize includes elapsed time once running", () => {
 		const store = new MonitorStore();
-		const id = store.addRun("worker");
+		const id = store.addRun("worker", "Implement the change");
 		store.setStatus(id, "running");
 		expect(store.summarize(store.getRuns()[0])).toMatch(/\d+s/);
 	});

@@ -1,23 +1,35 @@
-import { mkdtempSync } from "node:fs";
+import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { BackgroundTaskQueue, type BackgroundTask } from "../src/background.ts";
 import register from "../src/index.ts";
+import { monitor } from "../src/monitor.ts";
 
 interface StubPi {
 	tools: any[];
 	commands: string[];
-	hooks: Record<string, (event: any, ctx: any) => Promise<any>>;
+	hooks: Record<string, (event: any, ctx: any) => any>;
+	messages: Array<{ message: any; options: any }>;
+	setWidget: ReturnType<typeof vi.fn>;
 	api: any;
 }
 
 function makeStub(): StubPi {
-	const stub: StubPi = { tools: [], commands: [], hooks: {} , api: null};
+	const stub: StubPi = {
+		tools: [],
+		commands: [],
+		hooks: {},
+		messages: [],
+		setWidget: vi.fn(),
+		api: null,
+	};
 	stub.api = {
 		registerTool: (tool: any) => stub.tools.push(tool),
 		registerMessageRenderer: (_type: string, _renderer: any) => {},
 		registerCommand: (name: string) => stub.commands.push(name),
 		registerShortcut: (_key: string, _opts: any) => {},
+		sendMessage: (message: any, options: any) => stub.messages.push({ message, options }),
 		on: (event: string, handler: any) => {
 			stub.hooks[event] = handler;
 		},
@@ -25,21 +37,37 @@ function makeStub(): StubPi {
 	return stub;
 }
 
+function executionContext(): any {
+	return {
+		cwd: process.cwd(),
+		model: undefined,
+		scopedModels: [],
+		modelRegistry: { getAvailable: () => [] },
+		ui: { notify: vi.fn() },
+	};
+}
+
 let savedDepth: string | undefined;
 let savedAgentDir: string | undefined;
+let testAgentDir: string | undefined;
 
 beforeEach(() => {
 	savedDepth = process.env.PI_SUBAGENT_DEPTH;
 	savedAgentDir = process.env.PI_CODING_AGENT_DIR;
 	// Isolate config + user agents from the real home directory.
-	process.env.PI_CODING_AGENT_DIR = mkdtempSync(join(tmpdir(), "pi-subagents-load-"));
+	testAgentDir = mkdtempSync(join(tmpdir(), "pi-subagents-load-"));
+	process.env.PI_CODING_AGENT_DIR = testAgentDir;
 });
 
 afterEach(() => {
+	vi.restoreAllMocks();
+	for (const run of [...monitor.getRuns()]) monitor.removeRun(run.id);
 	if (savedDepth === undefined) delete process.env.PI_SUBAGENT_DEPTH;
 	else process.env.PI_SUBAGENT_DEPTH = savedDepth;
 	if (savedAgentDir === undefined) delete process.env.PI_CODING_AGENT_DIR;
 	else process.env.PI_CODING_AGENT_DIR = savedAgentDir;
+	if (testAgentDir) rmSync(testAgentDir, { recursive: true, force: true });
+	testAgentDir = undefined;
 });
 
 describe("extension registration", () => {
@@ -53,6 +81,8 @@ describe("extension registration", () => {
 		const tool = stub.tools.find((t) => t.name === "subagent");
 		expect(tool.promptGuidelines.length).toBeGreaterThan(0);
 		expect(tool.description).toContain("explore");
+		expect(tool.parameters.properties.task).toMatchObject({ minLength: 1, pattern: "\\S" });
+		expect(tool.parameters.properties.tasks.items.properties.task).toMatchObject({ minLength: 1, pattern: "\\S" });
 	});
 
 	it("does not register the tool inside any child sub-agent process", () => {
@@ -68,6 +98,133 @@ describe("extension registration", () => {
 		const stub = makeStub();
 		register(stub.api);
 		expect(stub.tools.map((t) => t.name)).not.toContain("subagent");
+	});
+});
+
+describe("delegated task validation", () => {
+	it("rejects a whitespace-only single task before enqueueing", async () => {
+		const enqueue = vi.spyOn(BackgroundTaskQueue.prototype, "enqueue").mockImplementation(() => new AbortController());
+		const stub = makeStub();
+		register(stub.api);
+		const tool = stub.tools.find((candidate) => candidate.name === "subagent");
+
+		const result = await tool.execute(
+			"call-1",
+			{ agent: "worker", task: " \n\t " },
+			new AbortController().signal,
+			() => {},
+			executionContext(),
+		);
+
+		expect(enqueue).not.toHaveBeenCalled();
+		expect(result.content[0].text).toContain("Invalid parameters. task must contain at least one non-whitespace character.");
+		expect(result.details).toEqual({ mode: "single", results: [], background: false });
+	});
+
+	it("rejects an entire parallel batch when one task is whitespace-only", async () => {
+		const enqueue = vi.spyOn(BackgroundTaskQueue.prototype, "enqueue").mockImplementation(() => new AbortController());
+		const stub = makeStub();
+		register(stub.api);
+		const tool = stub.tools.find((candidate) => candidate.name === "subagent");
+
+		const result = await tool.execute(
+			"call-2",
+			{
+				tasks: [
+					{ agent: "explore", task: "Inspect the relevant files" },
+					{ agent: "worker", task: "\n\t" },
+				],
+			},
+			new AbortController().signal,
+			() => {},
+			executionContext(),
+		);
+
+		expect(enqueue).not.toHaveBeenCalled();
+		expect(result.content[0].text).toContain("Invalid parameters. tasks[1].task must contain at least one non-whitespace character.");
+		expect(result.content[0].text).toContain("No background tasks were started.");
+		expect(result.details).toEqual({ mode: "parallel", results: [], background: false });
+	});
+});
+
+describe("registered tool background dispatch", () => {
+	it("shows the task in the widget and reports its summary with cache reads on completion", async () => {
+		const stub = makeStub();
+		const capturedTasks: BackgroundTask[] = [];
+		const backgroundController = new AbortController();
+		vi.spyOn(BackgroundTaskQueue.prototype, "enqueue").mockImplementation((task) => {
+			capturedTasks.push(task);
+			return backgroundController;
+		});
+
+		let component: { render: (width: number) => string[]; dispose: () => void } | undefined;
+		let childDir: string | undefined;
+		const previousScript = process.argv[1];
+		try {
+			childDir = mkdtempSync(join(tmpdir(), "pi-subagents-load-child-"));
+			const childScript = join(childDir, "fake-pi-child.mjs");
+			writeFileSync(
+				childScript,
+				`process.stdin.resume();
+process.stdin.on("end", () => {
+	process.stdout.write(JSON.stringify({ type: "agent_start" }) + "\\n");
+	process.stdout.write(JSON.stringify({
+		type: "message_end",
+		message: {
+			role: "assistant",
+			content: [{ type: "text", text: "fake child completed" }],
+			usage: { input: 0, output: 0, cacheRead: 321, cacheWrite: 0, cost: { total: 0 }, totalTokens: 321 },
+			stopReason: "stop"
+		}
+	}) + "\\n");
+});
+`,
+				"utf8",
+			);
+			process.argv[1] = childScript;
+
+			register(stub.api);
+			await stub.hooks["session_start"]({}, { mode: "tui", ui: { setWidget: stub.setWidget } });
+			expect(stub.setWidget).toHaveBeenCalledOnce();
+			const widgetRegistration = stub.setWidget.mock.calls[0];
+			expect(widgetRegistration[0]).toBe("pi-subagents");
+			expect(widgetRegistration[2]).toEqual({ placement: "aboveEditor" });
+			const widgetComponent = widgetRegistration[1](
+				{ requestRender: vi.fn() },
+				{ fg: (_color: string, text: string) => text, bold: (text: string) => text },
+			) as { render: (width: number) => string[]; dispose: () => void };
+			component = widgetComponent;
+
+			const tool = stub.tools.find((candidate) => candidate.name === "subagent");
+			const task = "\x1b[31mInspect\x1b[0m\n  cache-read metrics";
+			const summary = "Inspect cache-read metrics";
+			const dispatch = await tool.execute(
+				"call-valid",
+				{ agent: "worker", task },
+				new AbortController().signal,
+				() => {},
+				executionContext(),
+			);
+
+			expect(dispatch.terminate).toBe(true);
+			expect(capturedTasks).toHaveLength(1);
+			expect(widgetComponent.render(160).join("\n")).toContain(`task: ${summary}`);
+
+			await capturedTasks[0](backgroundController.signal);
+
+			expect(stub.messages).toHaveLength(1);
+			const completion = stub.messages[0];
+			expect(completion.message.content).toContain(`Task: ${summary}`);
+			expect(completion.message.content).toMatch(/\bR321\b/);
+			expect(completion.options).toEqual({ deliverAs: "followUp", triggerTurn: true });
+		} finally {
+			component?.dispose();
+			backgroundController.abort();
+			await stub.hooks["session_shutdown"]?.({}, {});
+			for (const run of [...monitor.getRuns()]) monitor.removeRun(run.id);
+			process.argv[1] = previousScript;
+			if (childDir) rmSync(childDir, { recursive: true, force: true });
+		}
 	});
 });
 
