@@ -5,10 +5,12 @@ import { describe, expect, it } from "vitest";
 import {
 	DEFAULT_ENABLED_AGENTS,
 	DEFAULT_MAX_CONCURRENCY,
+	DEFAULT_MAX_FIX_ROUNDS,
 	DEFAULT_MAX_PARALLEL_TASKS,
 	DEFAULT_MAX_RESULT_LINES,
 	DEFAULT_MAX_SUBAGENT_DEPTH,
 	DEFAULT_THINKING_LEVEL,
+	MAX_FIX_ROUNDS_LIMIT,
 	MAX_RESULT_LINES_LIMIT,
 	loadConfig,
 	normalizeConfig,
@@ -114,6 +116,16 @@ describe("normalizeConfig", () => {
 		expect(normalizeConfig({ maxSubagentDepth: 2.6 }).maxSubagentDepth).toBe(3);
 		expect(normalizeConfig({ maxSubagentDepth: 99 }).maxSubagentDepth).toBe(4);
 		expect(normalizeConfig({ maxSubagentDepth: "deep" }).maxSubagentDepth).toBe(DEFAULT_MAX_SUBAGENT_DEPTH);
+	});
+
+	it("defaults maxFixRounds to 2 and clamps to [0, 5]", () => {
+		expect(DEFAULT_MAX_FIX_ROUNDS).toBe(2);
+		expect(normalizeConfig({}).maxFixRounds).toBe(2);
+		expect(normalizeConfig({ maxFixRounds: 0 }).maxFixRounds).toBe(0);
+		expect(normalizeConfig({ maxFixRounds: 3 }).maxFixRounds).toBe(3);
+		expect(normalizeConfig({ maxFixRounds: 99 }).maxFixRounds).toBe(MAX_FIX_ROUNDS_LIMIT);
+		expect(normalizeConfig({ maxFixRounds: 2.6 }).maxFixRounds).toBe(3);
+		expect(normalizeConfig({ maxFixRounds: "many" }).maxFixRounds).toBe(DEFAULT_MAX_FIX_ROUNDS);
 	});
 });
 

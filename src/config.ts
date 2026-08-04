@@ -60,6 +60,14 @@ export const MAX_PARALLEL_TASKS_LIMIT = 32;
 export const DEFAULT_MAX_SUBAGENT_DEPTH = 1;
 /** Upper bound accepted for maxSubagentDepth (defensive clamp). */
 export const MAX_SUBAGENT_DEPTH_LIMIT = 4;
+/**
+ * How many automatic worker→reviewer fix rounds run when a reviewer returns
+ * REVIEW_FAIL before waking the main agent. 0 disables the auto-fix loop
+ * (the main agent is woken to dispatch fixes itself). Default: 2.
+ */
+export const DEFAULT_MAX_FIX_ROUNDS = 2;
+/** Upper bound accepted for maxFixRounds (defensive clamp). 0 disables the loop. */
+export const MAX_FIX_ROUNDS_LIMIT = 5;
 
 export interface SubagentsConfig {
 	/** Agent names that are discoverable and injected. Default: explore, worker, reviewer. */
@@ -91,6 +99,14 @@ export interface SubagentsConfig {
 	maxParallelTasks: number;
 	/** Depth at which the subagent tool is no longer registered. Default: 1. */
 	maxSubagentDepth: number;
+	/**
+	 * Auto-fix rounds when a reviewer returns REVIEW_FAIL: the extension dispatches
+	 * a worker (briefed with the review's concrete findings) then a reviewer
+	 * re-review, repeating up to this many times before waking the main agent with
+	 * the full chain. 0 disables it (the main agent handles fixes itself).
+	 * Default: 2.
+	 */
+	maxFixRounds: number;
 }
 
 export const DEFAULT_CONFIG: SubagentsConfig = {
@@ -105,6 +121,7 @@ export const DEFAULT_CONFIG: SubagentsConfig = {
 	maxConcurrency: DEFAULT_MAX_CONCURRENCY,
 	maxParallelTasks: DEFAULT_MAX_PARALLEL_TASKS,
 	maxSubagentDepth: DEFAULT_MAX_SUBAGENT_DEPTH,
+	maxFixRounds: DEFAULT_MAX_FIX_ROUNDS,
 };
 
 export function getConfigPath(agentDir: string = getAgentDir()): string {
@@ -151,6 +168,7 @@ export function normalizeConfig(raw: unknown): SubagentsConfig {
 		maxConcurrency: DEFAULT_CONFIG.maxConcurrency,
 		maxParallelTasks: DEFAULT_CONFIG.maxParallelTasks,
 		maxSubagentDepth: DEFAULT_CONFIG.maxSubagentDepth,
+		maxFixRounds: DEFAULT_CONFIG.maxFixRounds,
 	};
 
 	if (Array.isArray(raw.enabledAgents)) {
@@ -211,6 +229,11 @@ export function normalizeConfig(raw: unknown): SubagentsConfig {
 	// 0 is meaningful here (disables the tool), so clamp to [0, limit] instead.
 	if (typeof raw.maxSubagentDepth === "number" && Number.isFinite(raw.maxSubagentDepth)) {
 		config.maxSubagentDepth = Math.max(0, Math.min(MAX_SUBAGENT_DEPTH_LIMIT, Math.round(raw.maxSubagentDepth)));
+	}
+
+	// 0 disables the auto-fix loop (main agent handles fixes itself).
+	if (typeof raw.maxFixRounds === "number" && Number.isFinite(raw.maxFixRounds)) {
+		config.maxFixRounds = Math.max(0, Math.min(MAX_FIX_ROUNDS_LIMIT, Math.round(raw.maxFixRounds)));
 	}
 
 	return config;

@@ -36,6 +36,16 @@ export interface RunView {
 	startedAt?: number;
 	/** Epoch ms when the run finished (set on "done"/"failed"). */
 	endedAt?: number;
+	/** When set, this run belongs to an auto-fix chain (e.g. worker fixing a reviewer's findings). */
+	groupId?: string;
+	/** Human-readable role within a chain, e.g. "fix round 1" or "re-review round 1". */
+	relationLabel?: string;
+}
+
+/** Optional chain metadata for runs spawned by an auto-fix loop. */
+export interface RunChainMeta {
+	groupId?: string;
+	relationLabel?: string;
 }
 
 // ---------------------------------------------------------------------------
@@ -168,7 +178,7 @@ export class MonitorStore {
 		this.notify();
 	}
 
-	addRun(agent: string, task: string, model?: string, thinking?: string): number {
+	addRun(agent: string, task: string, model?: string, thinking?: string, meta?: RunChainMeta): number {
 		const id = this.nextId++;
 		this.runs.push({
 			id,
@@ -178,6 +188,8 @@ export class MonitorStore {
 			thinking,
 			status: "queued",
 			usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, cost: 0, contextTokens: 0, turns: 0 },
+			...(meta?.groupId ? { groupId: meta.groupId } : {}),
+			...(meta?.relationLabel ? { relationLabel: meta.relationLabel } : {}),
 		});
 		this.notify();
 		return id;
@@ -233,6 +245,7 @@ export class MonitorStore {
 	summarize(run: RunView): string {
 		const usage = formatUsageCompact(run.usage);
 		const parts = [run.agent];
+		if (run.relationLabel) parts.push(run.relationLabel);
 		if (run.model) parts.push(run.model);
 		if (run.thinking) parts.push(`thinking ${run.thinking}`);
 		if (usage) parts.push(usage);

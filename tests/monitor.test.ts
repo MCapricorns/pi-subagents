@@ -210,6 +210,26 @@ describe("MonitorStore.subscribe", () => {
 		const run = store.getRuns()[0];
 		expect(store.summarize(run)).not.toContain("thinking");
 	});
+
+	it("records chain metadata and surfaces the relationLabel in summarize", () => {
+		const store = new MonitorStore();
+		store.addRun("worker", "Fix the bug", undefined, undefined, {
+			groupId: "fix-1",
+			relationLabel: "fix round 1",
+		});
+		const run = store.getRuns()[0];
+		expect(run.groupId).toBe("fix-1");
+		expect(run.relationLabel).toBe("fix round 1");
+		expect(store.summarize(run)).toContain("fix round 1");
+	});
+
+	it("omits chain metadata when not provided", () => {
+		const store = new MonitorStore();
+		store.addRun("worker", "Fix the bug");
+		const run = store.getRuns()[0];
+		expect(run.groupId).toBeUndefined();
+		expect(run.relationLabel).toBeUndefined();
+	});
 });
 
 describe("status labels and timing", () => {

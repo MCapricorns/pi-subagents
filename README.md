@@ -145,7 +145,8 @@ agent's default — its frontmatter `thinking`, else the global default). The gl
   "agentScope": "user",
   "maxConcurrency": 4,
   "maxParallelTasks": 8,
-  "maxSubagentDepth": 1
+  "maxSubagentDepth": 1,
+  "maxFixRounds": 2
 }
 ```
 
@@ -162,6 +163,7 @@ agent's default — its frontmatter `thinking`, else the global default). The gl
 | `maxConcurrency` | How many sub-agent processes run at once (1–16, default 4). Extra work waits in the queue. |
 | `maxParallelTasks` | Maximum tasks accepted by one parallel `subagent` call (1–32, default 8). |
 | `maxSubagentDepth` | Depth at which the `subagent` tool is no longer registered (default 1: the main session delegates, children are leaf processes). `0` disables the tool entirely. Read once at extension load. |
+| `maxFixRounds` | Auto-fix rounds when a reviewer returns `REVIEW_FAIL`: the extension dispatches a `worker` (briefed with the review's concrete findings) then a `reviewer` re-review, repeating up to this many times before waking the main agent with the full chain. `0` disables it (the main agent handles fixes itself). Default 2. The reviewer stays read-only and in its own context; the loop is orchestrated by the extension, not by the reviewer. |
 
 ### Configuration migration
 

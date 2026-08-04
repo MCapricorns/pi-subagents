@@ -34,6 +34,7 @@ import {
 	getFinalOutput,
 	getResultOutput,
 	isFailedResult,
+	reviewVerdict,
 	runSingleAgent,
 	truncateResultOutput,
 	writeResultArtifact,
@@ -42,7 +43,8 @@ import {
 	type SubagentLiveEvent,
 	type UsageStats,
 } from "./spawn.ts";
-import { formatTaskSummary, formatToolActivity, monitor, statusColor, statusIcon, statusLabel } from "./monitor.ts";
+import { buildFixTaskBrief, buildReReviewBrief, shouldTriggerFixLoop } from "./fixloop.ts";
+import { formatTaskSummary, formatToolActivity, monitor, statusColor, statusIcon, statusLabel, type RunChainMeta } from "./monitor.ts";
 
 const NON_BLANK_TASK_OPTIONS = { minLength: 1, pattern: "\\S" } as const;
 
@@ -333,6 +335,95 @@ export default function (pi: ExtensionAPI): void {
 				};
 			}
 
+			/**
+			 * Dispatch one agent inside an auto-fix chain: tracked in the widget with a
+			 * groupId/relationLabel, but NOT delivered through the completion flow — the
+			 * chain owner assembles and delivers the whole group at the end.
+			 */
+			const launchInLoop = async (
+				agentName: string,
+				task: string,
+				signal: AbortSignal,
+				meta: RunChainMeta,
+			): Promise<SingleResult> => {
+				const agent = agents.find((candidate) => candidate.name === agentName);
+				if (!agent) return failedStartResult(agentName, task, `Unknown agent: "${agentName}".`);
+				const thinkingLevel = config.agentThinkingLevels[agent.name] ?? agent.thinking ?? config.thinkingLevel;
+				const runId = monitor.addRun(agent.name, task, agent.model, thinkingLevel, meta);
+				const onLive = makeLiveHandler(runId);
+				try {
+					const result = await runSingleAgent({
+						defaultCwd: ctx.cwd,
+						agent,
+						agentName,
+						task,
+						thinkingLevel,
+						signal,
+						onLive,
+						makeDetails: makeDetails("single", true),
+					});
+					finishRun(runId, isFailedResult(result) ? "failed" : "done");
+					return result;
+				} catch (error) {
+					finishRun(runId, "failed");
+					const errorMessage = error instanceof Error ? error.message : String(error);
+					return {
+						...queuedResult(agent, task, thinkingLevel),
+						exitCode: 1,
+						stderr: errorMessage,
+						stopReason: signal.aborted ? "aborted" : "error",
+						errorMessage,
+					};
+				}
+			};
+
+			/**
+			 * Run the auto-fix chain in the background: worker (briefed with the review's
+			 * findings) → reviewer re-review, up to maxFixRounds times. The main agent is
+			 * not woken mid-loop; the full chain is delivered as one group at the end.
+			 * Failures short-circuit: a crashed worker skips its re-review and delivers.
+			 */
+			const startFixLoop = (initialReviewerResult: SingleResult, parentGroupId: string): void => {
+				backgroundQueue.enqueue(
+					async (signal) => {
+						const chain: SingleResult[] = [initialReviewerResult];
+						let lastReviewer = initialReviewerResult;
+						for (let round = 1; round <= config.maxFixRounds; round++) {
+							if (!sessionActive) break;
+							const fixBrief = buildFixTaskBrief(lastReviewer, round, config.maxFixRounds);
+							const workerResult = await launchInLoop("worker", fixBrief, signal, {
+								groupId: parentGroupId,
+								relationLabel: `fix round ${round}`,
+							});
+							chain.push(workerResult);
+							if (!sessionActive || isFailedResult(workerResult)) break;
+							const reReviewBrief = buildReReviewBrief(lastReviewer, round);
+							const reviewResult = await launchInLoop("reviewer", reReviewBrief, signal, {
+								groupId: parentGroupId,
+								relationLabel: `re-review round ${round}`,
+							});
+							chain.push(reviewResult);
+							lastReviewer = reviewResult;
+							if (!sessionActive) break;
+							if (reviewVerdict(getResultOutput(reviewResult)) === "pass") break;
+						}
+						if (!sessionActive) return;
+						// Deliver the whole chain as one group; the loop's outcome always wakes
+						// the main agent (a passing chain reports success, a stuck one needs a human).
+						const items: CompletionMessageItem[] = chain.map((r) => ({
+							agent: r.agent,
+							block: formatCompletionBlock(r, config.maxResultLines),
+							triggerTurn: true,
+						}));
+						sendCompletionGroup(items);
+						completionBatcher.flush();
+					},
+					() => {
+						// Cancelled: each in-flight run was already finished by its launchInLoop path.
+					},
+				);
+			};
+
 			const startBackground = (agentName: string, task: string, cwd?: string): SingleResult => {
 				const agent = agents.find((candidate) => candidate.name === agentName);
 				if (!agent) return failedStartResult(agentName, task, `Unknown agent: "${agentName}".`);
@@ -371,6 +462,15 @@ export default function (pi: ExtensionAPI): void {
 						}
 
 						if (!sessionActive) return;
+						// Auto-fix loop: a REVIEW_FAIL from a main-agent-dispatched reviewer
+						// triggers a worker→reviewer chain (up to maxFixRounds) without waking
+						// the main agent. Loop-internal re-reviews never reach here (they are
+						// awaited inside launchInLoop); the initial review is delivered with
+						// the chain at the end.
+						if (shouldTriggerFixLoop(result, config)) {
+							startFixLoop(result, `fix-${runId}`);
+							return;
+						}
 						const failed = isFailedResult(result);
 						const completion: CompletionMessageItem = {
 							agent: result.agent,
@@ -518,7 +618,10 @@ export default function (pi: ExtensionAPI): void {
 						for (const r of runs) {
 							const icon = statusIcon(r.status, theme);
 							const label = theme.fg(statusColor(r.status), statusLabel(r.status));
-							lines.push(truncateToWidth(` ${icon} ${monitor.summarize(r)} · ${label}`, width, ""));
+							// Chain-internal runs (auto-fix worker/reviewer) indent under their
+							// parent reviewer; summarize() already carries the relationLabel.
+							const head = r.groupId ? theme.fg("dim", "  ↳ ") : " ";
+							lines.push(truncateToWidth(`${head}${icon} ${monitor.summarize(r)} · ${label}`, width, ""));
 							if (r.status === "queued" || r.status === "running") {
 								lines.push(truncateToWidth(theme.fg("dim", `     task: ${formatTaskSummary(r.task)}`), width, ""));
 							}

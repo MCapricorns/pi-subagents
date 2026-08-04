@@ -15,6 +15,7 @@ import {
 	DEFAULT_CONFIG,
 	DEFAULT_ENABLED_AGENTS,
 	DEFAULT_MAX_CONCURRENCY,
+	DEFAULT_MAX_FIX_ROUNDS,
 	DEFAULT_MAX_PARALLEL_TASKS,
 	THINKING_LEVEL_VALUES,
 	type AgentScope,
@@ -196,6 +197,8 @@ async function pickInjection(ctx: ExtensionCommandContext, current: boolean): Pr
 /** Preset steps offered for the two numeric limits (selection-only wizard). */
 const CONCURRENCY_STEPS = [1, 2, 3, 4, 6, 8, 12, 16];
 const PARALLEL_TASK_STEPS = [2, 4, 6, 8, 12, 16, 24, 32];
+/** Preset rounds offered for the auto-fix loop (0 disables it). */
+const FIX_ROUNDS_STEPS = [0, 1, 2, 3, 5];
 
 async function pickCount(
 	ctx: ExtensionCommandContext,
@@ -295,9 +298,18 @@ async function runFullSetup(ctx: ExtensionCommandContext, configPath: string, ba
 		base.maxParallelTasks,
 		DEFAULT_MAX_PARALLEL_TASKS,
 	);
-	if (maxParallelTasks === undefined) return notifyCancelled(ctx);
+		if (maxParallelTasks === undefined) return notifyCancelled(ctx);
 
-	const next: SubagentsConfig = {
+		const maxFixRounds = await pickCount(
+			ctx,
+			"Auto-fix rounds when a reviewer returns REQUEST_CHANGES? (0 = main agent handles fixes)",
+			FIX_ROUNDS_STEPS,
+			base.maxFixRounds,
+			DEFAULT_MAX_FIX_ROUNDS,
+		);
+		if (maxFixRounds === undefined) return notifyCancelled(ctx);
+
+		const next: SubagentsConfig = {
 		enabledAgents: enabled,
 		agentModels: repairStaleModels(ctx, picked.models),
 		agentThinkingLevels: picked.strengths,
@@ -309,6 +321,7 @@ async function runFullSetup(ctx: ExtensionCommandContext, configPath: string, ba
 		maxConcurrency,
 		maxParallelTasks,
 		maxSubagentDepth: base.maxSubagentDepth,
+		maxFixRounds,
 	};
 	await saveConfig(next, configPath);
 	ctx.ui.notify(`pi-subagents configured. Saved to ${configPath}`, "info");
@@ -323,6 +336,7 @@ async function runMenu(ctx: ExtensionCommandContext, configPath: string, config:
 		"Change agent scope",
 		"Change max concurrent sub-agents",
 		"Change max parallel tasks",
+		"Change max fix rounds",
 		"Full re-setup",
 	]);
 	if (choice === undefined) return notifyCancelled(ctx);
@@ -384,6 +398,16 @@ async function runMenu(ctx: ExtensionCommandContext, configPath: string, config:
 		);
 		if (maxParallelTasks === undefined) return notifyCancelled(ctx);
 		next.maxParallelTasks = maxParallelTasks;
+	} else if (choice.startsWith("Change max fix")) {
+		const maxFixRounds = await pickCount(
+			ctx,
+			"Auto-fix rounds when a reviewer returns REQUEST_CHANGES? (0 = main agent handles fixes)",
+			FIX_ROUNDS_STEPS,
+			config.maxFixRounds,
+			DEFAULT_MAX_FIX_ROUNDS,
+		);
+		if (maxFixRounds === undefined) return notifyCancelled(ctx);
+		next.maxFixRounds = maxFixRounds;
 	}
 
 	await saveConfig(next, configPath);
