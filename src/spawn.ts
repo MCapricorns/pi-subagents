@@ -21,8 +21,8 @@ import type { AgentConfig, AgentSource } from "./agents.ts";
 import { DEFAULT_THINKING_LEVEL, type ThinkingLevel } from "./config.ts";
 
 /**
- * Limits are configurable: see maxConcurrency / maxSubagentDepth in config.ts
- * (defaults 4 / 1, via /subagents-setup or pi-subagents.json).
+ * Limits are configurable: see maxConcurrency in config.ts (default 4, via
+ * /subagents-setup or pi-subagents.json).
  */
 /** Default thinking level for sub-agents. pi clamps it to the resolved model's support. */
 export const SUBAGENT_THINKING_LEVEL: ThinkingLevel = DEFAULT_THINKING_LEVEL;

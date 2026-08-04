@@ -7,7 +7,6 @@ import {
 	DEFAULT_MAX_CONCURRENCY,
 	DEFAULT_MAX_FIX_ROUNDS,
 	DEFAULT_MAX_RESULT_LINES,
-	DEFAULT_MAX_SUBAGENT_DEPTH,
 	DEFAULT_THINKING_LEVEL,
 	MAX_CONCURRENCY_LIMIT,
 	MAX_FIX_ROUNDS_LIMIT,
@@ -27,7 +26,6 @@ describe("normalizeConfig", () => {
 		expect(config.thinkingLevel).toBe(DEFAULT_THINKING_LEVEL);
 		expect(config.notifyOnReviewPass).toBe(false);
 		expect(config.maxConcurrency).toBe(DEFAULT_MAX_CONCURRENCY);
-		expect(config.maxSubagentDepth).toBe(DEFAULT_MAX_SUBAGENT_DEPTH);
 	});
 
 	it("keeps valid enabledAgents and drops non-strings", () => {
@@ -122,13 +120,6 @@ describe("normalizeConfig", () => {
 		expect(invalid.maxConcurrency).toBe(3);
 	});
 
-	it("accepts maxSubagentDepth including 0 (tool disabled)", () => {
-		expect(normalizeConfig({ maxSubagentDepth: 0 }).maxSubagentDepth).toBe(0);
-		expect(normalizeConfig({ maxSubagentDepth: 2.6 }).maxSubagentDepth).toBe(3);
-		expect(normalizeConfig({ maxSubagentDepth: 99 }).maxSubagentDepth).toBe(4);
-		expect(normalizeConfig({ maxSubagentDepth: "deep" }).maxSubagentDepth).toBe(DEFAULT_MAX_SUBAGENT_DEPTH);
-	});
-
 	it("defaults maxFixRounds to 2 and clamps to [0, 5]", () => {
 		expect(DEFAULT_MAX_FIX_ROUNDS).toBe(2);
 		expect(normalizeConfig({}).maxFixRounds).toBe(2);
@@ -164,13 +155,11 @@ describe("loadConfig", () => {
 
 		const config = await loadConfig(path);
 		expect(config.maxConcurrency).toBe(DEFAULT_MAX_CONCURRENCY);
-		expect(config.maxSubagentDepth).toBe(DEFAULT_MAX_SUBAGENT_DEPTH);
 
 		const saved = JSON.parse(readFileSync(path, "utf8"));
 		expect(saved.enabledAgents).toEqual(["explore"]);
 		expect(saved.thinkingLevel).toBe("high");
 		expect(saved.maxConcurrency).toBe(DEFAULT_MAX_CONCURRENCY);
-		expect(saved.maxSubagentDepth).toBe(DEFAULT_MAX_SUBAGENT_DEPTH);
 	});
 
 	it("cleans removed agents out of an old config and saves the result", async () => {

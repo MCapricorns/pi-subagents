@@ -331,7 +331,6 @@ agent's default — its frontmatter `thinking`, else the global default). The gl
   "proactiveInjection": true,
   "agentScope": "user",
   "maxConcurrency": 4,
-  "maxSubagentDepth": 1,
   "maxFixRounds": 2
 }
 ```
@@ -347,7 +346,6 @@ agent's default — its frontmatter `thinking`, else the global default). The gl
 | `proactiveInjection` | Whether to add the delegation directive to the main system prompt. |
 | `agentScope` | `user`, `project`, or `both`; controls which user/project agent directories are discovered. |
 | `maxConcurrency` | Max sub-agent processes running at once (1–16, default 4), and the max tasks one parallel `subagent` call accepts. Extra work waits in the queue. |
-| `maxSubagentDepth` | Depth at which the `subagent` tool is no longer registered (default 1: the main session delegates, children are leaf processes). `0` disables the tool entirely. Read once at extension load. |
 | `maxFixRounds` | Auto-fix rounds when a reviewer returns `REVIEW_FAIL`: the extension dispatches a `worker` (briefed with the review's concrete findings) then a `reviewer` re-review, repeating up to this many times before waking the main agent with the full chain. `0` disables it (the main agent handles fixes itself). Default 2. The reviewer stays read-only and in its own context; the loop is orchestrated by the extension, not by the reviewer. |
 
 ### Configuration migration
@@ -360,6 +358,9 @@ The config file migrates itself on load — no manual steps after an upgrade:
   from `enabledAgents`, `agentModels`, and `agentThinkingLevels` automatically.
 - **Merged limits** — the pre-0.13 `maxParallelTasks` key is folded into `maxConcurrency`
   (the larger of the two wins) and dropped on the next save.
+- **Removed keys** — `maxSubagentDepth` (0.14) is dropped on load: sub-agent children are
+  always leaf processes (the `subagent` tool is excluded from their toolset, with a depth
+  marker as defense in depth). To disable delegation entirely, use `"enabledAgents": []`.
 
 Model selection uses this precedence:
 

@@ -308,7 +308,6 @@ async function runFullSetup(ctx: ExtensionCommandContext, configPath: string, ba
 		proactiveInjection: injection,
 		agentScope: scope,
 		maxConcurrency,
-		maxSubagentDepth: base.maxSubagentDepth,
 		maxFixRounds,
 	};
 	await saveConfig(next, configPath);

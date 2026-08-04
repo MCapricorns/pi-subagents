@@ -50,13 +50,6 @@ export const DEFAULT_MAX_CONCURRENCY = 4;
 /** Upper bound accepted for maxConcurrency (defensive clamp). */
 export const MAX_CONCURRENCY_LIMIT = 16;
 /**
- * Depth at which the subagent tool stops being available. 1 = the main session
- * delegates and child processes are leaves; 0 disables the tool entirely.
- */
-export const DEFAULT_MAX_SUBAGENT_DEPTH = 1;
-/** Upper bound accepted for maxSubagentDepth (defensive clamp). */
-export const MAX_SUBAGENT_DEPTH_LIMIT = 4;
-/**
  * How many automatic worker→reviewer fix rounds run when a reviewer returns
  * REVIEW_FAIL before waking the main agent. 0 disables the auto-fix loop
  * (the main agent is woken to dispatch fixes itself). Default: 2.
@@ -89,13 +82,9 @@ export interface SubagentsConfig {
 	proactiveInjection: boolean;
 	/** Which agent directories to discover from. Default: "user". */
 	agentScope: AgentScope;
-	/**
-	 * Max sub-agent processes running at once (extra work queues) and the max tasks
-	 * one parallel `subagent` call may contain. Default: 4.
-	 */
+	/** Max sub-agent processes running at once (extra work queues) and the max tasks
+	 * one parallel `subagent` call may contain. Default: 4. */
 	maxConcurrency: number;
-	/** Depth at which the subagent tool is no longer registered. Default: 1. */
-	maxSubagentDepth: number;
 	/**
 	 * Auto-fix rounds when a reviewer returns REVIEW_FAIL: the extension dispatches
 	 * a worker (briefed with the review's concrete findings) then a reviewer
@@ -116,7 +105,6 @@ export const DEFAULT_CONFIG: SubagentsConfig = {
 	proactiveInjection: true,
 	agentScope: "user",
 	maxConcurrency: DEFAULT_MAX_CONCURRENCY,
-	maxSubagentDepth: DEFAULT_MAX_SUBAGENT_DEPTH,
 	maxFixRounds: DEFAULT_MAX_FIX_ROUNDS,
 };
 
@@ -162,7 +150,6 @@ export function normalizeConfig(raw: unknown): SubagentsConfig {
 		proactiveInjection: DEFAULT_CONFIG.proactiveInjection,
 		agentScope: DEFAULT_CONFIG.agentScope,
 		maxConcurrency: DEFAULT_CONFIG.maxConcurrency,
-		maxSubagentDepth: DEFAULT_CONFIG.maxSubagentDepth,
 		maxFixRounds: DEFAULT_CONFIG.maxFixRounds,
 	};
 
@@ -224,11 +211,6 @@ export function normalizeConfig(raw: unknown): SubagentsConfig {
 	const legacyParallelTasks = clampCount(raw.maxParallelTasks, MAX_CONCURRENCY_LIMIT);
 	if (legacyParallelTasks !== undefined && legacyParallelTasks > config.maxConcurrency) {
 		config.maxConcurrency = legacyParallelTasks;
-	}
-
-	// 0 is meaningful here (disables the tool), so clamp to [0, limit] instead.
-	if (typeof raw.maxSubagentDepth === "number" && Number.isFinite(raw.maxSubagentDepth)) {
-		config.maxSubagentDepth = Math.max(0, Math.min(MAX_SUBAGENT_DEPTH_LIMIT, Math.round(raw.maxSubagentDepth)));
 	}
 
 	// 0 disables the auto-fix loop (main agent handles fixes itself).

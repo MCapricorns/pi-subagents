@@ -167,17 +167,15 @@ export default function (pi: ExtensionAPI): void {
 	};
 	const completionBatcher = createCompletionBatcher<CompletionMessageItem>({ emit: sendCompletionGroup });
 
-	// Recursion guard: sub-agents at the configured depth are leaf processes and
-	// cannot delegate again. maxSubagentDepth 0 disables the tool entirely.
-	if (currentSubagentDepth() >= initialConfig.maxSubagentDepth) {
-		const reason =
-			initialConfig.maxSubagentDepth === 0
-				? "disabled by maxSubagentDepth 0 in pi-subagents.json"
-				: "disabled in nested sub-agent processes";
+	// Recursion guard: sub-agent children are leaf processes. The `subagent` tool is
+	// excluded from their toolset at spawn (--exclude-tools); this check is defense
+	// in depth so a child can never expose the tool back to its model, even if
+	// another extension ignores the depth marker.
+	if (currentSubagentDepth() >= 1) {
 		pi.registerCommand("subagents-setup", {
-			description: `Configure pi-subagents (${reason})`,
+			description: "Configure pi-subagents (unavailable in nested sub-agent processes)",
 			handler: async (_args, ctx) => {
-				ctx.ui.notify(`pi-subagents setup is unavailable here (${reason}).`, "warning");
+				ctx.ui.notify("pi-subagents setup is unavailable in nested sub-agent processes.", "warning");
 			},
 		});
 		return;
