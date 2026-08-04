@@ -23,6 +23,10 @@ agent, and keep the workflow moving without manual polling.
   elapsed time; completion also produces a concise notification.
 - **Per-agent configuration** — enable agents, pick model and thinking strength per agent,
   tune concurrency limits, and choose discovery scope from `/subagents-setup`.
+- **Automatic model fallback** — if an agent's model fails at the provider level before
+  producing any output, the run is retried once with the main window's current model.
+  Per-run only, never persisted: a transient provider hiccup does not silently downgrade
+  the configured model.
 - **Leaf processes** — child agents cannot access the `subagent` tool, so delegation cannot
   recurse.
 
