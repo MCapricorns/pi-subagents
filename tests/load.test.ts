@@ -37,13 +37,13 @@ function makeStub(): StubPi {
 	return stub;
 }
 
-function executionContext(): any {
+function executionContext(overrides: { uiNotify?: ReturnType<typeof vi.fn> } = {}): any {
 	return {
 		cwd: process.cwd(),
 		model: undefined,
 		scopedModels: [],
 		modelRegistry: { getAvailable: () => [] },
-		ui: { notify: vi.fn() },
+		ui: { notify: overrides.uiNotify ?? vi.fn() },
 	};
 }
 
@@ -494,6 +494,215 @@ process.stdin.on("end", () => {
 			rmSync(artifactPath!, { force: true });
 		} finally {
 			controller.abort();
+			await stub.hooks["session_shutdown"]?.({}, {});
+			for (const run of [...monitor.getRuns()]) monitor.removeRun(run.id);
+			process.argv[1] = previousScript;
+			if (childDir) rmSync(childDir, { recursive: true, force: true });
+		}
+	});
+});
+
+describe("auto-fix loop dispatch", () => {
+	it("intercepts a REVIEW_FAIL reviewer, runs the worker→re-review chain, and delivers it as one group", async () => {
+		vi.useFakeTimers();
+		vi.setSystemTime(0);
+		const stub = makeStub();
+		const uiNotify = vi.fn();
+		const capturedTasks: BackgroundTask[] = [];
+		const controllers: AbortController[] = [];
+		vi.spyOn(BackgroundTaskQueue.prototype, "enqueue").mockImplementation((task) => {
+			capturedTasks.push(task);
+			const controller = new AbortController();
+			controllers.push(controller);
+			return controller;
+		});
+
+		let childDir: string | undefined;
+		const previousScript = process.argv[1];
+		try {
+			childDir = mkdtempSync(join(tmpdir(), "pi-subagents-chain-child-"));
+			const childScript = join(childDir, "fake-pi-child.mjs");
+			writeFileSync(
+				childScript,
+				`let input = "";
+process.stdin.setEncoding("utf8");
+process.stdin.on("data", (chunk) => input += chunk);
+process.stdin.on("end", () => {
+	let text = "REQUEST_CHANGES\\nVERDICT: REVIEW_FAIL";
+	if (input.includes("Auto-fix round")) text = "all blockers fixed";
+	else if (input.includes("Re-review after auto-fix round")) text = "APPROVE\\nVERDICT: REVIEW_PASS";
+	process.stdout.write(JSON.stringify({
+		type: "message_end",
+		message: { role: "assistant", content: [{ type: "text", text }], stopReason: "stop" }
+	}) + "\\n");
+});
+`,
+				"utf8",
+			);
+			process.argv[1] = childScript;
+
+			register(stub.api);
+			const tool = stub.tools.find((candidate) => candidate.name === "subagent");
+			await tool.execute(
+				"call-chain",
+				{ agent: "reviewer", task: "Review the change" },
+				new AbortController().signal,
+				() => {},
+				executionContext({ uiNotify }),
+			);
+
+			expect(capturedTasks).toHaveLength(1);
+			await capturedTasks[0](controllers[0].signal);
+
+			// The chain task was enqueued by the initial review's completion; the
+			// review itself is NOT delivered or notified yet.
+			expect(capturedTasks).toHaveLength(2);
+			expect(stub.messages).toHaveLength(0);
+			expect(uiNotify).not.toHaveBeenCalled();
+			const parent = monitor.getRuns().find((run) => run.annotation === "auto-fix chain running");
+			expect(parent).toBeDefined();
+			expect(parent?.agent).toBe("reviewer");
+
+			await capturedTasks[1](controllers[1].signal);
+
+			expect(stub.messages).toHaveLength(1);
+			const content = stub.messages[0].message.content as string;
+			expect(content).toContain("### [reviewer] completed");
+			expect(content).toContain("### [worker] completed");
+			expect(content).toContain("Task: Review the change");
+			expect(content).toContain("Task: Auto-fix round 1 of 2");
+			expect(content).toContain("Task: Re-review after auto-fix round 1");
+			expect(stub.messages[0].options).toEqual({ deliverAs: "followUp", triggerTurn: true });
+			// Chain-internal runs notify individually; the parent row is dropped.
+			expect(uiNotify).toHaveBeenCalledTimes(2);
+			expect(monitor.getRuns().find((run) => run.annotation)).toBeUndefined();
+		} finally {
+			for (const controller of controllers) controller.abort();
+			await stub.hooks["session_shutdown"]?.({}, {});
+			for (const run of [...monitor.getRuns()]) monitor.removeRun(run.id);
+			process.argv[1] = previousScript;
+			if (childDir) rmSync(childDir, { recursive: true, force: true });
+		}
+	});
+
+	it("stops the chain when a re-review fails, without starting another fix round", async () => {
+		vi.useFakeTimers();
+		vi.setSystemTime(0);
+		const stub = makeStub();
+		const capturedTasks: BackgroundTask[] = [];
+		const controllers: AbortController[] = [];
+		vi.spyOn(BackgroundTaskQueue.prototype, "enqueue").mockImplementation((task) => {
+			capturedTasks.push(task);
+			const controller = new AbortController();
+			controllers.push(controller);
+			return controller;
+		});
+
+		let childDir: string | undefined;
+		const previousScript = process.argv[1];
+		try {
+			childDir = mkdtempSync(join(tmpdir(), "pi-subagents-chain-fail-child-"));
+			const childScript = join(childDir, "fake-pi-child.mjs");
+			writeFileSync(
+				childScript,
+				`let input = "";
+process.stdin.setEncoding("utf8");
+process.stdin.on("data", (chunk) => input += chunk);
+process.stdin.on("end", () => {
+	if (input.includes("Auto-fix round")) {
+		process.stdout.write(JSON.stringify({ type: "message_end", message: { role: "assistant", content: [{ type: "text", text: "fixed" }], stopReason: "stop" } }) + "\\n");
+	} else if (input.includes("Re-review after auto-fix round")) {
+		process.stdout.write(JSON.stringify({ type: "message_end", message: { role: "assistant", content: [{ type: "text", text: "crashed mid-review" }], stopReason: "error" } }) + "\\n");
+		process.exitCode = 1;
+	} else {
+		process.stdout.write(JSON.stringify({ type: "message_end", message: { role: "assistant", content: [{ type: "text", text: "REQUEST_CHANGES\\nVERDICT: REVIEW_FAIL" }], stopReason: "stop" } }) + "\\n");
+	}
+});
+`,
+				"utf8",
+			);
+			process.argv[1] = childScript;
+
+			register(stub.api);
+			const tool = stub.tools.find((candidate) => candidate.name === "subagent");
+			await tool.execute(
+				"call-chain-fail",
+				{ agent: "reviewer", task: "Review the change" },
+				new AbortController().signal,
+				() => {},
+				executionContext(),
+			);
+
+			await capturedTasks[0](controllers[0].signal);
+			expect(capturedTasks).toHaveLength(2);
+			await capturedTasks[1](controllers[1].signal);
+
+			expect(stub.messages).toHaveLength(1);
+			const content = stub.messages[0].message.content as string;
+			expect(content).toContain("### [reviewer] failed");
+			expect(content).toContain("Task: Auto-fix round 1 of 2");
+			// No second fix round: the crashed re-review ends the chain.
+			expect(content).not.toContain("Auto-fix round 2");
+			expect(monitor.getRuns().find((run) => run.annotation)).toBeUndefined();
+		} finally {
+			for (const controller of controllers) controller.abort();
+			await stub.hooks["session_shutdown"]?.({}, {});
+			for (const run of [...monitor.getRuns()]) monitor.removeRun(run.id);
+			process.argv[1] = previousScript;
+			if (childDir) rmSync(childDir, { recursive: true, force: true });
+		}
+	});
+
+	it("delivers a REVIEW_FAIL review directly when maxFixRounds is 0", async () => {
+		vi.useFakeTimers();
+		vi.setSystemTime(0);
+		if (!testAgentDir) throw new Error("test agent directory was not initialized");
+		writeFileSync(join(testAgentDir, "pi-subagents.json"), JSON.stringify({ maxFixRounds: 0 }), "utf8");
+		const stub = makeStub();
+		const capturedTasks: BackgroundTask[] = [];
+		const controllers: AbortController[] = [];
+		vi.spyOn(BackgroundTaskQueue.prototype, "enqueue").mockImplementation((task) => {
+			capturedTasks.push(task);
+			const controller = new AbortController();
+			controllers.push(controller);
+			return controller;
+		});
+
+		let childDir: string | undefined;
+		const previousScript = process.argv[1];
+		try {
+			childDir = mkdtempSync(join(tmpdir(), "pi-subagents-no-loop-child-"));
+			const childScript = join(childDir, "fake-pi-child.mjs");
+			writeFileSync(
+				childScript,
+				`process.stdin.resume();
+process.stdin.on("end", () => {
+	process.stdout.write(JSON.stringify({ type: "message_end", message: { role: "assistant", content: [{ type: "text", text: "REQUEST_CHANGES\\nVERDICT: REVIEW_FAIL" }], stopReason: "stop" } }) + "\\n");
+});
+`,
+				"utf8",
+			);
+			process.argv[1] = childScript;
+
+			register(stub.api);
+			const tool = stub.tools.find((candidate) => candidate.name === "subagent");
+			await tool.execute(
+				"call-no-loop",
+				{ agent: "reviewer", task: "Review the change" },
+				new AbortController().signal,
+				() => {},
+				executionContext(),
+			);
+
+			await capturedTasks[0](controllers[0].signal);
+			// Only the review task was enqueued — no chain task.
+			expect(capturedTasks).toHaveLength(1);
+			vi.advanceTimersByTime(150);
+			expect(stub.messages).toHaveLength(1);
+			expect(stub.messages[0].message.content).toContain("### [reviewer] completed");
+			expect(monitor.getRuns().find((run) => run.annotation)).toBeUndefined();
+		} finally {
+			for (const controller of controllers) controller.abort();
 			await stub.hooks["session_shutdown"]?.({}, {});
 			for (const run of [...monitor.getRuns()]) monitor.removeRun(run.id);
 			process.argv[1] = previousScript;

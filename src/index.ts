@@ -243,22 +243,34 @@ export default function (pi: ExtensionAPI): void {
 
 			// Finished runs leave the widget immediately. Their final findings are sent
 			// back as a custom message that automatically starts a follow-up turn.
-			const finishRun = (runId: number, status: "done" | "failed"): void => {
+			const finishRun = (
+				runId: number,
+				status: "done" | "failed",
+				opts?: { silent?: boolean; retain?: boolean },
+			): void => {
 				monitor.setStatus(runId, status); // stamps endedAt for the elapsed time
-				const run = monitor.removeRun(runId);
+				const run = opts?.retain ? monitor.findRun(runId) : monitor.removeRun(runId);
 				if (!run) return; // already finished — stay idempotent
-				if (!sessionActive) return;
+				if (opts?.silent || !sessionActive) return;
 				const icon = status === "done" ? "✓" : "✗";
 				ctx.ui.notify(`${icon} ${monitor.summarize(run)}`, status === "done" ? "info" : "error");
 			};
 
 			// Live sub-agent activity → concise one-line status ("thinking",
-			// "read src/index.ts", ...), never a raw args blob.
-			const makeLiveHandler = (runId: number) => (e: SubagentLiveEvent): void => {
+			// "read src/index.ts", ...), never a raw args blob. Reviewer runs started
+			// by the main agent defer finishing so the queue task can decide between
+			// delivering the review and starting an auto-fix chain: a triggered chain
+			// keeps the parent row in the widget (annotated) until it completes and
+			// suppresses the premature "done" notification.
+			const makeLiveHandler = (runId: number, deferFinish = false) => (e: SubagentLiveEvent): void => {
 				switch (e.kind) {
 					case "status":
-						if (e.status === "done" || e.status === "failed") finishRun(runId, e.status);
-						else monitor.setStatus(runId, e.status);
+						if (e.status === "done" || e.status === "failed") {
+							// Deferred runs only update the widget; the queue task finishes
+							// them once it knows whether an auto-fix chain will follow.
+							if (deferFinish) monitor.setStatus(runId, e.status);
+							else finishRun(runId, e.status);
+						} else monitor.setStatus(runId, e.status);
 						break;
 					case "usage":
 						monitor.setUsage(runId, e.usage, e.model);
@@ -386,8 +398,10 @@ export default function (pi: ExtensionAPI): void {
 			 * findings) → reviewer re-review, up to maxFixRounds times. The main agent is
 			 * not woken mid-loop; the full chain is delivered as one group at the end.
 			 * Failures short-circuit: a crashed worker skips its re-review and delivers.
+			 * The triggering reviewer's run stays visible in the widget (annotated) until
+			 * the chain resolves, so the ↳ rows have an obvious parent.
 			 */
-			const startFixLoop = (initialReviewerResult: SingleResult, parentGroupId: string): void => {
+			const startFixLoop = (initialReviewerResult: SingleResult, parentGroupId: string, parentRunId: number): void => {
 				backgroundQueue.enqueue(
 					async (signal) => {
 						const chain: SingleResult[] = [initialReviewerResult];
@@ -408,12 +422,18 @@ export default function (pi: ExtensionAPI): void {
 							});
 							chain.push(reviewResult);
 							lastReviewer = reviewResult;
-							if (!sessionActive) break;
+							// A crashed re-review must stop the chain like a crashed worker: its
+							// output (if any) is not a verdict, and feeding it to the next fix
+							// round would brief the worker from garbage.
+							if (!sessionActive || isFailedResult(reviewResult)) break;
 							if (reviewVerdict(getResultOutput(reviewResult)) === "pass") break;
 						}
+						// The chain is done (success, exhaustion, or abort): drop the retained
+						// parent row, then deliver the whole chain as one group. The loop's
+						// outcome always wakes the main agent (a passing chain reports
+						// success, a stuck one needs a human).
+						monitor.removeRun(parentRunId);
 						if (!sessionActive) return;
-						// Deliver the whole chain as one group; the loop's outcome always wakes
-						// the main agent (a passing chain reports success, a stuck one needs a human).
 						const items: CompletionMessageItem[] = chain.map((r) => ({
 							agent: r.agent,
 							block: formatCompletionBlock(r, config.maxResultLines),
@@ -423,7 +443,9 @@ export default function (pi: ExtensionAPI): void {
 						completionBatcher.flush();
 					},
 					() => {
-						// Cancelled: each in-flight run was already finished by its launchInLoop path.
+						// Cancelled before delivery: clean up the retained parent row (each
+						// in-flight chain run was already finished by its launchInLoop path).
+						monitor.removeRun(parentRunId);
 					},
 				);
 			};
@@ -436,7 +458,9 @@ export default function (pi: ExtensionAPI): void {
 				const thinkingLevel = config.agentThinkingLevels[agent.name] ?? agent.thinking ?? config.thinkingLevel;
 				const pending = queuedResult(agent, task, thinkingLevel);
 				const runId = monitor.addRun(agent.name, task, agent.model, thinkingLevel);
-				const onLive = makeLiveHandler(runId);
+				// Only a main-agent-dispatched reviewer can trigger an auto-fix chain, so
+				// only its finish is deferred to the queue task (see startFixLoop).
+				const onLive = makeLiveHandler(runId, agent.name === "reviewer");
 
 				backgroundQueue.enqueue(
 					async (backgroundSignal) => {
@@ -473,12 +497,22 @@ export default function (pi: ExtensionAPI): void {
 						// triggers a worker→reviewer chain (up to maxFixRounds) without waking
 						// the main agent. Loop-internal re-reviews never reach here (they are
 						// awaited inside launchInLoop); the initial review is delivered with
-						// the chain at the end.
+						// the chain at the end. While the chain runs, the triggering review
+						// stays in the widget (annotated) so the chain rows have an obvious
+						// parent; no premature "done" notification is shown.
 						if (shouldTriggerFixLoop(result, config)) {
-							startFixLoop(result, `fix-${runId}`);
+							// The session is known active here (checked above), so the chain
+							// always starts: keep the triggering review in the widget
+							// (annotated) without a premature "done" notification, and let
+							// startFixLoop deliver the whole chain and drop the parent row.
+							finishRun(runId, "done", { silent: true, retain: true });
+							monitor.setAnnotation(runId, "auto-fix chain running");
+							startFixLoop(result, `fix-${runId}`, runId);
 							return;
 						}
 						const failed = isFailedResult(result);
+						finishRun(runId, failed ? "failed" : "done");
+						if (!sessionActive) return;
 						const completion: CompletionMessageItem = {
 							agent: result.agent,
 							block: formatCompletionBlock(result, config.maxResultLines),
@@ -628,7 +662,8 @@ export default function (pi: ExtensionAPI): void {
 							// Chain-internal runs (auto-fix worker/reviewer) indent under their
 							// parent reviewer; summarize() already carries the relationLabel.
 							const head = r.groupId ? theme.fg("dim", "  ↳ ") : " ";
-							lines.push(truncateToWidth(`${head}${icon} ${monitor.summarize(r)} · ${label}`, width, ""));
+							const note = r.annotation ? theme.fg("dim", ` · ${r.annotation}`) : "";
+							lines.push(truncateToWidth(`${head}${icon} ${monitor.summarize(r)} · ${label}${note}`, width, ""));
 							if (r.status === "queued" || r.status === "running") {
 								lines.push(truncateToWidth(theme.fg("dim", `     task: ${formatTaskSummary(r.task)}`), width, ""));
 							}

@@ -40,6 +40,8 @@ export interface RunView {
 	groupId?: string;
 	/** Human-readable role within a chain, e.g. "fix round 1" or "re-review round 1". */
 	relationLabel?: string;
+	/** Free-form note shown in the widget next to the status label (e.g. "auto-fix chain running"). */
+	annotation?: string;
 }
 
 /** Optional chain metadata for runs spawned by an auto-fix loop. */
@@ -199,8 +201,11 @@ export class MonitorStore {
 		const run = this.find(id);
 		if (!run) return;
 		run.status = status;
-		if (status === "running" && run.startedAt === undefined) {
-			run.startedAt = Date.now();
+		if (status === "running") {
+			if (run.startedAt === undefined) run.startedAt = Date.now();
+			// A model-fallback retry after a failed attempt restarts the clock; a
+			// stale endedAt would freeze the elapsed display at the first attempt.
+			if (run.endedAt !== undefined) run.endedAt = undefined;
 		} else if ((status === "done" || status === "failed") && run.endedAt === undefined) {
 			run.endedAt = Date.now();
 		}
@@ -220,6 +225,19 @@ export class MonitorStore {
 		if (!run) return;
 		run.activity = text;
 		this.notify();
+	}
+
+	/** Set a widget note on the run (e.g. that its auto-fix chain is still running). */
+	setAnnotation(id: number, text: string): void {
+		const run = this.find(id);
+		if (!run) return;
+		run.annotation = text;
+		this.notify();
+	}
+
+	/** Look up a run by id without removing it. */
+	findRun(id: number): RunView | undefined {
+		return this.find(id);
 	}
 
 	/** Remove a run (finished runs leave the widget). Returns the removed run. */

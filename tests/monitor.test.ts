@@ -49,6 +49,37 @@ describe("MonitorStore", () => {
 		expect(run.usage.input).toBe(10);
 		expect(run.usage.cost).toBe(0.5);
 	});
+
+	it("setAnnotation records a widget note without touching status", () => {
+		const store = new MonitorStore();
+		const id = store.addRun("reviewer", "Review the change");
+		store.setStatus(id, "done");
+		store.setAnnotation(id, "auto-fix chain running");
+		expect(store.getRuns()[0].annotation).toBe("auto-fix chain running");
+		expect(store.getRuns()[0].status).toBe("done");
+	});
+
+	it("findRun looks up a run without removing it; removeRun then makes it undefined", () => {
+		const store = new MonitorStore();
+		const id = store.addRun("worker", "Implement the change");
+		expect(store.findRun(id)?.id).toBe(id);
+		const removed = store.removeRun(id);
+		expect(removed?.id).toBe(id);
+		expect(store.findRun(id)).toBeUndefined();
+		expect(store.removeRun(id)).toBeUndefined();
+	});
+
+	it("addRun carries chain metadata (groupId, relationLabel) and an empty annotation", () => {
+		const store = new MonitorStore();
+		const id = store.addRun("worker", "Fix the findings", undefined, undefined, {
+			groupId: "fix-3",
+			relationLabel: "fix round 1",
+		});
+		const run = store.findRun(id);
+		expect(run?.groupId).toBe("fix-3");
+		expect(run?.relationLabel).toBe("fix round 1");
+		expect(run?.annotation).toBeUndefined();
+	});
 });
 
 describe("MonitorStore activity", () => {
