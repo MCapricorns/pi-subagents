@@ -45,14 +45,10 @@ export const MAX_RESULT_LINES_LIMIT = 2000;
 
 export const CONFIG_FILE_NAME = "pi-subagents.json";
 
-/** How many sub-agent processes may run at once. Default: 4. */
+/** How many sub-agent processes may run at once, and how many tasks one parallel `subagent` call may contain. Default: 4. */
 export const DEFAULT_MAX_CONCURRENCY = 4;
 /** Upper bound accepted for maxConcurrency (defensive clamp). */
 export const MAX_CONCURRENCY_LIMIT = 16;
-/** How many tasks a single parallel `subagent` call may contain. Default: 8. */
-export const DEFAULT_MAX_PARALLEL_TASKS = 8;
-/** Upper bound accepted for maxParallelTasks (defensive clamp). */
-export const MAX_PARALLEL_TASKS_LIMIT = 32;
 /**
  * Depth at which the subagent tool stops being available. 1 = the main session
  * delegates and child processes are leaves; 0 disables the tool entirely.
@@ -93,10 +89,11 @@ export interface SubagentsConfig {
 	proactiveInjection: boolean;
 	/** Which agent directories to discover from. Default: "user". */
 	agentScope: AgentScope;
-	/** Max sub-agent processes running at once (extra work queues). Default: 4. */
+	/**
+	 * Max sub-agent processes running at once (extra work queues) and the max tasks
+	 * one parallel `subagent` call may contain. Default: 4.
+	 */
 	maxConcurrency: number;
-	/** Max tasks accepted by one parallel `subagent` call. Default: 8. */
-	maxParallelTasks: number;
 	/** Depth at which the subagent tool is no longer registered. Default: 1. */
 	maxSubagentDepth: number;
 	/**
@@ -119,7 +116,6 @@ export const DEFAULT_CONFIG: SubagentsConfig = {
 	proactiveInjection: true,
 	agentScope: "user",
 	maxConcurrency: DEFAULT_MAX_CONCURRENCY,
-	maxParallelTasks: DEFAULT_MAX_PARALLEL_TASKS,
 	maxSubagentDepth: DEFAULT_MAX_SUBAGENT_DEPTH,
 	maxFixRounds: DEFAULT_MAX_FIX_ROUNDS,
 };
@@ -166,7 +162,6 @@ export function normalizeConfig(raw: unknown): SubagentsConfig {
 		proactiveInjection: DEFAULT_CONFIG.proactiveInjection,
 		agentScope: DEFAULT_CONFIG.agentScope,
 		maxConcurrency: DEFAULT_CONFIG.maxConcurrency,
-		maxParallelTasks: DEFAULT_CONFIG.maxParallelTasks,
 		maxSubagentDepth: DEFAULT_CONFIG.maxSubagentDepth,
 		maxFixRounds: DEFAULT_CONFIG.maxFixRounds,
 	};
@@ -223,8 +218,13 @@ export function normalizeConfig(raw: unknown): SubagentsConfig {
 	const maxConcurrency = clampCount(raw.maxConcurrency, MAX_CONCURRENCY_LIMIT);
 	if (maxConcurrency !== undefined) config.maxConcurrency = maxConcurrency;
 
-	const maxParallelTasks = clampCount(raw.maxParallelTasks, MAX_PARALLEL_TASKS_LIMIT);
-	if (maxParallelTasks !== undefined) config.maxParallelTasks = maxParallelTasks;
+	// Schema migration: maxParallelTasks (pre-0.13) merged into maxConcurrency.
+	// Take the larger of the two so an upgraded config never loses capacity it
+	// was explicitly given; the old key is dropped on the persisted save.
+	const legacyParallelTasks = clampCount(raw.maxParallelTasks, MAX_CONCURRENCY_LIMIT);
+	if (legacyParallelTasks !== undefined && legacyParallelTasks > config.maxConcurrency) {
+		config.maxConcurrency = legacyParallelTasks;
+	}
 
 	// 0 is meaningful here (disables the tool), so clamp to [0, limit] instead.
 	if (typeof raw.maxSubagentDepth === "number" && Number.isFinite(raw.maxSubagentDepth)) {

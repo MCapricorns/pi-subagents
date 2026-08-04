@@ -16,7 +16,6 @@ import {
 	DEFAULT_ENABLED_AGENTS,
 	DEFAULT_MAX_CONCURRENCY,
 	DEFAULT_MAX_FIX_ROUNDS,
-	DEFAULT_MAX_PARALLEL_TASKS,
 	THINKING_LEVEL_VALUES,
 	type AgentScope,
 	type SubagentsConfig,
@@ -196,7 +195,6 @@ async function pickInjection(ctx: ExtensionCommandContext, current: boolean): Pr
 
 /** Preset steps offered for the two numeric limits (selection-only wizard). */
 const CONCURRENCY_STEPS = [1, 2, 3, 4, 6, 8, 12, 16];
-const PARALLEL_TASK_STEPS = [2, 4, 6, 8, 12, 16, 24, 32];
 /** Preset rounds offered for the auto-fix loop (0 disables it). */
 const FIX_ROUNDS_STEPS = [0, 1, 2, 3, 5];
 
@@ -284,21 +282,12 @@ async function runFullSetup(ctx: ExtensionCommandContext, configPath: string, ba
 
 	const maxConcurrency = await pickCount(
 		ctx,
-		"Max sub-agents running at once? (extra work queues)",
+		"Max sub-agents running at once (and per parallel call)? (extra work queues)",
 		CONCURRENCY_STEPS,
 		base.maxConcurrency,
 		DEFAULT_MAX_CONCURRENCY,
 	);
 	if (maxConcurrency === undefined) return notifyCancelled(ctx);
-
-	const maxParallelTasks = await pickCount(
-		ctx,
-		"Max tasks in one parallel subagent call?",
-		PARALLEL_TASK_STEPS,
-		base.maxParallelTasks,
-		DEFAULT_MAX_PARALLEL_TASKS,
-	);
-		if (maxParallelTasks === undefined) return notifyCancelled(ctx);
 
 		const maxFixRounds = await pickCount(
 			ctx,
@@ -319,7 +308,6 @@ async function runFullSetup(ctx: ExtensionCommandContext, configPath: string, ba
 		proactiveInjection: injection,
 		agentScope: scope,
 		maxConcurrency,
-		maxParallelTasks,
 		maxSubagentDepth: base.maxSubagentDepth,
 		maxFixRounds,
 	};
@@ -335,7 +323,6 @@ async function runMenu(ctx: ExtensionCommandContext, configPath: string, config:
 		"Toggle proactive injection",
 		"Change agent scope",
 		"Change max concurrent sub-agents",
-		"Change max parallel tasks",
 		"Change max fix rounds",
 		"Full re-setup",
 	]);
@@ -381,23 +368,13 @@ async function runMenu(ctx: ExtensionCommandContext, configPath: string, config:
 	} else if (choice.startsWith("Change max concurrent")) {
 		const maxConcurrency = await pickCount(
 			ctx,
-			"Max sub-agents running at once? (extra work queues)",
+			"Max sub-agents running at once (and per parallel call)? (extra work queues)",
 			CONCURRENCY_STEPS,
 			config.maxConcurrency,
 			DEFAULT_MAX_CONCURRENCY,
 		);
 		if (maxConcurrency === undefined) return notifyCancelled(ctx);
 		next.maxConcurrency = maxConcurrency;
-	} else if (choice.startsWith("Change max parallel")) {
-		const maxParallelTasks = await pickCount(
-			ctx,
-			"Max tasks in one parallel subagent call?",
-			PARALLEL_TASK_STEPS,
-			config.maxParallelTasks,
-			DEFAULT_MAX_PARALLEL_TASKS,
-		);
-		if (maxParallelTasks === undefined) return notifyCancelled(ctx);
-		next.maxParallelTasks = maxParallelTasks;
 	} else if (choice.startsWith("Change max fix")) {
 		const maxFixRounds = await pickCount(
 			ctx,

@@ -6,10 +6,10 @@ import {
 	DEFAULT_ENABLED_AGENTS,
 	DEFAULT_MAX_CONCURRENCY,
 	DEFAULT_MAX_FIX_ROUNDS,
-	DEFAULT_MAX_PARALLEL_TASKS,
 	DEFAULT_MAX_RESULT_LINES,
 	DEFAULT_MAX_SUBAGENT_DEPTH,
 	DEFAULT_THINKING_LEVEL,
+	MAX_CONCURRENCY_LIMIT,
 	MAX_FIX_ROUNDS_LIMIT,
 	MAX_RESULT_LINES_LIMIT,
 	loadConfig,
@@ -27,7 +27,6 @@ describe("normalizeConfig", () => {
 		expect(config.thinkingLevel).toBe(DEFAULT_THINKING_LEVEL);
 		expect(config.notifyOnReviewPass).toBe(false);
 		expect(config.maxConcurrency).toBe(DEFAULT_MAX_CONCURRENCY);
-		expect(config.maxParallelTasks).toBe(DEFAULT_MAX_PARALLEL_TASKS);
 		expect(config.maxSubagentDepth).toBe(DEFAULT_MAX_SUBAGENT_DEPTH);
 	});
 
@@ -98,17 +97,29 @@ describe("normalizeConfig", () => {
 	});
 
 	it("clamps the numeric limits and rejects non-numbers", () => {
-		const config = normalizeConfig({ maxConcurrency: 6, maxParallelTasks: 12 });
+		const config = normalizeConfig({ maxConcurrency: 6 });
 		expect(config.maxConcurrency).toBe(6);
-		expect(config.maxParallelTasks).toBe(12);
 
-		const clamped = normalizeConfig({ maxConcurrency: 0, maxParallelTasks: 999 });
+		const clamped = normalizeConfig({ maxConcurrency: 0 });
 		expect(clamped.maxConcurrency).toBe(1);
-		expect(clamped.maxParallelTasks).toBe(32);
+		expect(normalizeConfig({ maxConcurrency: 999 }).maxConcurrency).toBe(MAX_CONCURRENCY_LIMIT);
 
-		const invalid = normalizeConfig({ maxConcurrency: "many", maxParallelTasks: Number.NaN });
+		const invalid = normalizeConfig({ maxConcurrency: "many" });
 		expect(invalid.maxConcurrency).toBe(DEFAULT_MAX_CONCURRENCY);
-		expect(invalid.maxParallelTasks).toBe(DEFAULT_MAX_PARALLEL_TASKS);
+	});
+
+	it("merges a legacy maxParallelTasks into maxConcurrency (larger wins)", () => {
+		// Old config: concurrency 2, parallel cap 8 → merged to 8.
+		const merged = normalizeConfig({ maxConcurrency: 2, maxParallelTasks: 8 });
+		expect(merged.maxConcurrency).toBe(8);
+
+		// The old key alone also folds in, clamped to the new limit.
+		const alone = normalizeConfig({ maxParallelTasks: 999 });
+		expect(alone.maxConcurrency).toBe(MAX_CONCURRENCY_LIMIT);
+
+		// Invalid legacy values are ignored; concurrency stays as configured.
+		const invalid = normalizeConfig({ maxConcurrency: 3, maxParallelTasks: "many" });
+		expect(invalid.maxConcurrency).toBe(3);
 	});
 
 	it("accepts maxSubagentDepth including 0 (tool disabled)", () => {
@@ -153,14 +164,12 @@ describe("loadConfig", () => {
 
 		const config = await loadConfig(path);
 		expect(config.maxConcurrency).toBe(DEFAULT_MAX_CONCURRENCY);
-		expect(config.maxParallelTasks).toBe(DEFAULT_MAX_PARALLEL_TASKS);
 		expect(config.maxSubagentDepth).toBe(DEFAULT_MAX_SUBAGENT_DEPTH);
 
 		const saved = JSON.parse(readFileSync(path, "utf8"));
 		expect(saved.enabledAgents).toEqual(["explore"]);
 		expect(saved.thinkingLevel).toBe("high");
 		expect(saved.maxConcurrency).toBe(DEFAULT_MAX_CONCURRENCY);
-		expect(saved.maxParallelTasks).toBe(DEFAULT_MAX_PARALLEL_TASKS);
 		expect(saved.maxSubagentDepth).toBe(DEFAULT_MAX_SUBAGENT_DEPTH);
 	});
 

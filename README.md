@@ -257,9 +257,9 @@ main agent
 1. The main agent calls `subagent` with a self-contained brief.
 2. The tool returns immediately and ends that foreground tool turn, leaving the editor ready
    for input.
-3. The child process works independently. By default up to four queued runs execute at
-   once and a single parallel request may contain up to eight tasks; both limits are
-   configurable (`maxConcurrency` / `maxParallelTasks`).
+3. The child process works independently. By default up to four sub-agents run at once —
+   and one parallel call accepts at most four tasks; extra runs queue up to `maxConcurrency`
+   (configurable via `/subagents-setup` or `pi-subagents.json`).
 4. On completion or failure, the extension sends a durable result message to the main
    session. That message automatically wakes the main agent, or waits until its current turn
    finishes.
@@ -331,7 +331,6 @@ agent's default — its frontmatter `thinking`, else the global default). The gl
   "proactiveInjection": true,
   "agentScope": "user",
   "maxConcurrency": 4,
-  "maxParallelTasks": 8,
   "maxSubagentDepth": 1,
   "maxFixRounds": 2
 }
@@ -347,8 +346,7 @@ agent's default — its frontmatter `thinking`, else the global default). The gl
 | `maxResultLines` | Max lines of a sub-agent result carried in the completion message (default `80`). Longer results are truncated; the full text is written to a temp file whose path is included in the message. |
 | `proactiveInjection` | Whether to add the delegation directive to the main system prompt. |
 | `agentScope` | `user`, `project`, or `both`; controls which user/project agent directories are discovered. |
-| `maxConcurrency` | How many sub-agent processes run at once (1–16, default 4). Extra work waits in the queue. |
-| `maxParallelTasks` | Maximum tasks accepted by one parallel `subagent` call (1–32, default 8). |
+| `maxConcurrency` | Max sub-agent processes running at once (1–16, default 4), and the max tasks one parallel `subagent` call accepts. Extra work waits in the queue. |
 | `maxSubagentDepth` | Depth at which the `subagent` tool is no longer registered (default 1: the main session delegates, children are leaf processes). `0` disables the tool entirely. Read once at extension load. |
 | `maxFixRounds` | Auto-fix rounds when a reviewer returns `REVIEW_FAIL`: the extension dispatches a `worker` (briefed with the review's concrete findings) then a `reviewer` re-review, repeating up to this many times before waking the main agent with the full chain. `0` disables it (the main agent handles fixes itself). Default 2. The reviewer stays read-only and in its own context; the loop is orchestrated by the extension, not by the reviewer. |
 
@@ -360,6 +358,8 @@ The config file migrates itself on load — no manual steps after an upgrade:
   holding invalid values) is normalized and saved back with the new fields filled in.
 - **Removed agents** — agents no longer shipped (e.g. the old `plan` agent) are stripped
   from `enabledAgents`, `agentModels`, and `agentThinkingLevels` automatically.
+- **Merged limits** — the pre-0.13 `maxParallelTasks` key is folded into `maxConcurrency`
+  (the larger of the two wins) and dropped on the next save.
 
 Model selection uses this precedence:
 

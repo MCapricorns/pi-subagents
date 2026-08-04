@@ -504,12 +504,12 @@ export default function (pi: ExtensionAPI): void {
 			// Sub-agents intentionally detach from the foreground turn. This makes the
 			// editor available immediately; completion messages later wake the main agent.
 			if (params.tasks && params.tasks.length > 0) {
-				if (params.tasks.length > config.maxParallelTasks) {
+				if (params.tasks.length > config.maxConcurrency) {
 					return {
 						content: [
 							{
 								type: "text",
-								text: `Too many parallel tasks (${params.tasks.length}). Max is ${config.maxParallelTasks} (configurable via /subagents-setup).`,
+								text: `Too many parallel tasks (${params.tasks.length}). Max is ${config.maxConcurrency} (configurable via /subagents-setup).`,
 							},
 						],
 						details: makeDetails("parallel", true)([]),
