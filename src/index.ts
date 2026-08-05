@@ -134,7 +134,7 @@ function formatCompletionBlock(result: SingleResult, maxResultLines: number): st
 	const fallbackNote = result.modelFallbackFrom
 		? ` (model fell back from ${result.modelFallbackFrom} to ${result.model ?? "main-window model"})`
 		: "";
-	const lines = [`### [${result.agent}] ${status}${usage ? ` (${usage})` : ""}${fallbackNote}`, "", `Task: ${formatTaskSummary(result.task)}`, "", text];
+	const lines = [`### [${result.agent}] ${status}${usage ? ` (${usage})` : ""}${fallbackNote}`, "", `Task: ${formatTaskSummary(result.task, 80, false)}`, "", text];
 	if (truncated) {
 		// The full text lives on disk so the main agent can read it on demand.
 		lines.push("", `(output truncated to ${maxResultLines} lines; full result: ${writeResultArtifact(output, result.agent)})`);
@@ -587,14 +587,14 @@ export default function (pi: ExtensionAPI): void {
 			if (args.tasks && args.tasks.length > 0) {
 				let text = `${theme.fg("toolTitle", theme.bold("subagent "))}${theme.fg("accent", `parallel (${args.tasks.length})`)}`;
 				for (const t of args.tasks.slice(0, 4)) {
-					const preview = t.task.length > 48 ? `${t.task.slice(0, 48)}…` : t.task;
+					const preview = formatTaskSummary(t.task, 48);
 					text += `\n  ${theme.fg("accent", t.agent)} ${theme.fg("dim", preview)}`;
 				}
 				if (args.tasks.length > 4) text += `\n  ${theme.fg("dim", `… +${args.tasks.length - 4} more`)}`;
 				return new Text(text, 0, 0);
 			}
 			const task: string = args.task ?? "";
-			const preview = task.length > 60 ? `${task.slice(0, 60)}…` : task;
+			const preview = formatTaskSummary(task, 60);
 			return new Text(
 				`${theme.fg("toolTitle", theme.bold("subagent "))}${theme.fg("accent", args.agent ?? "?")} ${theme.fg("dim", preview)}`,
 				0,
@@ -663,9 +663,9 @@ export default function (pi: ExtensionAPI): void {
 							// parent reviewer; summarize() already carries the relationLabel.
 							const head = r.groupId ? theme.fg("dim", "  ↳ ") : " ";
 							const note = r.annotation ? theme.fg("dim", ` · ${r.annotation}`) : "";
-							lines.push(truncateToWidth(`${head}${icon} ${monitor.summarize(r)} · ${label}${note}`, width, ""));
+							lines.push(truncateToWidth(`${head}${icon} #${r.id} ${monitor.summarize(r)} · ${label}${note}`, width, ""));
 							if (r.status === "queued" || r.status === "running") {
-								lines.push(truncateToWidth(theme.fg("dim", `     task: ${formatTaskSummary(r.task)}`), width, ""));
+								lines.push(truncateToWidth(theme.fg("dim", `     task: ${formatTaskSummary(r.task, Math.max(20, width - 11))}`), width, ""));
 							}
 							// Activity sits one indent level below the agent name.
 							if (r.activity) lines.push(truncateToWidth(theme.fg("dim", `     ${r.activity}`), width, ""));

@@ -2,6 +2,7 @@ import { visibleWidth } from "@earendil-works/pi-tui";
 import { describe, expect, it } from "vitest";
 import {
 	MonitorStore,
+	extractKeyFragments,
 	formatDuration,
 	formatElapsed,
 	formatTaskSummary,
@@ -129,30 +130,88 @@ describe("formatTaskSummary", () => {
 
 	it("strips VT controls before display-width truncation", () => {
 		const summary = formatTaskSummary(`${"a".repeat(78)}\x1b[31m界\x1b[0mz`);
-		expect(summary).toBe(`${"a".repeat(78)}…`);
+		expect(summary).toBe(`${"a".repeat(51)}…${"a".repeat(25)}界z`);
 		expect(summary).not.toContain("\x1b");
-		expect(visibleWidth(summary)).toBeLessThanOrEqual(80);
+		expect(visibleWidth(summary)).toBe(80);
 	});
 
 	it("truncates CJK text by terminal display columns", () => {
 		expect(formatTaskSummary("界".repeat(40))).toBe("界".repeat(40));
 		const summary = formatTaskSummary("界".repeat(41));
-		expect(summary).toBe(`${"界".repeat(39)}…`);
+		expect(summary).toBe(`${"界".repeat(25)}…${"界".repeat(14)}`);
 		expect(visibleWidth(summary)).toBeLessThanOrEqual(80);
 	});
 
 	it("does not split a ZWJ emoji when truncating", () => {
 		const family = "👨‍👩‍👧‍👦";
 		const summary = formatTaskSummary(`${"a".repeat(78)}${family}z`);
-		expect(summary).toBe(`${"a".repeat(78)}…`);
-		expect(visibleWidth(summary)).toBeLessThanOrEqual(80);
+		expect(summary).toBe(`${"a".repeat(51)}…${"a".repeat(25)}${family}z`);
+		expect(visibleWidth(summary)).toBe(80);
 	});
 
 	it("keeps a combining sequence intact at the truncation boundary", () => {
 		const combining = "e\u0301";
 		const summary = formatTaskSummary(`${"a".repeat(78)}${combining}zz`);
-		expect(summary).toBe(`${"a".repeat(78)}${combining}…`);
+		expect(summary).toBe(`${"a".repeat(51)}…${"a".repeat(25)}${combining}zz`);
 		expect(visibleWidth(summary)).toBe(80);
+	});
+
+	it("shows only the distinctive path, dropping templated prose", () => {
+		const summary = formatTaskSummary(
+			"explore: survey the widget rendering pipeline and completion batching paths to find every place that interacts with the footer data provider, then report how they connect src/footer-data-provider.ts",
+		);
+		expect(summary).toBe("src/footer-data-provider.ts");
+	});
+
+	it("shows the differing keyword for near-identical explore tasks", () => {
+		const a = formatTaskSummary(
+			"explore: trace how the batching pipeline drains and how completion messages are grouped, then report src/completion.ts",
+		);
+		const b = formatTaskSummary(
+			"explore: trace how the batching pipeline drains and how completion messages are grouped, then report src/fixloop.ts",
+		);
+		expect(a).toBe("src/completion.ts");
+		expect(b).toBe("src/fixloop.ts");
+	});
+
+	it("keeps the tail of an over-long single fragment", () => {
+		const longPath = `src/${"x".repeat(90)}/component.ts`;
+		const summary = formatTaskSummary(`explore: trace the deeply nested widget state and how it renders, look at ${longPath}`, 40);
+		expect(summary.startsWith("…")).toBe(true);
+		expect(summary.endsWith("component.ts")).toBe(true);
+		expect(visibleWidth(summary)).toBeLessThanOrEqual(40);
+	});
+
+	it("joins multiple fragments with the separator, keeping the first", () => {
+		const summary = formatTaskSummary(
+			"worker: implement the new render path in src/ui/render.ts, wire up fixGridLayout, and add tests",
+			60,
+		);
+		expect(summary).toBe("src/ui/render.ts · fixGridLayout");
+	});
+
+	it("honors a custom maxWidth when showing keywords", () => {
+		const summary = formatTaskSummary(`${"a".repeat(60)} tail-keyword`, 40);
+		expect(summary).toBe("tail-keyword");
+		expect(visibleWidth(summary)).toBeLessThanOrEqual(40);
+	});
+});
+
+describe("extractKeyFragments", () => {
+	it("extracts paths, quoted phrases and symbols in order of appearance", () => {
+		expect(
+			extractKeyFragments('check "the focus manager" in src/ui/render.ts and fixGridLayout'),
+		).toEqual(["the focus manager", "src/ui/render.ts", "fixGridLayout"]);
+	});
+
+	it("dedupes fragments that are substrings of longer paths", () => {
+		expect(extractKeyFragments("look at src/footer-data-provider.ts and data-provider.ts")).toEqual([
+			"src/footer-data-provider.ts",
+		]);
+	});
+
+	it("drops kebab-case boilerplate words", () => {
+		expect(extractKeyFragments("a self-contained read-only review of main.ts")).toEqual(["main.ts"]);
 	});
 });
 
