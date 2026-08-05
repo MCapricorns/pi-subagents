@@ -128,9 +128,14 @@ export function truncateResultOutput(output: string, maxLines: number): Truncate
 	return { text: kept.join("\n"), truncated: true };
 }
 
-/** Persist the full result where the main agent can read it on demand. Returns the file path. */
-export function writeResultArtifact(output: string, agentName: string): string {
-	const dir = join(tmpdir(), "pi-subagents-results");
+/** Persist the full result where the main agent can read it on demand. Returns the file path.
+ * Results are grouped under a per-project subdirectory so concurrent projects don't
+ * litter a single flat folder. */
+export function writeResultArtifact(output: string, agentName: string, cwd?: string): string {
+	const projectSlug = cwd
+		? basename(cwd).replace(/[^\w.-]+/g, "_") || "default"
+		: "default";
+	const dir = join(tmpdir(), "pi-subagents-results", projectSlug);
 	mkdirSync(dir, { recursive: true });
 	const safeName = agentName.replace(/[^\w.-]+/g, "_");
 	// A random suffix keeps same-millisecond writes from clobbering each other.
@@ -166,7 +171,10 @@ export function isModelLevelFailure(result: SingleResult): boolean {
 
 export function getResultOutput(result: SingleResult): string {
 	if (isFailedResult(result)) {
-		return result.errorMessage || result.stderr || getFinalOutput(result.messages) || "(no output)";
+		const error = result.errorMessage || result.stderr;
+		const partial = getFinalOutput(result.messages);
+		if (error && partial) return `${error}\n\n--- Partial output ---\n${partial}`;
+		return error || partial || "(no output)";
 	}
 	return getFinalOutput(result.messages) || "(no output)";
 }
@@ -506,12 +514,13 @@ export async function runSingleAgent(options: RunSingleOptions): Promise<SingleR
 
 		currentResult.exitCode = exitCode;
 		if (wasAborted) {
+			currentResult.stopReason = "aborted";
+			currentResult.errorMessage ??= "Subagent was aborted";
 			if (onLive) {
 				try {
 					onLive({ kind: "status", status: "failed" });
 				} catch { /* never throw from event handling */ }
 			}
-			throw new Error("Subagent was aborted");
 		}
 		return currentResult;
 	} finally {

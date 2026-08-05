@@ -39,6 +39,20 @@ describe("MonitorStore", () => {
 		expect(runs[0].id).toBe(active);
 	});
 
+	it("beginTurn preserves retained runs (auto-fix chain parent)", () => {
+		const store = new MonitorStore();
+		const parent = store.addRun("reviewer", "Review the change");
+		store.setStatus(parent, "done");
+		store.setRetained(parent, true);
+		const active = store.addRun("worker", "Fix the findings");
+		store.setStatus(active, "running");
+		store.beginTurn();
+		const runs = store.getRuns();
+		expect(runs).toHaveLength(2);
+		expect(runs.map((r) => r.id)).toContain(parent);
+		expect(runs.map((r) => r.id)).toContain(active);
+	});
+
 	it("setUsage updates usage and model; setStatus updates status", () => {
 		const store = new MonitorStore();
 		const id = store.addRun("worker", "Implement the change");
@@ -58,6 +72,29 @@ describe("MonitorStore", () => {
 		store.setAnnotation(id, "auto-fix chain running");
 		expect(store.getRuns()[0].annotation).toBe("auto-fix chain running");
 		expect(store.getRuns()[0].status).toBe("done");
+	});
+
+	it("setRetained marks a run so beginTurn keeps it", () => {
+		const store = new MonitorStore();
+		const id = store.addRun("reviewer", "Review the change");
+		store.setStatus(id, "done");
+		store.setRetained(id, true);
+		expect(store.findRun(id)?.retained).toBe(true);
+		store.beginTurn();
+		expect(store.getRuns()).toHaveLength(1);
+		store.setRetained(id, false);
+		store.beginTurn();
+		expect(store.getRuns()).toHaveLength(0);
+	});
+
+	it("clear removes all runs without resetting the id counter", () => {
+		const store = new MonitorStore();
+		const first = store.addRun("worker", "Task A");
+		store.addRun("explore", "Task B");
+		store.clear();
+		expect(store.getRuns()).toHaveLength(0);
+		const next = store.addRun("worker", "Task C");
+		expect(next).toBeGreaterThan(first);
 	});
 
 	it("findRun looks up a run without removing it; removeRun then makes it undefined", () => {

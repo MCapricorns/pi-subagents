@@ -124,7 +124,7 @@ function formatUsage(usage: UsageStats): string {
 	return parts.join(" ");
 }
 
-function formatCompletionBlock(result: SingleResult, maxResultLines: number): string {
+function formatCompletionBlock(result: SingleResult, maxResultLines: number, cwd?: string): string {
 	const status = isFailedResult(result) ? "failed" : "completed";
 	const usage = formatUsage(result.usage);
 	const output = getResultOutput(result);
@@ -135,7 +135,7 @@ function formatCompletionBlock(result: SingleResult, maxResultLines: number): st
 	const lines = [`### [${result.agent}] ${status}${usage ? ` (${usage})` : ""}${fallbackNote}`, "", `Task: ${formatTaskSummary(result.task, 80, false)}`, "", text];
 	if (truncated) {
 		// The full text lives on disk so the main agent can read it on demand.
-		lines.push("", `(output truncated to ${maxResultLines} lines; full result: ${writeResultArtifact(output, result.agent)})`);
+		lines.push("", `(output truncated to ${maxResultLines} lines; full result: ${writeResultArtifact(output, result.agent, cwd)})`);
 	}
 	return lines.join("\n");
 }
@@ -191,6 +191,9 @@ export default function (pi: ExtensionAPI): void {
 		sessionActive = false;
 		completionBatcher.dispose();
 		backgroundQueue.cancelAll();
+		// Clear the monitor so stale runs from this session never leak into the
+		// next one (the module-level singleton survives across sessions).
+		monitor.clear();
 	});
 
 	pi.registerTool({
@@ -212,6 +215,7 @@ export default function (pi: ExtensionAPI): void {
 			"Use subagent with agent 'reviewer' for a fresh read-only review before reporting work done or committing.",
 			"subagent launches work in the background and ends the current turn; when a result arrives, the main agent is automatically resumed with it.",
 			"Run independent tasks in parallel by passing a tasks array to subagent; let the automatically resumed main agent start dependent work after results arrive.",
+			"NEVER sleep, wait, poll, or call other tools alongside subagent — it ends the turn immediately. The main agent is auto-resumed when results arrive; manual waiting only blocks the turn and delays delivery.",
 		],
 		parameters: SubagentParams,
 
@@ -249,6 +253,7 @@ export default function (pi: ExtensionAPI): void {
 				monitor.setStatus(runId, status); // stamps endedAt for the elapsed time
 				const run = opts?.retain ? monitor.findRun(runId) : monitor.removeRun(runId);
 				if (!run) return; // already finished — stay idempotent
+				if (opts?.retain) monitor.setRetained(runId, true);
 				if (opts?.silent || !sessionActive) return;
 				const icon = status === "done" ? "✓" : "✗";
 				ctx.ui.notify(`${icon} ${monitor.summarize(run)}`, status === "done" ? "info" : "error");
@@ -435,7 +440,7 @@ export default function (pi: ExtensionAPI): void {
 						if (!sessionActive) return;
 						const items: CompletionMessageItem[] = chain.map((r) => ({
 							agent: r.agent,
-							block: formatCompletionBlock(r, config.maxResultLines),
+							block: formatCompletionBlock(r, config.maxResultLines, ctx.cwd),
 							triggerTurn: true,
 						}));
 						sendCompletionGroup(items);
@@ -515,7 +520,7 @@ export default function (pi: ExtensionAPI): void {
 						if (!sessionActive) return;
 						const completion: CompletionMessageItem = {
 							agent: result.agent,
-							block: formatCompletionBlock(result, config.maxResultLines),
+							block: formatCompletionBlock(result, config.maxResultLines, ctx.cwd),
 							triggerTurn: completionTriggersTurn(result, config.notifyOnReviewPass),
 						};
 						if (failed) {

@@ -5,6 +5,7 @@ import { describe, expect, it } from "vitest";
 import {
 	currentSubagentDepth,
 	getFinalOutput,
+	getResultOutput,
 	isFailedResult,
 	isModelLevelFailure,
 	RESULT_LINE_MAX,
@@ -385,12 +386,44 @@ describe("truncateResultOutput", () => {
 	});
 });
 
+describe("getResultOutput", () => {
+	it("returns the final assistant text for a successful run", () => {
+		const r = result({ exitCode: 0, messages: [assistant("all done")] });
+		expect(getResultOutput(r)).toBe("all done");
+	});
+
+	it("returns just the error when a failed run has no partial output", () => {
+		const r = result({ exitCode: 1, errorMessage: "crashed" });
+		expect(getResultOutput(r)).toBe("crashed");
+	});
+
+	it("includes both error and partial output when a failed run has messages", () => {
+		const r = result({
+			exitCode: 1,
+			errorMessage: "Subagent was aborted",
+			stopReason: "aborted",
+			messages: [assistant("I read src/index.ts and started editing...")],
+		});
+		const out = getResultOutput(r);
+		expect(out).toContain("Subagent was aborted");
+		expect(out).toContain("--- Partial output ---");
+		expect(out).toContain("I read src/index.ts and started editing...");
+	});
+});
+
 describe("writeResultArtifact", () => {
 	it("persists the full output and returns a readable path", () => {
 		const artifactPath = writeResultArtifact("full text\n", "reviewer");
 		expect(artifactPath).toContain("pi-subagents-results");
 		expect(artifactPath).toContain("reviewer");
 		expect(readFileSync(artifactPath, "utf8")).toBe("full text\n");
+		rmSync(artifactPath, { force: true });
+	});
+
+	it("groups results under a per-project subdirectory when cwd is given", () => {
+		const artifactPath = writeResultArtifact("body", "worker", "/home/user/my-project");
+		expect(artifactPath).toContain(join("pi-subagents-results", "my-project"));
+		expect(readFileSync(artifactPath, "utf8")).toBe("body");
 		rmSync(artifactPath, { force: true });
 	});
 });

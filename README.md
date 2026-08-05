@@ -269,7 +269,9 @@ main agent
 5. The main agent uses the result to verify the work and continue dependent steps. No later
    user prompt is required to collect a result.
 
-Switching sessions, reloading, or shutting down cancels remaining background runs.
+Switching sessions, reloading, or shutting down cancels remaining background runs. A
+crashed or aborted agent returns whatever partial output it produced (clearly
+labelled) so the main agent can assess the progress and decide whether to retry.
 
 ## Usage
 
@@ -346,7 +348,7 @@ agent's default — its frontmatter `thinking`, else the global default). The gl
 | `agentThinkingLevels` | Optional thinking level per agent; agents without an entry use the agent's frontmatter `thinking`, then `thinkingLevel`. |
 | `thinkingLevel` | Default thinking level: `off`, `minimal`, `low`, `medium`, `high`, `xhigh`, or `max` (default `high`). |
 | `notifyOnReviewPass` | When `true`, a passing reviewer result is delivered without waking the main agent (default `false`). |
-| `maxResultLines` | Max lines of a sub-agent result carried in the completion message (default `80`). Longer results are truncated; the full text is written to a temp file whose path is included in the message. |
+| `maxResultLines` | Max lines of a sub-agent result carried in the completion message (default `80`). Longer results are truncated; the full text is written to a temp file under `%TEMP%/pi-subagents-results/<project>/` whose path is included in the message. |
 | `proactiveInjection` | Whether to add the delegation directive to the main system prompt. |
 | `agentScope` | `user`, `project`, or `both`; controls which user/project agent directories are discovered. |
 | `maxConcurrency` | Max sub-agent processes running at once (1–16, default 4), and the max tasks one parallel `subagent` call accepts. Extra work waits in the queue. |

@@ -42,6 +42,10 @@ export interface RunView {
 	relationLabel?: string;
 	/** Free-form note shown in the widget next to the status label (e.g. "auto-fix chain running"). */
 	annotation?: string;
+	/** True when a finished run is intentionally kept in the widget (e.g. an
+	 * auto-fix chain parent whose chain is still running). beginTurn preserves
+	 * retained runs so they are not swept between turns. */
+	retained?: boolean;
 }
 
 /** Optional chain metadata for runs spawned by an auto-fix loop. */
@@ -298,7 +302,12 @@ export class MonitorStore {
 	beginTurn(): void {
 		// Clear finished runs from a previous turn, but keep any still-active
 		// (queued/running) ones so a concurrent sub-agent call is not wiped.
-		this.runs = this.runs.filter((r) => r.status === "queued" || r.status === "running");
+		// Retained runs (e.g. an auto-fix chain parent whose chain is still
+		// running) are also preserved — their status is "done" but they must
+		// stay visible until the chain resolves.
+		this.runs = this.runs.filter(
+			(r) => r.status === "queued" || r.status === "running" || r.retained,
+		);
 		this.notify();
 	}
 
@@ -357,9 +366,25 @@ export class MonitorStore {
 		this.notify();
 	}
 
+	/** Mark a run as retained (kept in the widget despite being finished). */
+	setRetained(id: number, retained: boolean): void {
+		const run = this.find(id);
+		if (!run) return;
+		run.retained = retained;
+		this.notify();
+	}
+
 	/** Look up a run by id without removing it. */
 	findRun(id: number): RunView | undefined {
 		return this.find(id);
+	}
+
+	/** Remove all runs (used on session shutdown so stale state never leaks
+	 * into the next session). Does not reset the id counter so in-flight
+	 * finishRun calls from the old session remain safe no-ops. */
+	clear(): void {
+		this.runs = [];
+		this.notify();
 	}
 
 	/** Remove a run (finished runs leave the widget). Returns the removed run. */

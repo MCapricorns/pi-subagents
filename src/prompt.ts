@@ -41,6 +41,10 @@ It immediately ends the current main-agent turn so the user can keep working. Wh
 finishes, its result is sent back as a message that automatically resumes the main agent;
 if the main agent is busy, the result waits as a follow-up.
 
+NEVER run sleep, wait, or polling commands (e.g. Start-Sleep, sleep, timeout) to wait for
+a sub-agent — the turn already ended and the main agent is auto-resumed when results arrive.
+Manual waiting blocks the turn, delays result delivery, and wastes the user's time.
+
 Available agents:
 ${catalog}
 
