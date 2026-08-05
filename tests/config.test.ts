@@ -4,10 +4,12 @@ import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 import {
 	DEFAULT_ENABLED_AGENTS,
+	DEFAULT_IDLE_TIMEOUT_SEC,
 	DEFAULT_MAX_CONCURRENCY,
 	DEFAULT_MAX_FIX_ROUNDS,
 	DEFAULT_MAX_RESULT_LINES,
 	DEFAULT_THINKING_LEVEL,
+	IDLE_TIMEOUT_SEC_LIMIT,
 	MAX_CONCURRENCY_LIMIT,
 	MAX_FIX_ROUNDS_LIMIT,
 	MAX_RESULT_LINES_LIMIT,
@@ -128,6 +130,16 @@ describe("normalizeConfig", () => {
 		expect(normalizeConfig({ maxFixRounds: 99 }).maxFixRounds).toBe(MAX_FIX_ROUNDS_LIMIT);
 		expect(normalizeConfig({ maxFixRounds: 2.6 }).maxFixRounds).toBe(3);
 		expect(normalizeConfig({ maxFixRounds: "many" }).maxFixRounds).toBe(DEFAULT_MAX_FIX_ROUNDS);
+	});
+
+	it("defaults idleTimeoutSec to 90 and clamps to [0, 600]", () => {
+		expect(DEFAULT_IDLE_TIMEOUT_SEC).toBe(90);
+		expect(normalizeConfig({}).idleTimeoutSec).toBe(90);
+		expect(normalizeConfig({ idleTimeoutSec: 0 }).idleTimeoutSec).toBe(0);
+		expect(normalizeConfig({ idleTimeoutSec: 120 }).idleTimeoutSec).toBe(120);
+		expect(normalizeConfig({ idleTimeoutSec: 999 }).idleTimeoutSec).toBe(IDLE_TIMEOUT_SEC_LIMIT);
+		expect(normalizeConfig({ idleTimeoutSec: 45.6 }).idleTimeoutSec).toBe(46);
+		expect(normalizeConfig({ idleTimeoutSec: "off" }).idleTimeoutSec).toBe(DEFAULT_IDLE_TIMEOUT_SEC);
 	});
 });
 

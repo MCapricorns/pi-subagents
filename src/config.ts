@@ -58,6 +58,15 @@ export const DEFAULT_MAX_FIX_ROUNDS = 2;
 /** Upper bound accepted for maxFixRounds (defensive clamp). 0 disables the loop. */
 export const MAX_FIX_ROUNDS_LIMIT = 5;
 
+/**
+ * Default idle timeout in seconds: a sub-agent whose stdout (JSON event stream)
+ * goes silent for this long is terminated and may be retried with the fallback
+ * model. 0 disables the idle watchdog. Default: 90.
+ */
+export const DEFAULT_IDLE_TIMEOUT_SEC = 90;
+/** Upper bound accepted for idleTimeoutSec (defensive clamp). 0 disables. */
+export const IDLE_TIMEOUT_SEC_LIMIT = 600;
+
 export interface SubagentsConfig {
 	/** Agent names that are discoverable and injected. Default: explore, worker, reviewer. */
 	enabledAgents: string[];
@@ -93,6 +102,12 @@ export interface SubagentsConfig {
 	 * Default: 2.
 	 */
 	maxFixRounds: number;
+	/**
+	 * Idle timeout in seconds: a sub-agent whose stdout (JSON event stream) goes
+	 * silent for this long is terminated and may be retried with the fallback
+	 * model. 0 disables the idle watchdog. Default: 90.
+	 */
+	idleTimeoutSec: number;
 }
 
 export const DEFAULT_CONFIG: SubagentsConfig = {
@@ -106,6 +121,7 @@ export const DEFAULT_CONFIG: SubagentsConfig = {
 	agentScope: "user",
 	maxConcurrency: DEFAULT_MAX_CONCURRENCY,
 	maxFixRounds: DEFAULT_MAX_FIX_ROUNDS,
+	idleTimeoutSec: DEFAULT_IDLE_TIMEOUT_SEC,
 };
 
 export function getConfigPath(agentDir: string = getAgentDir()): string {
@@ -151,6 +167,7 @@ export function normalizeConfig(raw: unknown): SubagentsConfig {
 		agentScope: DEFAULT_CONFIG.agentScope,
 		maxConcurrency: DEFAULT_CONFIG.maxConcurrency,
 		maxFixRounds: DEFAULT_CONFIG.maxFixRounds,
+		idleTimeoutSec: DEFAULT_CONFIG.idleTimeoutSec,
 	};
 
 	if (Array.isArray(raw.enabledAgents)) {
@@ -216,6 +233,11 @@ export function normalizeConfig(raw: unknown): SubagentsConfig {
 	// 0 disables the auto-fix loop (main agent handles fixes itself).
 	if (typeof raw.maxFixRounds === "number" && Number.isFinite(raw.maxFixRounds)) {
 		config.maxFixRounds = Math.max(0, Math.min(MAX_FIX_ROUNDS_LIMIT, Math.round(raw.maxFixRounds)));
+	}
+
+	// 0 disables the idle watchdog; otherwise clamp to [0, upper].
+	if (typeof raw.idleTimeoutSec === "number" && Number.isFinite(raw.idleTimeoutSec)) {
+		config.idleTimeoutSec = Math.max(0, Math.min(IDLE_TIMEOUT_SEC_LIMIT, Math.round(raw.idleTimeoutSec)));
 	}
 
 	return config;

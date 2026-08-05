@@ -156,6 +156,75 @@ process.stdin.on("end", () => process.stdout.write(JSON.stringify({ type: "messa
 			rmSync(dir, { recursive: true, force: true });
 		}
 	});
+
+	it("terminates a child whose stdout goes idle past the idle timeout", async () => {
+		const dir = mkdtempSync(join(tmpdir(), "pi-subagents-idle-"));
+		const script = join(dir, "idle-child.mjs");
+		// Start with one stdout line, then go silent (resume stdin, no more output).
+		writeFileSync(
+			script,
+			`process.stdout.write(JSON.stringify({ type: "message_end", message: { role: "assistant", content: [{ type: "text", text: "started" }] } }) + "\\n");
+process.stdin.resume();
+setInterval(() => {}, 1000);
+`,
+			"utf8",
+		);
+		const previousScript = process.argv[1];
+		process.argv[1] = script;
+		try {
+			const result = await runSingleAgent({
+				defaultCwd: process.cwd(),
+				agent,
+				agentName: agent.name,
+				task: "hang after one line",
+				makeDetails: (results) => ({ mode: "single", results }),
+				idleTimeoutMs: 50,
+				timeoutMs: 5_000,
+			});
+			expect(result.stopReason).toBe("error");
+			expect(result.errorMessage).toContain("idle timeout");
+			expect(result.exitCode).not.toBe(0);
+		} finally {
+			process.argv[1] = previousScript;
+			rmSync(dir, { recursive: true, force: true });
+		}
+	});
+
+	it("does not fire idle timeout while stdout is active", async () => {
+		const dir = mkdtempSync(join(tmpdir(), "pi-subagents-idle-active-"));
+		const script = join(dir, "active-child.mjs");
+		// Emit a line every 20ms so stdout never goes idle; finish before the idle timeout.
+		writeFileSync(
+			script,
+			`let n = 0;
+const timer = setInterval(() => {
+	n++;
+	process.stdout.write(JSON.stringify({ type: "message_update", assistantMessageEvent: { type: "thinking_delta" } }) + "\\n");
+	if (n >= 5) { clearInterval(timer); process.stdout.write(JSON.stringify({ type: "message_end", message: { role: "assistant", content: [{ type: "text", text: "done" }] } }) + "\\n"); process.exit(0); }
+}, 20);
+process.stdin.resume();
+`,
+			"utf8",
+		);
+		const previousScript = process.argv[1];
+		process.argv[1] = script;
+		try {
+			const result = await runSingleAgent({
+				defaultCwd: process.cwd(),
+				agent,
+				agentName: agent.name,
+				task: "keep busy",
+				makeDetails: (results) => ({ mode: "single", results }),
+				idleTimeoutMs: 100,
+				timeoutMs: 5_000,
+			});
+			expect(result.exitCode).toBe(0);
+			expect(getFinalOutput(result.messages)).toBe("done");
+		} finally {
+			process.argv[1] = previousScript;
+			rmSync(dir, { recursive: true, force: true });
+		}
+	});
 });
 
 describe("isModelLevelFailure", () => {
@@ -178,11 +247,32 @@ describe("isModelLevelFailure", () => {
 		).toBe(false);
 	});
 
-	it("is false for aborts and timeouts", () => {
+	it("is false for aborts and total timeouts", () => {
 		expect(isModelLevelFailure(result({ exitCode: 1, stopReason: "aborted" }))).toBe(false);
 		expect(
 			isModelLevelFailure(result({ exitCode: 1, stopReason: "error", errorMessage: "Subagent timed out after 5 seconds." })),
 		).toBe(false);
+	});
+
+	it("is true for idle timeouts even with partial output", () => {
+		expect(
+			isModelLevelFailure(result({
+				exitCode: 1,
+				stopReason: "error",
+				errorMessage: "Subagent idle timeout: no activity for 90 seconds.",
+				messages: [assistant("partial work")],
+			})),
+		).toBe(true);
+	});
+
+	it("is true for idle timeouts with no output", () => {
+		expect(
+			isModelLevelFailure(result({
+				exitCode: 1,
+				stopReason: "error",
+				errorMessage: "Subagent idle timeout: no activity for 90 seconds.",
+			})),
+		).toBe(true);
 	});
 
 	it("is false without any evidence of a model/provider error", () => {

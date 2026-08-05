@@ -23,10 +23,13 @@ agent, and keep the workflow moving without manual polling.
   elapsed time; completion also produces a concise notification.
 - **Per-agent configuration** — enable agents, pick model and thinking strength per agent,
   tune concurrency limits, and choose discovery scope from `/subagents-setup`.
+- **Idle watchdog** — a sub-agent whose stdout goes silent for a configurable
+  duration is terminated and retried with the fallback model, so a stalled SSE
+  stream never hangs the workflow.
 - **Automatic model fallback** — if an agent's model fails at the provider level before
-  producing any output, the run is retried once with the main window's current model.
-  Per-run only, never persisted: a transient provider hiccup does not silently downgrade
-  the configured model.
+  producing any output (or the idle watchdog fires), the run is retried once with the
+  main window's current model. Per-run only, never persisted: a transient provider
+  hiccup does not silently downgrade the configured model.
 - **Leaf processes** — child agents cannot access the `subagent` tool, so delegation cannot
   recurse.
 
@@ -331,7 +334,8 @@ agent's default — its frontmatter `thinking`, else the global default). The gl
   "proactiveInjection": true,
   "agentScope": "user",
   "maxConcurrency": 4,
-  "maxFixRounds": 2
+  "maxFixRounds": 2,
+  "idleTimeoutSec": 90
 }
 ```
 
@@ -347,6 +351,7 @@ agent's default — its frontmatter `thinking`, else the global default). The gl
 | `agentScope` | `user`, `project`, or `both`; controls which user/project agent directories are discovered. |
 | `maxConcurrency` | Max sub-agent processes running at once (1–16, default 4), and the max tasks one parallel `subagent` call accepts. Extra work waits in the queue. |
 | `maxFixRounds` | Auto-fix rounds when a reviewer returns `REVIEW_FAIL`: the extension dispatches a `worker` (briefed with the review's concrete findings) then a `reviewer` re-review, repeating up to this many times before waking the main agent with the full chain. `0` disables it (the main agent handles fixes itself). Default 2. The reviewer stays read-only and in its own context; the loop is orchestrated by the extension, not by the reviewer. |
+| `idleTimeoutSec` | Idle timeout in seconds: a sub-agent whose stdout (JSON event stream) goes silent for this long is terminated and retried with the fallback model (if one is available). `0` disables the idle watchdog. Default 90. Unlike the total timeout, this only fires when the child produces no output at all — a long but active run is never interrupted. |
 
 ### Configuration migration
 
@@ -361,6 +366,8 @@ The config file migrates itself on load — no manual steps after an upgrade:
 - **Removed keys** — `maxSubagentDepth` (0.14) is dropped on load: sub-agent children are
   always leaf processes (the `subagent` tool is excluded from their toolset, with a depth
   marker as defense in depth). To disable delegation entirely, use `"enabledAgents": []`.
+- **New fields** — `idleTimeoutSec` (0.16) is filled in on load with its default (90)
+  when missing from an older config.
 
 Model selection uses this precedence:
 
@@ -375,8 +382,10 @@ At runtime, if an agent's model fails at the provider level before producing any
 model id, auth, thinking level, quota, ...), the run is retried **once** with the main window's
 current model. This per-run degradation is never persisted — a transient provider hiccup must
 not silently downgrade the configured model — and it does not apply to task-level failures
-(the model worked, the task failed), aborts, or timeouts. Results carry a `model fell back
-from …` note when it happened.
+(the model worked, the task failed), aborts, or total timeouts. Idle timeouts (the child's
+stdout goes silent for `idleTimeoutSec` seconds) are treated as model-level failures and do
+trigger the fallback, since a stalled SSE stream is usually a provider-side issue. Results
+carry a `model fell back from …` note when it happened.
 
 Thinking strength uses this precedence: `agentThinkingLevels` entry → agent frontmatter `thinking` → `thinkingLevel` default.
 

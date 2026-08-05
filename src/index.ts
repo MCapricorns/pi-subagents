@@ -375,6 +375,7 @@ export default function (pi: ExtensionAPI): void {
 							signal,
 							onLive,
 							makeDetails: makeDetails("single", true),
+							idleTimeoutMs: config.idleTimeoutSec * 1000,
 						},
 						sessionRef,
 					);
@@ -477,6 +478,7 @@ export default function (pi: ExtensionAPI): void {
 									signal: backgroundSignal,
 									onLive,
 									makeDetails: makeDetails("single", true),
+									idleTimeoutMs: config.idleTimeoutSec * 1000,
 								},
 								sessionRef,
 							);

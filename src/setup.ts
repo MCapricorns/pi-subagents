@@ -14,6 +14,7 @@ import {
 	BUILTIN_AGENT_NAMES,
 	DEFAULT_CONFIG,
 	DEFAULT_ENABLED_AGENTS,
+	DEFAULT_IDLE_TIMEOUT_SEC,
 	DEFAULT_MAX_CONCURRENCY,
 	DEFAULT_MAX_FIX_ROUNDS,
 	THINKING_LEVEL_VALUES,
@@ -197,6 +198,8 @@ async function pickInjection(ctx: ExtensionCommandContext, current: boolean): Pr
 const CONCURRENCY_STEPS = [1, 2, 3, 4, 6, 8, 12, 16];
 /** Preset rounds offered for the auto-fix loop (0 disables it). */
 const FIX_ROUNDS_STEPS = [0, 1, 2, 3, 5];
+/** Preset seconds offered for the idle timeout (0 disables it). */
+const IDLE_TIMEOUT_STEPS = [0, 30, 60, 90, 120, 180, 300, 600];
 
 async function pickCount(
 	ctx: ExtensionCommandContext,
@@ -298,6 +301,15 @@ async function runFullSetup(ctx: ExtensionCommandContext, configPath: string, ba
 		);
 		if (maxFixRounds === undefined) return notifyCancelled(ctx);
 
+		const idleTimeoutSec = await pickCount(
+			ctx,
+			"Idle timeout in seconds? (0 = disabled, kills a sub-agent whose output goes silent)",
+			IDLE_TIMEOUT_STEPS,
+			base.idleTimeoutSec,
+			DEFAULT_IDLE_TIMEOUT_SEC,
+		);
+		if (idleTimeoutSec === undefined) return notifyCancelled(ctx);
+
 		const next: SubagentsConfig = {
 		enabledAgents: enabled,
 		agentModels: repairStaleModels(ctx, picked.models),
@@ -309,6 +321,7 @@ async function runFullSetup(ctx: ExtensionCommandContext, configPath: string, ba
 		agentScope: scope,
 		maxConcurrency,
 		maxFixRounds,
+		idleTimeoutSec,
 	};
 	await saveConfig(next, configPath);
 	ctx.ui.notify(`pi-subagents configured. Saved to ${configPath}`, "info");
@@ -323,6 +336,7 @@ async function runMenu(ctx: ExtensionCommandContext, configPath: string, config:
 		"Change agent scope",
 		"Change max concurrent sub-agents",
 		"Change max fix rounds",
+		"Change idle timeout",
 		"Full re-setup",
 	]);
 	if (choice === undefined) return notifyCancelled(ctx);
@@ -384,6 +398,16 @@ async function runMenu(ctx: ExtensionCommandContext, configPath: string, config:
 		);
 		if (maxFixRounds === undefined) return notifyCancelled(ctx);
 		next.maxFixRounds = maxFixRounds;
+	} else if (choice.startsWith("Change idle")) {
+		const idleTimeoutSec = await pickCount(
+			ctx,
+			"Idle timeout in seconds? (0 = disabled, kills a sub-agent whose output goes silent)",
+			IDLE_TIMEOUT_STEPS,
+			config.idleTimeoutSec,
+			DEFAULT_IDLE_TIMEOUT_SEC,
+		);
+		if (idleTimeoutSec === undefined) return notifyCancelled(ctx);
+		next.idleTimeoutSec = idleTimeoutSec;
 	}
 
 	await saveConfig(next, configPath);
