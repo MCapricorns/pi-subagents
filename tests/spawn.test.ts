@@ -13,7 +13,6 @@ import {
 	runSingleAgentWithModelFallback,
 	truncateResultOutput,
 	writeResultArtifact,
-	mapWithConcurrencyLimit,
 	type SingleResult,
 } from "../src/spawn.ts";
 
@@ -215,11 +214,8 @@ describe("isModelLevelFailure", () => {
 		).toBe(false);
 	});
 
-	it("is false for aborts and total timeouts", () => {
+	it("is false for aborts", () => {
 		expect(isModelLevelFailure(result({ exitCode: 1, stopReason: "aborted" }))).toBe(false);
-		expect(
-			isModelLevelFailure(result({ exitCode: 1, stopReason: "error", errorMessage: "Subagent timed out after 5 seconds." })),
-		).toBe(false);
 	});
 
 	it("is true for idle timeouts even with partial output", () => {
@@ -357,16 +353,6 @@ process.exit(1);
 			process.argv[1] = previousScript;
 			rmSync(dir, { recursive: true, force: true });
 		}
-	});
-});
-
-describe("mapWithConcurrencyLimit", () => {
-	it("preserves input order", async () => {
-		const out = await mapWithConcurrencyLimit([1, 2, 3, 4], 2, async (n) => n * 10);
-		expect(out).toEqual([10, 20, 30, 40]);
-	});
-	it("returns empty for empty input", async () => {
-		expect(await mapWithConcurrencyLimit([], 4, async (n) => n)).toEqual([]);
 	});
 });
 

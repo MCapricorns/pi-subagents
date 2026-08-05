@@ -12,7 +12,6 @@
  * runaway recursion and keeps child context windows clean.
  */
 
-import type { AgentToolResult } from "@earendil-works/pi-agent-core";
 import { getAgentDir, type ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { Text, truncateToWidth } from "@earendil-works/pi-tui";
 import { Type } from "typebox";
@@ -31,7 +30,6 @@ import { buildDelegationDirective } from "./prompt.ts";
 import { runSetup } from "./setup.ts";
 import {
 	currentSubagentDepth,
-	getFinalOutput,
 	getResultOutput,
 	isFailedResult,
 	reviewVerdict,
@@ -217,7 +215,7 @@ export default function (pi: ExtensionAPI): void {
 		],
 		parameters: SubagentParams,
 
-		async execute(_toolCallId, params, signal, onUpdate, ctx) {
+		async execute(_toolCallId, params, signal, _onUpdate, ctx) {
 			monitor.beginTurn();
 			let config = await loadConfig(configPath);
 			// Pick up concurrency changes from /subagents-setup without a restart.

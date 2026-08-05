@@ -4,8 +4,7 @@
  * written to a temp file and passed via `--append-system-prompt` (which accepts a
  * file path). The task itself is sent through the child's stdin pipe, not another
  * temp file or command-line argument. Child stdout is a JSON-lines event stream;
- * we accumulate assistant messages from `message_end` events and stream partial
- * output back via onUpdate.
+ * we accumulate assistant messages from `message_end` events.
  *
  * Adapted from the official pi example `examples/extensions/subagent`.
  */
@@ -16,7 +15,6 @@ import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { basename, join } from "node:path";
 import { StringDecoder } from "node:string_decoder";
-import type { AgentToolResult } from "@earendil-works/pi-agent-core";
 import type { Message } from "@earendil-works/pi-ai";
 import type { AgentConfig, AgentSource } from "./agents.ts";
 import { DEFAULT_THINKING_LEVEL, type ThinkingLevel } from "./config.ts";
@@ -67,8 +65,6 @@ export interface SubagentDetails {
 	/** The tool returned immediately while the child process continues in the background. */
 	background?: boolean;
 }
-
-export type OnUpdateCallback = (partial: AgentToolResult<SubagentDetails>) => void;
 
 export type SubagentLiveEvent =
 	| { kind: "status"; status: "queued" | "running" | "done" | "failed" }
@@ -163,7 +159,6 @@ export function isModelLevelFailure(result: SingleResult): boolean {
 	if (result.errorMessage?.includes("idle timeout")) return true;
 	// The model produced text: the failure belongs to the task, not the model.
 	if (getFinalOutput(result.messages)) return false;
-	if (result.errorMessage?.includes("timed out")) return false;
 	// Require evidence the failure came from the model/provider (an error
 	// message or stderr), not from the child process failing to start.
 	return result.messages.length > 0 || result.stderr.trim().length > 0;
@@ -174,26 +169,6 @@ export function getResultOutput(result: SingleResult): string {
 		return result.errorMessage || result.stderr || getFinalOutput(result.messages) || "(no output)";
 	}
 	return getFinalOutput(result.messages) || "(no output)";
-}
-
-export async function mapWithConcurrencyLimit<TIn, TOut>(
-	items: TIn[],
-	concurrency: number,
-	fn: (item: TIn, index: number) => Promise<TOut>,
-): Promise<TOut[]> {
-	if (items.length === 0) return [];
-	const limit = Math.max(1, Math.min(concurrency, items.length));
-	const results: TOut[] = new Array(items.length);
-	let nextIndex = 0;
-	const workers = new Array(limit).fill(null).map(async () => {
-		while (true) {
-			const current = nextIndex++;
-			if (current >= items.length) return;
-			results[current] = await fn(items[current], current);
-		}
-	});
-	await Promise.all(workers);
-	return results;
 }
 
 async function writePromptToTempFile(agentName: string, prompt: string): Promise<{ dir: string; filePath: string }> {
@@ -263,7 +238,6 @@ export interface RunSingleOptions {
 	 * for this duration. 0 (the default) disables the idle watchdog. */
 	idleTimeoutMs?: number;
 	signal?: AbortSignal;
-	onUpdate?: OnUpdateCallback;
 	onLive?: (e: SubagentLiveEvent) => void;
 	makeDetails: (results: SingleResult[]) => SubagentDetails;
 	env?: NodeJS.ProcessEnv;
@@ -279,7 +253,6 @@ export async function runSingleAgent(options: RunSingleOptions): Promise<SingleR
 		thinkingLevel = SUBAGENT_THINKING_LEVEL,
 		idleTimeoutMs = SUBAGENT_DEFAULT_IDLE_TIMEOUT_MS,
 		signal,
-		onUpdate,
 		onLive,
 		makeDetails,
 	} = options;
@@ -319,13 +292,6 @@ export async function runSingleAgent(options: RunSingleOptions): Promise<SingleR
 		thinking: thinkingLevel,
 	};
 
-	const emitUpdate = (): void => {
-		onUpdate?.({
-			content: [{ type: "text", text: getFinalOutput(currentResult.messages) || "(running...)" }],
-			details: makeDetails([currentResult]),
-		});
-	};
-
 	try {
 		if (agent.systemPrompt.trim()) {
 			const tmp = await writePromptToTempFile(agent.name, agent.systemPrompt);
@@ -335,7 +301,6 @@ export async function runSingleAgent(options: RunSingleOptions): Promise<SingleR
 		}
 
 		let wasAborted = false;
-		let timedOut = false;
 
 		// Increment depth so nested sub-agents can be guarded against runaway recursion.
 		const childDepth = currentSubagentDepth(options.env) + 1;
@@ -454,12 +419,10 @@ export async function runSingleAgent(options: RunSingleOptions): Promise<SingleR
 							onLive({ kind: "usage", usage: { ...currentResult.usage }, model: currentResult.model });
 						} catch { /* never throw from event handling */ }
 					}
-					emitUpdate();
 				}
 
 				if (event.type === "tool_result_end" && event.message) {
 					currentResult.messages.push(event.message as Message);
-					emitUpdate();
 				}
 			};
 			// Send the task through the child stdin pipe instead of the process
@@ -495,7 +458,6 @@ export async function runSingleAgent(options: RunSingleOptions): Promise<SingleR
 				const failed =
 					code !== 0 ||
 					wasAborted ||
-					timedOut ||
 					(signal?.aborted ?? false) ||
 					currentResult.stopReason === "error" ||
 					currentResult.stopReason === "aborted";
@@ -525,7 +487,6 @@ export async function runSingleAgent(options: RunSingleOptions): Promise<SingleR
 					if (closed) return;
 					if (Date.now() - lastActivityAt >= idleTimeoutMs) {
 						if (idleTimer) clearInterval(idleTimer);
-						timedOut = true;
 						currentResult.stopReason = "error";
 						currentResult.errorMessage = `Subagent idle timeout: no activity for ${Math.ceil(idleTimeoutMs / 1000)} seconds.`;
 						terminate();
