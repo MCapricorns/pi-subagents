@@ -28,8 +28,6 @@ import { DEFAULT_THINKING_LEVEL, type ThinkingLevel } from "./config.ts";
 /** Default thinking level for sub-agents. pi clamps it to the resolved model's support. */
 export const SUBAGENT_THINKING_LEVEL: ThinkingLevel = DEFAULT_THINKING_LEVEL;
 export const DEPTH_ENV_VAR = "PI_SUBAGENT_DEPTH";
-/** No default deadline: sub-agents may run until completion or explicit cancellation. */
-export const SUBAGENT_TIMEOUT_MS = 0;
 export const SUBAGENT_KILL_GRACE_MS = 5_000;
 /** Default idle watchdog: terminate a child whose stdout goes silent for this
  * many milliseconds. 0 disables it. The actual value comes from config
@@ -261,8 +259,6 @@ export interface RunSingleOptions {
 	cwd?: string;
 	/** Thinking level passed to the child pi process. */
 	thinkingLevel?: ThinkingLevel;
-	/** Optional total timeout; zero (the default) disables it. Intended for tests and controlled callers. */
-	timeoutMs?: number;
 	/** Idle timeout in ms: terminate the child if its stdout produces no activity
 	 * for this duration. 0 (the default) disables the idle watchdog. */
 	idleTimeoutMs?: number;
@@ -281,7 +277,6 @@ export async function runSingleAgent(options: RunSingleOptions): Promise<SingleR
 		task,
 		cwd,
 		thinkingLevel = SUBAGENT_THINKING_LEVEL,
-		timeoutMs = SUBAGENT_TIMEOUT_MS,
 		idleTimeoutMs = SUBAGENT_DEFAULT_IDLE_TIMEOUT_MS,
 		signal,
 		onUpdate,
@@ -361,7 +356,6 @@ export async function runSingleAgent(options: RunSingleOptions): Promise<SingleR
 			let closed = false;
 			let termSent = false;
 			let forceKillTimer: ReturnType<typeof setTimeout> | undefined;
-			let timeoutTimer: ReturnType<typeof setTimeout> | undefined;
 			let abortHandler: (() => void) | undefined;
 			let lastActivityAt = Date.now();
 			let idleTimer: ReturnType<typeof setInterval> | undefined;
@@ -370,7 +364,6 @@ export async function runSingleAgent(options: RunSingleOptions): Promise<SingleR
 				if (closed) return;
 				closed = true;
 				if (forceKillTimer) clearTimeout(forceKillTimer);
-				if (timeoutTimer) clearTimeout(timeoutTimer);
 				if (idleTimer) clearInterval(idleTimer);
 				if (signal && abortHandler) signal.removeEventListener("abort", abortHandler);
 				resolve(code ?? 1);
@@ -525,15 +518,6 @@ export async function runSingleAgent(options: RunSingleOptions): Promise<SingleR
 				}
 				finish(1);
 			});
-
-			if (timeoutMs > 0) {
-				timeoutTimer = setTimeout(() => {
-					timedOut = true;
-					currentResult.stopReason = "error";
-					currentResult.errorMessage = `Subagent timed out after ${Math.ceil(timeoutMs / 1000)} seconds.`;
-					terminate();
-				}, timeoutMs);
-			}
 
 			if (idleTimeoutMs > 0) {
 				const checkInterval = Math.min(10_000, Math.floor(idleTimeoutMs / 3));

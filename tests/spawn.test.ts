@@ -4,7 +4,6 @@ import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 import {
 	currentSubagentDepth,
-	SUBAGENT_TIMEOUT_MS,
 	getFinalOutput,
 	isFailedResult,
 	isModelLevelFailure,
@@ -90,10 +89,6 @@ describe("currentSubagentDepth", () => {
 });
 
 describe("runSingleAgent transport and lifecycle", () => {
-	it("has no default timeout", () => {
-		expect(SUBAGENT_TIMEOUT_MS).toBe(0);
-	});
-
 	const agent = {
 		name: "fake",
 		description: "fake",
@@ -123,34 +118,9 @@ process.stdin.on("end", () => process.stdout.write(JSON.stringify({ type: "messa
 				agentName: agent.name,
 				task: "hello from stdin",
 				makeDetails: (results) => ({ mode: "single", results }),
-				timeoutMs: 2_000,
 			});
 			expect(getFinalOutput(result.messages)).toBe("Task: hello from stdin");
 			expect(result.exitCode).toBe(0);
-		} finally {
-			process.argv[1] = previousScript;
-			rmSync(dir, { recursive: true, force: true });
-		}
-	});
-
-	it("terminates a child that exceeds an explicitly configured timeout", async () => {
-		const dir = mkdtempSync(join(tmpdir(), "pi-subagents-timeout-"));
-		const script = join(dir, "stuck-child.mjs");
-		writeFileSync(script, "process.stdin.resume(); setInterval(() => {}, 1000);\n", "utf8");
-		const previousScript = process.argv[1];
-		process.argv[1] = script;
-		try {
-			const result = await runSingleAgent({
-				defaultCwd: process.cwd(),
-				agent,
-				agentName: agent.name,
-				task: "hang",
-				makeDetails: (results) => ({ mode: "single", results }),
-				timeoutMs: 20,
-			});
-			expect(result.stopReason).toBe("error");
-			expect(result.errorMessage).toContain("timed out");
-			expect(result.exitCode).not.toBe(0);
 		} finally {
 			process.argv[1] = previousScript;
 			rmSync(dir, { recursive: true, force: true });
@@ -163,24 +133,23 @@ process.stdin.on("end", () => process.stdout.write(JSON.stringify({ type: "messa
 		// Start with one stdout line, then go silent (resume stdin, no more output).
 		writeFileSync(
 			script,
-			`process.stdout.write(JSON.stringify({ type: "message_end", message: { role: "assistant", content: [{ type: "text", text: "started" }] } }) + "\\n");
+		`process.stdout.write(JSON.stringify({ type: "message_end", message: { role: "assistant", content: [{ type: "text", text: "started" }] } }) + "\\n");
 process.stdin.resume();
 setInterval(() => {}, 1000);
 `,
-			"utf8",
-		);
+		"utf8",
+	);
 		const previousScript = process.argv[1];
 		process.argv[1] = script;
 		try {
-			const result = await runSingleAgent({
-				defaultCwd: process.cwd(),
-				agent,
-				agentName: agent.name,
-				task: "hang after one line",
-				makeDetails: (results) => ({ mode: "single", results }),
-				idleTimeoutMs: 50,
-				timeoutMs: 5_000,
-			});
+		const result = await runSingleAgent({
+			defaultCwd: process.cwd(),
+			agent,
+			agentName: agent.name,
+			task: "hang after one line",
+			makeDetails: (results) => ({ mode: "single", results }),
+			idleTimeoutMs: 50,
+		});
 			expect(result.stopReason).toBe("error");
 			expect(result.errorMessage).toContain("idle timeout");
 			expect(result.exitCode).not.toBe(0);
@@ -216,7 +185,6 @@ process.stdin.resume();
 				task: "keep busy",
 				makeDetails: (results) => ({ mode: "single", results }),
 				idleTimeoutMs: 100,
-				timeoutMs: 5_000,
 			});
 			expect(result.exitCode).toBe(0);
 			expect(getFinalOutput(result.messages)).toBe("done");
@@ -319,7 +287,6 @@ process.exit(0);
 					agentName: agent.name,
 					task: "review",
 					makeDetails: (results) => ({ mode: "single", results }),
-					timeoutMs: 2_000,
 				},
 				"deepseek/deepseek-v4-flash",
 			);
@@ -354,11 +321,10 @@ process.exit(1);
 					agentName: agent.name,
 					task: "review",
 					makeDetails: (results) => ({ mode: "single", results }),
-					timeoutMs: 2_000,
-				},
-				"deepseek/deepseek-v4-flash",
-			);
-			expect(result.exitCode).toBe(1);
+					},
+					"deepseek/deepseek-v4-flash",
+				);
+				expect(result.exitCode).toBe(1);
 			expect(result.stopReason).toBe("error");
 			expect(result.errorMessage).toBe("provider down");
 			expect(result.modelFallbackFrom).toBe("openai-codex/gpt-5.6-sol");
@@ -383,7 +349,6 @@ process.exit(1);
 				agentName: agent.name,
 				task: "review",
 				makeDetails: (results) => ({ mode: "single", results }),
-				timeoutMs: 2_000,
 			});
 			expect(result.exitCode).toBe(1);
 			expect(result.modelFallbackFrom).toBeUndefined();

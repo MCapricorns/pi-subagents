@@ -351,7 +351,7 @@ agent's default — its frontmatter `thinking`, else the global default). The gl
 | `agentScope` | `user`, `project`, or `both`; controls which user/project agent directories are discovered. |
 | `maxConcurrency` | Max sub-agent processes running at once (1–16, default 4), and the max tasks one parallel `subagent` call accepts. Extra work waits in the queue. |
 | `maxFixRounds` | Auto-fix rounds when a reviewer returns `REVIEW_FAIL`: the extension dispatches a `worker` (briefed with the review's concrete findings) then a `reviewer` re-review, repeating up to this many times before waking the main agent with the full chain. `0` disables it (the main agent handles fixes itself). Default 2. The reviewer stays read-only and in its own context; the loop is orchestrated by the extension, not by the reviewer. |
-| `idleTimeoutSec` | Idle timeout in seconds: a sub-agent whose stdout (JSON event stream) goes silent for this long is terminated and retried with the fallback model (if one is available). `0` disables the idle watchdog. Default 90. Unlike the total timeout, this only fires when the child produces no output at all — a long but active run is never interrupted. |
+| `idleTimeoutSec` | Idle timeout in seconds: a sub-agent whose stdout (JSON event stream) goes silent for this long is terminated and retried with the fallback model (if one is available). `0` disables the idle watchdog. Default 90. This only fires when the child produces no output at all — a long but active run is never interrupted. |
 
 ### Configuration migration
 
@@ -382,10 +382,10 @@ At runtime, if an agent's model fails at the provider level before producing any
 model id, auth, thinking level, quota, ...), the run is retried **once** with the main window's
 current model. This per-run degradation is never persisted — a transient provider hiccup must
 not silently downgrade the configured model — and it does not apply to task-level failures
-(the model worked, the task failed), aborts, or total timeouts. Idle timeouts (the child's
-stdout goes silent for `idleTimeoutSec` seconds) are treated as model-level failures and do
-trigger the fallback, since a stalled SSE stream is usually a provider-side issue. Results
-carry a `model fell back from …` note when it happened.
+(the model worked, the task failed) or aborts. Idle timeouts (the child's stdout goes silent
+for `idleTimeoutSec` seconds) are treated as model-level failures and do trigger the fallback,
+since a stalled SSE stream is usually a provider-side issue. Results carry a `model fell back
+from …` note when it happened.
 
 Thinking strength uses this precedence: `agentThinkingLevels` entry → agent frontmatter `thinking` → `thinkingLevel` default.
 
