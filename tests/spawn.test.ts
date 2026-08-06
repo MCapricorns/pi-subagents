@@ -10,6 +10,7 @@ import {
 	isFailedResult,
 	isModelLevelFailure,
 	isRetryableStartupFailure,
+	isTerminalModelError,
 	RESULT_LINE_MAX,
 	reviewVerdict,
 	runSingleAgent,
@@ -288,7 +289,7 @@ process.stdout.write(JSON.stringify({ type: "message_end", message: { role: "ass
 process.exit(0);
 `;
 
-	it("retries once with the fallback model after a model-level failure", async () => {
+	it("falls back to the main-window model after a model-level failure (run-level retry disabled)", async () => {
 		const dir = mkdtempSync(join(tmpdir(), "pi-subagents-fallback-"));
 		const script = join(dir, "fallback-child.cjs");
 		const log = join(dir, "attempts.log");
@@ -302,6 +303,7 @@ process.exit(0);
 					agent: { ...agent, model: "openai-codex/gpt-5.6-sol" },
 					agentName: agent.name,
 					task: "review",
+					runLevelRetryDelaysMs: [],
 					makeDetails: (results) => ({ mode: "single", results }),
 				},
 				"deepseek/deepseek-v4-flash",
@@ -310,6 +312,7 @@ process.exit(0);
 			expect(getFinalOutput(result.messages)).toBe("recovered on main model");
 			expect(result.model).toBe("deepseek/deepseek-v4-flash");
 			expect(result.modelFallbackFrom).toBe("openai-codex/gpt-5.6-sol");
+			expect(result.modelRetries).toBe(0);
 			expect(readFileSync(log, "utf8").split("\n").filter(Boolean)).toHaveLength(2);
 		} finally {
 			process.argv[1] = previousScript;
@@ -317,7 +320,7 @@ process.exit(0);
 		}
 	});
 
-	it("reports the retried failure with the fallback origin when both attempts fail", async () => {
+	it("reports the retried failure with the fallback origin when both attempts fail (run-level retry disabled)", async () => {
 		const dir = mkdtempSync(join(tmpdir(), "pi-subagents-fallback-"));
 		const script = join(dir, "always-fail-child.mjs");
 		writeFileSync(
@@ -337,21 +340,23 @@ process.exit(1);
 					agentName: agent.name,
 					task: "review",
 					makeDetails: (results) => ({ mode: "single", results }),
-					},
-					"deepseek/deepseek-v4-flash",
-				);
-				expect(result.exitCode).toBe(1);
+					runLevelRetryDelaysMs: [],
+				},
+				"deepseek/deepseek-v4-flash",
+			);
+			expect(result.exitCode).toBe(1);
 			expect(result.stopReason).toBe("error");
 			expect(result.errorMessage).toBe("provider down");
 			expect(result.modelFallbackFrom).toBe("openai-codex/gpt-5.6-sol");
 			expect(result.model).toBe("deepseek/deepseek-v4-flash");
+			expect(result.modelRetries).toBe(0);
 		} finally {
 			process.argv[1] = previousScript;
 			rmSync(dir, { recursive: true, force: true });
 		}
 	});
 
-	it("does not retry without a fallback model ref", async () => {
+	it("does not fall back when no fallback model ref is configured", async () => {
 		const dir = mkdtempSync(join(tmpdir(), "pi-subagents-fallback-"));
 		const script = join(dir, "fallback-child.cjs");
 		const log = join(dir, "attempts.log");
@@ -364,15 +369,260 @@ process.exit(1);
 				agent: { ...agent, model: "openai-codex/gpt-5.6-sol" },
 				agentName: agent.name,
 				task: "review",
+				runLevelRetryDelaysMs: [],
 				makeDetails: (results) => ({ mode: "single", results }),
 			});
 			expect(result.exitCode).toBe(1);
 			expect(result.modelFallbackFrom).toBeUndefined();
+			expect(result.modelRetries).toBe(0);
 			expect(readFileSync(log, "utf8").split("\n").filter(Boolean)).toHaveLength(1);
 		} finally {
 			process.argv[1] = previousScript;
 			rmSync(dir, { recursive: true, force: true });
 		}
+	});
+});
+
+describe("runSingleAgentWithModelFallback run-level retry", () => {
+	const agent = {
+		name: "fake",
+		description: "fake",
+		systemPrompt: "",
+		source: "builtin" as const,
+		filePath: "/agents/fake.md",
+	};
+
+	// Child that fails with a transient error for the first `failTimes` launches
+	// (counting via LOG_PATH), then emits a normal success on the same model.
+	const transientThenRecoverScript = (failTimes: number): string => `
+const fs = require("node:fs");
+const log = process.env.LOG_PATH;
+fs.appendFileSync(log, "attempt\\n");
+const count = fs.readFileSync(log, "utf8").split("\\n").filter(Boolean).length;
+if (count <= ${failTimes}) {
+  process.stdout.write(JSON.stringify({ type: "message_end", message: { role: "assistant", content: [], stopReason: "error", errorMessage: "provider down" } }) + "\\n");
+  process.exit(1);
+}
+process.stdout.write(JSON.stringify({ type: "message_end", message: { role: "assistant", content: [{ type: "text", text: "recovered on same model" }], stopReason: "end" } }) + "\\n");
+process.exit(0);
+`;
+
+	const withArgv = (script: string, fn: () => Promise<void>): Promise<void> => {
+		const previousScript = process.argv[1];
+		process.argv[1] = script;
+		return fn().finally(() => {
+			process.argv[1] = previousScript;
+		});
+	};
+
+	it("retries the same model up to N times on a transient error, then falls back", async () => {
+		const dir = mkdtempSync(join(tmpdir(), "pi-subagents-runlevel-fallback-"));
+		const script = join(dir, "broken-child.cjs");
+		const log = join(dir, "attempts.log");
+		// Always fails on the configured model with a transient "model not found"
+		// (NOT a terminal error), then succeeds on the fallback model.
+		writeFileSync(
+			script,
+			`const fs = require("node:fs");
+fs.appendFileSync(${JSON.stringify(log)}, "attempt\\n");
+const modelArg = process.argv.indexOf("--model");
+const model = modelArg !== -1 ? process.argv[modelArg + 1] : "";
+if (model.startsWith("openai-codex")) {
+  process.stdout.write(JSON.stringify({ type: "message_end", message: { role: "assistant", content: [], stopReason: "error", errorMessage: "model not found" } }) + "\\n");
+  process.exit(1);
+}
+process.stdout.write(JSON.stringify({ type: "message_end", message: { role: "assistant", content: [{ type: "text", text: "recovered on main model" }], stopReason: "end" } }) + "\\n");
+process.exit(0);`,
+			"utf8",
+		);
+		try {
+			await withArgv(script, async () => {
+				const result = await runSingleAgentWithModelFallback(
+					{
+						defaultCwd: process.cwd(),
+						agent: { ...agent, model: "openai-codex/gpt-5.6-sol" },
+						agentName: agent.name,
+						task: "review",
+						runLevelRetryDelaysMs: [10, 10, 10, 10, 10],
+						makeDetails: (results) => ({ mode: "single", results }),
+					},
+					"deepseek/deepseek-v4-flash",
+				);
+				expect(result.exitCode).toBe(0);
+				expect(getFinalOutput(result.messages)).toBe("recovered on main model");
+				expect(result.model).toBe("deepseek/deepseek-v4-flash");
+				expect(result.modelFallbackFrom).toBe("openai-codex/gpt-5.6-sol");
+				expect(result.modelRetries).toBe(5);
+				// 1 initial + 5 same-model retries (all fail) + 1 fallback success = 7.
+				expect(readFileSync(log, "utf8").split("\n").filter(Boolean)).toHaveLength(7);
+			});
+		} finally {
+			rmSync(dir, { recursive: true, force: true });
+		}
+	});
+
+	it("recovers on a later same-model retry without falling back", async () => {
+		const dir = mkdtempSync(join(tmpdir(), "pi-subagents-runlevel-recover-"));
+		const script = join(dir, "recover-child.cjs");
+		const log = join(dir, "attempts.log");
+		writeFileSync(script, transientThenRecoverScript(3), "utf8");
+		try {
+			await withArgv(script, async () => {
+				const result = await runSingleAgentWithModelFallback(
+					{
+						defaultCwd: process.cwd(),
+						agent: { ...agent, model: "openai-codex/gpt-5.6-sol" },
+						agentName: agent.name,
+						task: "review",
+						runLevelRetryDelaysMs: [10, 10, 10, 10, 10],
+						env: { ...process.env, LOG_PATH: log },
+						makeDetails: (results) => ({ mode: "single", results }),
+					},
+					"deepseek/deepseek-v4-flash",
+				);
+				expect(result.exitCode).toBe(0);
+				expect(getFinalOutput(result.messages)).toBe("recovered on same model");
+				expect(result.model).toBe("openai-codex/gpt-5.6-sol");
+				expect(result.modelFallbackFrom).toBeUndefined();
+				expect(result.modelRetries).toBe(3);
+				// 1 initial + 3 same-model retries; the 4th launch succeeds.
+				expect(readFileSync(log, "utf8").split("\n").filter(Boolean)).toHaveLength(4);
+			});
+		} finally {
+			rmSync(dir, { recursive: true, force: true });
+		}
+	});
+
+	it("does not retry or fall back on a terminal quota error", async () => {
+		const dir = mkdtempSync(join(tmpdir(), "pi-subagents-runlevel-terminal-"));
+		const script = join(dir, "quota-child.cjs");
+		const log = join(dir, "attempts.log");
+		writeFileSync(
+			script,
+			`const fs = require("node:fs");
+fs.appendFileSync(${JSON.stringify(log)}, "attempt\\n");
+process.stdout.write(JSON.stringify({ type: "message_end", message: { role: "assistant", content: [], stopReason: "error", errorMessage: "insufficient_quota: you exceeded your quota" } }) + "\\n");
+process.exit(1);`,
+			"utf8",
+		);
+		try {
+			await withArgv(script, async () => {
+				const result = await runSingleAgentWithModelFallback(
+					{
+						defaultCwd: process.cwd(),
+						agent: { ...agent, model: "openai-codex/gpt-5.6-sol" },
+						agentName: agent.name,
+						task: "review",
+						runLevelRetryDelaysMs: [10, 10, 10, 10, 10],
+						env: { ...process.env, LOG_PATH: log },
+						makeDetails: (results) => ({ mode: "single", results }),
+					},
+					"deepseek/deepseek-v4-flash",
+				);
+				expect(result.exitCode).toBe(1);
+				expect(result.stopReason).toBe("error");
+				expect(result.errorMessage).toContain("insufficient_quota");
+				expect(result.model).toBe("openai-codex/gpt-5.6-sol");
+				expect(result.modelFallbackFrom).toBeUndefined();
+				expect(result.modelRetries).toBeUndefined();
+				expect(readFileSync(log, "utf8").split("\n").filter(Boolean)).toHaveLength(1);
+			});
+		} finally {
+			rmSync(dir, { recursive: true, force: true });
+		}
+	});
+
+	it("does not retry or fall back on a terminal auth error (401)", async () => {
+		const dir = mkdtempSync(join(tmpdir(), "pi-subagents-runlevel-auth-"));
+		const script = join(dir, "auth-child.cjs");
+		const log = join(dir, "attempts.log");
+		writeFileSync(
+			script,
+			`const fs = require("node:fs");
+fs.appendFileSync(${JSON.stringify(log)}, "attempt\\n");
+process.stdout.write(JSON.stringify({ type: "message_end", message: { role: "assistant", content: [], stopReason: "error", errorMessage: "Request failed with status 401 Unauthorized" } }) + "\\n");
+process.exit(1);`,
+			"utf8",
+		);
+		try {
+			await withArgv(script, async () => {
+				const result = await runSingleAgentWithModelFallback(
+					{
+						defaultCwd: process.cwd(),
+						agent: { ...agent, model: "openai-codex/gpt-5.6-sol" },
+						agentName: agent.name,
+						task: "review",
+						runLevelRetryDelaysMs: [10, 10, 10, 10, 10],
+						env: { ...process.env, LOG_PATH: log },
+						makeDetails: (results) => ({ mode: "single", results }),
+					},
+					"deepseek/deepseek-v4-flash",
+				);
+				expect(result.exitCode).toBe(1);
+				expect(result.model).toBe("openai-codex/gpt-5.6-sol");
+				expect(result.modelFallbackFrom).toBeUndefined();
+				expect(result.modelRetries).toBeUndefined();
+				expect(readFileSync(log, "utf8").split("\n").filter(Boolean)).toHaveLength(1);
+			});
+		} finally {
+			rmSync(dir, { recursive: true, force: true });
+		}
+	});
+});
+
+describe("isTerminalModelError (unit)", () => {
+	const base = (overrides: Partial<SingleResult>): SingleResult => ({
+		agent: "worker",
+		agentSource: "builtin",
+		task: "t",
+		exitCode: 1,
+		messages: [],
+		stderr: "",
+		usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, cost: 0, contextTokens: 0, turns: 0 },
+		...overrides,
+	});
+
+	it("is terminal for quota / billing / usage-limit text", () => {
+		expect(isTerminalModelError(base({ errorMessage: "insufficient_quota: exceeded" }))).toBe(true);
+		expect(isTerminalModelError(base({ errorMessage: "You have exceeded your quota" }))).toBe(true);
+		expect(isTerminalModelError(base({ errorMessage: "out of budget" }))).toBe(true);
+		expect(isTerminalModelError(base({ errorMessage: "billing: card declined" }))).toBe(true);
+		expect(isTerminalModelError(base({ errorMessage: "monthly usage limit reached" }))).toBe(true);
+	});
+
+	it("is terminal for auth / invalid-key text", () => {
+		expect(isTerminalModelError(base({ errorMessage: "invalid api key" }))).toBe(true);
+		expect(isTerminalModelError(base({ errorMessage: "Incorrect API key provided" }))).toBe(true);
+		expect(isTerminalModelError(base({ errorMessage: "Request failed with status 401" }))).toBe(true);
+		expect(isTerminalModelError(base({ errorMessage: "403 forbidden" }))).toBe(true);
+		expect(isTerminalModelError(base({ errorMessage: "unauthorized" }))).toBe(true);
+	});
+
+	it("is NOT terminal for transient provider errors", () => {
+		expect(isTerminalModelError(base({ errorMessage: "model not found" }))).toBe(false);
+		expect(isTerminalModelError(base({ errorMessage: "provider down" }))).toBe(false);
+		expect(isTerminalModelError(base({ errorMessage: "503 Service Unavailable" }))).toBe(false);
+		expect(isTerminalModelError(base({ errorMessage: "429 Too Many Requests" }))).toBe(false);
+		expect(isTerminalModelError(base({ errorMessage: "overloaded" }))).toBe(false);
+		expect(isTerminalModelError(base({ errorMessage: "network error: fetch failed" }))).toBe(false);
+		expect(isTerminalModelError(base({ errorMessage: "Subagent idle timeout: no activity for 90 seconds." }))).toBe(false);
+	});
+
+	it("does NOT let noisy stderr override a transient errorMessage", () => {
+		// A transient 503 must stay retryable even when stderr coincidentally
+		// mentions a terminal-looking word (npm warning, proxy banner).
+		expect(isTerminalModelError(base({ errorMessage: "503 Service Unavailable", stderr: "npm warn billing..." }))).toBe(false);
+		expect(isTerminalModelError(base({ errorMessage: "overloaded", stderr: "403 forbidden in some log line" }))).toBe(false);
+	});
+
+	it("classifies a terminal error from stderr when there is no errorMessage", () => {
+		expect(isTerminalModelError(base({ stderr: "invalid api key provided" }))).toBe(true);
+		expect(isTerminalModelError(base({ stderr: "insufficient_quota" }))).toBe(true);
+	});
+
+	it("is NOT terminal when there is no error message", () => {
+		expect(isTerminalModelError(base({}))).toBe(false);
+		expect(isTerminalModelError(base({ errorMessage: "" }))).toBe(false);
 	});
 });
 

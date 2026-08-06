@@ -41,6 +41,20 @@ export const SUBAGENT_STARTUP_RETRY_DELAYS_MS = [250, 750, 1500] as const;
 /** A genuine startup race fails well before a model request can complete. */
 export const MAX_SUBAGENT_STARTUP_FAILURE_DURATION_MS = 2000;
 
+/** Backoff schedule (ms) for retrying a run whose configured model failed at the
+ * provider level with a TRANSIENT error (503/429/timeout/network/overloaded/...) —
+ * i.e. NOT a terminal error (quota exhausted, billing, invalid API key). The same
+ * model is relaunched (each relaunch gets its own startup-retry inner loop), so a
+ * one-off provider hiccup recovers without demoting the configured agent model.
+ *
+ * This sits OUTSIDE pi-ai's per-request provider retry (default 3 attempts, 2/4/8s
+ * backoff): when the provider still can't recover after its own retries, the
+ * child exits carrying the final error, and this layer relaunches the whole run
+ * up to len(delays) more times before falling back to the main-window model.
+ *
+ * Bounded and capped so a stubborn outage does not stall a dispatch forever. */
+export const SUBAGENT_RUN_LEVEL_RETRY_DELAYS_MS = [2_000, 4_000, 8_000, 16_000, 30_000] as const;
+
 export interface UsageStats {
 	input: number;
 	output: number;
@@ -74,6 +88,12 @@ export interface SingleResult {
 	 * exit (a concurrent pi startup race) before it produced a result. Set only when
 	 * the run actually recovered after retrying, so callers can surface it. */
 	startupRetries?: number;
+	/** How many times the SAME configured model was relaunched after a transient
+	 * provider-level failure (503/429/timeout/network/...) before the run produced
+	 * a result. Set on recovery and on fall-back to the main-window model; left
+	 * undefined for a terminal (quota/billing/invalid-key) error that short-
+	 * circuits before any retry, since no relaunch happened. */
+	modelRetries?: number;
 	/** Tool calls that failed inside the run (from tool_execution_end events). A
 	 * clean process exit can still hide a failed build/test/tool — the completion
 	 * message must surface these so the main agent is never misled by a rosy final
@@ -216,6 +236,39 @@ export function isModelLevelFailure(result: SingleResult): boolean {
 	// Require evidence the failure came from the model/provider (an error
 	// message or stderr), not from the child process failing to start.
 	return result.messages.length > 0 || result.stderr.trim().length > 0;
+}
+
+/** Patterns that signal a TERMINAL provider/account error: retrying the same
+ * model (or falling back to the main-window model under the same account) cannot
+ * fix it, so the run skips both run-level retry and model fallback and is handed
+ * back to the main agent. This is the complement of pi-ai's transient-error set
+ * (429/5xx/overloaded/network/timeout/...): anything NOT matching here is treated
+ * as transient and retried on the same model before degrading.
+ *
+ * Mirrors pi-ai's NON_RETRYABLE_PROVIDER_LIMIT_ERROR_PATTERN (quota/billing/
+ * subscription-limit text) and adds the auth/credential failures the user cited
+ * ("key无效"). Auth is account-scoped, so a fallback model on the same provider
+ * would fail identically — hand it to the main agent immediately. */
+const TERMINAL_MODEL_ERROR_PATTERN =
+	/insufficient_quota|quota\s+exceeded|exceeded[^.\n]{0,40}quota|out\s+of\s+budget|billing|usage\s+limit|usage_limit|gousagelimiterror|freeusagelimiterror|monthly\s+usage\s+limit\s+reached|available\s+balance|invalid\s+(?:api\s+)?key|incorrect\s+api\s+key|unauthori[sz]ed|\b401\b|\b403\b|forbidden|permission\s+denied/i;
+
+/** True when a model-level failure carries a TERMINAL error message — quota
+ * exhaustion, billing, an invalid API key, auth rejection. Such a run is NEVER
+ * retried on the same model and never falls back to the main-window model: the
+ * account is the bottleneck, so it is handed back to the main agent to fix.
+ *
+ * Caller must first confirm `isModelLevelFailure(result)` — aborts and
+ * dispatch-crafted results never reach this classifier. */
+export function isTerminalModelError(result: SingleResult): boolean {
+	const message = result.errorMessage?.trim();
+	if (message) return TERMINAL_MODEL_ERROR_PATTERN.test(message);
+	// Only consult stderr when there is no structured errorMessage: pi-ai surfaces
+	// provider errors via message_end -> errorMessage, so a transient errorMessage
+	// (e.g. "503 Service Unavailable") must not be overridden by noisy stderr that
+	// happens to mention a terminal-looking word (an npm warning, a proxy banner).
+	// This keeps transient failures retryable even when stderr is chatty.
+	const stderr = result.stderr.trim();
+	return stderr.length > 0 && TERMINAL_MODEL_ERROR_PATTERN.test(stderr);
 }
 
 /**
@@ -365,6 +418,12 @@ export interface RunSingleOptions {
 	 * (a concurrent pi startup race). Defaults to SUBAGENT_STARTUP_RETRY_DELAYS_MS;
 	 * pass a shorter array in tests to keep them fast. */
 	startupRetryDelaysMs?: readonly number[];
+	/** Run-level backoff schedule (ms) for relaunching the SAME configured model
+	 * after a transient provider-level failure (503/429/timeout/network/...). Each
+	 * relaunch gets its own startup-retry inner loop. Defaults to
+	 * SUBAGENT_RUN_LEVEL_RETRY_DELAYS_MS; pass [] to disable (e.g. when an isolated
+	 * test wants to assert only the fallback path runs once). */
+	runLevelRetryDelaysMs?: readonly number[];
 	signal?: AbortSignal;
 	onLive?: (e: SubagentLiveEvent) => void;
 	makeDetails: (results: SingleResult[]) => SubagentDetails;
@@ -666,17 +725,31 @@ export async function runSingleAgent(options: RunSingleOptions): Promise<SingleR
 }
 
 /**
- * Run one agent with two layers of resilience against transient dispatch failures:
+ * Run one agent with three layers of resilience against transient dispatch failures:
  *
  * 1. Startup retry (inner loop): a concurrent pi startup race can make the child
  *    exit before any model/tool activity. Relaunch with backoff so the startup
  *    lock clears. The SAME model is retried — the race is in the host, not the
  *    model — and only a clean, silent, zero-activity exit qualifies (see
  *    isRetryableStartupFailure), so retrying can never duplicate real work.
- * 2. Model fallback (outer): when the provider rejects the configured model
- *    before producing output (see isModelLevelFailure), retry once with the main
- *    window's current model. The fallback gets its own startup-retry loop, since
- *    a startup race can hit any relaunch regardless of model.
+ * 2. Run-level retry on the SAME configured model (middle): when the provider
+ *    rejects the model before producing output with a TRANSIENT error
+ *    (503/429/timeout/network/stream/...) — i.e. NOT a terminal one (quota
+ *    exhausted, billing, an invalid API key, auth rejected — see
+ *    isTerminalModelError) — relaunch the whole run up to
+ *    SUBAGENT_RUN_LEVEL_RETRY_DELAYS_MS.length more times with backoff, so a
+ *    one-off provider hiccup recovers without demoting the configured agent
+ *    model. Each relaunch gets its own inner startup-retry loop. This sits
+ *    outside pi-ai's per-request provider retry, which by then has already
+ *    tried (default 3 attempts) and given up.
+ * 3. Model fallback (outer): when the same model is still failing after all its
+ *    run-level retries, retry once with the main window's current model. The
+ *    fallback gets its own startup-retry loop, since a startup race can hit any
+ *    relaunch regardless of model.
+ *
+ * Terminal model errors short-circuit straight to the caller (modelRetries is
+ * set): the account is the bottleneck, so neither same-model retry nor a
+ * same-account fallback can help, and the run is left for the main agent to fix.
  *
  * The fallback is per-run only and never persisted: a transient provider hiccup
  * must not silently downgrade the configured agent model.
@@ -687,7 +760,11 @@ export async function runSingleAgentWithModelFallback(
 ): Promise<SingleResult> {
 	const agent = options.agent;
 	const launchedRef = agent?.model;
-	const delays = options.startupRetryDelaysMs ?? SUBAGENT_STARTUP_RETRY_DELAYS_MS;
+	const startupDelays = options.startupRetryDelaysMs ?? SUBAGENT_STARTUP_RETRY_DELAYS_MS;
+	// Run-level retry is opted out of with an explicit empty array (e.g. a test
+	// that wants to assert ONLY the fallback path runs once); undefined means
+	// "use the default 5-attempt transient-error schedule".
+	const runDelays = options.runLevelRetryDelaysMs ?? SUBAGENT_RUN_LEVEL_RETRY_DELAYS_MS;
 
 	const runWithStartupRetry = async (opts: RunSingleOptions): Promise<SingleResult> => {
 		let lastResult: SingleResult;
@@ -700,12 +777,12 @@ export async function runSingleAgentWithModelFallback(
 				if (retries > 0 && !isFailedResult(lastResult)) lastResult.startupRetries = retries;
 				return lastResult;
 			}
-			const delay = delays[attempt];
+			const delay = startupDelays[attempt];
 			if (delay === undefined) {
 				// Exhausted: the agent never reached a model. Surface the concurrency-race
 				// cause as a dispatch-level failure (no model was ever reached, so this
-				// must NOT trigger model fallback) so the main agent can retry or lower
-				// maxConcurrency.
+				// must NOT trigger run-level retry or model fallback) so the main agent
+				// can retry or lower maxConcurrency.
 				lastResult.errorMessage = formatStartupRetryExhaustedError(
 					lastResult.model ?? opts.agent?.model ?? "default",
 					attempt + 1,
@@ -725,15 +802,55 @@ export async function runSingleAgentWithModelFallback(
 		}
 	};
 
-	const result = await runWithStartupRetry(options);
-	if (!agent || !launchedRef || !fallbackModelRef || launchedRef === fallbackModelRef) return result;
-	if (!isModelLevelFailure(result)) return result;
-	const retried = await runWithStartupRetry({ ...options, agent: { ...agent, model: fallbackModelRef } });
-	// The fallback replaces the result wholesale: `retried.failedTools` reflect
-	// ONLY the fallback (final) attempt. The original attempt's failedTools are
-	// intentionally not merged — a fallback relaunch redoes the work, so attaching
-	// the first attempt's stale build errors to a clean final attempt would
-	// misattribute failures the worker already fixed. This makes the README's
-	// "failed tool calls from the run's final attempt" claim accurate.
-	return { ...retried, modelFallbackFrom: launchedRef };
+	let result = await runWithStartupRetry(options);
+
+	// After a model-level failure, classify before reacting. A TERMINAL error
+	// (quota/billing/invalid key/auth) is account-scoped: neither same-model
+	// retry nor a same-account fallback can help, so hand the run straight back
+	// to the main agent instead of burning its time on a doomed retry.
+	if (agent && launchedRef && isModelLevelFailure(result) && isTerminalModelError(result)) return result;
+
+	// A TRANSIENT provider failure (503/429/timeout/network/stream/...) is usually
+	// a one-off hiccup. Relaunch the SAME configured model up to runDelays.length
+	// more times with backoff before degrading to a fallback model — the run's own
+	// provider retry already tried and failed, so each relaunch here is an
+	// independent, fresh attempt that can recover without losing the configured
+	// model's capability to review.
+	let modelRetries = 0;
+	if (agent && launchedRef && isModelLevelFailure(result) && runDelays.length > 0) {
+		for (let attempt = 0; ; attempt++) {
+			const delay = runDelays[attempt];
+			if (delay === undefined) break;
+			try {
+				options.onLive?.({ kind: "status", status: "running" });
+			} catch { /* never throw from event handling */ }
+			const shouldRetry = await waitForStartupRetry(delay, options.signal);
+			if (!shouldRetry) return { ...result, modelRetries };
+			const retried = await runWithStartupRetry(options);
+			modelRetries++;
+			if (!isModelLevelFailure(retried) || isTerminalModelError(retried)) {
+				// Each relaunch redoes the work; failedTools reflect ONLY the final
+				// attempt (no stale build errors from earlier transient failures),
+				// so the completion message's claim stays accurate.
+				return { ...retried, modelRetries };
+			}
+			result = retried;
+		}
+	}
+
+	// Same-model retries exhausted (or none configured) and still failing: fall
+	// back to the main window's current model exactly once. Skipped when there is
+	// no fallback ref or it equals the configured model — a same-ref rerun would
+	// just repeat the already-exhausted failure for nothing.
+	if (agent && launchedRef && fallbackModelRef && launchedRef !== fallbackModelRef && isModelLevelFailure(result)) {
+		const retried = await runWithStartupRetry({ ...options, agent: { ...agent, model: fallbackModelRef } });
+		// The fallback replaces the result wholesale: `retried.failedTools` reflect
+		// ONLY the fallback (final) attempt. The original attempt's failedTools are
+		// intentionally not merged — a fallback relaunch redoes the work, so attaching
+		// the first attempt's stale build errors to a clean final attempt would
+		// misattribute failures the worker already fixed. This makes the README's
+		// "failed tool calls from the run's final attempt" claim accurate.
+		return { ...retried, modelFallbackFrom: launchedRef, modelRetries };
+	}
+	return { ...result, modelRetries };
 }

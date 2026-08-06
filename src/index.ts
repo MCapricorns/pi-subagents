@@ -167,10 +167,13 @@ function formatCompletionBlock(result: SingleResult, maxResultLines: number, cwd
 	const fallbackNote = result.modelFallbackFrom
 		? ` (model fell back from ${result.modelFallbackFrom} to ${result.model ?? "main-window model"})`
 		: "";
-	const retryNote = result.startupRetries
+	const startupRetryNote = result.startupRetries
 		? ` (recovered after ${result.startupRetries} startup retr${result.startupRetries === 1 ? "y" : "ies"} — concurrent pi startup race)`
 		: "";
-	const lines = [`### [${result.agent}] ${status}${usage ? ` (${usage})` : ""}${fallbackNote}${retryNote}`, "", `Task: ${formatTaskSummary(result.task, 80, false)}`, "", text];
+	const modelRetryNote = result.modelRetries
+		? ` (recovered after ${result.modelRetries} same-model retr${result.modelRetries === 1 ? "y" : "ies"} on a transient provider error)`
+		: "";
+	const lines = [`### [${result.agent}] ${status}${usage ? ` (${usage})` : ""}${fallbackNote}${startupRetryNote}${modelRetryNote}`, "", `Task: ${formatTaskSummary(result.task, 80, false)}`, "", text];
 	// A run can exit cleanly while its last tools failed (e.g. a build that broke):
 	// the final text alone may claim more than the tools achieved, so surface the
 	// failures explicitly and tell the main agent to verify before relying on it.
@@ -196,8 +199,11 @@ function formatCompletionBlock(result: SingleResult, maxResultLines: number, cwd
  * produced usable output (or the run stalled), so the task is handed back to the
  * main window instead of being left as a dead failure. */
 function modelLevelTakeoverNote(result: SingleResult): string {
+	const sameModel = result.modelRetries
+		? `, after ${result.modelRetries} same-model retr${result.modelRetries === 1 ? "y" : "ies"} on transient errors`
+		: "";
 	const retry = result.modelFallbackFrom ? ", and the retry with the main-window model also failed" : "";
-	return `The sub-agent could not complete this task: its model was unavailable or failed (or the run stalled)${retry}. Please execute this task in the main window with your own tools; do not re-dispatch it as a sub-agent.`;
+	return `The sub-agent could not complete this task: its model was unavailable or failed (or the run stalled)${sameModel}${retry}. Please execute this task in the main window with your own tools; do not re-dispatch it as a sub-agent.`;
 }
 
 /** Resolve a run-id request to actual ids: an exact numeric match always wins

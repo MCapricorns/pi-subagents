@@ -31,8 +31,11 @@ report their results back to the main agent automatically.
 - **Per-agent configuration** — enable agents, choose a model and thinking level per
   agent, and tune limits from `/subagents-setup`.
 - **Automatic model fallback** — if an agent's model fails at the provider level before
-  producing any output, the run is retried once with the main window's current model.
-  This is per-run only and never persisted.
+  producing any output, the SAME model is retried up to five times (bounded backoff) for
+  transient errors (503/429/timeout/network/...); if it still fails, the run is retried
+  once with the main window's current model. Terminal errors (quota exhausted, billing,
+  an invalid API key) skip both and are handed straight back to the main agent. The
+  fallback is per-run only and never persisted.
 - **Idle watchdog** — a sub-agent that produces no output for a configurable duration is
   terminated and retried with the fallback model.
 - **Leaf processes** — sub-agents cannot access the `subagent` tool, so delegation
@@ -53,10 +56,12 @@ Several tools now offer some form of sub-agents. What this extension does differ
   calls `subagent_wait` (event-driven, returns the actual result) instead of
   sleeping or polling.
 - **Failures are handled, not reported.** Three layers of resilience: a provider-
-  level model failure retries once with the main window's model; an idle watchdog
-  terminates a run that goes silent (a stalled stream) and retries it; and a
-  concurrent-startup race is retried with backoff automatically. The widget and the
-  completion message tell you when any of these happened.
+  level model failure first retries the same model up to five times on a transient
+  provider error, then retries once with the main window's model; terminal errors
+  (quota/auth) short-circuit straight to the main agent; an idle watchdog terminates
+  a run that goes silent (a stalled stream) and retries it; and a concurrent-startup
+  race is retried with backoff automatically. The widget and the completion message
+  tell you when any of these happened.
 - **A quality gate that closes the loop.** When a reviewer returns `REVIEW_FAIL`,
   the extension dispatches a worker briefed with the concrete findings, then a
   re-review — up to `maxFixRounds` times — and only then wakes the main agent with
@@ -466,7 +471,7 @@ idle timeout; **Full re-setup** re-runs the whole first-time wizard.
 | `agentScope` | `user`, `project`, or `both`; controls which user/project agent directories are discovered. |
 | `maxConcurrency` | Max sub-agent processes running at once (1–16, default 4), and the max tasks one parallel `subagent` call accepts. Extra work waits in the queue. |
 | `maxFixRounds` | Auto-fix rounds when a reviewer returns `REVIEW_FAIL`: the extension dispatches a `worker` (briefed with the review's findings) then a `reviewer` re-review, repeating up to this many times before waking the main agent with the full chain. `0` disables it (the main agent handles fixes itself). Default 2. |
-| `idleTimeoutSec` | Idle timeout in seconds: a sub-agent that produces no output for this long is terminated and retried with the fallback model (if one is available). `0` disables the idle watchdog. Default 90. A long but active run is never interrupted. |
+| `idleTimeoutSec` | Idle timeout in seconds: a sub-agent whose stdout goes silent for this long is terminated and retried (same model first, then the main-window fallback, like any transient provider failure). `0` disables the idle watchdog. Default 90. A long but active run is never interrupted. |
 
 ### Configuration migration
 
