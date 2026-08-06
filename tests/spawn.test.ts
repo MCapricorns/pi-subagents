@@ -8,6 +8,7 @@ import {
 	getResultOutput,
 	isFailedResult,
 	isModelLevelFailure,
+	isRetryableStartupFailure,
 	RESULT_LINE_MAX,
 	reviewVerdict,
 	runSingleAgent,
@@ -371,6 +372,218 @@ process.exit(1);
 			process.argv[1] = previousScript;
 			rmSync(dir, { recursive: true, force: true });
 		}
+	});
+});
+
+describe("runSingleAgentWithModelFallback startup retry", () => {
+	const agent = {
+		name: "fake",
+		description: "fake",
+		systemPrompt: "",
+		source: "builtin" as const,
+		filePath: "/agents/fake.md",
+	};
+
+	// Child that records each launch to LOG_PATH: it exits silently (no stdout, no
+	// stderr) on the first `failTimes` launches, then emits a normal success.
+	const retryThenSucceedScript = (failTimes: number): string => `
+const fs = require("node:fs");
+const log = process.env.LOG_PATH;
+fs.appendFileSync(log, "attempt\\n");
+const count = fs.readFileSync(log, "utf8").split("\\n").filter(Boolean).length;
+if (count <= ${failTimes}) { process.exit(1); }
+process.stdout.write(JSON.stringify({ type: "message_end", message: { role: "assistant", content: [{ type: "text", text: "recovered after startup retry" }], stopReason: "end" } }) + "\\n");
+process.exit(0);
+`;
+
+	const withArgv = (script: string, fn: () => Promise<void>): Promise<void> => {
+		const previousScript = process.argv[1];
+		process.argv[1] = script;
+		return fn().finally(() => {
+			process.argv[1] = previousScript;
+		});
+	};
+
+	it("retries a silent zero-activity startup failure, then succeeds", async () => {
+		const dir = mkdtempSync(join(tmpdir(), "pi-subagents-startup-retry-"));
+		const script = join(dir, "retry-child.cjs");
+		const log = join(dir, "attempts.log");
+		writeFileSync(script, retryThenSucceedScript(1), "utf8");
+		try {
+			await withArgv(script, async () => {
+				const result = await runSingleAgentWithModelFallback({
+					defaultCwd: process.cwd(),
+					agent,
+					agentName: agent.name,
+					task: "survive a startup race",
+					startupRetryDelaysMs: [10],
+					env: { ...process.env, LOG_PATH: log },
+					makeDetails: (results) => ({ mode: "single", results }),
+				});
+				expect(result.exitCode).toBe(0);
+				expect(getFinalOutput(result.messages)).toBe("recovered after startup retry");
+				expect(result.startupRetries).toBe(1);
+				expect(result.dispatchFailed).toBeUndefined();
+				expect(readFileSync(log, "utf8").split("\n").filter(Boolean)).toHaveLength(2);
+			});
+		} finally {
+			rmSync(dir, { recursive: true, force: true });
+		}
+	});
+
+	it("surfaces a dispatch failure after exhausting startup retries", async () => {
+		const dir = mkdtempSync(join(tmpdir(), "pi-subagents-startup-exhaust-"));
+		const script = join(dir, "always-silent.cjs");
+		const log = join(dir, "attempts.log");
+		writeFileSync(
+			script,
+			`const fs = require("node:fs");
+fs.appendFileSync(process.env.LOG_PATH, "attempt\\n");
+process.exit(1);`,
+			"utf8",
+		);
+		try {
+			await withArgv(script, async () => {
+				const result = await runSingleAgentWithModelFallback({
+					defaultCwd: process.cwd(),
+					agent,
+					agentName: agent.name,
+					task: "never starts",
+					startupRetryDelaysMs: [10, 10, 10],
+					env: { ...process.env, LOG_PATH: log },
+					makeDetails: (results) => ({ mode: "single", results }),
+				});
+				expect(result.exitCode).toBe(1);
+				expect(result.dispatchFailed).toBe(true);
+				expect(result.startupRetries).toBeUndefined();
+				expect(result.errorMessage).toContain("failed to start after 4 attempts");
+				expect(result.errorMessage).toContain("concurrent pi startup race");
+				expect(readFileSync(log, "utf8").split("\n").filter(Boolean)).toHaveLength(4);
+			});
+		} finally {
+			rmSync(dir, { recursive: true, force: true });
+		}
+	});
+
+	it("does not retry a failure that wrote to stderr (real error, not a race)", async () => {
+		const dir = mkdtempSync(join(tmpdir(), "pi-subagents-startup-stderr-"));
+		const script = join(dir, "stderr-child.cjs");
+		const log = join(dir, "attempts.log");
+		writeFileSync(
+			script,
+			`const fs = require("node:fs");
+fs.appendFileSync(process.env.LOG_PATH, "attempt\\n");
+process.stderr.write("some real error\\n");
+process.exit(1);`,
+			"utf8",
+		);
+		try {
+			await withArgv(script, async () => {
+				const result = await runSingleAgentWithModelFallback({
+					defaultCwd: process.cwd(),
+					agent,
+					agentName: agent.name,
+					task: "real error",
+					startupRetryDelaysMs: [10, 10, 10],
+					env: { ...process.env, LOG_PATH: log },
+					makeDetails: (results) => ({ mode: "single", results }),
+				});
+				expect(result.exitCode).toBe(1);
+				expect(result.dispatchFailed).toBeUndefined();
+				expect(result.startupRetries).toBeUndefined();
+				expect(result.stderr).toContain("some real error");
+				expect(readFileSync(log, "utf8").split("\n").filter(Boolean)).toHaveLength(1);
+			});
+		} finally {
+			rmSync(dir, { recursive: true, force: true });
+		}
+	});
+
+	it("does not retry a run that produced model output", async () => {
+		// A run that emitted a message_end (even a failing one) did real work and
+		// must not be retried as a startup race; it belongs to model fallback.
+		const dir = mkdtempSync(join(tmpdir(), "pi-subagents-startup-output-"));
+		const script = join(dir, "output-child.cjs");
+		const log = join(dir, "attempts.log");
+		writeFileSync(
+			script,
+			`const fs = require("node:fs");
+fs.appendFileSync(process.env.LOG_PATH, "attempt\\n");
+process.stdout.write(JSON.stringify({ type: "message_end", message: { role: "assistant", content: [], stopReason: "error", errorMessage: "provider down" } }) + "\\n");
+process.exit(1);`,
+			"utf8",
+		);
+		try {
+			await withArgv(script, async () => {
+				const result = await runSingleAgentWithModelFallback({
+					defaultCwd: process.cwd(),
+					agent,
+					agentName: agent.name,
+					task: "real model error",
+					startupRetryDelaysMs: [10, 10, 10],
+					env: { ...process.env, LOG_PATH: log },
+					makeDetails: (results) => ({ mode: "single", results }),
+				});
+				expect(result.exitCode).toBe(1);
+				expect(result.dispatchFailed).toBeUndefined();
+				expect(result.startupRetries).toBeUndefined();
+				expect(result.errorMessage).toBe("provider down");
+				expect(readFileSync(log, "utf8").split("\n").filter(Boolean)).toHaveLength(1);
+			});
+		} finally {
+			rmSync(dir, { recursive: true, force: true });
+		}
+	});
+});
+
+describe("isRetryableStartupFailure (unit)", () => {
+	const base = (overrides: Partial<SingleResult>): SingleResult => ({
+		agent: "worker",
+		agentSource: "builtin",
+		task: "t",
+		exitCode: 1,
+		messages: [],
+		stderr: "",
+		usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, cost: 0, contextTokens: 0, turns: 0 },
+		...overrides,
+	});
+
+	it("is retryable for a silent zero-activity fast exit", () => {
+		expect(isRetryableStartupFailure(base({}), 120)).toBe(true);
+	});
+
+	it("is not retryable on a clean exit", () => {
+		expect(isRetryableStartupFailure(base({ exitCode: 0 }), 120)).toBe(false);
+	});
+
+	it("is not retryable when aborted", () => {
+		expect(isRetryableStartupFailure(base({ stopReason: "aborted" }), 120)).toBe(false);
+	});
+
+	it("is not retryable when a dispatch crash already synthesized the result", () => {
+		expect(isRetryableStartupFailure(base({ dispatchFailed: true }), 120)).toBe(false);
+	});
+
+	it("is not retryable when stderr carries a real error", () => {
+		expect(isRetryableStartupFailure(base({ stderr: "ENOENT: spawn pi" }), 120)).toBe(false);
+	});
+
+	it("is not retryable when an error message is set", () => {
+		expect(isRetryableStartupFailure(base({ errorMessage: "model not found" }), 120)).toBe(false);
+	});
+
+	it("is not retryable when the run produced model output", () => {
+		expect(
+			isRetryableStartupFailure(base({ messages: [{ role: "assistant", content: [{ type: "text", text: "hi" }] } as any] }), 120),
+		).toBe(false);
+	});
+
+	it("is not retryable when usage shows the provider was reached", () => {
+		expect(isRetryableStartupFailure(base({ usage: { input: 10, output: 0, cacheRead: 0, cacheWrite: 0, cost: 0, contextTokens: 0, turns: 1 } }), 120)).toBe(false);
+	});
+
+	it("is not retryable when the run outlived the startup window", () => {
+		expect(isRetryableStartupFailure(base({}), 5000)).toBe(false);
 	});
 });
 

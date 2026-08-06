@@ -13,7 +13,7 @@
  */
 
 import { getAgentDir, type ExtensionAPI } from "@earendil-works/pi-coding-agent";
-import { Text, truncateToWidth } from "@earendil-works/pi-tui";
+import { Text } from "@earendil-works/pi-tui";
 import { Type } from "typebox";
 import { discoverAgents, type AgentConfig } from "./agents.ts";
 import { BackgroundTaskQueue } from "./background.ts";
@@ -43,7 +43,19 @@ import {
 	type UsageStats,
 } from "./spawn.ts";
 import { buildFixTaskBrief, buildReReviewBrief, shouldTriggerFixLoop } from "./fixloop.ts";
-import { formatTaskSummary, formatToolActivity, monitor, statusColor, statusIcon, statusLabel, type RunChainMeta } from "./monitor.ts";
+import {
+	activityStateLabel,
+	compactModelRef,
+	deriveActivityState,
+	formatElapsed,
+	formatTaskSummary,
+	formatToolActivity,
+	monitor,
+	rightAlign,
+	statusIcon,
+	statusLabel,
+	type RunChainMeta,
+} from "./monitor.ts";
 
 const NON_BLANK_TASK_OPTIONS = { minLength: 1, pattern: "\\S" } as const;
 
@@ -148,7 +160,10 @@ function formatCompletionBlock(result: SingleResult, maxResultLines: number, cwd
 	const fallbackNote = result.modelFallbackFrom
 		? ` (model fell back from ${result.modelFallbackFrom} to ${result.model ?? "main-window model"})`
 		: "";
-	const lines = [`### [${result.agent}] ${status}${usage ? ` (${usage})` : ""}${fallbackNote}`, "", `Task: ${formatTaskSummary(result.task, 80, false)}`, "", text];
+	const retryNote = result.startupRetries
+		? ` (recovered after ${result.startupRetries} startup retr${result.startupRetries === 1 ? "y" : "ies"} — concurrent pi startup race)`
+		: "";
+	const lines = [`### [${result.agent}] ${status}${usage ? ` (${usage})` : ""}${fallbackNote}${retryNote}`, "", `Task: ${formatTaskSummary(result.task, 80, false)}`, "", text];
 	if (truncated) {
 		// The full text lives on disk so the main agent can read it on demand.
 		lines.push("", `(output truncated to ${maxResultLines} lines; full result: ${writeResultArtifact(output, result.agent, cwd)})`);
@@ -284,29 +299,30 @@ export default function (pi: ExtensionAPI): void {
 			};
 
 			// Live sub-agent activity → concise one-line status ("thinking",
-			// "read src/index.ts", ...), never a raw args blob. Reviewer runs started
-			// by the main agent defer finishing so the queue task can decide between
-			// delivering the review and starting an auto-fix chain: a triggered chain
-			// keeps the parent row in the widget (annotated) until it completes and
-			// suppresses the premature "done" notification.
-			const makeLiveHandler = (runId: number, deferFinish = false) => (e: SubagentLiveEvent): void => {
+			// "read src/index.ts", ...), never a raw args blob. The live handler only
+			// updates widget status; finishing (removeRun + notify) is owned by the
+			// queue task / launchInLoop. That keeps a startup retry — which fires a
+			// transient "failed" status before relaunching — from ripping the row out
+			// early, and lets the queue task decide between delivering a reviewer's
+			// result and starting an auto-fix chain (a triggered chain keeps the
+			// parent row annotated until it completes).
+			const makeLiveHandler = (runId: number) => (e: SubagentLiveEvent): void => {
 				switch (e.kind) {
 					case "status":
-						if (e.status === "done" || e.status === "failed") {
-							// Deferred runs only update the widget; the queue task finishes
-							// them once it knows whether an auto-fix chain will follow.
-							if (deferFinish) monitor.setStatus(runId, e.status);
-							else finishRun(runId, e.status);
-						} else monitor.setStatus(runId, e.status);
+						// Only update the widget status here. Finishing (removeRun + notify) is
+						// owned by the queue task / launchInLoop so that a startup retry — which
+						// fires a transient "failed" status before relaunching the child — never
+						// rips the row out from under the retry or emits a premature "✗" toast.
+						monitor.setStatus(runId, e.status);
 						break;
 					case "usage":
 						monitor.setUsage(runId, e.usage, e.model);
 						break;
 					case "tool_start":
-						monitor.setActivity(runId, formatToolActivity(e.toolName, e.args));
+						monitor.recordToolStart(runId, e.toolName, formatToolActivity(e.toolName, e.args));
 						break;
 					case "tool_end":
-						if (e.isError) monitor.setActivity(runId, `✗ ${e.toolName} failed`);
+						monitor.recordToolEnd(runId, e.toolName, e.isError);
 						break;
 					case "thinking":
 						monitor.setActivity(runId, "thinking");
@@ -522,7 +538,7 @@ export default function (pi: ExtensionAPI): void {
 				const runId = monitor.addRun(agent.name, task, agent.model, thinkingLevel);
 				// Only a main-agent-dispatched reviewer can trigger an auto-fix chain, so
 				// only its finish is deferred to the queue task (see startFixLoop).
-				const onLive = makeLiveHandler(runId, agent.name === "reviewer");
+				const onLive = makeLiveHandler(runId);
 
 				backgroundQueue.enqueue(
 					async (backgroundSignal) => {
@@ -553,7 +569,7 @@ export default function (pi: ExtensionAPI): void {
 								errorMessage,
 								dispatchFailed: true,
 							};
-							// The dedicated 派发失败 notification below replaces the generic
+							// The dedicated dispatch-failure notification below replaces the generic
 							// failure toast for dispatch crashes, so finish silently here.
 							finishRun(runId, "failed", { silent: true });
 						}
@@ -578,7 +594,7 @@ export default function (pi: ExtensionAPI): void {
 						}
 						const failed = isFailedResult(result);
 						// Model-level failures and dispatch crashes get their own dedicated
-						// 派发失败 notification below, so finishRun's generic failure toast is
+						// dispatch-failure notification below, so finishRun's generic failure toast is
 						// silenced for them (computed before finishRun for that reason).
 						const modelLevel = failed && isModelLevelFailure(result);
 						const dispatchFailed = result.dispatchFailed === true;
@@ -761,20 +777,41 @@ export default function (pi: ExtensionAPI): void {
 					render(width: number): string[] {
 						const runs = monitor.getRuns();
 						if (runs.length === 0) return [];
+						const now = Date.now();
 						const lines: string[] = [];
 						for (const r of runs) {
 							const icon = statusIcon(r.status, theme);
-							const label = theme.fg(statusColor(r.status), statusLabel(r.status));
-							// Chain-internal runs (auto-fix worker/reviewer) indent under their
-							// parent reviewer; summarize() already carries the relationLabel.
+							// Chain-internal runs (auto-fix worker/reviewer) indent under their parent
+							// reviewer. For those, the relationLabel ("fix round 1") is more
+							// distinguishing than the repeated worker/reviewer name.
 							const head = r.groupId ? theme.fg("dim", "  ↳ ") : " ";
-							const note = r.annotation ? theme.fg("dim", ` · ${r.annotation}`) : "";
-							lines.push(truncateToWidth(`${head}${icon} #${r.id} ${monitor.summarize(r)} · ${label}${note}`, width, ""));
-							if (r.status === "queued" || r.status === "running") {
-								lines.push(truncateToWidth(theme.fg("dim", `     task: ${formatTaskSummary(r.task, Math.max(20, width - 11))}`), width, ""));
+							const name = r.groupId ? (r.relationLabel ?? r.agent) : r.agent;
+							// Inline the task's distinguishing key fragments (paths, symbols, quoted
+							// phrases) right after the agent name, so parallel runs of the SAME agent
+							// are distinguishable at a glance instead of only on a second line.
+							const title = formatTaskSummary(r.task, Math.max(16, Math.floor(width * 0.45)), true);
+							const left = `${head}${icon} ${theme.fg("dim", `#${r.id}`)} ${theme.bold(name)} ${theme.fg("dim", "›")} ${theme.fg("accent", title)}`;
+
+							// Right side: compact model (no provider prefix), tool count, elapsed,
+							// and the soft activity-state annotation (idle / long-running). Always
+							// visible — rightAlign clips the title on overflow, never this.
+							const model = compactModelRef(r.model);
+							const tools = r.toolCount ? `${r.toolCount} tool${r.toolCount === 1 ? "" : "s"}` : "";
+							const elapsed = formatElapsed(r, now);
+							const metaParts = [model, tools, elapsed].filter(Boolean);
+							// Running is conveyed by the icon + elapsed; spell out the label only for
+							// the other states (ready / done / stopped) so they are unambiguous.
+							if (r.status !== "running") metaParts.push(statusLabel(r.status));
+							const state = deriveActivityState(r, now);
+							const stateNote = state ? ` · ${activityStateLabel(state)}` : "";
+							const note = r.annotation ? ` · ${r.annotation}` : "";
+							const right = theme.fg("dim", `${metaParts.join(" · ")}${stateNote}${note}`);
+							lines.push(rightAlign(left, right, width));
+
+							// Current activity sits one indent below, only while the run is active.
+							if (r.activity && (r.status === "running" || r.status === "queued")) {
+								lines.push(rightAlign(`${head}  ${theme.fg("dim", r.activity)}`, "", width));
 							}
-							// Activity sits one indent level below the agent name.
-							if (r.activity) lines.push(truncateToWidth(theme.fg("dim", `     ${r.activity}`), width, ""));
 						}
 						return lines;
 					},

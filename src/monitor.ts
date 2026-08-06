@@ -12,7 +12,7 @@
 
 import { stripVTControlCharacters } from "node:util";
 import type { Theme } from "@earendil-works/pi-coding-agent";
-import { visibleWidth } from "@earendil-works/pi-tui";
+import { truncateToWidth, visibleWidth } from "@earendil-works/pi-tui";
 import type { UsageStats } from "./spawn.ts";
 
 // ---------------------------------------------------------------------------
@@ -20,6 +20,20 @@ import type { UsageStats } from "./spawn.ts";
 // ---------------------------------------------------------------------------
 
 export type RunStatus = "queued" | "running" | "done" | "failed";
+
+/** Soft state-awareness signals, complementary to the hard idle-kill: a run may
+ * be alive (stdout streaming) yet "stuck thinking" (no tool running for a while),
+ * or simply taking a long time. Both are surfaced as widget annotations so the
+ * user can tell a healthy busy run from one that needs a nudge. */
+export type ActivityState = "needs_attention" | "active_long_running";
+
+/** A run with no tool running and no activity for this long is "needs attention"
+ * (the model may be stuck between turns). Below the idle-kill threshold so the
+ * soft signal always fires before the hard kill. */
+export const NEEDS_ATTENTION_AFTER_MS = 60_000;
+/** A run whose total elapsed time exceeds this is "long-running": still active
+ * but worth flagging so the user can decide whether to wait or steer. */
+export const ACTIVE_LONG_RUNNING_AFTER_MS = 240_000;
 
 export interface RunView {
 	id: number;
@@ -32,6 +46,14 @@ export interface RunView {
 	usage: UsageStats;
 	/** Concise current activity ("thinking", "read src/index.ts"); last writer wins. */
 	activity?: string;
+	/** Total tool calls started by the run so far (a progress signal). */
+	toolCount?: number;
+	/** Tool currently executing (set on tool_start, cleared on tool_end). When set,
+	 * the run is NOT idle for needs-attention purposes. */
+	currentTool?: string;
+	/** Epoch ms of the last live activity (tool, usage, status). Used to derive
+	 * the needs-attention state: no tool running AND now - lastActivityAt > threshold. */
+	lastActivityAt?: number;
 	/** Epoch ms when the run started executing (set on first "running" status). */
 	startedAt?: number;
 	/** Epoch ms when the run finished (set on "done"/"failed"). */
@@ -233,6 +255,47 @@ export function formatElapsed(run: RunView, now: number = Date.now()): string {
 	return formatDuration(end - run.startedAt);
 }
 
+/** Strip the provider prefix from a "provider/model-id" reference for compact
+ * widget display ("anthropic/claude-sonnet-4" → "claude-sonnet-4"). A bare id is
+ * left unchanged. */
+export function compactModelRef(model: string | undefined): string {
+	if (!model) return "";
+	const slash = model.lastIndexOf("/");
+	return slash >= 0 ? model.slice(slash + 1) : model;
+}
+
+/** Human-readable label for a soft activity-state annotation. */
+export function activityStateLabel(state: ActivityState): string {
+	return state === "needs_attention" ? "idle" : "long-running";
+}
+
+/** Derive the soft activity state of a run at render time: needs_attention
+ * (no tool running, idle past the threshold) takes priority over
+ * active_long_running (total elapsed past its threshold). Both are suppressed
+ * for non-running runs. */
+export function deriveActivityState(run: RunView, now: number = Date.now()): ActivityState | undefined {
+	if (run.status !== "running") return undefined;
+	if (!run.currentTool) {
+		const since = run.lastActivityAt ?? run.startedAt ?? now;
+		if (now - since >= NEEDS_ATTENTION_AFTER_MS) return "needs_attention";
+	}
+	if (run.startedAt !== undefined && now - run.startedAt >= ACTIVE_LONG_RUNNING_AFTER_MS) {
+		return "active_long_running";
+	}
+	return undefined;
+}
+
+/** Left/right split a widget line so the right side (status, elapsed) is always
+ * visible and the left side (title) clips on overflow instead of pushing it off.
+ * `left`/`right` may carry ANSI styling; widths are measured display-column-wise. */
+export function rightAlign(left: string, right: string, width: number): string {
+	const rightWidth = visibleWidth(right);
+	const leftMax = Math.max(0, width - rightWidth - 1);
+	const leftClipped = truncateToWidth(left, leftMax);
+	const gap = Math.max(1, width - visibleWidth(leftClipped) - rightWidth);
+	return truncateToWidth(`${leftClipped}${" ".repeat(gap)}${right}`, width);
+}
+
 /** Max length of the argument target inside a formatted activity line. */
 export const ACTIVITY_TARGET_MAX = 60;
 
@@ -337,6 +400,7 @@ export class MonitorStore {
 			// A model-fallback retry after a failed attempt restarts the clock; a
 			// stale endedAt would freeze the elapsed display at the first attempt.
 			if (run.endedAt !== undefined) run.endedAt = undefined;
+			run.lastActivityAt = Date.now();
 		} else if ((status === "done" || status === "failed") && run.endedAt === undefined) {
 			run.endedAt = Date.now();
 		}
@@ -347,6 +411,7 @@ export class MonitorStore {
 		if (!run) return;
 		run.usage = { ...usage };
 		if (model) run.model = model;
+		run.lastActivityAt = Date.now();
 		this.notify();
 	}
 
@@ -355,6 +420,31 @@ export class MonitorStore {
 		const run = this.find(id);
 		if (!run) return;
 		run.activity = text;
+		run.lastActivityAt = Date.now();
+		this.notify();
+	}
+
+	/** Record a tool starting: counts it, marks it current, and updates activity.
+	 * A running tool means the run is NOT idle, so needs-attention is suppressed
+	 * while it stays current. */
+	recordToolStart(id: number, toolName: string, activity: string): void {
+		const run = this.find(id);
+		if (!run) return;
+		run.toolCount = (run.toolCount ?? 0) + 1;
+		run.currentTool = toolName;
+		run.activity = activity;
+		run.lastActivityAt = Date.now();
+		this.notify();
+	}
+
+	/** Record a tool ending: clears the current-tool marker (so the run becomes
+	 * eligible for needs-attention again) and notes the failure in activity. */
+	recordToolEnd(id: number, toolName: string, isError: boolean): void {
+		const run = this.find(id);
+		if (!run) return;
+		run.currentTool = undefined;
+		run.lastActivityAt = Date.now();
+		if (isError) run.activity = `✗ ${toolName} failed`;
 		this.notify();
 	}
 

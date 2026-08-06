@@ -211,7 +211,9 @@ process.stdin.on("end", () => {
 
 			expect(dispatch.terminate).toBe(true);
 			expect(capturedTasks).toHaveLength(1);
-			expect(widgetComponent.render(160).join("\n")).toContain(`task: ${summary}`);
+			// The task title is inlined after the agent name (› marker) so parallel
+			// runs of the same agent are distinguishable at a glance.
+			expect(widgetComponent.render(160).join("\n")).toContain(`worker › ${summary}`);
 
 			await capturedTasks[0](backgroundController.signal);
 

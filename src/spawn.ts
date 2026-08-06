@@ -32,6 +32,15 @@ export const SUBAGENT_KILL_GRACE_MS = 5_000;
  * (idleTimeoutSec); this constant is only a fallback for tests. */
 export const SUBAGENT_DEFAULT_IDLE_TIMEOUT_MS = 0;
 
+/** Backoff schedule for retrying a child that exited before any model or tool
+ * activity — the signature of a concurrent pi startup race, where several
+ * sub-agents contending for pi's startup lock lose and exit with nothing on
+ * stdout. Bounded and short so persistent launch failures are not amplified
+ * while the startup lock clears. */
+export const SUBAGENT_STARTUP_RETRY_DELAYS_MS = [250, 750, 1500] as const;
+/** A genuine startup race fails well before a model request can complete. */
+export const MAX_SUBAGENT_STARTUP_FAILURE_DURATION_MS = 2000;
+
 export interface UsageStats {
 	input: number;
 	output: number;
@@ -61,6 +70,10 @@ export interface SingleResult {
 	 * temp-file/fs errors, delivery bugs) instead of being produced by the agent
 	 * process. A dispatch failure is never a model-level failure. */
 	dispatchFailed?: boolean;
+	/** How many times the run was relaunched after a silent, zero-activity startup
+	 * exit (a concurrent pi startup race) before it produced a result. Set only when
+	 * the run actually recovered after retrying, so callers can surface it. */
+	startupRetries?: number;
 }
 
 export interface SubagentDetails {
@@ -177,6 +190,73 @@ export function isModelLevelFailure(result: SingleResult): boolean {
 	return result.messages.length > 0 || result.stderr.trim().length > 0;
 }
 
+/**
+ * True when a failed run produced NO model, tool, output, or usage activity
+ * within the startup window — the signature of a concurrent pi startup race,
+ * where the child lost pi's startup lock and exited before doing anything.
+ * Such a run is safe to relaunch: nothing was mutated and no provider call
+ * completed, so retrying cannot duplicate work.
+ *
+ * Fails closed: any final output, assistant message, usage, stderr, structured
+ * error message, idle-timeout, abort, dispatch crash, or run that outlived the
+ * startup window disqualifies the run from retry (it either did real work or
+ * carries a real error that belongs to model fallback / normal failure
+ * delivery instead). Only a clean, SILENT, fast, zero-activity exit retries.
+ */
+export function isRetryableStartupFailure(result: SingleResult, durationMs: number): boolean {
+	if (result.exitCode === 0) return false;
+	if (result.stopReason === "aborted") return false;
+	if (result.dispatchFailed) return false;
+	if (result.errorMessage?.includes("idle timeout")) return false;
+	if (getFinalOutput(result.messages)) return false;
+	if (result.messages.length > 0) return false;
+	const usage = result.usage;
+	if (usage.turns || usage.input || usage.output || usage.cacheRead || usage.cacheWrite || usage.cost) return false;
+	if (durationMs > MAX_SUBAGENT_STARTUP_FAILURE_DURATION_MS) return false;
+	// Any stderr or structured error could be a real provider/config error (auth,
+	// bad model id, quota, ...) that must not be amplified by retry. A silent
+	// zero-activity exit — no stdout, no stderr, no error message — is the race.
+	if (result.stderr.trim().length > 0) return false;
+	if (result.errorMessage && result.errorMessage.trim().length > 0) return false;
+	return true;
+}
+
+/** Error surfaced when every startup-retry attempt still exited with no
+ * activity. Tells the main agent the dispatch never reached a model and what to
+ * do (retry, or lower maxConcurrency). */
+export function formatStartupRetryExhaustedError(model: string, attempts: number): string {
+	return `Subagent failed to start after ${attempts} attempt${attempts === 1 ? "" : "s"} on ${model}: the child exited before any model, tool, output, or usage activity. This is typically a concurrent pi startup race (several sub-agents starting at once). Retry the dispatch, or temporarily lower maxConcurrency in /subagents-setup.`;
+}
+
+/** Wait out a startup-retry backoff. Resolves false immediately (do not retry)
+ * when the signal is or becomes aborted during the wait, so cancellation never
+ * delays delivering the last result. The timer is unref'd so it cannot keep the
+ * event loop alive on shutdown. */
+export async function waitForStartupRetry(delayMs: number, signal?: AbortSignal): Promise<boolean> {
+	if (delayMs <= 0) return !signal?.aborted;
+	if (!signal) {
+		return new Promise<boolean>((resolve) => {
+			const timer = setTimeout(() => resolve(true), delayMs);
+			if (typeof timer.unref === "function") timer.unref();
+		});
+	}
+	if (signal.aborted) return false;
+	return new Promise<boolean>((resolve) => {
+		let settled = false;
+		const finish = (shouldRetry: boolean): void => {
+			if (settled) return;
+			settled = true;
+			clearTimeout(timer);
+			signal.removeEventListener("abort", onAbort);
+			resolve(shouldRetry);
+		};
+		const onAbort = (): void => finish(false);
+		const timer = setTimeout(() => finish(true), delayMs);
+		if (typeof timer.unref === "function") timer.unref();
+		signal.addEventListener("abort", onAbort, { once: true });
+	});
+}
+
 export function getResultOutput(result: SingleResult): string {
 	if (isFailedResult(result)) {
 		const error = result.errorMessage || result.stderr;
@@ -253,6 +333,10 @@ export interface RunSingleOptions {
 	/** Idle timeout in ms: terminate the child if its stdout produces no activity
 	 * for this duration. 0 (the default) disables the idle watchdog. */
 	idleTimeoutMs?: number;
+	/** Startup-retry backoff schedule (ms) for silent, zero-activity child exits
+	 * (a concurrent pi startup race). Defaults to SUBAGENT_STARTUP_RETRY_DELAYS_MS;
+	 * pass a shorter array in tests to keep them fast. */
+	startupRetryDelaysMs?: readonly number[];
 	signal?: AbortSignal;
 	onLive?: (e: SubagentLiveEvent) => void;
 	makeDetails: (results: SingleResult[]) => SubagentDetails;
@@ -548,22 +632,68 @@ export async function runSingleAgent(options: RunSingleOptions): Promise<SingleR
 }
 
 /**
- * Run one agent; when the configured model fails at the provider level before
- * producing any output (see isModelLevelFailure), retry once with the main
- * window's current model. The retried result is returned with `modelFallbackFrom`
- * set so callers can surface the degradation. The fallback is per-run only and
- * never persisted: a transient provider hiccup must not silently downgrade the
- * configured agent model.
+ * Run one agent with two layers of resilience against transient dispatch failures:
+ *
+ * 1. Startup retry (inner loop): a concurrent pi startup race can make the child
+ *    exit before any model/tool activity. Relaunch with backoff so the startup
+ *    lock clears. The SAME model is retried — the race is in the host, not the
+ *    model — and only a clean, silent, zero-activity exit qualifies (see
+ *    isRetryableStartupFailure), so retrying can never duplicate real work.
+ * 2. Model fallback (outer): when the provider rejects the configured model
+ *    before producing output (see isModelLevelFailure), retry once with the main
+ *    window's current model. The fallback gets its own startup-retry loop, since
+ *    a startup race can hit any relaunch regardless of model.
+ *
+ * The fallback is per-run only and never persisted: a transient provider hiccup
+ * must not silently downgrade the configured agent model.
  */
 export async function runSingleAgentWithModelFallback(
 	options: RunSingleOptions,
 	fallbackModelRef?: string,
 ): Promise<SingleResult> {
-	const result = await runSingleAgent(options);
 	const agent = options.agent;
 	const launchedRef = agent?.model;
+	const delays = options.startupRetryDelaysMs ?? SUBAGENT_STARTUP_RETRY_DELAYS_MS;
+
+	const runWithStartupRetry = async (opts: RunSingleOptions): Promise<SingleResult> => {
+		let lastResult: SingleResult;
+		let retries = 0;
+		for (let attempt = 0; ; attempt++) {
+			const start = Date.now();
+			lastResult = await runSingleAgent(opts);
+			const durationMs = Date.now() - start;
+			if (!isRetryableStartupFailure(lastResult, durationMs)) {
+				if (retries > 0 && !isFailedResult(lastResult)) lastResult.startupRetries = retries;
+				return lastResult;
+			}
+			const delay = delays[attempt];
+			if (delay === undefined) {
+				// Exhausted: the agent never reached a model. Surface the concurrency-race
+				// cause as a dispatch-level failure (no model was ever reached, so this
+				// must NOT trigger model fallback) so the main agent can retry or lower
+				// maxConcurrency.
+				lastResult.errorMessage = formatStartupRetryExhaustedError(
+					lastResult.model ?? opts.agent?.model ?? "default",
+					attempt + 1,
+				);
+				lastResult.stopReason ??= "error";
+				lastResult.dispatchFailed = true;
+				return lastResult;
+			}
+			// Flip the live status back to running so the widget does not flash a
+			// false "failed" while we wait out the backoff and relaunch the child.
+			try {
+				opts.onLive?.({ kind: "status", status: "running" });
+			} catch { /* never throw from event handling */ }
+			const shouldRetry = await waitForStartupRetry(delay, opts.signal);
+			if (!shouldRetry) return lastResult;
+			retries++;
+		}
+	};
+
+	const result = await runWithStartupRetry(options);
 	if (!agent || !launchedRef || !fallbackModelRef || launchedRef === fallbackModelRef) return result;
 	if (!isModelLevelFailure(result)) return result;
-	const retried = await runSingleAgent({ ...options, agent: { ...agent, model: fallbackModelRef } });
+	const retried = await runWithStartupRetry({ ...options, agent: { ...agent, model: fallbackModelRef } });
 	return { ...retried, modelFallbackFrom: launchedRef };
 }
