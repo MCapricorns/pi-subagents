@@ -45,7 +45,7 @@ import {
 import { buildFixTaskBrief, buildReReviewBrief, shouldTriggerFixLoop } from "./fixloop.ts";
 import {
 	activityStateLabel,
-	compactModelRef,
+	compactLine,
 	deriveActivityState,
 	formatElapsed,
 	formatTaskSummary,
@@ -795,11 +795,12 @@ export default function (pi: ExtensionAPI): void {
 							const title = formatTaskSummary(r.task, Math.max(16, Math.floor(width * 0.65)), true);
 							const left = `${head}${icon} ${theme.fg("dim", `#${r.id}`)} ${theme.bold(name)}`;
 
-							// Right side: compact model (no provider prefix), token usage (in/out +
+							// Right side: full model ref (provider/model), token usage (in/out +
 							// cache read/write), tool count, elapsed, and the soft activity-state
-							// annotation (idle / long-running). Always visible — rightAlign clips
-							// the title on overflow, never this.
-							const model = compactModelRef(r.model);
+							// annotation (idle / long-running). Trailing the header with a single
+							// " · " chain keeps the row compact (no center gap); compactLine
+							// clips on overflow, never the right side on its own.
+							const model = r.model ?? "?";
 							const usage = formatUsageCompact(r.usage);
 							const tools = r.toolCount ? `${r.toolCount} tool${r.toolCount === 1 ? "" : "s"}` : "";
 							const elapsed = formatElapsed(r, now);
@@ -808,10 +809,10 @@ export default function (pi: ExtensionAPI): void {
 							// the other states (ready / done / stopped) so they are unambiguous.
 							if (r.status !== "running") metaParts.push(statusLabel(r.status));
 							const state = deriveActivityState(r, now);
-							const stateNote = state ? ` · ${activityStateLabel(state)}` : "";
-							const note = r.annotation ? ` · ${r.annotation}` : "";
-							const right = theme.fg("dim", `${metaParts.join(" · ")}${stateNote}${note}`);
-							lines.push(rightAlign(left, right, width));
+							if (state) metaParts.push(activityStateLabel(state));
+							if (r.annotation) metaParts.push(r.annotation);
+							const right = metaParts.length ? theme.fg("dim", ` · ${metaParts.join(" · ")}`) : "";
+							lines.push(compactLine(left, right, width));
 
 							// Task summary sits one indent below the header, on its own line.
 							lines.push(rightAlign(`${head}  ${theme.fg("accent", title)}`, "", width));

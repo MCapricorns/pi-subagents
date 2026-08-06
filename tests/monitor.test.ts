@@ -14,6 +14,7 @@ import {
 	formatToolActivity,
 	formatUsageCompact,
 	rightAlign,
+	compactLine,
 	statusLabel,
 } from "../src/monitor.ts";
 
@@ -499,6 +500,28 @@ describe("rightAlign", () => {
 	it("handles ANSI-styled strings by display width", () => {
 		// styled left/right must still align by visible columns, not byte length.
 		const line = rightAlign("\x1b[31mred\x1b[0m left", "\x1b[32mgreen\x1b[0m", 20);
+		expect(visibleWidth(line)).toBeLessThanOrEqual(20);
+		expect(line).toContain("green");
+	});
+});
+
+describe("compactLine", () => {
+	it("places the right side directly after the left with no center gap", () => {
+		const line = compactLine("left", " · right", 20);
+		expect(line.startsWith("left")).toBe(true);
+		expect(line).toContain("left · right");
+		expect(visibleWidth(line)).toBeLessThanOrEqual(20);
+	});
+	it("clips the combined line to width on overflow", () => {
+		const line = compactLine("a very long left side", " · RIGHT", 20);
+		expect(visibleWidth(line)).toBeLessThanOrEqual(20);
+	});
+	it("returns just the left when the right is empty", () => {
+		const line = compactLine("left", "", 20);
+		expect(line).toBe("left");
+	});
+	it("handles ANSI-styled strings by display width", () => {
+		const line = compactLine("\x1b[31mred\x1b[0m left", " \x1b[32mgreen\x1b[0m", 20);
 		expect(visibleWidth(line)).toBeLessThanOrEqual(20);
 		expect(line).toContain("green");
 	});

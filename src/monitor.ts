@@ -297,6 +297,16 @@ export function rightAlign(left: string, right: string, width: number): string {
 	return truncateToWidth(`${leftClipped}${" ".repeat(gap)}${right}`, width);
 }
 
+/** Concatenate `left` and `right` (no center padding) and clip the combined line
+ * to `width`. Unlike {@link rightAlign}, the right side trails the left side
+ * instead of being pinned to the far edge, so a short header leaves no gap in
+ * the middle. `right` should carry its own leading separator (e.g. ` \u00b7 `);
+ * pass an empty string when there is nothing to append. Styled strings are
+ * measured by display width. */
+export function compactLine(left: string, right: string, width: number): string {
+	return truncateToWidth(`${left}${right}`, width);
+}
+
 /** Max length of the argument target inside a formatted activity line. */
 export const ACTIVITY_TARGET_MAX = 60;
 
