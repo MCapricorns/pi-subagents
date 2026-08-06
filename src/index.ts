@@ -776,54 +776,75 @@ export default function (pi: ExtensionAPI): void {
 					}
 				}, 1000);
 				return {
-					render(width: number): string[] {
-						const runs = monitor.getRuns();
-						if (runs.length === 0) return [];
-						const now = Date.now();
-						const lines: string[] = [];
-						for (const r of runs) {
-							const icon = statusIcon(r.status, theme);
-							// Chain-internal runs (auto-fix worker/reviewer) indent under their parent
-							// reviewer. For those, the relationLabel ("fix round 1") is more
-							// distinguishing than the repeated worker/reviewer name.
-							const head = r.groupId ? theme.fg("dim", "  ↳ ") : " ";
-							const name = r.groupId ? (r.relationLabel ?? r.agent) : r.agent;
-							// Header row stays short: icon, run id, agent name — the task summary
-							// (keys-only fragments: paths, symbols, quoted phrases) gets its own
-							// line below with a full width budget, so parallel runs of the SAME
-							// agent are still distinguishable at a glance.
-							const title = formatTaskSummary(r.task, Math.max(16, Math.floor(width * 0.65)), true);
-							const left = `${head}${icon} ${theme.fg("dim", `#${r.id}`)} ${theme.bold(name)}`;
+						render(width: number): string[] {
+							const runs = monitor.getRuns();
+							if (runs.length === 0) return [];
+							const now = Date.now();
+							const lines: string[] = [];
+							// Tree layout: each top-level agent is a root whose title/activity hang
+							// off it as branches; auto-fix chain runs (groupId) become child nodes
+							// under their parent root, with a "│" continuation while more siblings
+							// follow. Blank lines separate agent blocks so parallel runs don't blur
+							// into one wall of text.
+							const dim = (t: string): string => theme.fg("dim", t);
+							for (let idx = 0; idx < runs.length; idx++) {
+								const r = runs[idx];
+								const isChain = Boolean(r.groupId);
+								const chainContinues = isChain && runs[idx + 1]?.groupId === r.groupId;
+								const activity =
+									r.activity && (r.status === "running" || r.status === "queued") ? r.activity : undefined;
+								const hasActivity = activity !== undefined;
+								const icon = statusIcon(r.status, theme);
+								// Chain-internal runs (auto-fix worker/reviewer) are child nodes under
+								// their parent reviewer. Their relationLabel ("fix round 1") is more
+								// distinguishing than the repeated worker/reviewer name.
+								const name = isChain ? (r.relationLabel ?? r.agent) : r.agent;
+								// Header row stays short: icon, run id, agent name — the task summary
+								// (keys-only fragments: paths, symbols, quoted phrases) gets its own
+								// line below with a full width budget, so parallel runs of the SAME
+								// agent are still distinguishable at a glance.
+								const title = formatTaskSummary(r.task, Math.max(16, Math.floor(width * 0.65)), true);
+								// Hierarchy: top-level agent names are the visual anchor (accent +
+								// bold); chain nodes and all metadata stay quiet, so the widget reads
+								// top-down: roots → their branches → the fine print.
+								if (!isChain && lines.length > 0) lines.push("");
+								const nodeBranch = isChain ? (chainContinues ? "├─ " : "└─ ") : "";
+								const left = `${dim(nodeBranch)}${icon} ${dim(`#${r.id}`)} ${isChain ? name : theme.fg("accent", theme.bold(name))}`;
 
-							// Right side: full model ref (provider/model), token usage (in/out +
-							// cache read/write), tool count, elapsed, and the soft activity-state
-							// annotation (idle / long-running). Trailing the header with a single
-							// " · " chain keeps the row compact (no center gap); compactLine
-							// clips on overflow, never the right side on its own.
-							const model = r.model ?? "?";
-							const usage = formatUsageCompact(r.usage);
-							const tools = r.toolCount ? `${r.toolCount} tool${r.toolCount === 1 ? "" : "s"}` : "";
-							const elapsed = formatElapsed(r, now);
-							const metaParts = [model, usage, tools, elapsed].filter(Boolean);
-							// Running is conveyed by the icon + elapsed; spell out the label only for
-							// the other states (ready / done / stopped) so they are unambiguous.
-							if (r.status !== "running") metaParts.push(statusLabel(r.status));
-							const state = deriveActivityState(r, now);
-							if (state) metaParts.push(activityStateLabel(state));
-							if (r.annotation) metaParts.push(r.annotation);
-							const right = metaParts.length ? theme.fg("dim", ` · ${metaParts.join(" · ")}`) : "";
-							lines.push(compactLine(left, right, width));
+								// Right side: full model ref (provider/model), token usage (in/out +
+								// cache read/write), tool count, elapsed, and the soft activity-state
+								// annotation (idle / long-running). Trailing the header with a single
+								// " · " chain keeps the row compact (no center gap); compactLine
+								// clips on overflow, never the right side on its own.
+								const model = r.model ?? "?";
+								const usage = formatUsageCompact(r.usage);
+								const tools = r.toolCount ? `${r.toolCount} tool${r.toolCount === 1 ? "" : "s"}` : "";
+								const elapsed = formatElapsed(r, now);
+								const metaParts = [model, usage, tools, elapsed].filter(Boolean);
+								// Running is conveyed by the icon + elapsed; spell out the label only for
+								// the other states (ready / done / stopped) so they are unambiguous.
+								if (r.status !== "running") metaParts.push(statusLabel(r.status));
+								const state = deriveActivityState(r, now);
+								if (state) metaParts.push(activityStateLabel(state));
+								if (r.annotation) metaParts.push(r.annotation);
+								const right = metaParts.length ? dim(` · ${metaParts.join(" · ")}`) : "";
+								lines.push(compactLine(left, right, width));
 
-							// Task summary sits one indent below the header, on its own line.
-							lines.push(rightAlign(`${head}  ${theme.fg("accent", title)}`, "", width));
-
-							// Current activity sits one indent below, only while the run is active.
-							if (r.activity && (r.status === "running" || r.status === "queued")) {
-								lines.push(rightAlign(`${head}  ${theme.fg("dim", r.activity)}`, "", width));
+								// Branches hang off the node's content column; chain nodes that still
+								// have siblings carry a "│" continuation down to the last one.
+								const continuation = isChain ? (chainContinues ? "│  " : "   ") : "";
+								// Task summary is the first branch; the summary itself is plain text —
+								// no accent, so it never competes with the agent name or pi's own UI.
+								lines.push(
+									rightAlign(`${continuation}${dim(hasActivity ? "├─ " : "└─ ")}${dim("title: ")}${theme.fg("text", title)}`, "", width),
+								);
+								// Current activity is the last branch, only while the run is active.
+								if (hasActivity) {
+									lines.push(rightAlign(`${continuation}${dim("└─ ")}${dim(activity)}`, "", width));
+								}
 							}
-						}
-						return lines;
-					},
+							return lines;
+						},
 					invalidate() {},
 					dispose() {
 						unsub();

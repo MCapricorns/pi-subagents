@@ -215,7 +215,7 @@ process.stdin.on("end", () => {
 			// fragments) sits on its own line below so the row never overflows.
 			const widgetText = widgetComponent.render(160).join("\n");
 			expect(widgetText).toContain("○ #1 worker");
-			expect(widgetText).toContain(summary);
+			expect(widgetText).toContain(`title: ${summary}`);
 
 			await capturedTasks[0](backgroundController.signal);
 
