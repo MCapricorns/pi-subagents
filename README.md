@@ -347,6 +347,13 @@ agent's default — its frontmatter `thinking`, else the global default). The gl
 `thinkingLevel` is set first and applies as the final fallback. `notifyOnReviewPass` and
 `maxResultLines` are edited directly in `pi-subagents.json`.
 
+When the config already exists, re-running `/subagents-setup` opens a menu whose
+**Configure an agent (model + thinking)** entry lets you pick one agent and set just its
+model and thinking strength — so changing a single agent no longer walks every enabled
+agent. **Change default thinking strength** sets only the global fallback. The rest of the
+menu toggles injection, scope, concurrency, fix rounds, and idle timeout; **Full re-setup**
+re-runs the whole first-time wizard.
+
 ```json
 {
   "enabledAgents": ["explore", "worker", "reviewer"],
