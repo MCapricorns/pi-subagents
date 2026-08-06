@@ -76,12 +76,15 @@ async function pickEnabledAgents(
 	);
 }
 
-/** Single-agent model pick; the inherit option drops any existing override. */
+/** Single-agent model pick; the inherit option drops any existing override.
+ * `escNote` describes what Esc does at this pick (whole-wizard cancel in the
+ * full setup vs. ending the per-agent loop in the menu). */
 async function pickAgentModel(
 	ctx: ExtensionCommandContext,
 	name: string,
 	currentRef: string | undefined,
 	refs: readonly string[],
+	escNote = "cancels setup",
 ): Promise<string | typeof INHERIT | undefined> {
 	const items = [
 		{
@@ -95,7 +98,7 @@ async function pickAgentModel(
 	return promptSelectOne(
 		ctx,
 		`Model for "${name}"`,
-		"Type to filter • ↑/↓ • PgUp/PgDn • Enter selects • Esc cancels setup",
+		`Type to filter • ↑/↓ • PgUp/PgDn • Enter selects • Esc ${escNote}`,
 		items,
 	);
 }
@@ -140,13 +143,16 @@ const THINKING_LEVEL_HINTS: Record<ThinkingLevel, string> = {
 	max: "strongest reasoning",
 };
 
-/** Single strength pick for one agent; the inherit option keeps the effective default. */
+/** Single strength pick for one agent; the inherit option keeps the effective default.
+ * `escNote` describes what Esc does at this pick (whole-wizard cancel in the
+ * full setup vs. ending the per-agent loop in the menu). */
 async function pickAgentStrength(
 	ctx: ExtensionCommandContext,
 	agentName: string,
 	current: ThinkingLevel | undefined,
 	defaultLevel: ThinkingLevel,
 	defaults: ReadonlyMap<string, ThinkingLevel>,
+	escNote = "cancels setup",
 ): Promise<ThinkingLevel | typeof INHERIT | undefined> {
 	const options = THINKING_LEVEL_VALUES.map((level) => ({
 		value: level,
@@ -159,7 +165,7 @@ async function pickAgentStrength(
 	const choice = await promptSelectOne(
 		ctx,
 		`Thinking strength for "${agentName}"?`,
-		"Type to filter • ↑/↓ • Enter selects • Esc cancels setup",
+		`Type to filter • ↑/↓ • Enter selects • Esc ${escNote}`,
 		[{ value: INHERIT, label: inheritLabel }, ...options],
 	);
 	if (choice === undefined) return undefined;
@@ -179,7 +185,7 @@ async function pickAgentToConfigure(
 	return promptSelectOne(
 		ctx,
 		"Configure which agent?",
-		"Type to filter • ↑/↓ • PgUp/PgDn • Enter selects • Esc cancels",
+		"Type to filter • ↑/↓ • PgUp/PgDn • Enter selects • Esc stops",
 		items,
 	);
 }
@@ -189,7 +195,8 @@ async function pickAgentToConfigure(
  * its thinking strength. Only that one agent is touched, so re-running the menu
  * to tweak one agent no longer walks every enabled agent. Both picks offer an
  * "inherit" option that drops any existing per-agent override for that field.
- * Resolves undefined when the user cancels (Esc) at any step.
+ * Resolves undefined when the user presses Esc at any step; the caller keeps
+ * changes from agents already configured earlier in the same pass.
  */
 async function configureOneAgent(
 	ctx: ExtensionCommandContext,
@@ -216,13 +223,13 @@ async function configureOneAgent(
 	if (!modelsAvailable) {
 		ctx.ui.notify("No Pi models are currently available; model override left unchanged.", "warning");
 	} else {
-		const modelChoice = await pickAgentModel(ctx, name, currentModels[name], refs);
-		if (modelChoice === undefined) return undefined; // Esc cancels setup
+		const modelChoice = await pickAgentModel(ctx, name, currentModels[name], refs, "stops — earlier agent picks are kept");
+		if (modelChoice === undefined) return undefined; // Esc ends the loop
 		model = modelChoice;
 	}
 
-	const strength = await pickAgentStrength(ctx, name, currentStrengths[name], defaultLevel, defaults);
-	if (strength === undefined) return undefined; // Esc cancels setup
+	const strength = await pickAgentStrength(ctx, name, currentStrengths[name], defaultLevel, defaults, "stops — earlier agent picks are kept");
+	if (strength === undefined) return undefined; // Esc ends the loop
 
 	return { name, model, modelsAvailable, strength };
 }
@@ -403,27 +410,33 @@ async function runMenu(ctx: ExtensionCommandContext, configPath: string, config:
 		if (enabled === undefined) return notifyCancelled(ctx);
 		next.enabledAgents = enabled;
 	} else if (choice.startsWith("Configure an agent")) {
-		// Per-agent: pick one agent, then its model and thinking strength. Only that
-		// agent is touched, so tweaking one no longer walks every enabled agent.
+		// Per-agent loop: pick one agent, then its model and thinking strength, then
+		// return to the agent picker so several agents can be configured in one
+		// pass. Esc at any step ends the loop; agents already configured in this
+		// pass are kept.
 		const defaults = builtinThinkingDefaults();
-		const picked = await configureOneAgent(
-			ctx,
-			config.enabledAgents,
-			config.agentModels,
-			config.agentThinkingLevels,
-			config.thinkingLevel,
-			defaults,
-		);
-		if (picked === undefined) return notifyCancelled(ctx);
-		next.agentModels = { ...config.agentModels };
+		let configuredAny = false;
 		next.agentThinkingLevels = { ...config.agentThinkingLevels };
-		if (picked.modelsAvailable) {
-			if (picked.model === INHERIT) delete next.agentModels[picked.name];
-			else next.agentModels[picked.name] = picked.model;
-			next.agentModels = repairStaleModels(ctx, next.agentModels);
+		while (true) {
+			const picked = await configureOneAgent(
+				ctx,
+				next.enabledAgents,
+				next.agentModels,
+				next.agentThinkingLevels,
+				next.thinkingLevel,
+				defaults,
+			);
+			if (picked === undefined) break; // Esc ends the loop
+			configuredAny = true;
+			if (picked.modelsAvailable) {
+				if (picked.model === INHERIT) delete next.agentModels[picked.name];
+				else next.agentModels[picked.name] = picked.model;
+			}
+			if (picked.strength === INHERIT) delete next.agentThinkingLevels[picked.name];
+			else next.agentThinkingLevels[picked.name] = picked.strength;
 		}
-		if (picked.strength === INHERIT) delete next.agentThinkingLevels[picked.name];
-		else next.agentThinkingLevels[picked.name] = picked.strength;
+		if (!configuredAny) return notifyCancelled(ctx);
+		next.agentModels = repairStaleModels(ctx, next.agentModels);
 	} else if (choice.startsWith("Change default thinking")) {
 		const thinkingLevel = await pickThinkingLevel(ctx, config.thinkingLevel);
 		if (thinkingLevel === undefined) return notifyCancelled(ctx);
