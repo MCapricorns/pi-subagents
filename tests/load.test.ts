@@ -211,11 +211,11 @@ process.stdin.on("end", () => {
 
 			expect(dispatch.terminate).toBe(true);
 			expect(capturedTasks).toHaveLength(1);
-			// Header row stays short (icon + run id + agent); the task summary (keys-only
-			// fragments) sits on its own line below so the row never overflows.
+			// Two lines per run by design: the header row (icon + run id + agent)
+			// and the live activity row; the task summary has no line of its own.
 			const widgetText = widgetComponent.render(160).join("\n");
 			expect(widgetText).toContain("○ #1 worker");
-			expect(widgetText).toContain(`title: ${summary}`);
+			expect(widgetText).not.toContain("title:");
 
 			await capturedTasks[0](backgroundController.signal);
 

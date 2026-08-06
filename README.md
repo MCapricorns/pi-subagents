@@ -459,25 +459,17 @@ The package has no runtime dependencies beyond pi peer dependencies.
 ## Acknowledgments
 
 - The official [pi subagent example](https://github.com/earendil-works/pi)
-  (`examples/extensions/subagent`) — this extension's child-process dispatch and
-  event-stream handling are adapted from it.
-- [nicobailon/pi-subagents](https://github.com/nicobailon/pi-subagents) — the most
-  widely used pi sub-agent extension; its async delegation model and result
-  truncation/artifact handling directly informed this project.
-- [tintinweb/pi-subagents](https://github.com/tintinweb/pi-subagents) — Claude Code-
-  style sub-agents for pi with parallel execution and a live widget; this project's
-  widget and parallel fan-out follow the same ideas.
-- [amosblomqvist/pi-subagents](https://github.com/amosblomqvist/pi-subagents) — a
-  clean, minimal reference for markdown-defined agents in pi.
-- [edxeth/pi-subagents](https://github.com/edxeth/pi-subagents) — multi-agent
-  coordination patterns (background agents, child-to-parent messaging) that are
-  worth borrowing from.
+  (`examples/extensions/subagent`) — the child-process dispatch and
+  event-stream handling build on it.
+- [tintinweb/pi-subagents](https://github.com/tintinweb/pi-subagents) — the
+  live widget (two lines per run: header + quiet gray activity row) and
+  parallel fan-out follow its design.
 - The sub-agent pattern itself, popularized by
   [Claude Code](https://github.com/anthropics/claude-code): role-specialized
   agents that receive self-contained briefs.
 
-The agent prompts and extension code are written independently for this project;
-the projects above served as design references.
+The agent prompts and extension code are written independently for this
+project; the projects above served as design references.
 
 ## License
 

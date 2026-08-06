@@ -13,7 +13,7 @@
  */
 
 import { getAgentDir, type ExtensionAPI } from "@earendil-works/pi-coding-agent";
-import { Text } from "@earendil-works/pi-tui";
+import { Text, truncateToWidth } from "@earendil-works/pi-tui";
 import { Type } from "typebox";
 import { discoverAgents, type AgentConfig } from "./agents.ts";
 import { BackgroundTaskQueue } from "./background.ts";
@@ -52,7 +52,6 @@ import {
 	formatToolActivity,
 	formatUsageCompact,
 	monitor,
-	rightAlign,
 	statusIcon,
 	statusLabel,
 	type RunChainMeta,
@@ -799,14 +798,13 @@ export default function (pi: ExtensionAPI): void {
 								// their parent reviewer. Their relationLabel ("fix round 1") is more
 								// distinguishing than the repeated worker/reviewer name.
 								const name = isChain ? (r.relationLabel ?? r.agent) : r.agent;
-								// Header row stays short: icon, run id, agent name — the task summary
-								// (keys-only fragments: paths, symbols, quoted phrases) gets its own
-								// line below with a full width budget, so parallel runs of the SAME
-								// agent are still distinguishable at a glance.
-								const title = formatTaskSummary(r.task, Math.max(16, Math.floor(width * 0.65)), true);
-								// Hierarchy: top-level agent names are the visual anchor (accent +
-								// bold); chain nodes and all metadata stay quiet, so the widget reads
-								// top-down: roots → their branches → the fine print.
+								// Two lines per run: the header row (icon, run id, agent name) and the
+								// live activity branch below. The task summary is deliberately not
+								// shown — the task lives in the tool result, and the agent name plus
+								// what it is doing right now is enough to tell runs apart. The header
+								// stays exactly as it was (accent name, dim stats), matching the
+								// referenced sub-agent widgets (tintinweb): the running indicator
+								// uses the accent color, everything else is quiet.
 								if (!isChain && lines.length > 0) lines.push("");
 								const nodeBranch = isChain ? (chainContinues ? "├─ " : "└─ ") : "";
 								const left = `${dim(nodeBranch)}${icon} ${dim(`#${r.id}`)} ${isChain ? name : theme.fg("accent", theme.bold(name))}`;
@@ -827,20 +825,20 @@ export default function (pi: ExtensionAPI): void {
 								const state = deriveActivityState(r, now);
 								if (state) metaParts.push(activityStateLabel(state));
 								if (r.annotation) metaParts.push(r.annotation);
+								// Metadata trails the header in dim — quiet, never competing with the
+								// accent agent name (the same restraint the referenced widgets use).
+								// Trailing with a single " · " chain keeps the row compact (no center
+								// gap); compactLine clips on overflow, never the right side on its own.
 								const right = metaParts.length ? dim(` · ${metaParts.join(" · ")}`) : "";
 								lines.push(compactLine(left, right, width));
 
-								// Branches hang off the node's content column; chain nodes that still
-								// have siblings carry a "│" continuation down to the last one.
-								const continuation = isChain ? (chainContinues ? "│  " : "   ") : "";
-								// Task summary is the first branch; the summary itself is plain text —
-								// no accent, so it never competes with the agent name or pi's own UI.
-								lines.push(
-									rightAlign(`${continuation}${dim(hasActivity ? "├─ " : "└─ ")}${dim("title: ")}${theme.fg("text", title)}`, "", width),
-								);
-								// Current activity is the last branch, only while the run is active.
+								// Current activity ("read src/index.ts", "bash npm test") is the only
+								// branch: gray, so it never competes with the agent name or pi's own
+								// UI. Chain nodes that still have siblings carry a "│" continuation
+								// down to the last one.
 								if (hasActivity) {
-									lines.push(rightAlign(`${continuation}${dim("└─ ")}${dim(activity)}`, "", width));
+									const continuation = isChain ? (chainContinues ? "│  " : "   ") : "";
+									lines.push(truncateToWidth(`${continuation}${dim("└─ ")}${dim(activity)}`, width));
 								}
 							}
 							return lines;
