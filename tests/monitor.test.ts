@@ -259,7 +259,7 @@ describe("extractKeyFragments", () => {
 });
 
 describe("formatUsageCompact", () => {
-	it("formats cache-read tokens with R", () => {
+	it("formats cache read/write tokens with R and W", () => {
 		expect(
 			formatUsageCompact({
 				input: 0,
@@ -270,7 +270,7 @@ describe("formatUsageCompact", () => {
 				contextTokens: 0,
 				turns: 0,
 			}),
-		).toBe("R1.2k");
+		).toBe("R1.2k W9.0k");
 	});
 });
 

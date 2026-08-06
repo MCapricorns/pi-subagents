@@ -50,6 +50,7 @@ import {
 	formatElapsed,
 	formatTaskSummary,
 	formatToolActivity,
+	formatUsageCompact,
 	monitor,
 	rightAlign,
 	statusIcon,
@@ -148,6 +149,7 @@ function formatUsage(usage: UsageStats): string {
 	if (usage.input) parts.push(`↑${formatTokens(usage.input)}`);
 	if (usage.output) parts.push(`↓${formatTokens(usage.output)}`);
 	if (usage.cacheRead) parts.push(`R${formatTokens(usage.cacheRead)}`);
+	if (usage.cacheWrite) parts.push(`W${formatTokens(usage.cacheWrite)}`);
 	if (usage.cost) parts.push(`$${usage.cost.toFixed(4)}`);
 	return parts.join(" ");
 }
@@ -786,19 +788,22 @@ export default function (pi: ExtensionAPI): void {
 							// distinguishing than the repeated worker/reviewer name.
 							const head = r.groupId ? theme.fg("dim", "  ↳ ") : " ";
 							const name = r.groupId ? (r.relationLabel ?? r.agent) : r.agent;
-							// Inline the task's distinguishing key fragments (paths, symbols, quoted
-							// phrases) right after the agent name, so parallel runs of the SAME agent
-							// are distinguishable at a glance instead of only on a second line.
-							const title = formatTaskSummary(r.task, Math.max(16, Math.floor(width * 0.45)), true);
-							const left = `${head}${icon} ${theme.fg("dim", `#${r.id}`)} ${theme.bold(name)} ${theme.fg("dim", "›")} ${theme.fg("accent", title)}`;
+							// Header row stays short: icon, run id, agent name — the task summary
+							// (keys-only fragments: paths, symbols, quoted phrases) gets its own
+							// line below with a full width budget, so parallel runs of the SAME
+							// agent are still distinguishable at a glance.
+							const title = formatTaskSummary(r.task, Math.max(16, Math.floor(width * 0.65)), true);
+							const left = `${head}${icon} ${theme.fg("dim", `#${r.id}`)} ${theme.bold(name)}`;
 
-							// Right side: compact model (no provider prefix), tool count, elapsed,
-							// and the soft activity-state annotation (idle / long-running). Always
-							// visible — rightAlign clips the title on overflow, never this.
+							// Right side: compact model (no provider prefix), token usage (in/out +
+							// cache read/write), tool count, elapsed, and the soft activity-state
+							// annotation (idle / long-running). Always visible — rightAlign clips
+							// the title on overflow, never this.
 							const model = compactModelRef(r.model);
+							const usage = formatUsageCompact(r.usage);
 							const tools = r.toolCount ? `${r.toolCount} tool${r.toolCount === 1 ? "" : "s"}` : "";
 							const elapsed = formatElapsed(r, now);
-							const metaParts = [model, tools, elapsed].filter(Boolean);
+							const metaParts = [model, usage, tools, elapsed].filter(Boolean);
 							// Running is conveyed by the icon + elapsed; spell out the label only for
 							// the other states (ready / done / stopped) so they are unambiguous.
 							if (r.status !== "running") metaParts.push(statusLabel(r.status));
@@ -807,6 +812,9 @@ export default function (pi: ExtensionAPI): void {
 							const note = r.annotation ? ` · ${r.annotation}` : "";
 							const right = theme.fg("dim", `${metaParts.join(" · ")}${stateNote}${note}`);
 							lines.push(rightAlign(left, right, width));
+
+							// Task summary sits one indent below the header, on its own line.
+							lines.push(rightAlign(`${head}  ${theme.fg("accent", title)}`, "", width));
 
 							// Current activity sits one indent below, only while the run is active.
 							if (r.activity && (r.status === "running" || r.status === "queued")) {

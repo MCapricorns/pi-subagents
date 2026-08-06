@@ -211,9 +211,11 @@ process.stdin.on("end", () => {
 
 			expect(dispatch.terminate).toBe(true);
 			expect(capturedTasks).toHaveLength(1);
-			// The task title is inlined after the agent name (› marker) so parallel
-			// runs of the same agent are distinguishable at a glance.
-			expect(widgetComponent.render(160).join("\n")).toContain(`worker › ${summary}`);
+			// Header row stays short (icon + run id + agent); the task summary (keys-only
+			// fragments) sits on its own line below so the row never overflows.
+			const widgetText = widgetComponent.render(160).join("\n");
+			expect(widgetText).toContain("○ #1 worker");
+			expect(widgetText).toContain(summary);
 
 			await capturedTasks[0](backgroundController.signal);
 
