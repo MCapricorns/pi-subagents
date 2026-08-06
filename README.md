@@ -6,32 +6,63 @@
 ![platform](https://img.shields.io/badge/platform-Windows%20%7C%20macOS%20%7C%20Linux-lightgrey)
 ![pi](https://img.shields.io/badge/pi-extension-orange)
 
-Focused background delegation for [pi](https://pi.dev). `pi-subagents` adds a small set of
-specialized agents that run in isolated child processes, report results back to the main
-agent, and keep the workflow moving without manual polling.
+Background delegation for [pi](https://pi.dev). This extension adds three specialized
+agents — `explore`, `worker`, `reviewer` — that run in isolated child processes and
+report their results back to the main agent automatically.
 
 ## Highlights
 
-- **Automatic delegation guidance** — injects the enabled agent catalog and routing rules into
-  the main agent's system prompt.
-- **Isolated execution** — every sub-agent runs in its own `pi` process with `--no-session`.
-- **Automatic continuation** — a completed result is sent to the main session as a custom
-  message and automatically starts a follow-up turn. If the main agent is busy, the result
-  waits in the follow-up queue.
-- **Parallel fan-out** — run independent tasks together, with a bounded background queue.
-- **Live progress** — a TUI widget shows each agent's status, activity, model, usage, and
-  elapsed time; completion also produces a concise notification.
-- **Per-agent configuration** — enable agents, pick model and thinking strength per agent,
-  tune concurrency limits, and choose discovery scope from `/subagents-setup`.
-- **Idle watchdog** — a sub-agent whose stdout goes silent for a configurable
-  duration is terminated and retried with the fallback model, so a stalled SSE
-  stream never hangs the workflow.
+- **Isolated execution** — each sub-agent runs in its own `pi` process; it cannot see
+  the main conversation, so it gets a clean context window.
+- **Automatic continuation** — results are delivered as a message that wakes the main
+  agent automatically (or waits in the follow-up queue if it is busy).
+- **Parallel fan-out** — independent tasks run at the same time, with a configurable
+  concurrency limit.
+- **Live progress** — a TUI widget shows each run's status, current activity, model,
+  token usage (input/output and cache read/write), and elapsed time.
+- **Per-agent configuration** — enable agents, choose a model and thinking level per
+  agent, and tune limits from `/subagents-setup`.
 - **Automatic model fallback** — if an agent's model fails at the provider level before
-  producing any output (or the idle watchdog fires), the run is retried once with the
-  main window's current model. Per-run only, never persisted: a transient provider
-  hiccup does not silently downgrade the configured model.
-- **Leaf processes** — child agents cannot access the `subagent` tool, so delegation cannot
-  recurse.
+  producing any output, the run is retried once with the main window's current model.
+  This is per-run only and never persisted.
+- **Idle watchdog** — a sub-agent that produces no output for a configurable duration is
+  terminated and retried with the fallback model.
+- **Leaf processes** — sub-agents cannot access the `subagent` tool, so delegation
+  cannot recurse.
+
+## Why pi-subagents
+
+Several tools now offer some form of sub-agents. What this extension does differently:
+
+- **Real isolation, not prompt-swapping.** Each sub-agent runs as its own `pi`
+  process with its own context window. The main conversation is never polluted by
+  the child's tool calls, thinking, or long exploration trails — a "sub-agent" that
+  just swaps the system prompt inside the same session does not give you that.
+- **Results come back on their own.** The extension turns the child's completion
+  into a message that wakes the main agent automatically. No polling, no "go check
+  the other window" step.
+- **Failures are handled, not reported.** Three layers of resilience: a provider-
+  level model failure retries once with the main window's model; an idle watchdog
+  terminates a run that goes silent (a stalled stream) and retries it; and a
+  concurrent-startup race is retried with backoff automatically. The widget and the
+  completion message tell you when any of these happened.
+- **A quality gate that closes the loop.** When a reviewer returns `REVIEW_FAIL`,
+  the extension dispatches a worker briefed with the concrete findings, then a
+  re-review — up to `maxFixRounds` times — and only then wakes the main agent with
+  the whole chain. The gate runs itself instead of asking you to babysit it.
+- **You can see what it is doing.** The widget shows each run's status, current
+  activity (which tool, which file), model, token usage including cache reads and
+  writes, and elapsed time — plus soft warnings when a run looks stuck.
+- **Recursion is structurally impossible.** Children are leaf processes: the
+  `subagent` tool is excluded from their toolset. No runaway delegation trees.
+- **Zero runtime dependencies.** It is a plain pi extension — install, configure,
+  go. Agents are Markdown files, so overriding or adding one is just writing a
+  file.
+
+It is not the right tool for everything: if you need agents that share state,
+communicate with each other, or run long-lived background services, a heavier
+orchestration framework fits better. This one is deliberately narrow — bounded
+delegation of focused, self-contained work.
 
 ## Install
 
@@ -63,9 +94,9 @@ frontmatter defaults above are overridden by `agentModels` / `agentThinkingLevel
 
 ### Agent prompts
 
-The prompts below mirror `agents/*.md` — the source of truth loaded at dispatch time. They are
-the contract: each agent's role, hard constraints, and output format. Prompt drift shows up
-here first.
+The prompts below mirror `agents/*.md` — the files loaded at dispatch time. They define
+each agent's role, constraints, and output format, so keep them in sync if you edit
+either side.
 
 <details>
 <summary><code>agents/explore.md</code> — reconnaissance</summary>
@@ -243,9 +274,8 @@ Specific file paths and line numbers. No vague feedback. A clean report means yo
 ```
 
 </details>
-## Workflow
 
-A typical flow is:
+## Workflow
 
 ```text
 main agent
@@ -258,20 +288,17 @@ main agent
 ```
 
 1. The main agent calls `subagent` with a self-contained brief.
-2. The tool returns immediately and ends that foreground tool turn, leaving the editor ready
-   for input.
-3. The child process works independently. By default up to four sub-agents run at once —
-   and one parallel call accepts at most four tasks; extra runs queue up to `maxConcurrency`
-   (configurable via `/subagents-setup` or `pi-subagents.json`).
-4. On completion or failure, the extension sends a durable result message to the main
-   session. That message automatically wakes the main agent, or waits until its current turn
+2. The tool returns immediately, so the editor stays usable while the child works.
+3. Up to `maxConcurrency` sub-agents run at once (default 4); a parallel call accepts at
+   most that many tasks, and anything beyond waits in the queue.
+4. When a run finishes (successfully or not), the extension sends a result message to the
+   main session. It wakes the main agent automatically, or waits until the current turn
    finishes.
-5. The main agent uses the result to verify the work and continue dependent steps. No later
-   user prompt is required to collect a result.
+5. The main agent uses the result to continue. No extra user prompt is needed.
 
 Switching sessions, reloading, or shutting down cancels remaining background runs. A
-crashed or aborted agent returns whatever partial output it produced (clearly
-labelled) so the main agent can assess the progress and decide whether to retry.
+crashed or aborted agent returns whatever partial output it produced, clearly labelled,
+so the main agent can decide whether to retry.
 
 ## Usage
 
@@ -307,15 +334,15 @@ Use parallel mode only for independent work:
 }
 ```
 
-Start dependent work after the relevant result has been delivered to the main agent.
+Start dependent work only after the relevant result has been delivered.
 
 ## Configuration
 
 Configuration is stored at `~/.pi/agent/pi-subagents.json`. The location follows
 `PI_CODING_AGENT_DIR` when set.
 
-The `/subagents-setup` wizard drives the main fields interactively: for each agent, picking a
-model is immediately followed by picking that agent's thinking strength (or inheriting the
+The `/subagents-setup` wizard drives the main fields interactively: for each agent, picking
+a model is immediately followed by picking that agent's thinking strength (or inheriting the
 agent's default — its frontmatter `thinking`, else the global default). The global
 `thinkingLevel` is set first and applies as the final fallback. `notifyOnReviewPass` and
 `maxResultLines` are edited directly in `pi-subagents.json`.
@@ -348,12 +375,12 @@ agent's default — its frontmatter `thinking`, else the global default). The gl
 | `agentThinkingLevels` | Optional thinking level per agent; agents without an entry use the agent's frontmatter `thinking`, then `thinkingLevel`. |
 | `thinkingLevel` | Default thinking level: `off`, `minimal`, `low`, `medium`, `high`, `xhigh`, or `max` (default `high`). |
 | `notifyOnReviewPass` | When `true`, a passing reviewer result is delivered without waking the main agent (default `false`). |
-| `maxResultLines` | Max lines of a sub-agent result carried in the completion message (default `80`). Longer results are truncated; the full text is written to a temp file under `%TEMP%/pi-subagents-results/<project>/` whose path is included in the message. |
+| `maxResultLines` | Max lines of a sub-agent result carried in the completion message (default `80`). Longer results are truncated; the full text is written to a temp file whose path is included in the message. |
 | `proactiveInjection` | Whether to add the delegation directive to the main system prompt. |
 | `agentScope` | `user`, `project`, or `both`; controls which user/project agent directories are discovered. |
 | `maxConcurrency` | Max sub-agent processes running at once (1–16, default 4), and the max tasks one parallel `subagent` call accepts. Extra work waits in the queue. |
-| `maxFixRounds` | Auto-fix rounds when a reviewer returns `REVIEW_FAIL`: the extension dispatches a `worker` (briefed with the review's concrete findings) then a `reviewer` re-review, repeating up to this many times before waking the main agent with the full chain. `0` disables it (the main agent handles fixes itself). Default 2. The reviewer stays read-only and in its own context; the loop is orchestrated by the extension, not by the reviewer. |
-| `idleTimeoutSec` | Idle timeout in seconds: a sub-agent whose stdout (JSON event stream) goes silent for this long is terminated and retried with the fallback model (if one is available). `0` disables the idle watchdog. Default 90. This only fires when the child produces no output at all — a long but active run is never interrupted. |
+| `maxFixRounds` | Auto-fix rounds when a reviewer returns `REVIEW_FAIL`: the extension dispatches a `worker` (briefed with the review's findings) then a `reviewer` re-review, repeating up to this many times before waking the main agent with the full chain. `0` disables it (the main agent handles fixes itself). Default 2. |
+| `idleTimeoutSec` | Idle timeout in seconds: a sub-agent that produces no output for this long is terminated and retried with the fallback model (if one is available). `0` disables the idle watchdog. Default 90. A long but active run is never interrupted. |
 
 ### Configuration migration
 
@@ -361,13 +388,12 @@ The config file migrates itself on load — no manual steps after an upgrade:
 
 - **Schema upgrades** — a config written by an older version (missing newer keys or
   holding invalid values) is normalized and saved back with the new fields filled in.
-- **Removed agents** — agents no longer shipped (e.g. the old `plan` agent) are stripped
-  from `enabledAgents`, `agentModels`, and `agentThinkingLevels` automatically.
+- **Removed agents** — agents no longer shipped are stripped from `enabledAgents`,
+  `agentModels`, and `agentThinkingLevels` automatically.
 - **Merged limits** — the pre-0.13 `maxParallelTasks` key is folded into `maxConcurrency`
   (the larger of the two wins) and dropped on the next save.
 - **Removed keys** — `maxSubagentDepth` (0.14) is dropped on load: sub-agent children are
-  always leaf processes (the `subagent` tool is excluded from their toolset, with a depth
-  marker as defense in depth). To disable delegation entirely, use `"enabledAgents": []`.
+  always leaf processes. To disable delegation entirely, use `"enabledAgents": []`.
 - **New fields** — `idleTimeoutSec` (0.16) is filled in on load with its default (90)
   when missing from an older config.
 
@@ -377,24 +403,23 @@ Model selection uses this precedence:
 configured agent model → current main-session model → agent frontmatter model
 ```
 
-Unavailable configured models are replaced with a usable current-session model when possible
-and the repaired configuration is saved.
+Unavailable configured models are replaced with a usable current-session model when
+possible, and the repaired configuration is saved.
 
-At runtime, if an agent's model fails at the provider level before producing any output (bad
-model id, auth, thinking level, quota, ...), the run is retried **once** with the main window's
-current model. This per-run degradation is never persisted — a transient provider hiccup must
-not silently downgrade the configured model — and it does not apply to task-level failures
-(the model worked, the task failed) or aborts. Idle timeouts (the child's stdout goes silent
-for `idleTimeoutSec` seconds) are treated as model-level failures and do trigger the fallback,
-since a stalled SSE stream is usually a provider-side issue. Results carry a `model fell back
-from …` note when it happened.
+At runtime, if an agent's model fails at the provider level before producing any output
+(bad model id, auth, thinking level, quota, ...), the run is retried **once** with the
+main window's current model. This degradation is per-run only and never persisted; it
+does not apply to task-level failures (the model worked, the task failed) or aborts.
+Idle timeouts count as model-level failures and do trigger the fallback, since a stalled
+stream is usually a provider-side issue. Results carry a `model fell back from …` note
+when it happened.
 
-If the model is unavailable or broken and the fallback retry also fails (or no fallback model
-is available), the task is **handed back to the main window**: the completion message tells
-the main agent to execute the task itself with its own tools instead of leaving a dead
-failure. A background task that crashes with an exception (spawn infra, delivery API, ...)
-is never silently swallowed either — the user gets a `✗ … 派发失败` error notification and
-the failure is delivered to the main agent, which can re-dispatch it.
+If the model is unavailable or broken and the fallback retry also fails (or no fallback
+model is available), the task is **handed back to the main window**: the completion
+message tells the main agent to execute the task itself with its own tools. A background
+task that crashes with an exception is also surfaced — the user gets a `✗ dispatch
+failed` notification and the failure is delivered to the main agent, which can
+re-dispatch it.
 
 Thinking strength uses this precedence: `agentThinkingLevels` entry → agent frontmatter `thinking` → `thinkingLevel` default.
 
@@ -405,8 +430,8 @@ Thinking strength uses this precedence: `agentThinkingLevels` entry → agent fr
 - Project agents live in the nearest `.pi/agents/` directory.
 - For duplicate names, project overrides user and user overrides built-in.
 
-Use a matching Markdown filename and `name` field to replace a built-in agent. Keep the task
-brief explicit: include the goal, relevant paths, constraints, and expected handoff.
+Use a matching Markdown filename and `name` field to replace a built-in agent. Keep the
+task brief explicit: include the goal, relevant paths, constraints, and expected handoff.
 
 Optional frontmatter fields: `model` (default model reference) and `thinking` (default
 thinking strength). Both are overridden by `agentModels` / `agentThinkingLevels` in
@@ -421,6 +446,29 @@ npm test
 ```
 
 The package has no runtime dependencies beyond pi peer dependencies.
+
+## Acknowledgments
+
+- The official [pi subagent example](https://github.com/earendil-works/pi)
+  (`examples/extensions/subagent`) — this extension's child-process dispatch and
+  event-stream handling are adapted from it.
+- [nicobailon/pi-subagents](https://github.com/nicobailon/pi-subagents) — the most
+  widely used pi sub-agent extension; its async delegation model and result
+  truncation/artifact handling directly informed this project.
+- [tintinweb/pi-subagents](https://github.com/tintinweb/pi-subagents) — Claude Code-
+  style sub-agents for pi with parallel execution and a live widget; this project's
+  widget and parallel fan-out follow the same ideas.
+- [amosblomqvist/pi-subagents](https://github.com/amosblomqvist/pi-subagents) — a
+  clean, minimal reference for markdown-defined agents in pi.
+- [edxeth/pi-subagents](https://github.com/edxeth/pi-subagents) — multi-agent
+  coordination patterns (background agents, child-to-parent messaging) that are
+  worth borrowing from.
+- The sub-agent pattern itself, popularized by
+  [Claude Code](https://github.com/anthropics/claude-code): role-specialized
+  agents that receive self-contained briefs.
+
+The agent prompts and extension code are written independently for this project;
+the projects above served as design references.
 
 ## License
 
