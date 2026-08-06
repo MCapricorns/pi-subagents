@@ -32,6 +32,7 @@ import {
 	currentSubagentDepth,
 	getResultOutput,
 	isFailedResult,
+	isModelLevelFailure,
 	reviewVerdict,
 	runSingleAgentWithModelFallback,
 	truncateResultOutput,
@@ -92,6 +93,21 @@ function failedStartResult(agentName: string, task: string, errorMessage: string
 		stderr: errorMessage,
 		usage: emptyUsage(),
 		errorMessage,
+		dispatchFailed: true,
+	};
+}
+
+/** Failed result for a background task that crashed with an exception (spawn
+ * infra, delivery API, ...) instead of returning a normal result. */
+function dispatchFailedResult(agent: AgentConfig, task: string, error: unknown, thinking?: string): SingleResult {
+	const errorMessage = error instanceof Error ? error.message : String(error);
+	return {
+		...queuedResult(agent, task, thinking),
+		exitCode: 1,
+		stderr: errorMessage,
+		stopReason: "error",
+		errorMessage,
+		dispatchFailed: true,
 	};
 }
 
@@ -138,6 +154,14 @@ function formatCompletionBlock(result: SingleResult, maxResultLines: number, cwd
 		lines.push("", `(output truncated to ${maxResultLines} lines; full result: ${writeResultArtifact(output, result.agent, cwd)})`);
 	}
 	return lines.join("\n");
+}
+
+/** Instruction appended to a model-level failure: the sub-agent's provider never
+ * produced usable output (or the run stalled), so the task is handed back to the
+ * main window instead of being left as a dead failure. */
+function modelLevelTakeoverNote(result: SingleResult): string {
+	const retry = result.modelFallbackFrom ? ", and the retry with the main-window model also failed" : "";
+	return `The sub-agent could not complete this task: its model was unavailable or failed (or the run stalled)${retry}. Please execute this task in the main window with your own tools; do not re-dispatch it as a sub-agent.`;
 }
 
 export default function (pi: ExtensionAPI): void {
@@ -393,6 +417,7 @@ export default function (pi: ExtensionAPI): void {
 						stderr: errorMessage,
 						stopReason: signal.aborted ? "aborted" : "error",
 						errorMessage,
+						dispatchFailed: true,
 					};
 				}
 			};
@@ -438,11 +463,20 @@ export default function (pi: ExtensionAPI): void {
 						// success, a stuck one needs a human).
 						monitor.removeRun(parentRunId);
 						if (!sessionActive) return;
-						const items: CompletionMessageItem[] = chain.map((r) => ({
-							agent: r.agent,
-							block: formatCompletionBlock(r, config.maxResultLines, ctx.cwd),
-							triggerTurn: true,
-						}));
+						const items: CompletionMessageItem[] = chain.map((r) => {
+							// A model-level chain run (worker or re-review whose provider never
+							// produced output) is handed to the main window like any other
+							// sub-agent run: the block carries the takeover note. Dispatch
+							// crashes (dispatchFailed) are excluded by the gate itself.
+							const modelLevel = isFailedResult(r) && isModelLevelFailure(r);
+							return {
+								agent: r.agent,
+								block: modelLevel
+									? `${formatCompletionBlock(r, config.maxResultLines, ctx.cwd)}\n\n${modelLevelTakeoverNote(r)}`
+									: formatCompletionBlock(r, config.maxResultLines, ctx.cwd),
+								triggerTurn: true,
+							};
+						});
 						sendCompletionGroup(items);
 						completionBatcher.flush();
 					},
@@ -450,6 +484,30 @@ export default function (pi: ExtensionAPI): void {
 						// Cancelled before delivery: clean up the retained parent row (each
 						// in-flight chain run was already finished by its launchInLoop path).
 						monitor.removeRun(parentRunId);
+					},
+					(error) => {
+						// A crash inside the chain orchestration (failed runs are caught by
+						// launchInLoop and delivered as part of the chain) must not vanish:
+						// drop the retained parent row, notify, and deliver a failed result
+						// so the main agent knows the chain never completed.
+						monitor.removeRun(parentRunId);
+						if (!sessionActive) return;
+						const errorMessage = error instanceof Error ? error.message : String(error);
+						try {
+							ctx.ui.notify(`✗ auto-fix chain 派发失败: ${errorMessage}`, "error");
+							// Keep the triggering review's findings: the chain crashed before any
+							// fix round ran, and the main agent needs the review to act on it.
+							sendCompletionGroup([
+								{
+									agent: initialReviewerResult.agent,
+									block: `${formatCompletionBlock(initialReviewerResult, config.maxResultLines, ctx.cwd)}\n\nAuto-fix chain crashed before completion: ${errorMessage}. The planned fix rounds did not run; the review above is the triggering reviewer's full output.`,
+									triggerTurn: true,
+								},
+							]);
+							completionBatcher.flush();
+						} catch {
+							/* a second delivery failure must not throw through the queue */
+						}
 					},
 				);
 			};
@@ -493,8 +551,11 @@ export default function (pi: ExtensionAPI): void {
 								stderr: errorMessage,
 								stopReason: backgroundSignal.aborted ? "aborted" : "error",
 								errorMessage,
+								dispatchFailed: true,
 							};
-							finishRun(runId, "failed");
+							// The dedicated 派发失败 notification below replaces the generic
+							// failure toast for dispatch crashes, so finish silently here.
+							finishRun(runId, "failed", { silent: true });
 						}
 
 						if (!sessionActive) return;
@@ -516,13 +577,31 @@ export default function (pi: ExtensionAPI): void {
 							return;
 						}
 						const failed = isFailedResult(result);
-						finishRun(runId, failed ? "failed" : "done");
+						// Model-level failures and dispatch crashes get their own dedicated
+						// 派发失败 notification below, so finishRun's generic failure toast is
+						// silenced for them (computed before finishRun for that reason).
+						const modelLevel = failed && isModelLevelFailure(result);
+						const dispatchFailed = result.dispatchFailed === true;
+						finishRun(runId, failed ? "failed" : "done", modelLevel || dispatchFailed ? { silent: true } : undefined);
 						if (!sessionActive) return;
+						// Model-level failure: the configured model is unavailable or broke
+						// and the retry with the main-window model (when distinct) also
+						// failed. Instead of leaving a dead failure, hand the task to the
+						// main window — the main agent executes it itself with its own tools.
 						const completion: CompletionMessageItem = {
 							agent: result.agent,
-							block: formatCompletionBlock(result, config.maxResultLines, ctx.cwd),
+							block: modelLevel
+								? `${formatCompletionBlock(result, config.maxResultLines, ctx.cwd)}\n\n${modelLevelTakeoverNote(result)}`
+								: formatCompletionBlock(result, config.maxResultLines, ctx.cwd),
 							triggerTurn: completionTriggersTurn(result, config.notifyOnReviewPass),
 						};
+						if (modelLevel) {
+							ctx.ui.notify(`✗ ${result.agent} 派发失败: 模型不可用或出错，任务已交由主窗口执行`, "error");
+						} else if (dispatchFailed) {
+							// An exception inside the dispatch layer (spawn infra, temp-file/fs
+							// errors, ...): the main agent must know so it can re-dispatch.
+							ctx.ui.notify(`✗ ${result.agent} 派发失败: ${result.errorMessage ?? "dispatch crashed"}`, "error");
+						}
 						if (failed) {
 							// Failures never wait and never hide behind a success turn: deliver
 							// first so the wake-up leads with the failure; held successes follow.
@@ -533,6 +612,28 @@ export default function (pi: ExtensionAPI): void {
 						}
 					},
 					() => finishRun(runId, "failed"),
+					(error) => {
+						// The task body converts sub-agent failures into delivered results; an
+						// exception escaping it (spawn infra, delivery API, ...) must not
+						// vanish: notify the user and deliver a failed result so the main
+						// agent knows the dispatch failed and can re-dispatch.
+						const crashed = dispatchFailedResult(agent, task, error, thinkingLevel);
+						finishRun(runId, "failed", { silent: true });
+						if (!sessionActive) return;
+						try {
+							ctx.ui.notify(`✗ ${agent.name} 派发失败: ${crashed.errorMessage}`, "error");
+							sendCompletionGroup([
+								{
+									agent: agent.name,
+									block: formatCompletionBlock(crashed, config.maxResultLines, ctx.cwd),
+									triggerTurn: true,
+								},
+							]);
+							completionBatcher.flush();
+						} catch {
+							/* a second delivery failure must not throw through the queue */
+						}
+					},
 				);
 
 				return pending;

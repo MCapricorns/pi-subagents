@@ -57,6 +57,10 @@ export interface SingleResult {
 	errorMessage?: string;
 	/** Model the run degraded from: set when a failed run was retried with the main-window model. */
 	modelFallbackFrom?: string;
+	/** True when the result was synthesized from a thrown exception (spawn infra,
+	 * temp-file/fs errors, delivery bugs) instead of being produced by the agent
+	 * process. A dispatch failure is never a model-level failure. */
+	dispatchFailed?: boolean;
 }
 
 export interface SubagentDetails {
@@ -158,6 +162,10 @@ export function isFailedResult(result: SingleResult): boolean {
 export function isModelLevelFailure(result: SingleResult): boolean {
 	if (!isFailedResult(result)) return false;
 	if (result.stopReason === "aborted") return false;
+	// A result synthesized from a thrown exception (spawn infra, fs, delivery
+	// bugs) never came from the provider: it is a dispatch failure, not a
+	// model-level one, and must not be handed back as a model problem.
+	if (result.dispatchFailed) return false;
 	// An idle timeout (stdout went silent) signals a stalled provider connection,
 	// not a task-level failure: allow model fallback even if the model produced
 	// partial output before going quiet.

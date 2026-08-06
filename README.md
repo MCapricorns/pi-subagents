@@ -389,6 +389,13 @@ for `idleTimeoutSec` seconds) are treated as model-level failures and do trigger
 since a stalled SSE stream is usually a provider-side issue. Results carry a `model fell back
 from …` note when it happened.
 
+If the model is unavailable or broken and the fallback retry also fails (or no fallback model
+is available), the task is **handed back to the main window**: the completion message tells
+the main agent to execute the task itself with its own tools instead of leaving a dead
+failure. A background task that crashes with an exception (spawn infra, delivery API, ...)
+is never silently swallowed either — the user gets a `✗ … 派发失败` error notification and
+the failure is delivered to the main agent, which can re-dispatch it.
+
 Thinking strength uses this precedence: `agentThinkingLevels` entry → agent frontmatter `thinking` → `thinkingLevel` default.
 
 ## Agent discovery and overrides

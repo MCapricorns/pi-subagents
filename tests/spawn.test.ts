@@ -243,6 +243,23 @@ describe("isModelLevelFailure", () => {
 	it("is false without any evidence of a model/provider error", () => {
 		expect(isModelLevelFailure(result({ exitCode: 1 }))).toBe(false);
 	});
+
+	it("is false for results synthesized from a dispatch exception", () => {
+		// A body-catch result (spawn infra, fs, delivery bugs) has empty messages
+		// and a non-empty stderr, but it never came from the provider: it must not
+		// be classified as a model-level failure.
+		expect(
+			isModelLevelFailure(
+				result({
+					exitCode: 1,
+					stopReason: "error",
+					stderr: "Failed to start the sub-agent process.",
+					errorMessage: "ENOENT: spawn pi ENOENT",
+					dispatchFailed: true,
+				}),
+			),
+		).toBe(false);
+	});
 });
 
 describe("runSingleAgentWithModelFallback", () => {
