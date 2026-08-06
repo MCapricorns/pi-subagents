@@ -25,6 +25,14 @@ export function shouldTriggerFixLoop(result: SingleResult, config: SubagentsConf
 	if (config.maxFixRounds <= 0) return false;
 	if (result.agent !== "reviewer") return false;
 	if (isFailedResult(result)) return false;
+	// A dispatch crash (spawn infra, delivery API, ...) is never a real review
+	// verdict: its output is an error message plus whatever partial text the
+	// child happened to emit, which could end in a stray `VERDICT: REVIEW_FAIL`.
+	// Guard explicitly in addition to isFailedResult so the intent is clear and
+	// a future change to isFailedResult can never let a crashed reviewer start a
+	// phantom auto-fix chain (and re-add a run controller id that was deleted in
+	// the catch path).
+	if (result.dispatchFailed) return false;
 	return reviewVerdict(getResultOutput(result)) === "fail";
 }
 

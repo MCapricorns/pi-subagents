@@ -154,7 +154,13 @@ function formatUsage(usage: UsageStats): string {
 }
 
 function formatCompletionBlock(result: SingleResult, maxResultLines: number, cwd?: string): string {
-	const status = isFailedResult(result) ? "failed" : "completed";
+	const failed = isFailedResult(result);
+	const failedTools = result.failedTools ?? [];
+	const status = failed
+		? "failed"
+		: failedTools.length > 0
+			? `completed with ${failedTools.length} failed tool call${failedTools.length === 1 ? "" : "s"}`
+			: "completed";
 	const usage = formatUsage(result.usage);
 	const output = getResultOutput(result);
 	const { text, truncated } = truncateResultOutput(output, maxResultLines);
@@ -165,6 +171,20 @@ function formatCompletionBlock(result: SingleResult, maxResultLines: number, cwd
 		? ` (recovered after ${result.startupRetries} startup retr${result.startupRetries === 1 ? "y" : "ies"} — concurrent pi startup race)`
 		: "";
 	const lines = [`### [${result.agent}] ${status}${usage ? ` (${usage})` : ""}${fallbackNote}${retryNote}`, "", `Task: ${formatTaskSummary(result.task, 80, false)}`, "", text];
+	// A run can exit cleanly while its last tools failed (e.g. a build that broke):
+	// the final text alone may claim more than the tools achieved, so surface the
+	// failures explicitly and tell the main agent to verify before relying on it.
+	if (!failed && failedTools.length > 0) {
+		const shown = failedTools.slice(0, 3);
+		const more = failedTools.length - shown.length;
+		lines.push(
+			"",
+			`⚠ ${failedTools.length} tool call${failedTools.length === 1 ? "" : "s"} failed during this run — the final text above may not reflect a working state:`,
+			...shown.map((tool) => `- ${tool.toolName}: ${tool.error.trim() || "(no output)"}`),
+		);
+		if (more > 0) lines.push(`- … and ${more} more`);
+		lines.push("Verify the actual artifacts before relying on this report.");
+	}
 	if (truncated) {
 		// The full text lives on disk so the main agent can read it on demand.
 		lines.push("", `(output truncated to ${maxResultLines} lines; full result: ${writeResultArtifact(output, result.agent, cwd)})`);
@@ -178,6 +198,16 @@ function formatCompletionBlock(result: SingleResult, maxResultLines: number, cwd
 function modelLevelTakeoverNote(result: SingleResult): string {
 	const retry = result.modelFallbackFrom ? ", and the retry with the main-window model also failed" : "";
 	return `The sub-agent could not complete this task: its model was unavailable or failed (or the run stalled)${retry}. Please execute this task in the main window with your own tools; do not re-dispatch it as a sub-agent.`;
+}
+
+/** Resolve a run-id request to actual ids: an exact numeric match always wins
+ * (so "1" never fans out to 10, 11, …); only when no exact match exists does a
+ * prefix match run, as a convenience for partial ids. Keeps single-digit lookups
+ * from returning — or, for subagent_stop, acting on — a whole prefix family. */
+export function matchRunIds(ids: number[], requested: string): number[] {
+	const exact = ids.filter((id) => String(id) === requested);
+	if (exact.length > 0) return exact;
+	return ids.filter((id) => String(id).startsWith(requested));
 }
 
 export default function (pi: ExtensionAPI): void {
@@ -195,7 +225,11 @@ export default function (pi: ExtensionAPI): void {
 			display: true,
 		};
 		if (completionGroupTriggersTurn(items)) {
-			pi.sendMessage(message, { deliverAs: "followUp", triggerTurn: true });
+			// steer: the result is injected after the current tool call even mid-turn, or
+			// starts a new turn when idle. followUp would sit in the queue until the whole
+			// turn ends — a main agent waiting for the result (sleep/poll) would never see
+			// it delivered, which is exactly the "returned but never woken" failure mode.
+			pi.sendMessage(message, { deliverAs: "steer", triggerTurn: true });
 		} else {
 			// No-wake delivery: nextTurn rides along with the next user turn and can
 			// never start a continuation by itself. followUp would auto-continue
@@ -204,6 +238,28 @@ export default function (pi: ExtensionAPI): void {
 		}
 	};
 	const completionBatcher = createCompletionBatcher<CompletionMessageItem>({ emit: sendCompletionGroup });
+
+	// Abort controllers per active run, so subagent_stop can cancel a run in-turn.
+	const runControllers = new Map<number, AbortController>();
+
+	// Final results keyed by run id, so `subagent_wait` can hand the model the
+	// actual result in-turn instead of it sleeping/polling for a wake-up message.
+	const settledRuns = new Map<number, SingleResult>();
+	const settledListeners = new Map<number, Set<(result: SingleResult) => void>>();
+	const registerRunResult = (runId: number, result: SingleResult): void => {
+		settledRuns.set(runId, result);
+		const listeners = settledListeners.get(runId);
+		if (listeners) {
+			settledListeners.delete(runId);
+			for (const listener of listeners) {
+				try {
+					listener(result);
+				} catch {
+					/* listener errors must never break settling */
+				}
+			}
+		}
+	};
 
 	// Recursion guard: sub-agent children are leaf processes. The `subagent` tool is
 	// excluded from their toolset at spawn (--exclude-tools); this check is defense
@@ -231,6 +287,9 @@ export default function (pi: ExtensionAPI): void {
 		sessionActive = false;
 		completionBatcher.dispose();
 		backgroundQueue.cancelAll();
+		settledRuns.clear();
+		settledListeners.clear();
+		runControllers.clear();
 		// Clear the monitor so stale runs from this session never leak into the
 		// next one (the module-level singleton survives across sessions).
 		monitor.clear();
@@ -244,7 +303,8 @@ export default function (pi: ExtensionAPI): void {
 			"Agents: explore (read-only codebase recon), worker (implement/fix/refactor/test, full tools), reviewer (adversarial pre-commit review, read-only).",
 			"Modes: single ({agent, task}) or parallel ({tasks: [{agent, task}, ...]}).",
 			"It starts agents in the background and immediately returns control to the main window; completion messages automatically wake the main agent to continue.",
-			"Each agent has no memory of this conversation — brief it fully (goal, exact paths, constraints, expected output)."
+			"Each agent has no memory of this conversation — brief it fully (goal, exact paths, constraints, expected output).",
+			"To get a result in-turn without sleeping, use the subagent_wait tool."
 		].join(" "),
 		promptSnippet:
 			"Start background subagents: explore (read-only search), worker (implement), reviewer (adversarial review); completion automatically resumes the main agent. Simple tasks: use direct tools, not subagents.",
@@ -255,7 +315,8 @@ export default function (pi: ExtensionAPI): void {
 			"Use subagent with agent 'reviewer' for a fresh read-only review before reporting work done or committing.",
 			"subagent launches work in the background and ends the current turn; when a result arrives, the main agent is automatically resumed with it.",
 			"Run independent tasks in parallel by passing a tasks array to subagent; let the automatically resumed main agent start dependent work after results arrive.",
-			"NEVER sleep, wait, poll, or call other tools alongside subagent — it ends the turn immediately. The main agent is auto-resumed when results arrive; manual waiting only blocks the turn and delays delivery.",
+			"NEVER sleep, poll, or call other tools alongside subagent — it ends the turn immediately. The main agent is auto-resumed when results arrive; manual waiting only blocks the turn and delays delivery. The one exception is subagent_wait (below): only when you must stay in the turn.",
+			"If you must keep the turn for a result, call subagent_wait (blocks in-tool and returns the result) — never bash sleep/timeout to wait for a sub-agent.",
 		],
 		parameters: SubagentParams,
 
@@ -424,11 +485,12 @@ export default function (pi: ExtensionAPI): void {
 						sessionRef,
 					);
 					finishRun(runId, isFailedResult(result) ? "failed" : "done");
+					registerRunResult(runId, result);
 					return result;
 				} catch (error) {
 					finishRun(runId, "failed");
 					const errorMessage = error instanceof Error ? error.message : String(error);
-					return {
+					const crashed = {
 						...queuedResult(agent, task, thinkingLevel),
 						exitCode: 1,
 						stderr: errorMessage,
@@ -436,6 +498,8 @@ export default function (pi: ExtensionAPI): void {
 						errorMessage,
 						dispatchFailed: true,
 					};
+					registerRunResult(runId, crashed);
+					return crashed;
 				}
 			};
 
@@ -448,7 +512,7 @@ export default function (pi: ExtensionAPI): void {
 			 * the chain resolves, so the ↳ rows have an obvious parent.
 			 */
 			const startFixLoop = (initialReviewerResult: SingleResult, parentGroupId: string, parentRunId: number): void => {
-				backgroundQueue.enqueue(
+				runControllers.set(parentRunId, backgroundQueue.enqueue(
 					async (signal) => {
 						const chain: SingleResult[] = [initialReviewerResult];
 						let lastReviewer = initialReviewerResult;
@@ -477,7 +541,11 @@ export default function (pi: ExtensionAPI): void {
 						// The chain is done (success, exhaustion, or abort): drop the retained
 						// parent row, then deliver the whole chain as one group. The loop's
 						// outcome always wakes the main agent (a passing chain reports
-						// success, a stuck one needs a human).
+						// success, a stuck one needs a human). Register the parent's final
+						// state (the last chain result) before removal so subagent_wait can
+						// resolve it.
+						registerRunResult(parentRunId, chain[chain.length - 1]);
+						runControllers.delete(parentRunId);
 						monitor.removeRun(parentRunId);
 						if (!sessionActive) return;
 						const items: CompletionMessageItem[] = chain.map((r) => {
@@ -500,6 +568,7 @@ export default function (pi: ExtensionAPI): void {
 					() => {
 						// Cancelled before delivery: clean up the retained parent row (each
 						// in-flight chain run was already finished by its launchInLoop path).
+						runControllers.delete(parentRunId);
 						monitor.removeRun(parentRunId);
 					},
 					(error) => {
@@ -507,6 +576,8 @@ export default function (pi: ExtensionAPI): void {
 						// launchInLoop and delivered as part of the chain) must not vanish:
 						// drop the retained parent row, notify, and deliver a failed result
 						// so the main agent knows the chain never completed.
+						registerRunResult(parentRunId, initialReviewerResult);
+						runControllers.delete(parentRunId);
 						monitor.removeRun(parentRunId);
 						if (!sessionActive) return;
 						const errorMessage = error instanceof Error ? error.message : String(error);
@@ -526,7 +597,7 @@ export default function (pi: ExtensionAPI): void {
 							/* a second delivery failure must not throw through the queue */
 						}
 					},
-				);
+				));
 			};
 
 			const startBackground = (agentName: string, task: string, cwd?: string): SingleResult => {
@@ -541,7 +612,7 @@ export default function (pi: ExtensionAPI): void {
 				// only its finish is deferred to the queue task (see startFixLoop).
 				const onLive = makeLiveHandler(runId);
 
-				backgroundQueue.enqueue(
+				runControllers.set(runId, backgroundQueue.enqueue(
 					async (backgroundSignal) => {
 						let result: SingleResult;
 						try {
@@ -573,6 +644,8 @@ export default function (pi: ExtensionAPI): void {
 							// The dedicated dispatch-failure notification below replaces the generic
 							// failure toast for dispatch crashes, so finish silently here.
 							finishRun(runId, "failed", { silent: true });
+							registerRunResult(runId, result);
+							runControllers.delete(runId);
 						}
 
 						if (!sessionActive) return;
@@ -600,6 +673,10 @@ export default function (pi: ExtensionAPI): void {
 						const modelLevel = failed && isModelLevelFailure(result);
 						const dispatchFailed = result.dispatchFailed === true;
 						finishRun(runId, failed ? "failed" : "done", modelLevel || dispatchFailed ? { silent: true } : undefined);
+						// Register before delivery so a concurrent subagent_wait resolves with
+						// the result even though the run row is already gone from the monitor.
+						registerRunResult(runId, result);
+						runControllers.delete(runId);
 						if (!sessionActive) return;
 						// Model-level failure: the configured model is unavailable or broke
 						// and the retry with the main-window model (when distinct) also
@@ -628,7 +705,10 @@ export default function (pi: ExtensionAPI): void {
 							completionBatcher.push(completion);
 						}
 					},
-					() => finishRun(runId, "failed"),
+					() => {
+						runControllers.delete(runId);
+						finishRun(runId, "failed");
+					},
 					(error) => {
 						// The task body converts sub-agent failures into delivered results; an
 						// exception escaping it (spawn infra, delivery API, ...) must not
@@ -636,6 +716,8 @@ export default function (pi: ExtensionAPI): void {
 						// agent knows the dispatch failed and can re-dispatch.
 						const crashed = dispatchFailedResult(agent, task, error, thinkingLevel);
 						finishRun(runId, "failed", { silent: true });
+						registerRunResult(runId, crashed);
+						runControllers.delete(runId);
 						if (!sessionActive) return;
 						try {
 							ctx.ui.notify(`✗ ${agent.name} 派发失败: ${crashed.errorMessage}`, "error");
@@ -651,7 +733,7 @@ export default function (pi: ExtensionAPI): void {
 							/* a second delivery failure must not throw through the queue */
 						}
 					},
-				);
+				));
 
 				return pending;
 			};
@@ -751,6 +833,407 @@ export default function (pi: ExtensionAPI): void {
 				lines.push(`  ${icon} ${theme.fg("accent", r.agent)} ${theme.fg("dim", `· ${model}${r.thinking ? ` · thinking ${r.thinking}` : ""}${pending ? " · background" : ""}${usage ? ` · ${usage}` : ""}`)}`);
 			}
 			return new Text(lines.join("\n"), 0, 0);
+		},
+	});
+
+	// Blocking wait: keeps the turn alive until the targeted run(s) settle, then
+	// returns the actual result(s) to the model in-turn. Without it, a model that
+	// must stay in the turn falls back to bash sleep/poll — blocking the turn and
+	// delaying the very wake-up it is waiting for. Ending the turn and letting the
+	// steer-delivered completion wake it is still the preferred path; this tool is
+	// for when the result is needed NOW (sequential dependent steps).
+	const SUBAGENT_WAIT_DEFAULT_TIMEOUT_MS = 30 * 60 * 1000;
+
+	const SubagentWaitParams = Type.Object({
+		id: Type.Optional(
+			Type.String({
+				description: "Run id or prefix shown in the subagent widget (#id). Omit to wait for all active runs in this session.",
+			}),
+		),
+		timeoutMs: Type.Optional(
+			Type.Number({
+				description: `Give up after this many milliseconds and report the still-running runs (default ${SUBAGENT_WAIT_DEFAULT_TIMEOUT_MS}).`,
+			}),
+		),
+	});
+
+	pi.registerTool({
+		name: "subagent_wait",
+		label: "Subagent Wait",
+		description: [
+			"Block the current turn until background sub-agent run(s) finish, then return their results.",
+			"Use ONLY when you must stay in the turn and act on the result immediately (sequential dependent steps).",
+			"Prefer ending your turn after subagent — the result arrives automatically and wakes you.",
+			"NEVER sleep, poll, or wait with bash to get a sub-agent result: end the turn, or call this tool.",
+			"The same result is also delivered as a completion message that resumes the main agent, so you may see it twice (once here, once as a wake-up) — that is expected, not a duplicate.",
+		].join(" "),
+		promptSnippet: "Wait for a background subagent to finish and get its result in-turn (id: run id from the widget; omit for all).",
+		promptGuidelines: [
+			"Call subagent_wait only when you must keep the turn and need the result now — e.g. the next step depends on it.",
+			"After dispatching via subagent, prefer ending the turn: the completion message wakes you automatically (no waiting).",
+			"Never use bash sleep/timeout/polling to wait for a sub-agent — it blocks the turn and delays result delivery.",
+			"If subagent_wait times out, call it again with a longer timeoutMs or end the turn and wait for the wake-up message.",
+		],
+		parameters: SubagentWaitParams,
+
+		async execute(_toolCallId, params, signal, _onUpdate, ctx) {
+			const config = await loadConfig(configPath);
+			// A non-finite or negative timeout would produce a nonsensical note
+			// ("timed out after Infinitys") or an instant "timeout" that was never
+			// asked for; fall back to the default. Zero is honored as an immediate
+			// give-up (clamped to 1ms below).
+			const timeoutMs =
+				typeof params.timeoutMs === "number" && Number.isFinite(params.timeoutMs) && params.timeoutMs >= 0
+					? params.timeoutMs
+					: SUBAGENT_WAIT_DEFAULT_TIMEOUT_MS;
+			const isActive = (run: { status: string; retained?: boolean }): boolean =>
+				run.status === "queued" || run.status === "running" || run.retained === true;
+
+			const requested = params.id?.trim();
+			// A run that already settled resolves immediately with its result.
+			if (requested) {
+				const settledIds = matchRunIds([...settledRuns.keys()], requested);
+				if (settledIds.length > 0) {
+					return {
+						content: [
+							{ type: "text", text: settledIds.map((id) => formatCompletionBlock(settledRuns.get(id)!, config.maxResultLines, ctx.cwd)).join("\n\n") },
+						],
+						details: {},
+					};
+				}
+			}
+
+			const activeRuns = monitor.getRuns().filter(isActive);
+			const targetIds = requested ? matchRunIds(activeRuns.map((run) => run.id), requested) : activeRuns.map((run) => run.id);
+			const targets = activeRuns.filter((run) => targetIds.includes(run.id));
+			if (targets.length === 0) {
+				const activeList = activeRuns.map((run) => `#${run.id} ${run.agent}`).join(", ");
+				return {
+					content: [
+						{
+							type: "text",
+							text: requested
+								? `No active subagent run matches "${requested}".${activeList ? ` Active runs: ${activeList}.` : ""}`
+								: `No active subagent runs${activeList ? ` (active: ${activeList})` : " right now"}.`,
+						},
+					],
+					details: {},
+				};
+			}
+
+			const waitForRun = (runId: number): Promise<{ result?: SingleResult; note?: string }> => {
+				const already = settledRuns.get(runId);
+				if (already) return Promise.resolve({ result: already });
+				return new Promise((resolve) => {
+					let done = false;
+					let timer: ReturnType<typeof setTimeout> | undefined;
+					let unsub: (() => void) | undefined;
+					const cleanup = (): void => {
+						if (timer) clearTimeout(timer);
+						if (unsub) unsub();
+						signal?.removeEventListener("abort", onAbort);
+						const listeners = settledListeners.get(runId);
+						if (listeners) {
+							listeners.delete(onSettled);
+							if (listeners.size === 0) settledListeners.delete(runId);
+						}
+					};
+					const finish = (outcome: { result?: SingleResult; note?: string }): void => {
+						if (done) return;
+						done = true;
+						cleanup();
+						resolve(outcome);
+					};
+					const onSettled = (result: SingleResult): void => finish({ result });
+					const onMonitor = (): void => {
+						const current = settledRuns.get(runId);
+						if (current) {
+							finish({ result: current });
+							return;
+						}
+						if (!monitor.findRun(runId)) {
+							// Removal is followed synchronously by registerRunResult in the
+							// finishing task; re-check on the next tick so the result wins.
+							setTimeout(() => {
+								const late = settledRuns.get(runId);
+								if (late) finish({ result: late });
+								else finish({ note: `run #${runId} was removed before its result was recorded (cancelled or session ended)` });
+							}, 0);
+						}
+					};
+					const onAbort = (): void => finish({ note: "wait aborted" });
+					let listeners = settledListeners.get(runId);
+					if (!listeners) {
+						listeners = new Set();
+						settledListeners.set(runId, listeners);
+					}
+					listeners.add(onSettled);
+					unsub = monitor.subscribe(onMonitor);
+					timer = setTimeout(
+						() =>
+							finish({
+								note: `wait timed out after ${Math.round(timeoutMs / 1000)}s — run #${runId} is still active; call subagent_wait again or end the turn (the result will wake you when ready)`,
+							}),
+						Math.max(1, timeoutMs),
+					);
+					if (signal?.aborted) onAbort();
+					else signal?.addEventListener("abort", onAbort, { once: true });
+				});
+			};
+
+			const outcomes = await Promise.all(targets.map((run) => waitForRun(run.id)));
+			const blocks = outcomes.map((outcome) =>
+				outcome.result ? formatCompletionBlock(outcome.result, config.maxResultLines, ctx.cwd) : (outcome.note ?? "(no outcome)"),
+			);
+			return { content: [{ type: "text", text: blocks.join("\n\n") }], details: {} };
+		},
+
+		renderCall(args, theme) {
+			const target = args.id ? `#${args.id}` : "all";
+			return new Text(`${theme.fg("toolTitle", theme.bold("subagent_wait "))}${theme.fg("accent", target)}`, 0, 0);
+		},
+
+		renderResult(result, _options, theme) {
+			const parts = (result.content ?? []) as Array<{ type: string; text?: string }>;
+			const text = parts
+				.map((part) => (typeof part.text === "string" ? part.text : ""))
+				.join(" ")
+				.trim();
+			const firstLine = text.split("\n").find((line) => line.trim()) ?? "(no output)";
+			return new Text(
+				`${theme.fg("toolTitle", theme.bold("subagent_wait "))}${theme.fg("dim", firstLine.slice(0, 60))}`,
+				0,
+				0,
+			);
+		},
+	});
+
+	// Status overview: what is running right now and what finished this session,
+	// with per-run details (id, agent, model, usage, elapsed, activity) so the
+	// main agent can decide whether to wait, stop, or re-dispatch. Learned from
+	// nicobailon/pi-subagents ({action:"status"} + status files): inspect before
+	// you act, and report run ids when handing off.
+	const SubagentStatusParams = Type.Object({
+		id: Type.Optional(
+			Type.String({
+				description: "Run id or prefix to show the full result for (must already be finished; use subagent_wait to block on an active run).",
+			}),
+		),
+	});
+
+	pi.registerTool({
+		name: "subagent_status",
+		label: "Subagent Status",
+		description: [
+			"List active background sub-agent runs (id, agent, model, usage, elapsed, current activity) and recently finished results.",
+			"Pass id to read the full result of a finished run; pass no id for the overview.",
+			"Use it to decide whether to subagent_wait, subagent_stop, or re-dispatch — never to poll: results arrive by themselves.",
+		].join(" "),
+		promptSnippet: "Inspect background subagents: active runs, finished results, full result by id.",
+		promptGuidelines: [
+			"Call subagent_status to see what is running and what already finished; the widget shows the same live state.",
+			"Never poll subagent_status in a loop to wait for a run: end the turn (you will be woken) or call subagent_wait.",
+			"A finished run's id stays available for the session; its full result is one subagent_status call away.",
+		],
+		parameters: SubagentStatusParams,
+
+		async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
+			const config = await loadConfig(configPath);
+			const requested = params.id?.trim();
+
+			if (requested) {
+				const settledIds = matchRunIds([...settledRuns.keys()], requested);
+				if (settledIds.length > 0) {
+					return {
+						content: [
+							{ type: "text", text: settledIds.map((id) => formatCompletionBlock(settledRuns.get(id)!, config.maxResultLines, ctx.cwd)).join("\n\n") },
+						],
+						details: {},
+					};
+				}
+				const runs = monitor.getRuns();
+				const activeId = matchRunIds(runs.map((run) => run.id), requested)[0];
+				const active = activeId === undefined ? undefined : runs.find((run) => run.id === activeId);
+				if (active) {
+					return {
+						content: [
+							{
+								type: "text",
+								text: `Run #${active.id} ${active.agent} is still active (${active.activity ?? statusLabel(active.status)}). Use subagent_wait to block for its result, or subagent_stop to cancel it.`,
+							},
+						],
+						details: {},
+					};
+				}
+				return { content: [{ type: "text", text: `No subagent run matches "${requested}".` }], details: {} };
+			}
+
+			const now = Date.now();
+			const activeRuns = monitor.getRuns().filter(
+				(run) => run.status === "queued" || run.status === "running" || run.retained,
+			);
+			const activeLines = activeRuns.map((run) => {
+				const parts = [
+					`#${run.id} ${run.agent}`,
+					run.model ?? "?",
+					formatUsageCompact(run.usage),
+					formatElapsed(run, now),
+				].filter(Boolean);
+				return `- ${parts.join(" · ")} · ${run.activity ?? statusLabel(run.status)}`;
+			});
+			const completed = [...settledRuns.entries()].slice(-5);
+			const completedLines = completed.map(([id, result]) => {
+				const usage = formatUsage(result.usage);
+				return `- #${id} ${result.agent} · ${isFailedResult(result) ? "failed" : "completed"}${usage ? ` · ${usage}` : ""}`;
+			});
+
+			const sections: string[] = [];
+			sections.push(`### Active subagent runs (${activeRuns.length})`);
+			sections.push(activeLines.length > 0 ? activeLines.join("\n") : "(none)");
+			sections.push(`### Finished this session (${settledRuns.size})`);
+			sections.push(completedLines.length > 0 ? completedLines.join("\n") : "(none)");
+			sections.push("Pass a run id to subagent_status for the full result, or subagent_wait to block for an active run.");
+			return { content: [{ type: "text", text: sections.join("\n\n") }], details: {} };
+		},
+
+		renderCall(args, theme) {
+			return new Text(
+				`${theme.fg("toolTitle", theme.bold("subagent_status "))}${theme.fg("accent", args.id ? `#${args.id}` : "overview")}`,
+				0,
+				0,
+			);
+		},
+
+		renderResult(result, _options, theme) {
+			const parts = (result.content ?? []) as Array<{ type: string; text?: string }>;
+			const text = parts
+				.map((part) => (typeof part.text === "string" ? part.text : ""))
+				.join(" ")
+				.trim();
+			const firstLine = text.split("\n").find((line) => line.trim()) ?? "(no output)";
+			return new Text(
+				`${theme.fg("toolTitle", theme.bold("subagent_status "))}${theme.fg("dim", firstLine.slice(0, 60))}`,
+				0,
+				0,
+			);
+		},
+	});
+
+	// Cancel one or more active runs: aborts the queue controller, which
+	// terminates the child and delivers an aborted result (with whatever partial
+	// output it produced) so the main agent always knows the run stopped.
+	const SubagentStopParams = Type.Object({
+		id: Type.Optional(
+			Type.String({
+				description: "Run id or prefix to stop (see the widget or subagent_status).",
+			}),
+		),
+		all: Type.Optional(Type.Boolean({ description: "Stop every active run (default false)." })),
+	});
+
+	pi.registerTool({
+		name: "subagent_stop",
+		label: "Subagent Stop",
+		description: [
+			"Cancel one or more active background sub-agent runs: the child process is terminated and an aborted result (with partial output) is delivered.",
+			"Pass id (run id or prefix) to stop one run, or all: true to stop every active run.",
+		].join(" "),
+		promptSnippet: "Stop a running background subagent (id from the widget/subagent_status; or all: true).",
+		promptGuidelines: [
+			"Stop a run when its task is obsolete, stuck, or superseded — do not leave it burning tokens.",
+			"A stopped run reports as failed with 'aborted' and its partial output, so the next step knows it did not complete.",
+		],
+		parameters: SubagentStopParams,
+
+		async execute(_toolCallId, params, _signal, _onUpdate) {
+			const targets =
+				params.all === true
+					? [...runControllers.keys()]
+					: params.id !== undefined && params.id.trim() !== ""
+						? matchRunIds([...runControllers.keys()], params.id!.trim())
+						: [];
+
+			if (targets.length === 0) {
+				const activeList = [...runControllers.keys()].map((id) => `#${id}`).join(", ");
+				return {
+					content: [
+						{
+							type: "text",
+							text:
+								params.all === true
+									? "No active subagent runs to stop."
+									: `No active subagent run matches "${params.id}".${activeList ? ` Active runs: ${activeList}.` : ""}`,
+						},
+					],
+					details: {},
+				};
+			}
+
+			const stopped: string[] = [];
+			for (const runId of targets) {
+				const run = monitor.findRun(runId);
+				if (!run) {
+					runControllers.delete(runId);
+					continue;
+				}
+				// Abort before registering the synthetic result: abort() only marks the
+				// queue entry (drain delivers the cancellation callback later), so the
+				// has() re-check right after it distinguishes an entry that never ran
+				// from one whose task already started under a stale "queued" status —
+				// a started task owns its own (real, partial-output) result.
+				const controller = runControllers.get(runId);
+				controller?.abort();
+				// A queued run never reaches the child-spawn code path, so its abort
+				// goes through the queue's cancelled callback with no result object;
+				// register a synthetic aborted result so subagent_wait resolves.
+				if (run.status === "queued" && runControllers.has(runId)) {
+					registerRunResult(runId, {
+						agent: run.agent,
+						agentSource: "builtin",
+						task: run.task,
+						exitCode: 1,
+						messages: [],
+						stderr: "Stopped by subagent_stop before the run started.",
+						usage: emptyUsage(),
+						model: run.model,
+						thinking: run.thinking,
+						stopReason: "aborted",
+						errorMessage: "Stopped by subagent_stop before the run started.",
+					});
+				}
+				stopped.push(`#${runId} ${run.agent}${run.status === "queued" ? " (queued)" : ""}`);
+			}
+			return {
+				content: [
+					{
+						type: "text",
+						text: `Stopped ${stopped.length} run${stopped.length === 1 ? "" : "s"}: ${stopped.join(", ")}. An aborted result (with partial output) is delivered.`,
+					},
+				],
+				details: {},
+			};
+		},
+
+		renderCall(args, theme) {
+			return new Text(
+				`${theme.fg("toolTitle", theme.bold("subagent_stop "))}${theme.fg("accent", args.all === true ? "all" : args.id ? `#${args.id}` : "?")}`,
+				0,
+				0,
+			);
+		},
+
+		renderResult(result, _options, theme) {
+			const parts = (result.content ?? []) as Array<{ type: string; text?: string }>;
+			const text = parts
+				.map((part) => (typeof part.text === "string" ? part.text : ""))
+				.join(" ")
+				.trim();
+			const firstLine = text.split("\n").find((line) => line.trim()) ?? "(no output)";
+			return new Text(
+				`${theme.fg("toolTitle", theme.bold("subagent_stop "))}${theme.fg("dim", firstLine.slice(0, 60))}`,
+				0,
+				0,
+			);
 		},
 	});
 

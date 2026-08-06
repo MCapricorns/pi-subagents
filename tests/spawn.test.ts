@@ -4,6 +4,7 @@ import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 import {
 	currentSubagentDepth,
+	extractToolErrorText,
 	getFinalOutput,
 	getResultOutput,
 	isFailedResult,
@@ -613,6 +614,26 @@ describe("truncateResultOutput", () => {
 		expect(truncated).toBe(true);
 		expect(text.length).toBeLessThanOrEqual(RESULT_LINE_MAX + 1); // + ellipsis
 		expect(text.endsWith("…")).toBe(true);
+	});
+});
+
+describe("extractToolErrorText", () => {
+	it("keeps the last non-empty lines of a tool's error content", () => {
+		expect(extractToolErrorText([{ type: "text", text: "head\n\nMSBuild.exe failed\nfatal error C3861: undeclared" }])).toBe("head\nMSBuild.exe failed\nfatal error C3861: undeclared");
+		expect(extractToolErrorText([{ type: "text", text: "a\n\nb\nc" }])).toBe("a\nb\nc");
+	});
+
+	it("clips long lines to RESULT_LINE_MAX", () => {
+		const long = "x".repeat(RESULT_LINE_MAX + 10);
+		const out = extractToolErrorText([{ type: "text", text: long }]);
+		expect(out.length).toBe(RESULT_LINE_MAX + 1); // clipped + ellipsis
+		expect(out.endsWith("…")).toBe(true);
+	});
+
+	it("ignores non-text parts and non-array input", () => {
+		expect(extractToolErrorText([{ type: "image", text: "no" }, { type: "text", text: "real" }])).toBe("real");
+		expect(extractToolErrorText(undefined)).toBe("");
+		expect(extractToolErrorText({ type: "text", text: "x" })).toBe("");
 	});
 });
 

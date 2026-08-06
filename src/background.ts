@@ -14,6 +14,12 @@ export type BackgroundTask = (signal: AbortSignal) => Promise<void>;
 interface PendingTask {
 	task: BackgroundTask;
 	controller: AbortController;
+	/** Called when a queued task is aborted before its body ever runs (drain skips
+	 * an already-aborted entry; cancelAll aborts every pending entry), so the
+	 * task body never produces a result. Callers that resolve waiters on a run id
+	 * must register a synthetic result here (or via a stop path) — otherwise a
+	 * waiter resolves via a "removed before its result was recorded" note. Never
+	 * called for a task whose body already started; that path owns its result. */
 	onCancelled?: () => void;
 	/** Invoked when the task throws and was not cancelled (cancellation is not a
 	 * failure — e.g. session shutdown races must never be reported as errors). */

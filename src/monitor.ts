@@ -252,7 +252,12 @@ export function formatDuration(ms: number): string {
 /** Elapsed wall time of a run: live while running, final once finished. */
 export function formatElapsed(run: RunView, now: number = Date.now()): string {
 	if (run.startedAt === undefined) return "";
-	const end = run.endedAt ?? now;
+	// A retained row (e.g. an auto-fix chain parent whose chain is still running)
+	// must keep ticking: its `endedAt` was stamped when the review itself
+	// finished, but the work is ongoing, so show live elapsed until the chain
+	// resolves and the row is removed. Without this, subagent_status would show a
+	// frozen elapsed for a run the UI otherwise presents as still active.
+	const end = run.retained ? now : (run.endedAt ?? now);
 	return formatDuration(end - run.startedAt);
 }
 

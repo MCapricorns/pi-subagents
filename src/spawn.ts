@@ -74,6 +74,11 @@ export interface SingleResult {
 	 * exit (a concurrent pi startup race) before it produced a result. Set only when
 	 * the run actually recovered after retrying, so callers can surface it. */
 	startupRetries?: number;
+	/** Tool calls that failed inside the run (from tool_execution_end events). A
+	 * clean process exit can still hide a failed build/test/tool — the completion
+	 * message must surface these so the main agent is never misled by a rosy final
+	 * text (e.g. a worker that ended with "keep waiting" while its build failed). */
+	failedTools?: Array<{ toolName: string; error: string }>;
 }
 
 export interface SubagentDetails {
@@ -121,6 +126,29 @@ export function reviewVerdict(output: string): "pass" | "fail" | undefined {
 		if (match) return match[1].toUpperCase() === "PASS" ? "pass" : "fail";
 	}
 	return undefined;
+}
+
+/** Tool errors are usually the trailing lines of a long output (build logs);
+ * keep the last non-empty lines, clipped to RESULT_LINE_MAX each. */
+export function extractToolErrorText(content: unknown): string {
+	const parts = Array.isArray(content) ? content : [];
+	const text = parts
+		.filter(
+			(part): part is { type: "text"; text: string } =>
+				typeof part === "object" &&
+				part !== null &&
+				(part as { type?: unknown }).type === "text" &&
+				typeof (part as { text?: unknown }).text === "string",
+		)
+		.map((part) => part.text)
+		.join("\n");
+	return text
+		.split("\n")
+		.map((line) => line.trim())
+		.filter(Boolean)
+		.slice(-3)
+		.map((line) => (line.length > RESULT_LINE_MAX ? `${line.slice(0, RESULT_LINE_MAX)}…` : line))
+		.join("\n");
 }
 
 /** Hard cap for a single line inside a truncated result (minified blobs must not blow up). */
@@ -493,6 +521,12 @@ export async function runSingleAgent(options: RunSingleOptions): Promise<SingleR
 							onLive({ kind: "tool_end", toolName: event.toolName ?? "unknown", isError: Boolean(event.isError) });
 						} catch { /* never throw from event handling */ }
 					}
+					if (event.isError) {
+						(currentResult.failedTools ??= []).push({
+							toolName: event.toolName ?? "unknown",
+							error: extractToolErrorText(event.result?.content),
+						});
+					}
 				}
 
 				if (event.type === "message_end" && event.message) {
@@ -695,5 +729,11 @@ export async function runSingleAgentWithModelFallback(
 	if (!agent || !launchedRef || !fallbackModelRef || launchedRef === fallbackModelRef) return result;
 	if (!isModelLevelFailure(result)) return result;
 	const retried = await runWithStartupRetry({ ...options, agent: { ...agent, model: fallbackModelRef } });
+	// The fallback replaces the result wholesale: `retried.failedTools` reflect
+	// ONLY the fallback (final) attempt. The original attempt's failedTools are
+	// intentionally not merged — a fallback relaunch redoes the work, so attaching
+	// the first attempt's stale build errors to a clean final attempt would
+	// misattribute failures the worker already fixed. This makes the README's
+	// "failed tool calls from the run's final attempt" claim accurate.
 	return { ...retried, modelFallbackFrom: launchedRef };
 }

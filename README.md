@@ -15,7 +15,15 @@ report their results back to the main agent automatically.
 - **Isolated execution** — each sub-agent runs in its own `pi` process; it cannot see
   the main conversation, so it gets a clean context window.
 - **Automatic continuation** — results are delivered as a message that wakes the main
-  agent automatically (or waits in the follow-up queue if it is busy).
+  agent automatically: injected as soon as the current tool call finishes (even
+  mid-turn), or starting a new turn when idle. No polling, no "go check" step.
+- **Sub-agent toolbelt** — three companion tools that replace the classic
+  sleep/poll anti-pattern: `subagent_wait` blocks in-tool and returns the result,
+  `subagent_status` inspects active and finished runs, and `subagent_stop` cancels
+  a run (delivering its partial output as an aborted result).
+- **Honest completions** — a run that exited cleanly but whose tool calls failed
+  (e.g. a broken build) is reported as `completed with N failed tool call(s)`
+  with the errors attached, so a rosy final text can never hide a failure.
 - **Parallel fan-out** — independent tasks run at the same time, with a configurable
   concurrency limit.
 - **Live progress** — a TUI widget shows each run's status, current activity, model,
@@ -39,8 +47,11 @@ Several tools now offer some form of sub-agents. What this extension does differ
   the child's tool calls, thinking, or long exploration trails — a "sub-agent" that
   just swaps the system prompt inside the same session does not give you that.
 - **Results come back on their own.** The extension turns the child's completion
-  into a message that wakes the main agent automatically. No polling, no "go check
-  the other window" step.
+  into a message that wakes the main agent automatically — delivered even
+  mid-turn, right after the current tool call. No polling, no "go check
+  the other window" step, and **no `sleep`**: if the model must keep the turn it
+  calls `subagent_wait` (event-driven, returns the actual result) instead of
+  sleeping or polling.
 - **Failures are handled, not reported.** Three layers of resilience: a provider-
   level model failure retries once with the main window's model; an idle watchdog
   terminates a run that goes silent (a stalled stream) and retries it; and a
@@ -50,6 +61,12 @@ Several tools now offer some form of sub-agents. What this extension does differ
   the extension dispatches a worker briefed with the concrete findings, then a
   re-review — up to `maxFixRounds` times — and only then wakes the main agent with
   the whole chain. The gate runs itself instead of asking you to babysit it.
+- **Honest results.** A sub-agent can end its turn with "still working" while its
+  last build actually failed. The completion message surfaces the failed tool
+  calls from the run's final attempt (`completed with N failed tool call(s)`) with
+  the error lines attached, so the main agent never trusts a cheerful summary
+  over reality. (A model-fallback retry runs the work fresh, so only the final
+  attempt's tool calls are counted — never stale errors from an abandoned one.)
 - **You can see what it is doing.** The widget shows each run's status, current
   activity (which tool, which file), model, token usage including cache reads and
   writes, and elapsed time — plus soft warnings when a run looks stuck.
@@ -292,9 +309,25 @@ main agent
 3. Up to `maxConcurrency` sub-agents run at once (default 4); a parallel call accepts at
    most that many tasks, and anything beyond waits in the queue.
 4. When a run finishes (successfully or not), the extension sends a result message to the
-   main session. It wakes the main agent automatically, or waits until the current turn
-   finishes.
+   main session. The result is delivered as soon as the current tool call finishes — even
+   mid-turn — or starts a new turn when the agent is idle. A run that ended with failed
+   tool calls (e.g. a broken build) is reported as such, never as a plain success.
 5. The main agent uses the result to continue. No extra user prompt is needed.
+
+### Waiting, inspecting, and stopping runs
+
+The extension registers three companion tools so the main agent never has to
+`sleep`/poll for a background run:
+
+- `subagent_wait` — blocks inside the tool call (event-driven, wakes on the run's
+  completion) and **returns the actual result in-turn**. Use it only when the current
+  turn must receive the result (sequential dependent steps); otherwise end the turn
+  and the completion message wakes you.
+- `subagent_status` — lists active runs (id, agent, model, usage, elapsed, activity)
+  and finished results; pass an id to read a finished run's full result.
+- `subagent_stop` — cancels an active run (or `all: true`); the child is terminated
+  and an aborted result with its partial output is delivered, so the main agent
+  always knows the run did not complete.
 
 Switching sessions, reloading, or shutting down cancels remaining background runs. A
 crashed or aborted agent returns whatever partial output it produced, clearly labelled,
@@ -335,6 +368,50 @@ Use parallel mode only for independent work:
 ```
 
 Start dependent work only after the relevant result has been delivered.
+
+### Waiting for a result in-turn
+
+When the next step depends on a run's result and the turn must not end, use
+`subagent_wait` instead of sleeping or polling. It blocks inside the tool call
+(event-driven) and returns the actual result:
+
+```json
+{
+  "id": "3"
+}
+```
+
+Pass `timeoutMs` to bound the wait; on timeout it reports the still-running runs
+and the model re-invokes it or ends the turn (the completion message then wakes it).
+
+### Inspecting runs
+
+`subagent_status` returns an overview of active and finished runs with their ids:
+
+```json
+{}
+```
+
+Pass a run id to read that run's full result:
+
+```json
+{
+  "id": "3"
+}
+```
+
+### Stopping a run
+
+`subagent_stop` cancels a run that is obsolete, stuck, or superseded — the child is
+terminated and an aborted result (with partial output) is delivered:
+
+```json
+{
+  "id": "3"
+}
+```
+
+Or stop everything with `{ "all": true }`.
 
 ## Configuration
 
@@ -464,12 +541,33 @@ The package has no runtime dependencies beyond pi peer dependencies.
 - [tintinweb/pi-subagents](https://github.com/tintinweb/pi-subagents) — the
   live widget (two lines per run: header + quiet gray activity row) and
   parallel fan-out follow its design.
+- [nicobailon/pi-subagents](https://github.com/nicobailon/pi-subagents) — the
+  result-delivery design is learned from it: prompt **steer** delivery (a
+  completion is injected right after the current tool call instead of waiting
+  for the turn to end), a blocking `subagent_wait` tool that returns the result
+  in-turn, status inspection and stop/interrupt management, and the rule that
+  an agent should never `sleep`/poll for a background run. Its status-file and
+  workflow-script orchestration (JS chains, checkpoints, scheduling, missions)
+  are deliberately out of scope here: this extension stays a focused 3-agent
+  delegation tool with a configuration wizard instead of a full orchestrator.
 - The sub-agent pattern itself, popularized by
   [Claude Code](https://github.com/anthropics/claude-code): role-specialized
   agents that receive self-contained briefs.
 
 The agent prompts and extension code are written independently for this
 project; the projects above served as design references.
+
+### What stays ours
+
+- **Exactly three focused agents** (`explore` / `worker` / `reviewer`) with
+  hand-tuned prompts, not a generic orchestration surface.
+- **`/subagents-setup` wizard** — per-agent model + thinking selection,
+  concurrency, fix rounds, idle watchdog, scope, injection — with config
+  migration and unavailable-model repair, all interactive.
+- **The auto-fix loop** — a `REVIEW_FAIL` reviewer automatically drives
+  worker → re-review rounds before waking anyone.
+- **Zero runtime dependencies**: agents are plain Markdown files; override or
+  add one by writing a file.
 
 ## License
 

@@ -3,8 +3,9 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { BackgroundTaskQueue, type BackgroundTask } from "../src/background.ts";
-import register from "../src/index.ts";
+import register, { matchRunIds } from "../src/index.ts";
 import { monitor } from "../src/monitor.ts";
+import * as spawn from "../src/spawn.ts";
 
 interface StubPi {
 	tools: any[];
@@ -54,6 +55,11 @@ let testAgentDir: string | undefined;
 beforeEach(() => {
 	savedDepth = process.env.PI_SUBAGENT_DEPTH;
 	savedAgentDir = process.env.PI_CODING_AGENT_DIR;
+	// The suite must never inherit the runner's own sub-agent depth: this test
+	// process can itself be a pi sub-agent child (the parent pi sets
+	// PI_SUBAGENT_DEPTH in the child env), which would trip the recursion guard
+	// and register nothing. Tests that need a depth set it explicitly.
+	delete process.env.PI_SUBAGENT_DEPTH;
 	// Isolate config + user agents from the real home directory.
 	testAgentDir = mkdtempSync(join(tmpdir(), "pi-subagents-load-"));
 	process.env.PI_CODING_AGENT_DIR = testAgentDir;
@@ -99,6 +105,22 @@ describe("extension registration", () => {
 		const stub = makeStub();
 		register(stub.api);
 		expect(stub.tools.map((t) => t.name)).not.toContain("subagent");
+	});
+});
+
+describe("run id matching", () => {
+	it("prefers an exact id over prefix matches", () => {
+		// "1" must resolve to run 1 only, never fan out to 10/11 (single-digit
+		// lookups would otherwise return several full result blocks).
+		expect(matchRunIds([1, 10, 11], "1")).toEqual([1]);
+	});
+
+	it("falls back to prefix matches only when no exact id exists", () => {
+		expect(matchRunIds([10, 11], "1")).toEqual([10, 11]);
+	});
+
+	it("returns no matches for an unknown id", () => {
+		expect(matchRunIds([1, 2], "9")).toEqual([]);
 	});
 });
 
@@ -225,7 +247,7 @@ process.stdin.on("end", () => {
 			const completion = stub.messages[0];
 			expect(completion.message.content).toContain(`Task: ${summary}`);
 			expect(completion.message.content).toMatch(/\bR321\b/);
-			expect(completion.options).toEqual({ deliverAs: "followUp", triggerTurn: true });
+			expect(completion.options).toEqual({ deliverAs: "steer", triggerTurn: true });
 		} finally {
 			component?.dispose();
 			backgroundController.abort();
@@ -233,6 +255,396 @@ process.stdin.on("end", () => {
 			for (const run of [...monitor.getRuns()]) monitor.removeRun(run.id);
 			process.argv[1] = previousScript;
 			if (childDir) rmSync(childDir, { recursive: true, force: true });
+		}
+	});
+
+	it("reports a clean-exit run whose tool calls failed as completed-with-failures", async () => {
+		vi.useFakeTimers();
+		vi.setSystemTime(0);
+		const stub = makeStub();
+		const capturedTasks: BackgroundTask[] = [];
+		const backgroundController = new AbortController();
+		vi.spyOn(BackgroundTaskQueue.prototype, "enqueue").mockImplementation((task) => {
+			capturedTasks.push(task);
+			return backgroundController;
+		});
+
+		let childDir: string | undefined;
+		const previousScript = process.argv[1];
+		try {
+			childDir = mkdtempSync(join(tmpdir(), "pi-subagents-failchild-"));
+			const childScript = join(childDir, "fake-pi-child.mjs");
+			// The child exits cleanly (exit code 0) even though its bash tool failed —
+			// exactly the shape that used to produce a misleading "completed" message.
+			writeFileSync(
+				childScript,
+				`process.stdin.resume();
+process.stdin.on("end", () => {
+	process.stdout.write(JSON.stringify({ type: "agent_start" }) + "\\n");
+	process.stdout.write(JSON.stringify({ type: "tool_execution_start", toolName: "bash", args: {} }) + "\\n");
+	process.stdout.write(JSON.stringify({
+		type: "tool_execution_end",
+		toolName: "bash",
+		isError: true,
+		result: { content: [{ type: "text", text: "MSBuild.exe failed\\nfatal error C3861: execute_wake_task: undeclared identifier" }] }
+	}) + "\\n");
+	process.stdout.write(JSON.stringify({
+		type: "message_end",
+		message: {
+			role: "assistant",
+			content: [{ type: "text", text: "still fixing, keep waiting" }],
+			usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, cost: { total: 0 }, totalTokens: 0 },
+			stopReason: "stop"
+		}
+	}) + "\\n");
+});
+`,
+				"utf8",
+			);
+			process.argv[1] = childScript;
+
+			register(stub.api);
+			const tool = stub.tools.find((candidate) => candidate.name === "subagent");
+			await tool.execute(
+				"call-f",
+				{ agent: "worker", task: "Fix the compile error" },
+				new AbortController().signal,
+				() => {},
+				executionContext(),
+			);
+			await capturedTasks[0](backgroundController.signal);
+			vi.advanceTimersByTime(150);
+			expect(stub.messages).toHaveLength(1);
+			const content = stub.messages[0].message.content;
+			expect(content).toContain("completed with 1 failed tool call");
+			expect(content).toContain("⚠ 1 tool call failed during this run");
+			expect(content).toContain("- bash: MSBuild.exe failed");
+			expect(content).toContain("fatal error C3861: execute_wake_task: undeclared identifier");
+			expect(content).toContain("Verify the actual artifacts before relying on this report.");
+			expect(stub.messages[0].options).toEqual({ deliverAs: "steer", triggerTurn: true });
+		} finally {
+			backgroundController.abort();
+			await stub.hooks["session_shutdown"]?.({}, {});
+			for (const run of [...monitor.getRuns()]) monitor.removeRun(run.id);
+			process.argv[1] = previousScript;
+			if (childDir) rmSync(childDir, { recursive: true, force: true });
+		}
+	});
+
+	it("subagent_wait returns the finished result in-turn instead of sleeping", async () => {
+		const stub = makeStub();
+		const capturedTasks: BackgroundTask[] = [];
+		const backgroundController = new AbortController();
+		vi.spyOn(BackgroundTaskQueue.prototype, "enqueue").mockImplementation((task) => {
+			capturedTasks.push(task);
+			return backgroundController;
+		});
+
+		let childDir: string | undefined;
+		const previousScript = process.argv[1];
+		try {
+			childDir = mkdtempSync(join(tmpdir(), "pi-subagents-wait-child-"));
+			const childScript = join(childDir, "fake-pi-child.mjs");
+			writeFileSync(
+				childScript,
+				`process.stdin.resume();
+process.stdin.on("end", () => {
+	process.stdout.write(JSON.stringify({ type: "agent_start" }) + "\\n");
+	process.stdout.write(JSON.stringify({
+		type: "message_end",
+		message: {
+			role: "assistant",
+			content: [{ type: "text", text: "worker result payload" }],
+			usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, cost: { total: 0 }, totalTokens: 0 },
+			stopReason: "stop"
+		}
+	}) + "\\n");
+});
+`,
+				"utf8",
+			);
+			process.argv[1] = childScript;
+
+			register(stub.api);
+			const tool = stub.tools.find((candidate) => candidate.name === "subagent");
+			const waitTool = stub.tools.find((candidate) => candidate.name === "subagent_wait");
+			expect(waitTool).toBeDefined();
+
+			await tool.execute(
+				"call-w",
+				{ agent: "worker", task: "Fix the build" },
+				new AbortController().signal,
+				() => {},
+				executionContext(),
+			);
+			expect(capturedTasks).toHaveLength(1);
+
+			// The wait blocks inside the tool call (event-driven, no sleep/poll);
+			// let the run settle afterwards and the same promise resolves with it.
+			const runId = monitor.getRuns().find((run) => run.task === "Fix the build")?.id;
+			expect(runId).toBeDefined();
+			const waitPromise = waitTool.execute(
+				"wait-1",
+				{ id: String(runId) },
+				new AbortController().signal,
+				() => {},
+				executionContext(),
+			);
+			await capturedTasks[0](backgroundController.signal);
+			const waitResult = await waitPromise;
+
+			const text = waitResult.content[0].text;
+			expect(text).toContain("### [worker] completed");
+			expect(text).toContain("worker result payload");
+			expect(text).toContain("Task: Fix the build");
+
+			// A settled run resolves immediately on a second call.
+			const second = await waitTool.execute(
+				"wait-2",
+				{ id: String(runId) },
+				new AbortController().signal,
+				() => {},
+				executionContext(),
+			);
+			expect(second.content[0].text).toContain("worker result payload");
+		} finally {
+			backgroundController.abort();
+			await stub.hooks["session_shutdown"]?.({}, {});
+			for (const run of [...monitor.getRuns()]) monitor.removeRun(run.id);
+			process.argv[1] = previousScript;
+			if (childDir) rmSync(childDir, { recursive: true, force: true });
+		}
+	});
+
+	it("subagent_wait reports no active runs and times out on still-running ones", async () => {
+		const stub = makeStub();
+		const capturedTasks: BackgroundTask[] = [];
+		const backgroundController = new AbortController();
+		vi.spyOn(BackgroundTaskQueue.prototype, "enqueue").mockImplementation((task) => {
+			capturedTasks.push(task);
+			return backgroundController;
+		});
+
+		try {
+			register(stub.api);
+			const tool = stub.tools.find((candidate) => candidate.name === "subagent");
+			const waitTool = stub.tools.find((candidate) => candidate.name === "subagent_wait");
+
+			const none = await waitTool.execute("wait-none", {}, new AbortController().signal, () => {}, executionContext());
+			expect(none.content[0].text).toContain("No active subagent runs");
+
+			await tool.execute(
+				"call-w2",
+				{ agent: "worker", task: "Long task" },
+				new AbortController().signal,
+				() => {},
+				executionContext(),
+			);
+			// The captured task never runs, so the run stays active: wait times out.
+			const runId = monitor.getRuns().find((run) => run.task === "Long task")?.id;
+			expect(runId).toBeDefined();
+			const timedOut = await waitTool.execute(
+				"wait-to",
+				{ id: String(runId), timeoutMs: 100 },
+				new AbortController().signal,
+				() => {},
+				executionContext(),
+			);
+			expect(timedOut.content[0].text).toContain("wait timed out");
+			expect(timedOut.content[0].text).toContain(`#${runId}`);
+
+			const unknown = await waitTool.execute(
+				"wait-x",
+				{ id: "99" },
+				new AbortController().signal,
+				() => {},
+				executionContext(),
+			);
+			expect(unknown.content[0].text).toContain('No active subagent run matches "99"');
+		} finally {
+			backgroundController.abort();
+			await stub.hooks["session_shutdown"]?.({}, {});
+			for (const run of [...monitor.getRuns()]) monitor.removeRun(run.id);
+		}
+	});
+
+	it("subagent_wait resolves with a note when the calling turn's signal is aborted", async () => {
+		const stub = makeStub();
+		const capturedTasks: BackgroundTask[] = [];
+		const backgroundController = new AbortController();
+		vi.spyOn(BackgroundTaskQueue.prototype, "enqueue").mockImplementation((task) => {
+			capturedTasks.push(task);
+			return backgroundController;
+		});
+
+		try {
+			register(stub.api);
+			const tool = stub.tools.find((candidate) => candidate.name === "subagent");
+			const waitTool = stub.tools.find((candidate) => candidate.name === "subagent_wait");
+			await tool.execute(
+				"call-wa",
+				{ agent: "worker", task: "Long task" },
+				new AbortController().signal,
+				() => {},
+				executionContext(),
+			);
+			const runId = monitor.getRuns().find((run) => run.task === "Long task")?.id;
+			expect(runId).toBeDefined();
+
+			// Already-aborted signal: the wait resolves immediately without blocking.
+			const alreadyAborted = new AbortController();
+			alreadyAborted.abort();
+			const immediate = await waitTool.execute(
+				"wait-ab1",
+				{ id: String(runId) },
+				alreadyAborted.signal,
+				() => {},
+				executionContext(),
+			);
+			expect(immediate.content[0].text).toContain("wait aborted");
+
+			// Mid-wait abort: the onAbort listener resolves the pending wait.
+			const midWait = new AbortController();
+			const pending = waitTool.execute(
+				"wait-ab2",
+				{ id: String(runId) },
+				midWait.signal,
+				() => {},
+				executionContext(),
+			);
+			midWait.abort();
+			const aborted = await pending;
+			expect(aborted.content[0].text).toContain("wait aborted");
+		} finally {
+			backgroundController.abort();
+			await stub.hooks["session_shutdown"]?.({}, {});
+			for (const run of [...monitor.getRuns()]) monitor.removeRun(run.id);
+		}
+	});
+
+	it("subagent_status lists active runs and returns full results by id", async () => {
+		const stub = makeStub();
+		const capturedTasks: BackgroundTask[] = [];
+		const backgroundController = new AbortController();
+		vi.spyOn(BackgroundTaskQueue.prototype, "enqueue").mockImplementation((task) => {
+			capturedTasks.push(task);
+			return backgroundController;
+		});
+
+		let childDir: string | undefined;
+		const previousScript = process.argv[1];
+		try {
+			childDir = mkdtempSync(join(tmpdir(), "pi-subagents-status-child-"));
+			const childScript = join(childDir, "fake-pi-child.mjs");
+			writeFileSync(
+				childScript,
+				`process.stdin.resume();
+process.stdin.on("end", () => {
+	process.stdout.write(JSON.stringify({ type: "agent_start" }) + "\\n");
+	process.stdout.write(JSON.stringify({
+		type: "message_end",
+		message: {
+			role: "assistant",
+			content: [{ type: "text", text: "status payload" }],
+			usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, cost: { total: 0 }, totalTokens: 0 },
+			stopReason: "stop"
+		}
+	}) + "\\n");
+});
+`,
+				"utf8",
+			);
+			process.argv[1] = childScript;
+
+			register(stub.api);
+			const tool = stub.tools.find((candidate) => candidate.name === "subagent");
+			const statusTool = stub.tools.find((candidate) => candidate.name === "subagent_status");
+			expect(statusTool).toBeDefined();
+
+			// No runs yet: empty overview.
+			const empty = await statusTool.execute("st-0", {}, new AbortController().signal, () => {}, executionContext());
+			expect(empty.content[0].text).toContain("Active subagent runs (0)");
+
+			await tool.execute(
+				"call-s",
+				{ agent: "worker", task: "Inspect the build" },
+				new AbortController().signal,
+				() => {},
+				executionContext(),
+			);
+
+			// Queued run shows in the overview with its id.
+			const runId = monitor.getRuns().find((run) => run.task === "Inspect the build")?.id;
+			expect(runId).toBeDefined();
+			const overview = await statusTool.execute("st-1", {}, new AbortController().signal, () => {}, executionContext());
+			expect(overview.content[0].text).toContain("Active subagent runs (1)");
+			expect(overview.content[0].text).toContain(`#${runId} worker`);
+			expect(overview.content[0].text).toContain("Finished this session (0)");
+
+			// While active, an id lookup reports the run is still running.
+			const stillActive = await statusTool.execute("st-2", { id: String(runId) }, new AbortController().signal, () => {}, executionContext());
+			expect(stillActive.content[0].text).toContain("still active");
+
+			// After the run settles, the same id returns the full result.
+			await capturedTasks[0](backgroundController.signal);
+			const settledView = await statusTool.execute("st-3", { id: String(runId) }, new AbortController().signal, () => {}, executionContext());
+			expect(settledView.content[0].text).toContain("### [worker] completed");
+			expect(settledView.content[0].text).toContain("status payload");
+
+			const after = await statusTool.execute("st-4", {}, new AbortController().signal, () => {}, executionContext());
+			expect(after.content[0].text).toContain("Finished this session (1)");
+			expect(after.content[0].text).toContain(`#${runId} worker · completed`);
+		} finally {
+			backgroundController.abort();
+			await stub.hooks["session_shutdown"]?.({}, {});
+			for (const run of [...monitor.getRuns()]) monitor.removeRun(run.id);
+			process.argv[1] = previousScript;
+			if (childDir) rmSync(childDir, { recursive: true, force: true });
+		}
+	});
+
+	it("subagent_stop cancels active runs and resolves waiters with an aborted result", async () => {
+		const stub = makeStub();
+		const capturedTasks: BackgroundTask[] = [];
+		const backgroundController = new AbortController();
+		vi.spyOn(BackgroundTaskQueue.prototype, "enqueue").mockImplementation((task) => {
+			capturedTasks.push(task);
+			return backgroundController;
+		});
+
+		try {
+			register(stub.api);
+			const tool = stub.tools.find((candidate) => candidate.name === "subagent");
+			const waitTool = stub.tools.find((candidate) => candidate.name === "subagent_wait");
+			const stopTool = stub.tools.find((candidate) => candidate.name === "subagent_stop");
+			expect(stopTool).toBeDefined();
+
+			// Unknown id: nothing to stop.
+			const unknown = await stopTool.execute("stop-x", { id: "99" }, new AbortController().signal, () => {}, executionContext());
+			expect(unknown.content[0].text).toContain('No active subagent run matches "99"');
+
+			await tool.execute(
+				"call-st",
+				{ agent: "worker", task: "Long task" },
+				new AbortController().signal,
+				() => {},
+				executionContext(),
+			);
+
+			// A waiter blocks on the queued run; stopping resolves it.
+			const runId = monitor.getRuns().find((run) => run.task === "Long task")?.id;
+			expect(runId).toBeDefined();
+			const waitPromise = waitTool.execute("wait-st", { id: String(runId) }, new AbortController().signal, () => {}, executionContext());
+			const stopped = await stopTool.execute("stop-1", { id: String(runId) }, new AbortController().signal, () => {}, executionContext());
+			expect(stopped.content[0].text).toContain(`Stopped 1 run: #${runId} worker (queued)`);
+
+			const waited = await waitPromise;
+			expect(waited.content[0].text).toContain("### [worker] failed");
+			expect(waited.content[0].text).toContain("Stopped by subagent_stop");
+		} finally {
+			backgroundController.abort();
+			await stub.hooks["session_shutdown"]?.({}, {});
+			for (const run of [...monitor.getRuns()]) monitor.removeRun(run.id);
 		}
 	});
 
@@ -296,7 +708,7 @@ process.stdin.on("end", () => {
 			expect(completion.message.content).toContain("### Subagents completed (2): worker, reviewer");
 			expect(completion.message.content).toContain("### [worker] completed");
 			expect(completion.message.content).toContain("### [reviewer] completed");
-			expect(completion.options).toEqual({ deliverAs: "followUp", triggerTurn: true });
+			expect(completion.options).toEqual({ deliverAs: "steer", triggerTurn: true });
 		} finally {
 			for (const controller of controllers) controller.abort();
 			await stub.hooks["session_shutdown"]?.({}, {});
@@ -430,7 +842,7 @@ process.stdin.on("end", () => {
 			await capturedTasks[1](controllers[1].signal);
 			expect(stub.messages).toHaveLength(2);
 			expect(stub.messages[0].message.content).toContain("### [reviewer] failed");
-			expect(stub.messages[0].options).toEqual({ deliverAs: "followUp", triggerTurn: true });
+			expect(stub.messages[0].options).toEqual({ deliverAs: "steer", triggerTurn: true });
 			expect(stub.messages[1].message.content).toContain("### [worker] completed");
 
 			vi.advanceTimersByTime(1_000);
@@ -576,7 +988,7 @@ process.stdin.on("end", () => {
 			expect(content).toContain("Task: Review the change");
 			expect(content).toContain("Task: Auto-fix round 1 of 2");
 			expect(content).toContain("Task: Re-review after auto-fix round 1");
-			expect(stub.messages[0].options).toEqual({ deliverAs: "followUp", triggerTurn: true });
+			expect(stub.messages[0].options).toEqual({ deliverAs: "steer", triggerTurn: true });
 			// Chain-internal runs notify individually; the parent row is dropped.
 			expect(uiNotify).toHaveBeenCalledTimes(2);
 			expect(monitor.getRuns().find((run) => run.annotation)).toBeUndefined();
@@ -705,6 +1117,139 @@ process.stdin.on("end", () => {
 			expect(stub.messages).toHaveLength(1);
 			expect(stub.messages[0].message.content).toContain("### [reviewer] completed");
 			expect(monitor.getRuns().find((run) => run.annotation)).toBeUndefined();
+		} finally {
+			for (const controller of controllers) controller.abort();
+			await stub.hooks["session_shutdown"]?.({}, {});
+			for (const run of [...monitor.getRuns()]) monitor.removeRun(run.id);
+			process.argv[1] = previousScript;
+			if (childDir) rmSync(childDir, { recursive: true, force: true });
+		}
+	});
+
+	it("delivers a dispatch-crashed reviewer as a failure, never as a phantom fix chain", async () => {
+		vi.useFakeTimers();
+		vi.setSystemTime(0);
+		const stub = makeStub();
+		const uiNotify = vi.fn();
+		const capturedTasks: BackgroundTask[] = [];
+		const controllers: AbortController[] = [];
+		vi.spyOn(BackgroundTaskQueue.prototype, "enqueue").mockImplementation((task) => {
+			capturedTasks.push(task);
+			const controller = new AbortController();
+			controllers.push(controller);
+			return controller;
+		});
+
+		let childDir: string | undefined;
+		const previousScript = process.argv[1];
+		try {
+			// Point argv[1] at a fake child anyway: if the rejection below fails to
+			// intercept, the test fails on assertions instead of spawning real pi.
+			childDir = mkdtempSync(join(tmpdir(), "pi-subagents-crash-child-"));
+			const childScript = join(childDir, "fake-pi-child.mjs");
+			writeFileSync(
+				childScript,
+				`process.stdin.resume();
+process.stdin.on("end", () => {
+	process.stdout.write(JSON.stringify({ type: "message_end", message: { role: "assistant", content: [{ type: "text", text: "REQUEST_CHANGES\\nVERDICT: REVIEW_FAIL" }], stopReason: "stop" } }) + "\\n");
+});
+`,
+				"utf8",
+			);
+			process.argv[1] = childScript;
+
+			register(stub.api);
+			const tool = stub.tools.find((candidate) => candidate.name === "subagent");
+			await tool.execute(
+				"call-crash",
+				{ agent: "reviewer", task: "Review the change" },
+				new AbortController().signal,
+				() => {},
+				executionContext({ uiNotify }),
+			);
+			expect(capturedTasks).toHaveLength(1);
+
+			// The dispatch layer throws (spawn infra, fs, ...): the crash result must
+			// be delivered as a failure and never fed into the auto-fix gate — a
+			// crashed reviewer's output is not a review verdict, so no chain may
+			// start and no "auto-fix chain running" annotation may appear.
+			const spy = vi.spyOn(spawn, "runSingleAgentWithModelFallback").mockRejectedValueOnce(new Error("spawn infra exploded"));
+			await capturedTasks[0](controllers[0].signal);
+			spy.mockRestore();
+
+			expect(capturedTasks).toHaveLength(1);
+			vi.advanceTimersByTime(150);
+			expect(stub.messages).toHaveLength(1);
+			const content = stub.messages[0].message.content as string;
+			expect(content).toContain("### [reviewer] failed");
+			expect(content).toContain("spawn infra exploded");
+			expect(stub.messages[0].options).toEqual({ deliverAs: "steer", triggerTurn: true });
+			expect(uiNotify).toHaveBeenCalledWith("✗ reviewer 派发失败: spawn infra exploded", "error");
+			expect(monitor.getRuns().find((run) => run.annotation === "auto-fix chain running")).toBeUndefined();
+		} finally {
+			for (const controller of controllers) controller.abort();
+			await stub.hooks["session_shutdown"]?.({}, {});
+			for (const run of [...monitor.getRuns()]) monitor.removeRun(run.id);
+			process.argv[1] = previousScript;
+			if (childDir) rmSync(childDir, { recursive: true, force: true });
+		}
+	});
+
+	it("delivers a crashed reviewer with a trailing REVIEW_FAIL partial as a failure, without a fix chain", async () => {
+		vi.useFakeTimers();
+		vi.setSystemTime(0);
+		const stub = makeStub();
+		const uiNotify = vi.fn();
+		const capturedTasks: BackgroundTask[] = [];
+		const controllers: AbortController[] = [];
+		vi.spyOn(BackgroundTaskQueue.prototype, "enqueue").mockImplementation((task) => {
+			capturedTasks.push(task);
+			const controller = new AbortController();
+			controllers.push(controller);
+			return controller;
+		});
+
+		let childDir: string | undefined;
+		const previousScript = process.argv[1];
+		try {
+			childDir = mkdtempSync(join(tmpdir(), "pi-subagents-partial-child-"));
+			const childScript = join(childDir, "fake-pi-child.mjs");
+			writeFileSync(
+				childScript,
+				`process.stdin.resume();
+process.stdin.on("end", () => {
+	process.stdout.write(JSON.stringify({ type: "message_end", message: { role: "assistant", content: [{ type: "text", text: "I found issues.\\nVERDICT: REVIEW_FAIL" }], stopReason: "error" } }) + "\\n");
+	process.exitCode = 1;
+});
+`,
+				"utf8",
+			);
+			process.argv[1] = childScript;
+
+			register(stub.api);
+			const tool = stub.tools.find((candidate) => candidate.name === "subagent");
+			await tool.execute(
+				"call-crash2",
+				{ agent: "reviewer", task: "Review the change" },
+				new AbortController().signal,
+				() => {},
+				executionContext({ uiNotify }),
+			);
+			expect(capturedTasks).toHaveLength(1);
+
+			// The child crashed (non-zero exit, error stop reason) after emitting a
+			// partial report that ends in VERDICT: REVIEW_FAIL. A crash is not a
+			// review verdict: the failure is delivered and no chain may start.
+			await capturedTasks[0](controllers[0].signal);
+
+			expect(capturedTasks).toHaveLength(1);
+			expect(stub.messages).toHaveLength(1);
+			const content = stub.messages[0].message.content as string;
+			expect(content).toContain("### [reviewer] failed");
+			expect(content).toContain("VERDICT: REVIEW_FAIL");
+			expect(stub.messages[0].options).toEqual({ deliverAs: "steer", triggerTurn: true });
+			expect(uiNotify).toHaveBeenCalledTimes(1);
+			expect(monitor.getRuns().find((run) => run.annotation === "auto-fix chain running")).toBeUndefined();
 		} finally {
 			for (const controller of controllers) controller.abort();
 			await stub.hooks["session_shutdown"]?.({}, {});
