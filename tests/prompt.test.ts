@@ -36,11 +36,13 @@ describe("buildDelegationDirective", () => {
 		expect(multi).toContain("INDEPENDENT tasks in parallel");
 	});
 
-	it("steers the model away from over-delegating simple work", () => {
+	it("inlines trivial work but pushes recon to explore", () => {
 		const directive = buildDelegationDirective([agent("explore"), agent("worker"), agent("reviewer")]);
 		expect(directive).toContain("Handle SIMPLE work INLINE");
 		expect(directive).toContain("Delegate only when isolation genuinely pays");
 		expect(directive).toContain("When in doubt, start with a direct tool call");
+		expect(directive).toContain("Use `explore` PROACTIVELY for codebase reconnaissance");
+		expect(directive).toContain("NOT for one-line lookups");
 		expect(directive).not.toContain("When in doubt, delegate");
 	});
 
