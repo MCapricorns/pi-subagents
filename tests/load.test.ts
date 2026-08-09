@@ -983,15 +983,23 @@ process.stdin.on("end", () => {
 
 			expect(stub.messages).toHaveLength(1);
 			const content = stub.messages[0].message.content as string;
-			expect(content).toContain("### [reviewer] completed");
-			expect(content).toContain("### [worker] completed");
-			expect(content).toContain("Task: Review the change");
-			expect(content).toContain("Task: Auto-fix round 1 of 2");
-			expect(content).toContain("Task: Re-review after auto-fix round 1");
+			// Condensed delivery: one summary block instead of every round's raw output.
+			expect(content).toContain("## Auto-fix chain: 1 round — final PASS");
+			expect(content).toContain("reviewer · initial review · FAIL");
+			expect(content).toContain("worker · fix round 1 · completed");
+			expect(content).toContain("reviewer · re-review round 1 · PASS");
+			expect(content).toContain("Totals:");
+			expect(content).toContain("subagent_status");
+			// A passing final re-review appends no full block; earlier rounds' full
+			// reports stay one subagent_status call away.
+			expect(content).not.toContain("### [worker]");
+			expect(content).not.toContain("Task: Review the change");
+			// The initial review is not delivered or notified yet (still held by the chain).
 			expect(stub.messages[0].options).toEqual({ deliverAs: "steer", triggerTurn: true });
-			// Chain-internal runs notify individually; the parent row is dropped.
+			// Chain-internal runs notify individually as they finish; the whole chain
+			// group (parent + retained round rows) is dropped once the chain resolves.
 			expect(uiNotify).toHaveBeenCalledTimes(2);
-			expect(monitor.getRuns().find((run) => run.annotation)).toBeUndefined();
+			expect(monitor.getRuns()).toHaveLength(0);
 		} finally {
 			for (const controller of controllers) controller.abort();
 			await stub.hooks["session_shutdown"]?.({}, {});
@@ -1055,11 +1063,14 @@ process.stdin.on("end", () => {
 
 			expect(stub.messages).toHaveLength(1);
 			const content = stub.messages[0].message.content as string;
+			expect(content).toContain("## Auto-fix chain: 1 round — final failed");
+			expect(content).toContain("reviewer · re-review round 1 · failed");
+			// The crashed final re-review's full report is appended so the main agent
+			// sees why the chain stopped.
 			expect(content).toContain("### [reviewer] failed");
-			expect(content).toContain("Task: Auto-fix round 1 of 2");
 			// No second fix round: the crashed re-review ends the chain.
 			expect(content).not.toContain("Auto-fix round 2");
-			expect(monitor.getRuns().find((run) => run.annotation)).toBeUndefined();
+			expect(monitor.getRuns()).toHaveLength(0);
 		} finally {
 			for (const controller of controllers) controller.abort();
 			await stub.hooks["session_shutdown"]?.({}, {});

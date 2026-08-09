@@ -42,7 +42,7 @@ import {
 	type SubagentLiveEvent,
 	type UsageStats,
 } from "./spawn.ts";
-import { buildFixTaskBrief, buildReReviewBrief, shouldTriggerFixLoop } from "./fixloop.ts";
+import { buildFixTaskBrief, buildReReviewBrief, formatChainSummary, shouldTriggerFixLoop, summarizeChainResult, type ChainStep } from "./fixloop.ts";
 import {
 	activityStateLabel,
 	compactLine,
@@ -469,9 +469,9 @@ export default function (pi: ExtensionAPI): void {
 				task: string,
 				signal: AbortSignal,
 				meta: RunChainMeta,
-			): Promise<SingleResult> => {
+			): Promise<{ runId?: number; result: SingleResult }> => {
 				const agent = agents.find((candidate) => candidate.name === agentName);
-				if (!agent) return failedStartResult(agentName, task, `Unknown agent: "${agentName}".`);
+				if (!agent) return { result: failedStartResult(agentName, task, `Unknown agent: "${agentName}".`) };
 				const thinkingLevel = config.agentThinkingLevels[agent.name] ?? agent.thinking ?? config.thinkingLevel;
 				const runId = monitor.addRun(agent.name, task, agent.model, thinkingLevel, meta);
 				const onLive = makeLiveHandler(runId);
@@ -490,11 +490,15 @@ export default function (pi: ExtensionAPI): void {
 						},
 						sessionRef,
 					);
-					finishRun(runId, isFailedResult(result) ? "failed" : "done");
+					// Keep the finished round visible in the widget while the chain is
+					// still running, with a one-line summary of what it did; the whole
+					// group is dropped when the chain resolves (see removeChainGroup).
+					monitor.setSummary(runId, summarizeChainResult(result));
+					finishRun(runId, isFailedResult(result) ? "failed" : "done", { retain: true });
 					registerRunResult(runId, result);
-					return result;
+					return { runId, result };
 				} catch (error) {
-					finishRun(runId, "failed");
+					finishRun(runId, "failed", { retain: true });
 					const errorMessage = error instanceof Error ? error.message : String(error);
 					const crashed = {
 						...queuedResult(agent, task, thinkingLevel),
@@ -505,7 +509,7 @@ export default function (pi: ExtensionAPI): void {
 						dispatchFailed: true,
 					};
 					registerRunResult(runId, crashed);
-					return crashed;
+					return { runId, result: crashed };
 				}
 			};
 
@@ -517,73 +521,90 @@ export default function (pi: ExtensionAPI): void {
 			 * The triggering reviewer's run stays visible in the widget (annotated) until
 			 * the chain resolves, so the ↳ rows have an obvious parent.
 			 */
+			/** Drop every widget row belonging to an auto-fix chain; the retained
+			 * parent row is removed separately (it does not carry the groupId). */
+			const removeChainGroup = (groupId: string): void => {
+				for (const run of [...monitor.getRuns()]) {
+					if (run.groupId === groupId) monitor.removeRun(run.id);
+				}
+			};
+
 			const startFixLoop = (initialReviewerResult: SingleResult, parentGroupId: string, parentRunId: number): void => {
 				runControllers.set(parentRunId, backgroundQueue.enqueue(
 					async (signal) => {
-						const chain: SingleResult[] = [initialReviewerResult];
+						const chain: ChainStep[] = [
+							{ runId: parentRunId, result: initialReviewerResult, relation: "initial review" },
+						];
 						let lastReviewer = initialReviewerResult;
 						for (let round = 1; round <= config.maxFixRounds; round++) {
 							if (!sessionActive) break;
 							const fixBrief = buildFixTaskBrief(lastReviewer, round, config.maxFixRounds);
-							const workerResult = await launchInLoop("worker", fixBrief, signal, {
+							const workerStep = await launchInLoop("worker", fixBrief, signal, {
 								groupId: parentGroupId,
 								relationLabel: `fix round ${round}`,
 							});
-							chain.push(workerResult);
-							if (!sessionActive || isFailedResult(workerResult)) break;
+							chain.push({ ...workerStep, relation: `fix round ${round}` });
+							if (!sessionActive || isFailedResult(workerStep.result)) break;
 							const reReviewBrief = buildReReviewBrief(lastReviewer, round);
-							const reviewResult = await launchInLoop("reviewer", reReviewBrief, signal, {
+							const reviewStep = await launchInLoop("reviewer", reReviewBrief, signal, {
 								groupId: parentGroupId,
 								relationLabel: `re-review round ${round}`,
 							});
-							chain.push(reviewResult);
-							lastReviewer = reviewResult;
+							chain.push({ ...reviewStep, relation: `re-review round ${round}` });
+							lastReviewer = reviewStep.result;
 							// A crashed re-review must stop the chain like a crashed worker: its
 							// output (if any) is not a verdict, and feeding it to the next fix
 							// round would brief the worker from garbage.
-							if (!sessionActive || isFailedResult(reviewResult)) break;
-							if (reviewVerdict(getResultOutput(reviewResult)) === "pass") break;
+							if (!sessionActive || isFailedResult(reviewStep.result)) break;
+							if (reviewVerdict(getResultOutput(reviewStep.result)) === "pass") break;
 						}
 						// The chain is done (success, exhaustion, or abort): drop the retained
-						// parent row, then deliver the whole chain as one group. The loop's
-						// outcome always wakes the main agent (a passing chain reports
-						// success, a stuck one needs a human). Register the parent's final
-						// state (the last chain result) before removal so subagent_wait can
-						// resolve it.
-						registerRunResult(parentRunId, chain[chain.length - 1]);
+						// parent row and its retained round rows, then deliver one condensed
+						// summary. Register the parent's final state (the last chain result)
+						// before removal so subagent_wait can resolve it.
+						registerRunResult(parentRunId, chain[chain.length - 1].result);
 						runControllers.delete(parentRunId);
+						removeChainGroup(parentGroupId);
 						monitor.removeRun(parentRunId);
 						if (!sessionActive) return;
-						const items: CompletionMessageItem[] = chain.map((r) => {
-							// A model-level chain run (worker or re-review whose provider never
-							// produced output) is handed to the main window like any other
-							// sub-agent run: the block carries the takeover note. Dispatch
-							// crashes (dispatchFailed) are excluded by the gate itself.
-							const modelLevel = isFailedResult(r) && isModelLevelFailure(r);
-							return {
-								agent: r.agent,
-								block: modelLevel
-									? `${formatCompletionBlock(r, config.maxResultLines, ctx.cwd)}\n\n${modelLevelTakeoverNote(r)}`
-									: formatCompletionBlock(r, config.maxResultLines, ctx.cwd),
+						// One compact message instead of every round's raw output: the summary
+						// lines cover each step (verdict + what changed/found), and the final
+						// step's full report is appended only when its detail is actionable
+						// (a FAIL verdict, a crash, or a model-level failure the main agent
+						// must take over). Everything else stays one `subagent_status #id`
+						// call away.
+						const last = chain[chain.length - 1];
+						let block = formatChainSummary(chain);
+						if (isFailedResult(last.result) && isModelLevelFailure(last.result)) {
+							block = `${block}\n\n${formatCompletionBlock(last.result, config.maxResultLines, ctx.cwd)}\n\n${modelLevelTakeoverNote(last.result)}`;
+						} else if (isFailedResult(last.result) || reviewVerdict(getResultOutput(last.result)) === "fail") {
+							block = `${block}\n\n${formatCompletionBlock(last.result, config.maxResultLines, ctx.cwd)}`;
+						}
+						sendCompletionGroup([
+							{
+								agent: `auto-fix chain (${last.result.agent})`,
+								block,
 								triggerTurn: true,
-							};
-						});
-						sendCompletionGroup(items);
+							},
+						]);
 						completionBatcher.flush();
 					},
 					() => {
-						// Cancelled before delivery: clean up the retained parent row (each
-						// in-flight chain run was already finished by its launchInLoop path).
+						// Cancelled before delivery: clean up the retained parent row and
+						// every retained chain row (each in-flight chain run was already
+						// finished by its launchInLoop path).
 						runControllers.delete(parentRunId);
+						removeChainGroup(parentGroupId);
 						monitor.removeRun(parentRunId);
 					},
 					(error) => {
 						// A crash inside the chain orchestration (failed runs are caught by
 						// launchInLoop and delivered as part of the chain) must not vanish:
-						// drop the retained parent row, notify, and deliver a failed result
+						// drop the retained rows, notify, and deliver a failed result
 						// so the main agent knows the chain never completed.
 						registerRunResult(parentRunId, initialReviewerResult);
 						runControllers.delete(parentRunId);
+						removeChainGroup(parentGroupId);
 						monitor.removeRun(parentRunId);
 						if (!sessionActive) return;
 						const errorMessage = error instanceof Error ? error.message : String(error);
@@ -1307,7 +1328,10 @@ export default function (pi: ExtensionAPI): void {
 								const usage = formatUsageCompact(r.usage);
 								const tools = r.toolCount ? `${r.toolCount} tool${r.toolCount === 1 ? "" : "s"}` : "";
 								const elapsed = formatElapsed(r, now);
-								const metaParts = [model, usage, tools, elapsed].filter(Boolean);
+								// The round outcome summary leads the metadata so a finished chain
+								// row reads as what it did ("fail · src/index.ts · render()",
+								// "pass", "src/index.ts · tests/monitor.test.ts").
+								const metaParts = [r.summary, model, usage, tools, elapsed].filter(Boolean);
 								// Running is conveyed by the icon + elapsed; spell out the label only for
 								// the other states (ready / done / stopped) so they are unambiguous.
 								if (r.status !== "running") metaParts.push(statusLabel(r.status));

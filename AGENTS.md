@@ -18,6 +18,10 @@ both pass, finalize the work without waiting to be asked:
    commit; `type(scope): imperative English`). Stage only paths from this task.
 3. Push to the current branch's upstream.
 
+Before the commit, update the README when the change affects user-visible
+behavior (widget display, tool messages, config, commands) — keep it in sync
+with what users actually see.
+
 Skip the automatic bump/commit/push only when the user explicitly says not to,
 or when tests/checks fail (fix first, then finalize).
 

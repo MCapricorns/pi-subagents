@@ -27,7 +27,10 @@ report their results back to the main agent automatically.
 - **Parallel fan-out** — independent tasks run at the same time, with a configurable
   concurrency limit.
 - **Live progress** — a TUI widget shows each run's status, current activity, model,
-  token usage (input/output and cache read/write), and elapsed time.
+  token usage (input/output and cache read/write), and elapsed time. Auto-fix chain
+  rounds hang under their triggering review as a tree, and each finished round stays
+  visible with a one-line outcome (what a worker changed, or a re-review's
+  PASS/FAIL and what it found) until the chain resolves.
 - **Per-agent configuration** — enable agents, choose a model and thinking level per
   agent, and tune limits from `/subagents-setup`.
 - **Automatic model fallback** — if an agent's model fails at the provider level before
@@ -64,8 +67,9 @@ Several tools now offer some form of sub-agents. What this extension does differ
   tell you when any of these happened.
 - **A quality gate that closes the loop.** When a reviewer returns `REVIEW_FAIL`,
   the extension dispatches a worker briefed with the concrete findings, then a
-  re-review — up to `maxFixRounds` times — and only then wakes the main agent with
-  the whole chain. The gate runs itself instead of asking you to babysit it.
+  re-review — up to `maxFixRounds` times — and only then wakes the main agent.
+  The gate runs itself instead of asking you to babysit it, and the widget shows
+  every round as it happens instead of a black box.
 - **Honest results.** A sub-agent can end its turn with "still working" while its
   last build actually failed. The completion message surfaces the failed tool
   calls from the run's final attempt (`completed with N failed tool call(s)`) with
@@ -74,7 +78,12 @@ Several tools now offer some form of sub-agents. What this extension does differ
   attempt's tool calls are counted — never stale errors from an abandoned one.)
 - **You can see what it is doing.** The widget shows each run's status, current
   activity (which tool, which file), model, token usage including cache reads and
-  writes, and elapsed time — plus soft warnings when a run looks stuck.
+  writes, and elapsed time — plus soft warnings when a run looks stuck. When a
+  chain finishes, the delivered message is one condensed summary (one line per
+  round: verdict + what changed/found, plus aggregate usage) instead of every
+  round's raw output stacked together; the final round's full report is attached
+  only when its detail is actionable (a FAIL verdict or a crash), and any round's
+  full report stays one `subagent_status <id>` call away.
 - **Recursion is structurally impossible.** Children are leaf processes: the
   `subagent` tool is excluded from their toolset. No runaway delegation trees.
 - **Zero runtime dependencies.** It is a plain pi extension — install, configure,

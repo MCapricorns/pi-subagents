@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { buildFixTaskBrief, buildReReviewBrief, shouldTriggerFixLoop } from "../src/fixloop.ts";
+import { buildFixTaskBrief, buildReReviewBrief, formatChainSummary, shouldTriggerFixLoop, summarizeChainResult, type ChainStep } from "../src/fixloop.ts";
 import { DEFAULT_CONFIG, type SubagentsConfig } from "../src/config.ts";
 import type { SingleResult } from "../src/spawn.ts";
 
@@ -73,5 +73,58 @@ describe("buildReReviewBrief", () => {
 		expect(brief).toContain("round 1");
 		expect(brief).toContain("file.ts:42 bug");
 		expect(brief).toContain("VERDICT: REVIEW_PASS / REVIEW_FAIL");
+	});
+});
+
+describe("summarizeChainResult", () => {
+	it("reports a passing re-review as pass", () => {
+		expect(summarizeChainResult(reviewResult("APPROVE\nVERDICT: REVIEW_PASS"))).toBe("pass");
+	});
+
+	it("reports a failing review with the fragments of what it found", () => {
+		expect(summarizeChainResult(reviewResult("issues:\n- src/index.ts render()\nVERDICT: REVIEW_FAIL"))).toContain("fail");
+		expect(summarizeChainResult(reviewResult("issues:\n- src/index.ts render()\nVERDICT: REVIEW_FAIL"))).toContain("src/index.ts");
+	});
+
+	it("reports a worker's changed paths", () => {
+		expect(
+			summarizeChainResult(reviewResult("Changed src/index.ts and tests/monitor.test.ts", { agent: "worker" })),
+		).toContain("src/index.ts");
+	});
+
+	it("omits the summary for failed runs", () => {
+		expect(summarizeChainResult(reviewResult("crashed", { exitCode: 1 }))).toBeUndefined();
+	});
+});
+
+describe("formatChainSummary", () => {
+	const step = (overrides: Partial<SingleResult>, relation: string, runId = 1): ChainStep => ({
+		runId,
+		result: reviewResult("x", overrides),
+		relation,
+	});
+
+	it("renders one line per step with verdicts, changed paths, and totals", () => {
+		const summary = formatChainSummary([
+			step({ messages: [assistant("found src/index.ts\nVERDICT: REVIEW_FAIL")] }, "initial review", 2),
+			step({ agent: "worker", messages: [assistant("fixed src/index.ts")] }, "fix round 1", 3),
+			step({ messages: [assistant("APPROVE\nVERDICT: REVIEW_PASS")] }, "re-review round 1", 4),
+		]);
+		expect(summary).toContain("## Auto-fix chain: 1 round — final PASS");
+		expect(summary).toContain("- #2 reviewer · initial review · FAIL — src/index.ts");
+		expect(summary).toContain("- #3 worker · fix round 1 · completed — changed: src/index.ts");
+		expect(summary).toContain("- #4 reviewer · re-review round 1 · PASS");
+		expect(summary).toContain("Totals: 3 runs");
+		expect(summary).toContain("subagent_status #2 #3 #4");
+	});
+
+	it("counts rounds from fix steps and flags a failed final step", () => {
+		const summary = formatChainSummary([
+			step({ messages: [assistant("VERDICT: REVIEW_FAIL")] }, "initial review", 2),
+			step({ agent: "worker", messages: [assistant("fixed")] }, "fix round 1", 3),
+			step({ exitCode: 1, messages: [assistant("crashed mid-review")] }, "re-review round 1", 4),
+		]);
+		expect(summary).toContain("## Auto-fix chain: 1 round — final failed");
+		expect(summary).toContain("- #4 reviewer · re-review round 1 · failed");
 	});
 });

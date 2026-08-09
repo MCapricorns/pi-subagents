@@ -64,6 +64,11 @@ export interface RunView {
 	relationLabel?: string;
 	/** Free-form note shown in the widget next to the status label (e.g. "auto-fix chain running"). */
 	annotation?: string;
+	/** One-line outcome summary of a finished chain run, shown in the widget so
+	 * each auto-fix round reads as what it did: a reviewer reports its verdict
+	 * plus key fragments of what it found ("fail · src/index.ts · render()"), a
+	 * worker the fragments of what it changed. Unset for non-chain runs. */
+	summary?: string;
 	/** True when a finished run is intentionally kept in the widget (e.g. an
 	 * auto-fix chain parent whose chain is still running). beginTurn preserves
 	 * retained runs so they are not swept between turns. */
@@ -472,6 +477,14 @@ export class MonitorStore {
 		this.notify();
 	}
 
+	/** Set the run's one-line outcome summary (what a finished chain round did). */
+	setSummary(id: number, text: string | undefined): void {
+		const run = this.find(id);
+		if (!run) return;
+		run.summary = text;
+		this.notify();
+	}
+
 	/** Mark a run as retained (kept in the widget despite being finished). */
 	setRetained(id: number, retained: boolean): void {
 		const run = this.find(id);
@@ -517,6 +530,7 @@ export class MonitorStore {
 		const usage = formatUsageCompact(run.usage);
 		const parts = [run.agent];
 		if (run.relationLabel) parts.push(run.relationLabel);
+		if (run.summary) parts.push(run.summary);
 		if (run.model) parts.push(run.model);
 		if (run.thinking) parts.push(`thinking ${run.thinking}`);
 		if (usage) parts.push(usage);
