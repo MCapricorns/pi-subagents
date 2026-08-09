@@ -391,7 +391,6 @@ async function runMenu(ctx: ExtensionCommandContext, configPath: string, config:
 	const choice = await ctx.ui.select("pi-subagents is already configured. What would you like to change?", [
 		"Enable/disable agents",
 		"Configure an agent (model + thinking)",
-		"Change default thinking strength",
 		"Toggle proactive injection",
 		"Change agent scope",
 		"Change max concurrent sub-agents",
@@ -437,10 +436,6 @@ async function runMenu(ctx: ExtensionCommandContext, configPath: string, config:
 		}
 		if (!configuredAny) return notifyCancelled(ctx);
 		next.agentModels = repairStaleModels(ctx, next.agentModels);
-	} else if (choice.startsWith("Change default thinking")) {
-		const thinkingLevel = await pickThinkingLevel(ctx, config.thinkingLevel);
-		if (thinkingLevel === undefined) return notifyCancelled(ctx);
-		next.thinkingLevel = thinkingLevel;
 	} else if (choice.startsWith("Toggle")) {
 		const injection = await pickInjection(ctx, config.proactiveInjection);
 		if (injection === undefined) return notifyCancelled(ctx);

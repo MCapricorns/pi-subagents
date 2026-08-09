@@ -434,9 +434,8 @@ When the config already exists, re-running `/subagents-setup` opens a menu whose
 model and thinking strength — so changing a single agent no longer walks every enabled
 agent. After one agent's model + strength picks, the wizard returns to the agent picker
 so several agents can be configured in one pass; Esc at any step ends the pass and keeps
-every agent already configured. **Change default thinking strength** sets only the global
-fallback. The rest of the menu toggles injection, scope, concurrency, fix rounds, and
-idle timeout; **Full re-setup** re-runs the whole first-time wizard.
+every agent already configured. The rest of the menu toggles injection, scope, concurrency,
+fix rounds, and idle timeout; **Full re-setup** re-runs the whole first-time wizard.
 
 ```json
 {
