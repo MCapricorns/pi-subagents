@@ -310,7 +310,7 @@ export default function (pi: ExtensionAPI): void {
 			"Modes: single ({agent, task}) or parallel ({tasks: [{agent, task}, ...]}).",
 			"It starts agents in the background and immediately returns control to the main window; completion messages automatically wake the main agent to continue.",
 			"Each agent has no memory of this conversation — brief it fully (goal, exact paths, constraints, expected output).",
-			"To get a result in-turn without sleeping, use the subagent_wait tool."
+			"Results arrive as wake-up messages automatically — you do NOT need to wait. If you must get a result in-turn, subagent_wait is a non-blocking lookup by default (pass timeoutMs to block)."
 		].join(" "),
 		promptSnippet:
 			"Start background subagents: explore (read-only search), worker (implement), reviewer (adversarial review); completion automatically resumes the main agent. Simple tasks: use direct tools, not subagents.",
@@ -321,8 +321,8 @@ export default function (pi: ExtensionAPI): void {
 			"Use subagent with agent 'reviewer' for a fresh read-only review before reporting work done or committing.",
 			"subagent launches work in the background and ends the current turn; when a result arrives, the main agent is automatically resumed with it.",
 			"Run independent tasks in parallel by passing a tasks array to subagent; let the automatically resumed main agent start dependent work after results arrive.",
-			"NEVER sleep, poll, or call other tools alongside subagent — it ends the turn immediately. The main agent is auto-resumed when results arrive; manual waiting only blocks the turn and delays delivery. The one exception is subagent_wait (below): only when you must stay in the turn.",
-			"If you must keep the turn for a result, call subagent_wait (blocks in-tool and returns the result) — never bash sleep/timeout to wait for a sub-agent.",
+			"NEVER sleep or poll, and do NOT call subagent_wait to hold the turn — subagent ends the turn immediately and the result arrives as a message that wakes you automatically (even mid-turn). Ending your turn is the default and the only correct way to wait.",
+			"If you must keep the turn for a result, call subagent_wait with an explicit timeoutMs (non-blocking by default) — never bash sleep/timeout to wait for a sub-agent.",
 		],
 		parameters: SubagentParams,
 
@@ -863,13 +863,13 @@ export default function (pi: ExtensionAPI): void {
 		},
 	});
 
-	// Blocking wait: keeps the turn alive until the targeted run(s) settle, then
-	// returns the actual result(s) to the model in-turn. Without it, a model that
-	// must stay in the turn falls back to bash sleep/poll — blocking the turn and
-	// delaying the very wake-up it is waiting for. Ending the turn and letting the
-	// steer-delivered completion wake it is still the preferred path; this tool is
-	// for when the result is needed NOW (sequential dependent steps).
-	const SUBAGENT_WAIT_DEFAULT_TIMEOUT_MS = 30 * 60 * 1000;
+	// In-turn result lookup. Dispatch already ended the turn and results arrive as
+	// wake-up messages, so the default must NOT block: a settled run returns its
+	// result immediately, a still-active run returns a "still running — end your
+	// turn" note and the model finishes (the completion then wakes it). Blocking
+	// is opt-in via an explicit timeoutMs — a long default would hold the turn
+	// hostage for nothing, since the result arrives on its own either way.
+	const SUBAGENT_WAIT_DEFAULT_TIMEOUT_MS = 0;
 
 	const SubagentWaitParams = Type.Object({
 		id: Type.Optional(
@@ -879,7 +879,7 @@ export default function (pi: ExtensionAPI): void {
 		),
 		timeoutMs: Type.Optional(
 			Type.Number({
-				description: `Give up after this many milliseconds and report the still-running runs (default ${SUBAGENT_WAIT_DEFAULT_TIMEOUT_MS}).`,
+					description: `Block for up to this many milliseconds and report the still-running runs. Default ${SUBAGENT_WAIT_DEFAULT_TIMEOUT_MS}: no blocking — settled runs return their result immediately, active runs return a note telling the model to end its turn.`,
 			}),
 		),
 	});
@@ -888,18 +888,19 @@ export default function (pi: ExtensionAPI): void {
 		name: "subagent_wait",
 		label: "Subagent Wait",
 		description: [
-			"Block the current turn until background sub-agent run(s) finish, then return their results.",
-			"Use ONLY when you must stay in the turn and act on the result immediately (sequential dependent steps).",
-			"Prefer ending your turn after subagent — the result arrives automatically and wakes you.",
+			"Look up background sub-agent run(s) and return their results.",
+			"PREFER NOT CALLING THIS: dispatching already ended your turn and results arrive as a message that wakes you automatically.",
+			"By default it does NOT block: a settled run returns its result immediately; a still-active run returns a 'still running — end your turn' note.",
+			"Pass an explicit timeoutMs ONLY when you must stay in the turn and need the result right now (sequential dependent steps).",
 			"NEVER sleep, poll, or wait with bash to get a sub-agent result: end the turn, or call this tool.",
 			"The same result is also delivered as a completion message that resumes the main agent, so you may see it twice (once here, once as a wake-up) — that is expected, not a duplicate.",
 		].join(" "),
-		promptSnippet: "Wait for a background subagent to finish and get its result in-turn (id: run id from the widget; omit for all).",
+		promptSnippet: "Look up a background subagent result in-turn (id: run id from the widget; omit for all). Non-blocking by default; pass timeoutMs to block.",
 		promptGuidelines: [
-			"Call subagent_wait only when you must keep the turn and need the result now — e.g. the next step depends on it.",
-			"After dispatching via subagent, prefer ending the turn: the completion message wakes you automatically (no waiting).",
+			"Do NOT call subagent_wait to hold the turn: results arrive as wake-up messages automatically. The default call is a non-blocking lookup — settled results return immediately, active runs return a note telling you to end your turn.",
+			"Pass an explicit timeoutMs only when you must keep the turn AND the next step depends on the result right now — e.g. the user asked you to wait for it.",
 			"Never use bash sleep/timeout/polling to wait for a sub-agent — it blocks the turn and delays result delivery.",
-			"If subagent_wait times out, call it again with a longer timeoutMs or end the turn and wait for the wake-up message.",
+			"If subagent_wait times out, end the turn and wait for the wake-up message, or call it again with a longer timeoutMs.",
 		],
 		parameters: SubagentWaitParams,
 
@@ -999,7 +1000,10 @@ export default function (pi: ExtensionAPI): void {
 					timer = setTimeout(
 						() =>
 							finish({
-								note: `wait timed out after ${Math.round(timeoutMs / 1000)}s — run #${runId} is still active; call subagent_wait again or end the turn (the result will wake you when ready)`,
+								note:
+									timeoutMs === 0
+										? `run #${runId} is still active — end your turn: the result will wake you (or call subagent_wait again with an explicit timeoutMs to block)`
+										: `wait timed out after ${Math.round(timeoutMs / 1000)}s — run #${runId} is still active; call subagent_wait again or end the turn (the result will wake you when ready)`,
 							}),
 						Math.max(1, timeoutMs),
 					);

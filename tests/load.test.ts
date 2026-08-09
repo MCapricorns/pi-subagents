@@ -379,13 +379,14 @@ process.stdin.on("end", () => {
 			);
 			expect(capturedTasks).toHaveLength(1);
 
-			// The wait blocks inside the tool call (event-driven, no sleep/poll);
-			// let the run settle afterwards and the same promise resolves with it.
+			// An explicit timeoutMs opts into blocking (the default is a
+			// non-blocking lookup); let the run settle afterwards and the same
+			// promise resolves with it.
 			const runId = monitor.getRuns().find((run) => run.task === "Fix the build")?.id;
 			expect(runId).toBeDefined();
 			const waitPromise = waitTool.execute(
 				"wait-1",
-				{ id: String(runId) },
+				{ id: String(runId), timeoutMs: 30_000 },
 				new AbortController().signal,
 				() => {},
 				executionContext(),
@@ -452,6 +453,19 @@ process.stdin.on("end", () => {
 			);
 			expect(timedOut.content[0].text).toContain("wait timed out");
 			expect(timedOut.content[0].text).toContain(`#${runId}`);
+
+			// The default is a NON-blocking lookup: a still-active run returns a
+			// note immediately (the model ends its turn and the wake-up message
+			// delivers the result) instead of holding the turn.
+			const nonBlocking = await waitTool.execute(
+				"wait-nb",
+				{ id: String(runId) },
+				new AbortController().signal,
+				() => {},
+				executionContext(),
+			);
+			expect(nonBlocking.content[0].text).toContain(`run #${runId} is still active`);
+			expect(nonBlocking.content[0].text).toContain("end your turn");
 
 			const unknown = await waitTool.execute(
 				"wait-x",
@@ -634,7 +648,13 @@ process.stdin.on("end", () => {
 			// A waiter blocks on the queued run; stopping resolves it.
 			const runId = monitor.getRuns().find((run) => run.task === "Long task")?.id;
 			expect(runId).toBeDefined();
-			const waitPromise = waitTool.execute("wait-st", { id: String(runId) }, new AbortController().signal, () => {}, executionContext());
+			const waitPromise = waitTool.execute(
+				"wait-st",
+				{ id: String(runId), timeoutMs: 30_000 },
+				new AbortController().signal,
+				() => {},
+				executionContext(),
+			);
 			const stopped = await stopTool.execute("stop-1", { id: String(runId) }, new AbortController().signal, () => {}, executionContext());
 			expect(stopped.content[0].text).toContain(`Stopped 1 run: #${runId} worker (queued)`);
 

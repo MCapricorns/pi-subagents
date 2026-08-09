@@ -41,9 +41,13 @@ It immediately ends the current main-agent turn so the user can keep working. Wh
 finishes, its result is sent back as a message that automatically resumes the main agent;
 if the main agent is busy, the result waits as a follow-up.
 
-NEVER run sleep, wait, or polling commands (e.g. Start-Sleep, sleep, timeout) to wait for
-a sub-agent — the turn already ended and the main agent is auto-resumed when results arrive.
-Manual waiting blocks the turn, delays result delivery, and wastes the user's time.
+NEVER run sleep, wait, or polling commands (e.g. Start-Sleep, sleep, timeout), and do NOT
+call subagent_wait to hold the turn — dispatching already ended it, and results arrive as
+messages that resume the main agent automatically (even mid-turn). Ending your turn is the
+default and the only correct way to wait; subagent_wait blocks the turn so the user cannot
+give you other work meanwhile. It is non-blocking by default: settled results return
+immediately, active runs return a "still running — end your turn" note. Pass an explicit
+timeoutMs only when you must stay in the turn (e.g. the user asked you to wait).
 
 Available agents:
 ${catalog}

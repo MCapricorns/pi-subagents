@@ -18,9 +18,11 @@ report their results back to the main agent automatically.
   agent automatically: injected as soon as the current tool call finishes (even
   mid-turn), or starting a new turn when idle. No polling, no "go check" step.
 - **Sub-agent toolbelt** — three companion tools that replace the classic
-  sleep/poll anti-pattern: `subagent_wait` blocks in-tool and returns the result,
-  `subagent_status` inspects active and finished runs, and `subagent_stop` cancels
-  a run (delivering its partial output as an aborted result).
+  sleep/poll anti-pattern: `subagent_wait` looks results up in-turn — **non-blocking
+  by default** (a settled run returns its result immediately, a still-active run
+  tells the model to end its turn and wait for the wake-up message; pass
+  `timeoutMs` to block) — `subagent_status` inspects active and finished runs, and
+  `subagent_stop` cancels a run (delivering its partial output as an aborted result).
 - **Honest completions** — a run that exited cleanly but whose tool calls failed
   (e.g. a broken build) is reported as `completed with N failed tool call(s)`
   with the errors attached, so a rosy final text can never hide a failure.
@@ -55,9 +57,10 @@ Several tools now offer some form of sub-agents. What this extension does differ
 - **Results come back on their own.** The extension turns the child's completion
   into a message that wakes the main agent automatically — delivered even
   mid-turn, right after the current tool call. No polling, no "go check
-  the other window" step, and **no `sleep`**: if the model must keep the turn it
-  calls `subagent_wait` (event-driven, returns the actual result) instead of
-  sleeping or polling.
+  the other window" step, and **no `sleep`** and no waiting: the model ends its
+  turn and the result wakes it. A settled result can be fetched in-turn with
+  `subagent_wait` (a non-blocking lookup by default; `timeoutMs` opts into
+  blocking) instead of sleeping or polling.
 - **Failures are handled, not reported.** Three layers of resilience: a provider-
   level model failure first retries the same model up to five times on a transient
   provider error, then retries once with the main window's model; terminal errors
@@ -333,10 +336,13 @@ main agent
 The extension registers three companion tools so the main agent never has to
 `sleep`/poll for a background run:
 
-- `subagent_wait` — blocks inside the tool call (event-driven, wakes on the run's
-  completion) and **returns the actual result in-turn**. Use it only when the current
-  turn must receive the result (sequential dependent steps); otherwise end the turn
-  and the completion message wakes you.
+- `subagent_wait` — looks up a run's result in-turn. It does **not block by
+  default**: a settled run returns its result immediately; a still-active run
+  returns a note telling the model to end its turn (the completion message then
+  wakes it). Pass `timeoutMs` to block inside the tool call (event-driven, wakes
+  on the run's completion) — only when the current turn must receive the result
+  right now (sequential dependent steps). Otherwise end the turn and the
+  completion message wakes you.
 - `subagent_status` — lists active runs (id, agent, model, usage, elapsed, activity)
   and finished results; pass an id to read a finished run's full result.
 - `subagent_stop` — cancels an active run (or `all: true`); the child is terminated
@@ -385,9 +391,11 @@ Start dependent work only after the relevant result has been delivered.
 
 ### Waiting for a result in-turn
 
-When the next step depends on a run's result and the turn must not end, use
-`subagent_wait` instead of sleeping or polling. It blocks inside the tool call
-(event-driven) and returns the actual result:
+Results arrive as messages that wake the main agent automatically, so waiting is
+usually unnecessary: end your turn and the result resumes you. When a result must
+be fetched in-turn, `subagent_wait` is a **non-blocking lookup by default** — a
+settled run returns its result immediately, a still-active run returns a note
+telling the model to end its turn:
 
 ```json
 {
@@ -395,8 +403,10 @@ When the next step depends on a run's result and the turn must not end, use
 }
 ```
 
-Pass `timeoutMs` to bound the wait; on timeout it reports the still-running runs
-and the model re-invokes it or ends the turn (the completion message then wakes it).
+Only when the turn must not end AND the result is needed right now (e.g. the user
+asked for it) pass `timeoutMs` to block; on timeout it reports the still-running
+runs and the model ends the turn (the completion message then wakes it) or
+re-invokes with a longer timeout.
 
 ### Inspecting runs
 
