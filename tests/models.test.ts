@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { availableModelRefs, repairUnavailableModelOverrides, type ModelContext } from "../src/models.ts";
+import { availableModelRefs, repairUnavailableModelOverrides, resolveVisionModelRef, type ModelContext } from "../src/models.ts";
 
 function context(current?: string, available: string[] = []): ModelContext {
 	const model = current ? (toModel(current) as unknown as ModelContext["model"]) : undefined;
@@ -29,6 +29,28 @@ describe("availableModelRefs", () => {
 		const ctx = context(undefined, ["openai/registry"]);
 		ctx.scopedModels = [{ model: toModel("anthropic/scoped") }] as unknown as ModelContext["scopedModels"];
 		expect(availableModelRefs(ctx)).toEqual(["anthropic/scoped"]);
+	});
+});
+
+describe("resolveVisionModelRef", () => {
+	it("prefers the configured vision model when available", () => {
+		const ctx = context("openai/current", ["openai/current", "anthropic/vision"]);
+		expect(resolveVisionModelRef(ctx, "anthropic/vision")).toBe("anthropic/vision");
+	});
+
+	it("falls back to the main session's current model when unset", () => {
+		const ctx = context("openai/current", ["openai/current", "anthropic/vision"]);
+		expect(resolveVisionModelRef(ctx, undefined)).toBe("openai/current");
+	});
+
+	it("falls back to the main session's current model when the configured one is unavailable", () => {
+		const ctx = context("openai/current", ["openai/current"]);
+		expect(resolveVisionModelRef(ctx, "anthropic/gone")).toBe("openai/current");
+	});
+
+	it("returns undefined only when neither a vision model nor a session model exists", () => {
+		expect(resolveVisionModelRef(context(), "anthropic/gone")).toBeUndefined();
+		expect(resolveVisionModelRef(context(), undefined)).toBeUndefined();
 	});
 });
 

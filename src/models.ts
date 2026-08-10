@@ -36,6 +36,19 @@ export function availableModelRefs(ctx: ModelContext): string[] {
 	return [currentRef, ...refs.filter((ref) => ref !== currentRef)];
 }
 
+/**
+ * Resolve the model for a `vision: true` dispatch. The configured vision model
+ * wins when it is usable by the current session; otherwise the task falls back
+ * to the main window's current model (the documented behavior when the vision
+ * model is unset). Returns undefined only when neither exists — callers then
+ * keep the agent's own model as the last resort.
+ */
+export function resolveVisionModelRef(ctx: ModelContext, visionModel?: string): string | undefined {
+	const configured = visionModel?.trim();
+	if (configured && availableModelRefs(ctx).includes(configured)) return configured;
+	return ctx.model ? modelRef(ctx.model) : undefined;
+}
+
 /** Replace unavailable persisted overrides with a model usable by the main session. */
 export function repairUnavailableModelOverrides(
 	ctx: ModelContext,

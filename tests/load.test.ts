@@ -1215,7 +1215,7 @@ process.stdin.on("end", () => {
 			expect(content).toContain("### [reviewer] failed");
 			expect(content).toContain("spawn infra exploded");
 			expect(stub.messages[0].options).toEqual({ deliverAs: "steer", triggerTurn: true });
-			expect(uiNotify).toHaveBeenCalledWith("✗ reviewer 派发失败: spawn infra exploded", "error");
+			expect(uiNotify).toHaveBeenCalledWith("✗ reviewer dispatch failed: spawn infra exploded", "error");
 			expect(monitor.getRuns().find((run) => run.annotation === "auto-fix chain running")).toBeUndefined();
 		} finally {
 			for (const controller of controllers) controller.abort();
@@ -1305,5 +1305,118 @@ describe("before_agent_start injection", () => {
 		expect(result.systemPrompt).toContain("- worker:");
 		expect(result.systemPrompt).toContain("- reviewer:");
 		expect(result.systemPrompt).not.toContain("- plan:");
+	});
+});
+
+describe("vision-flagged dispatch", () => {
+	const AVAILABLE = [
+		{ provider: "openai", id: "current" },
+		{ provider: "anthropic", id: "sonnet" },
+		{ provider: "anthropic", id: "vision" },
+	];
+
+	function visionContext(uiNotify: ReturnType<typeof vi.fn>): any {
+		return {
+			...executionContext({ uiNotify }),
+			model: { provider: "openai", id: "current" },
+			modelRegistry: { getAvailable: () => AVAILABLE },
+		};
+	}
+
+	/** Register, run one dispatch with the given vision flag + config, and return
+	 * the captured enqueue task and the spawn spy for model assertions. */
+	async function dispatchWithVision(
+		vision: boolean,
+		config: Record<string, unknown>,
+		uiNotify: ReturnType<typeof vi.fn>,
+	): Promise<{ controller: AbortController; runSpy: ReturnType<typeof vi.spyOn> }> {
+		if (!testAgentDir) throw new Error("test agent directory was not initialized");
+		writeFileSync(join(testAgentDir, "pi-subagents.json"), JSON.stringify(config), "utf8");
+		const stub = makeStub();
+		const captured: BackgroundTask[] = [];
+		const controller = new AbortController();
+		vi.spyOn(BackgroundTaskQueue.prototype, "enqueue").mockImplementation((task) => {
+			captured.push(task);
+			return controller;
+		});
+		const runSpy = vi
+			.spyOn(spawn, "runSingleAgentWithModelFallback")
+			.mockResolvedValue({
+				agent: "reviewer",
+				agentSource: "builtin",
+				task: "Compare screenshots",
+				exitCode: 0,
+				messages: [],
+				stderr: "",
+				usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, cost: 0, contextTokens: 0, turns: 0 },
+			} as any);
+		register(stub.api);
+		const tool = stub.tools.find((candidate) => candidate.name === "subagent");
+		await tool.execute(
+			"call-vision",
+			{ agent: "reviewer", task: "Compare screenshots", vision },
+			new AbortController().signal,
+			() => {},
+			visionContext(uiNotify),
+		);
+		expect(captured).toHaveLength(1);
+		await captured[0](controller.signal);
+		expect(runSpy).toHaveBeenCalledTimes(1);
+		return { controller, runSpy };
+	}
+
+	it("runs a vision-flagged task on the configured vision model, overriding the per-agent model", async () => {
+		const uiNotify = vi.fn();
+		const { controller, runSpy } = await dispatchWithVision(
+			true,
+			{
+				agentModels: { reviewer: "anthropic/sonnet" },
+				visionModel: "anthropic/vision",
+			},
+			uiNotify,
+		);
+		expect(runSpy.mock.calls[0][0].agent.model).toBe("anthropic/vision");
+		controller.abort();
+	});
+
+	it("falls back to the main session's current model when no vision model is configured", async () => {
+		const uiNotify = vi.fn();
+		const { controller, runSpy } = await dispatchWithVision(
+			true,
+			{ agentModels: { reviewer: "anthropic/sonnet" } },
+			uiNotify,
+		);
+		expect(runSpy.mock.calls[0][0].agent.model).toBe("openai/current");
+		controller.abort();
+	});
+
+	it("keeps the per-agent model when the task is not vision-flagged", async () => {
+		const uiNotify = vi.fn();
+		const { controller, runSpy } = await dispatchWithVision(
+			false,
+			{ agentModels: { reviewer: "anthropic/sonnet" } },
+			uiNotify,
+		);
+		expect(runSpy.mock.calls[0][0].agent.model).toBe("anthropic/sonnet");
+		controller.abort();
+	});
+
+	it("warns and falls back (no picker) outside the TUI when the configured vision model is unavailable", async () => {
+		const uiNotify = vi.fn();
+		const { controller, runSpy } = await dispatchWithVision(
+			true,
+			{
+				agentModels: { reviewer: "anthropic/sonnet" },
+				visionModel: "anthropic/gone",
+			},
+			uiNotify,
+		);
+		// The unavailable vision model degrades to the main session's model.
+		expect(runSpy.mock.calls[0][0].agent.model).toBe("openai/current");
+		expect(uiNotify).toHaveBeenCalledWith(
+			'Configured vision model "anthropic/gone" is unavailable; this dispatch uses the main session\'s model.',
+			"warning",
+		);
+		controller.abort();
 	});
 });

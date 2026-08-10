@@ -52,4 +52,11 @@ describe("buildDelegationDirective", () => {
 		const withReviewer = buildDelegationDirective([agent("worker"), agent("reviewer")]);
 		expect(withReviewer).toContain("multi-model cross-review");
 	});
+
+	it("instructs the main agent to judge when a task needs vision and pass vision: true", () => {
+		const directive = buildDelegationDirective([agent("explore"), agent("worker"), agent("reviewer")]);
+		expect(directive).toContain("Vision tasks");
+		expect(directive).toContain("pass `vision: true`");
+		expect(directive).toContain("falls back to the main session's current model");
+	});
 });

@@ -6,97 +6,50 @@
 ![platform](https://img.shields.io/badge/platform-Windows%20%7C%20macOS%20%7C%20Linux-lightgrey)
 ![pi](https://img.shields.io/badge/pi-extension-orange)
 
-Background delegation for [pi](https://pi.dev). This extension adds three specialized
-agents — `explore`, `worker`, `reviewer` — that run in isolated child processes and
-report their results back to the main agent automatically.
+Focused background delegation for [pi](https://pi.dev): `explore` / `worker` /
+`reviewer` agents run in **isolated child processes** and hand their results back
+to the main agent automatically. Install it, and the main model starts using it
+on its own — no prompt engineering, no babysitting.
 
 ## Highlights
 
-- **Isolated execution** — each sub-agent runs in its own `pi` process; it cannot see
-  the main conversation, so it gets a clean context window.
-- **Automatic continuation** — results are delivered as a message that wakes the main
-  agent automatically: injected as soon as the current tool call finishes (even
-  mid-turn), or starting a new turn when idle. No polling, no "go check" step.
-- **Sub-agent toolbelt** — three companion tools that replace the classic
-  sleep/poll anti-pattern: `subagent_wait` looks results up in-turn — **non-blocking
-  by default** (a settled run returns its result immediately, a still-active run
-  tells the model to end its turn and wait for the wake-up message; pass
-  `timeoutMs` to block) — `subagent_status` inspects active and finished runs, and
-  `subagent_stop` cancels a run (delivering its partial output as an aborted result).
-- **Honest completions** — a run that exited cleanly but whose tool calls failed
-  (e.g. a broken build) is reported as `completed with N failed tool call(s)`
-  with the errors attached, so a rosy final text can never hide a failure.
-- **Parallel fan-out** — independent tasks run at the same time, with a configurable
-  concurrency limit.
-- **Live progress** — a TUI widget shows each run's status, current activity, model,
-  token usage (input/output and cache read/write), and elapsed time. Auto-fix chain
-  rounds hang under their triggering review as a tree, and each finished round stays
-  visible with a one-line outcome (what a worker changed, or a re-review's
-  PASS/FAIL and what it found) until the chain resolves.
-- **Per-agent configuration** — enable agents, choose a model and thinking level per
-  agent, and tune limits from `/subagents-setup`.
-- **Automatic model fallback** — if an agent's model fails at the provider level before
-  producing any output, the SAME model is retried up to five times (bounded backoff) for
-  transient errors (503/429/timeout/network/...); if it still fails, the run is retried
-  once with the main window's current model. Terminal errors (quota exhausted, billing,
-  an invalid API key) skip both and are handed straight back to the main agent. The
-  fallback is per-run only and never persisted.
-- **Idle watchdog** — a sub-agent that produces no output for a configurable duration is
-  terminated and retried with the fallback model.
-- **Leaf processes** — sub-agents cannot access the `subagent` tool, so delegation
-  cannot recurse.
-
-## Why pi-subagents
-
-Several tools now offer some form of sub-agents. What this extension does differently:
-
-- **Real isolation, not prompt-swapping.** Each sub-agent runs as its own `pi`
-  process with its own context window. The main conversation is never polluted by
-  the child's tool calls, thinking, or long exploration trails — a "sub-agent" that
-  just swaps the system prompt inside the same session does not give you that.
-- **Results come back on their own.** The extension turns the child's completion
-  into a message that wakes the main agent automatically — delivered even
-  mid-turn, right after the current tool call. No polling, no "go check
-  the other window" step, and **no `sleep`** and no waiting: the model ends its
-  turn and the result wakes it. A settled result can be fetched in-turn with
-  `subagent_wait` (a non-blocking lookup by default; `timeoutMs` opts into
-  blocking) instead of sleeping or polling.
-- **Failures are handled, not reported.** Three layers of resilience: a provider-
-  level model failure first retries the same model up to five times on a transient
-  provider error, then retries once with the main window's model; terminal errors
-  (quota/auth) short-circuit straight to the main agent; an idle watchdog terminates
-  a run that goes silent (a stalled stream) and retries it; and a concurrent-startup
-  race is retried with backoff automatically. The widget and the completion message
-  tell you when any of these happened.
-- **A quality gate that closes the loop.** When a reviewer returns `REVIEW_FAIL`,
+- **Zero-setup proactive dispatch** — the extension injects a delegation directive
+  into the main system prompt, so the main model automatically sends broad searches
+  to `explore`, self-contained implementations to `worker`, and pre-commit reviews
+  to `reviewer`. You just use pi; delegation happens by itself.
+- **Vision-capable image tasks** — a task that may need to view screenshots,
+  mockups, or design files is flagged `vision: true`; the sub-agent then runs on
+  the vision model you configure in `/subagents-setup`. Not configured? It falls
+  back to the main session's current model. Configured model unavailable? You are
+  asked to pick a replacement, which is persisted. The agents know they can `read`
+  image files when the brief asks.
+- **Results come back on their own** — completions are delivered as messages that
+  wake the main agent automatically, even mid-turn. No polling, no `sleep`, no
+  "go check" step. `subagent_wait` is a **non-blocking** in-turn lookup by default
+  (pass `timeoutMs` to block); `subagent_status` inspects runs; `subagent_stop`
+  cancels one and delivers its partial output.
+- **A quality gate that closes the loop** — when a reviewer returns `REVIEW_FAIL`,
   the extension dispatches a worker briefed with the concrete findings, then a
-  re-review — up to `maxFixRounds` times — and only then wakes the main agent.
-  The gate runs itself instead of asking you to babysit it, and the widget shows
-  every round as it happens instead of a black box.
-- **Honest results.** A sub-agent can end its turn with "still working" while its
-  last build actually failed. The completion message surfaces the failed tool
-  calls from the run's final attempt (`completed with N failed tool call(s)`) with
-  the error lines attached, so the main agent never trusts a cheerful summary
-  over reality. (A model-fallback retry runs the work fresh, so only the final
-  attempt's tool calls are counted — never stale errors from an abandoned one.)
-- **You can see what it is doing.** The widget shows each run's status, current
-  activity (which tool, which file), model, token usage including cache reads and
-  writes, and elapsed time — plus soft warnings when a run looks stuck. When a
-  chain finishes, the delivered message is one condensed summary (one line per
-  round: verdict + what changed/found, plus aggregate usage) instead of every
-  round's raw output stacked together; the final round's full report is attached
-  only when its detail is actionable (a FAIL verdict or a crash), and any round's
-  full report stays one `subagent_status <id>` call away.
-- **Recursion is structurally impossible.** Children are leaf processes: the
-  `subagent` tool is excluded from their toolset. No runaway delegation trees.
-- **Zero runtime dependencies.** It is a plain pi extension — install, configure,
-  go. Agents are Markdown files, so overriding or adding one is just writing a
-  file.
-
-It is not the right tool for everything: if you need agents that share state,
-communicate with each other, or run long-lived background services, a heavier
-orchestration framework fits better. This one is deliberately narrow — bounded
-delegation of focused, self-contained work.
+  re-review, up to `maxFixRounds` times — and only then wakes the main agent.
+- **Self-healing model management** — unavailable configured models are repaired
+  and persisted automatically; a provider hiccup retries the same model up to 5×
+  with backoff, then falls back once to the main window's model; terminal errors
+  (quota/auth) short-circuit straight to the main agent; an idle watchdog kills
+  runs that go silent; startup races are retried with backoff.
+- **Honest completions** — a run that ended with failed tool calls (e.g. a broken
+  build) is reported as `completed with N failed tool call(s)` with the errors
+  attached — a cheerful final text can never hide a failure.
+- **Parallel fan-out** — independent tasks run concurrently up to a configurable
+  limit (default 4).
+- **Live progress widget** — each run's status, current activity, model, token
+  usage, and elapsed time; auto-fix chain rounds hang under their triggering
+  review as a tree, each finished round keeping a one-line outcome.
+- **Recursion is structurally impossible** — children are leaf processes; the
+  `subagent` tool is excluded from their toolset.
+- **Zero runtime dependencies** — agents are plain Markdown files; overriding or
+  adding one is writing a file.
+- **Update announcements** — when a new configurable feature ships, you are told
+  about it once (a persisted marker stops the notice from nagging).
 
 ## Install
 
@@ -104,357 +57,88 @@ delegation of focused, self-contained work.
 pi install npm:@ferris1225/pi-subagents
 ```
 
-Requires pi **>= 0.80.6**.
-
-After installation, open the setup wizard in an interactive TUI session:
+Requires pi **>= 0.80.6**. After installation, open the setup wizard in an
+interactive TUI session:
 
 ```text
 /subagents-setup
 ```
 
-The default configuration enables `explore`, `worker`, and `reviewer`.
+The default configuration enables `explore`, `worker`, and `reviewer` — you can
+start delegating immediately.
 
-## Included agents
+## The agents
 
-| Agent | Default | Access | Default model | Thinking | Purpose |
-| --- | :---: | --- | --- | --- | --- |
-| `explore` | Yes | Read-only | `claude-haiku-4-5` | `low` | Fast codebase reconnaissance and structured findings. |
-| `worker` | Yes | Full | `claude-sonnet-4-5` | `high` | Implements, fixes, refactors, and tests a self-contained task. |
-| `reviewer` | Yes | Read-only | `claude-sonnet-4-5` | `high` | Adversarial quality gate: diff review (default), plus plan, proposed-solution, codebase-health, and PR/issue validation. |
+| Agent | Access | Purpose |
+| --- | --- | --- |
+| `explore` | Read-only | Fast codebase reconnaissance: broad/open-ended search, multi-file lookups, mapping unfamiliar code. Returns compressed, structured findings. |
+| `worker` | Full | Implements, fixes, refactors, and tests a self-contained task end to end, then reports honest verification. |
+| `reviewer` | Read-only | Adversarial pre-commit quality gate: diff review, plus plans, proposed solutions, codebase health, and PR/issue validation. |
 
-Agents are Markdown files in `agents/`. Each file contains YAML frontmatter and a system
-prompt. User and project scopes can override a built-in agent with the same name; the
-frontmatter defaults above are overridden by `agentModels` / `agentThinkingLevels` when set.
-
-### Agent prompts
-
-The prompts below mirror `agents/*.md` — the files loaded at dispatch time. They define
-each agent's role, constraints, and output format, so keep them in sync if you edit
-either side.
-
-<details>
-<summary><code>agents/explore.md</code> — reconnaissance</summary>
-
-```markdown
----
-name: explore
-description: Fast read-only codebase reconnaissance. Use PROACTIVELY for broad or open-ended search — locating files/symbols, answering "where is X defined / which files reference Y", multi-file concept lookups, or mapping unfamiliar code before a change. Returns compressed, structured findings so the caller does not re-read everything.
-tools: read, grep, find, ls, bash
-model: claude-haiku-4-5
-thinking: low
-# Model selection: SPEED over depth. Pick the fastest available model.
-# What matters: fast grep/find/read, structured output. What doesn't: deep reasoning.
----
-
-You are an explore agent: a fast, read-only reconnaissance specialist. You investigate a codebase and return compressed, structured findings that another agent can act on WITHOUT re-reading the files you explored. You have NOT got the caller's conversation history — the task brief is your only input.
-
-## Hard constraints
-- You are READ-ONLY. Never create, edit, or delete files; never run mutating commands.
-- Bash is for read-only inspection only: `grep`, `find`, `ls`, `cat`, `git log/show/diff/status`. No installs, builds, or state changes.
-- Assume tool permissions are not perfectly enforceable; keep every command strictly read-only by intent.
-
-## When invoked
-1. Orient with `grep`/`find` to locate the relevant code fast. Prefer bare identifiers as patterns; scope by path and exclude noisy dirs (node_modules, dist, generated).
-2. Read KEY SECTIONS, not whole files. After 1-2 greps, read the top match instead of running more greps.
-3. Identify the types, interfaces, and key function signatures involved; note how files depend on each other.
-4. Record exact paths and line ranges so the caller can jump straight in.
-
-## Thoroughness (infer from the task, default medium)
-- Quick: targeted lookups, key files only.
-- Medium: follow imports and callers, read critical sections.
-- Thorough: trace dependencies across modules; check tests and types.
-
-## Collaboration
-- Your output feeds `worker` (or the main agent directly). Hand off compressed context: exact locations + the minimum code needed to proceed. Flag anything ambiguous so the caller can decide.
-
-## Output format
-## Files Retrieved
-1. `path/to/file.ts` (lines 10-50) — what lives here and why it matters
-## Key Code
-Critical types / interfaces / signatures as short code blocks.
-## Architecture
-A brief explanation of how the pieces connect.
-## Start Here
-Which file to look at first, and why.
-
-## Quality standards
-Terse and factual. Exact paths and line numbers. Compress — do not narrate your search process or pad with prose.
-```
-
-</details>
-
-<details>
-<summary><code>agents/worker.md</code> — implementation</summary>
-
-```markdown
----
-name: worker
-description: General-purpose implementation agent with full tools in an isolated context. Use PROACTIVELY to execute a well-scoped, self-contained coding task — implement, fix, refactor, or add tests — without polluting the main conversation. Plans internally, then implements and verifies. Give it a complete, self-contained brief.
-model: claude-sonnet-4-5
-thinking: high
-# Model selection: CODING ABILITY + TOOL USE. The primary implementation model —
-# balance quality against cost. No `tools` field => inherits all tools (full capability).
----
-
-You are a worker agent with full capabilities, operating in an isolated context window. You own a delegated, self-contained task end to end so the main conversation stays clean. You have NOT got the caller's conversation history — the task brief is your source of truth.
-
-## Standard operating procedure
-Work in phases. Do not skip planning or verification.
-
-### Phase 1 — Context
-Read the brief fully. If it references files, read them before editing. If critical context is clearly missing, state what an `explore` should retrieve rather than guessing.
-
-### Phase 2 — Plan
-Inspect existing code and conventions first. Form the smallest coherent root-cause change that satisfies the brief. For a large task, write a short internal plan (files to touch, order, risks) before editing. Do not refactor unrelated code or create docs unless the brief asks.
-
-### Phase 3 — Implement
-Make the change. Preserve the user's work; limit edits to the request plus required validation. Follow the project's existing error handling, naming, and style.
-
-### Phase 4 — Verify
-Run the project's format/build/tests when they exist (e.g. `tsc --noEmit`, the test runner). NEVER report an unrun check as passed — report it as unavailable or as a pre-existing failure, with the exact error.
-
-### Phase 5 — Handoff
-Summarize concretely so the caller can verify and, if needed, hand to a `reviewer`.
-
-## Collaboration
-- You cannot dispatch sub-agents (children are leaf processes with no `subagent` tool). When the
-  brief lacks context that needs broad code discovery, state concretely what an `explore` should
-  retrieve for the caller — do not guess.
-- Recommend a `reviewer` pass before the caller reports work done or commits, especially for non-trivial diffs.
-
-## Output format
-## Completed
-What was done, in a few lines.
-## Files Changed
-- `path/to/file.ts` — what changed.
-## Verification
-Which checks you ACTUALLY ran and their result (e.g. `tsc --noEmit` clean; `vitest` 12 passed). State explicitly anything you could not run and why.
-## Notes (if any)
-Follow-ups, decisions made, blockers. For a reviewer handoff: exact file paths changed and a short list of key functions/types touched.
-
-## Quality standards
-Root-cause fixes over patches. No unrelated churn. Honest verification — an unrun check is never a passed check.
-```
-
-</details>
-
-<details>
-<summary><code>agents/reviewer.md</code> — quality gate</summary>
-
-```markdown
----
-name: reviewer
-description: Adversarial code reviewer and pre-commit quality gate. Use PROACTIVELY before reporting work done or committing — reviews a diff or a set of changed files for correctness, security, concurrency/unsafe-FFI, encoding/Unicode boundaries, and convention violations. Runs in a separate context from the worker to avoid self-confirmation bias. Read-only; never edits, builds, or runs tests. Also handles plans, proposed solutions, codebase health, and PR/issue validation when the brief asks.
-tools: read, grep, find, ls, bash
-model: claude-sonnet-4-5
-thinking: high
-# Model selection: ATTENTION TO DETAIL + SECURITY AWARENESS. This is the quality gate —
-# use the strongest available reasoning model.
----
-
-You are a senior, adversarial code reviewer. Your job is to FIND WHAT IS WRONG, not to validate. Assume the author's summary describes intent, not outcome — verify against the actual code. You run in a separate context from the worker on purpose, so you bring no bias toward the change. You have NOT got the caller's conversation history.
-
-## Hard constraints
-- You are READ-ONLY. Do NOT modify files, run builds, or run tests.
-- Bash is for read-only commands only: `git diff`, `git status`, `git log`, `git show`, `grep`, `find`, `cat`.
-- Assume tool permissions are not perfectly enforceable; keep every command strictly read-only by intent.
-
-## Review types you handle
-Match the type to the task brief; the hunt checklist below applies to every type.
-
-### 1. Code diffs (default)
-1. Run `git diff` and `git status` to see the recent changes. If a specific file set was given, read those files.
-2. Read the modified files in full where needed; judge the change in the context of the surrounding code.
-
-### 2. Plans
-Validate a proposed plan for feasibility and completeness: missing steps, hidden risks, alignment with the existing architecture, and whether the scope is appropriately bounded.
-
-### 3. Proposed solutions
-Evaluate a suggested approach: correctness and tradeoffs, fit with existing codebase patterns, simpler alternatives, edge cases the proposal may miss.
-
-### 4. Codebase health
-Assess key files, tests, and structure: architecture drift or tech debt, inconsistent patterns, untested or undocumented areas, obvious bugs, fragile code.
-
-### 5. Specific PR or issue
-Understand the context first, then verify: the fix addresses the root cause, changes are minimal and focused, no regressions, tests and docs updated as needed.
-
-## Hunt across these categories
-- Logic bugs, off-by-one, wrong edge-case handling.
-- Error handling gaps; swallowed failures; unreported unrun checks.
-- Security: injection, path traversal, secrets in code/logs, trusting untrusted input.
-- Concurrency: shared mutable state, locks held across await, races.
-- Encoding/Unicode: assuming `char*`/files/CLI text is UTF-8; wrong `A` vs `W` Win32 APIs; boundary conversions.
-- Resource leaks; violations of the project's stated conventions.
-- Classify severity honestly. Distinguish blockers from nits; do not pad with style preferences.
-
-## Collaboration
-- Independent of `worker` by design — your verdict is the gate before commit. Fix nothing yourself; report so the caller can dispatch a worker.
-
-## Output format
-## Files Reviewed
-- `path/to/file.ts`
-## Critical (must fix)
-- `file.ts:42` — concrete issue and why it breaks.
-## Warnings (should fix)
-- `file.ts:10` — issue and suggested direction.
-## Suggestions (consider)
-- Optional improvements.
-## Verdict
-One of: APPROVE / APPROVE_WITH_NITS / REQUEST_CHANGES, plus a 2-3 sentence rationale.
-End with exactly one machine-readable line: `VERDICT: REVIEW_PASS` for APPROVE or APPROVE_WITH_NITS; `VERDICT: REVIEW_FAIL` for REQUEST_CHANGES.
-
-## Quality standards
-Specific file paths and line numbers. No vague feedback. A clean report means you looked hard, not that you found nothing to say.
-```
-
-</details>
-
-## Workflow
-
-```text
-main agent
-    │
-    ├─ subagent(explore / worker / reviewer)
-    │       └─ isolated pi child process
-    │                 └─ result message
-    │
-    └─ automatic follow-up turn with the result
-```
-
-1. The main agent calls `subagent` with a self-contained brief.
-2. The tool returns immediately, so the editor stays usable while the child works.
-3. Up to `maxConcurrency` sub-agents run at once (default 4); a parallel call accepts at
-   most that many tasks, and anything beyond waits in the queue.
-4. When a run finishes (successfully or not), the extension sends a result message to the
-   main session. The result is delivered as soon as the current tool call finishes — even
-   mid-turn — or starts a new turn when the agent is idle. A run that ended with failed
-   tool calls (e.g. a broken build) is reported as such, never as a plain success.
-5. The main agent uses the result to continue. No extra user prompt is needed.
-
-### Waiting, inspecting, and stopping runs
-
-The extension registers three companion tools so the main agent never has to
-`sleep`/poll for a background run:
-
-- `subagent_wait` — looks up a run's result in-turn. It does **not block by
-  default**: a settled run returns its result immediately; a still-active run
-  returns a note telling the model to end its turn (the completion message then
-  wakes it). Pass `timeoutMs` to block inside the tool call (event-driven, wakes
-  on the run's completion) — only when the current turn must receive the result
-  right now (sequential dependent steps). Otherwise end the turn and the
-  completion message wakes you.
-- `subagent_status` — lists active runs (id, agent, model, usage, elapsed, activity)
-  and finished results; pass an id to read a finished run's full result.
-- `subagent_stop` — cancels an active run (or `all: true`); the child is terminated
-  and an aborted result with its partial output is delivered, so the main agent
-  always knows the run did not complete.
-
-Switching sessions, reloading, or shutting down cancels remaining background runs. A
-crashed or aborted agent returns whatever partial output it produced, clearly labelled,
-so the main agent can decide whether to retry.
+Each agent runs in its own isolated `pi` process with a clean context window; it
+has no memory of your conversation, so briefs must be self-contained (goal, exact
+paths, constraints, expected output).
 
 ## Usage
 
-The main agent is encouraged to delegate automatically, but you can also ask directly:
-
-```text
-Use explore to map how authentication is wired up.
-Ask worker to implement the API change after the exploration is complete.
-Run reviewer on the final diff before reporting completion.
-```
-
 ### Single task
 
-```json
-{
-  "agent": "worker",
-  "task": "Implement the requested change. Inspect the existing conventions, update tests, and report the files changed and checks run."
-}
+```ts
+subagent({ agent: "explore", task: "Map the test setup: which files run what, and how is CI wired? Report exact paths." });
+subagent({ agent: "worker", task: "Implement X in src/foo.ts, add tests, run npm test." });
+subagent({ agent: "reviewer", task: "Review the diff of src/index.ts and tests/load.test.ts for correctness and edge cases." });
 ```
-
-Optional `cwd` selects the working directory for that child.
 
 ### Parallel tasks
 
-Use parallel mode only for independent work:
-
-```json
-{
-  "tasks": [
-    { "agent": "explore", "task": "Map the API layer and its tests." },
-    { "agent": "explore", "task": "Map the database layer and its tests." }
-  ]
-}
+```ts
+subagent({
+  tasks: [
+    { agent: "explore", task: "Where is the model fallback logic?" },
+    { agent: "worker", task: "Add unit tests for models.ts." },
+  ],
+});
 ```
 
-Start dependent work only after the relevant result has been delivered.
+### Vision tasks (screenshots / mockups / designs)
 
-### Waiting for a result in-turn
+When a task may require viewing images — frontend work, UI review, design
+comparisons — set `vision: true` and give the sub-agent the exact image paths:
 
-Results arrive as messages that wake the main agent automatically, so waiting is
-usually unnecessary: end your turn and the result resumes you. When a result must
-be fetched in-turn, `subagent_wait` is a **non-blocking lookup by default** — a
-settled run returns its result immediately, a still-active run returns a note
-telling the model to end its turn:
-
-```json
-{
-  "id": "3"
-}
+```ts
+subagent({
+  agent: "reviewer",
+  task: "Compare the UI in screenshots/settings.png against the mockup design.png; list every visual mismatch.",
+  vision: true,
+});
 ```
 
-Only when the turn must not end AND the result is needed right now (e.g. the user
-asked for it) pass `timeoutMs` to block; on timeout it reports the still-running
-runs and the model ends the turn (the completion message then wakes it) or
-re-invokes with a longer timeout.
+The sub-agent reads the images with its `read` tool. Model selection for
+vision-flagged runs: configured `visionModel` → main session's current model →
+agent's own model. When a configured vision model is no longer available, the
+TUI asks you to pick a replacement (persisted); outside the TUI it warns and
+falls back. A vision-flagged auto-fix chain keeps its worker/re-review rounds on
+the vision model too, since they re-read the same images.
 
-### Inspecting runs
+### Waiting, inspecting, stopping
 
-`subagent_status` returns an overview of active and finished runs with their ids:
-
-```json
-{}
-```
-
-Pass a run id to read that run's full result:
-
-```json
-{
-  "id": "3"
-}
-```
-
-### Stopping a run
-
-`subagent_stop` cancels a run that is obsolete, stuck, or superseded — the child is
-terminated and an aborted result (with partial output) is delivered:
-
-```json
-{
-  "id": "3"
-}
-```
-
-Or stop everything with `{ "all": true }`.
+- `subagent_wait` — in-turn result lookup. **Non-blocking by default**: a settled
+  run returns its result immediately; a still-active run tells the model to end
+  its turn (the wake-up message arrives on its own). Pass `timeoutMs` only when
+  you must stay in the turn.
+- `subagent_status` — what is running now, what finished this session, full
+  result by run id.
+- `subagent_stop` — cancel a run (or all); the child is terminated and an aborted
+  result with partial output is delivered.
 
 ## Configuration
 
-Configuration is stored at `~/.pi/agent/pi-subagents.json`. The location follows
-`PI_CODING_AGENT_DIR` when set.
-
-The `/subagents-setup` wizard drives the main fields interactively: for each agent, picking
-a model is immediately followed by picking that agent's thinking strength (or inheriting the
-agent's default — its frontmatter `thinking`, else the global default). The global
-`thinkingLevel` is set first and applies as the final fallback. `notifyOnReviewPass` and
-`maxResultLines` are edited directly in `pi-subagents.json`.
-
-When the config already exists, re-running `/subagents-setup` opens a menu whose
-**Configure an agent (model + thinking)** entry lets you pick one agent and set just its
-model and thinking strength — so changing a single agent no longer walks every enabled
-agent. After one agent's model + strength picks, the wizard returns to the agent picker
-so several agents can be configured in one pass; Esc at any step ends the pass and keeps
-every agent already configured. The rest of the menu toggles injection, scope, concurrency,
-fix rounds, and idle timeout; **Full re-setup** re-runs the whole first-time wizard.
+Stored at `~/.pi/agent/pi-subagents.json` (follows `PI_CODING_AGENT_DIR` when
+set). The `/subagents-setup` wizard drives every field interactively — models,
+thinking levels, the vision model, concurrency, fix rounds, idle timeout, scope,
+and injection — with a per-agent "configure one" menu when the config already
+exists. `notifyOnReviewPass` and `maxResultLines` are edited directly in the
+file.
 
 ```json
 {
@@ -463,10 +147,10 @@ fix rounds, and idle timeout; **Full re-setup** re-runs the whole first-time wiz
     "explore": "anthropic/claude-haiku-4-5"
   },
   "agentThinkingLevels": {
-    "explore": "low",
-    "worker": "high"
+    "explore": "low"
   },
   "thinkingLevel": "high",
+  "visionModel": "anthropic/claude-sonnet-4-5",
   "notifyOnReviewPass": false,
   "maxResultLines": 80,
   "proactiveInjection": true,
@@ -483,68 +167,65 @@ fix rounds, and idle timeout; **Full re-setup** re-runs the whole first-time wiz
 | `agentModels` | Optional `provider/model-id` override per agent. |
 | `agentThinkingLevels` | Optional thinking level per agent; agents without an entry use the agent's frontmatter `thinking`, then `thinkingLevel`. |
 | `thinkingLevel` | Default thinking level: `off`, `minimal`, `low`, `medium`, `high`, `xhigh`, or `max` (default `high`). |
+| `visionModel` | Optional vision-capable model for `vision: true` tasks (screenshots/mockups/designs). Unset = falls back to the main session's current model. |
 | `notifyOnReviewPass` | When `true`, a passing reviewer result is delivered without waking the main agent (default `false`). |
 | `maxResultLines` | Max lines of a sub-agent result carried in the completion message (default `80`). Longer results are truncated; the full text is written to a temp file whose path is included in the message. |
 | `proactiveInjection` | Whether to add the delegation directive to the main system prompt. |
 | `agentScope` | `user`, `project`, or `both`; controls which user/project agent directories are discovered. |
 | `maxConcurrency` | Max sub-agent processes running at once (1–16, default 4), and the max tasks one parallel `subagent` call accepts. Extra work waits in the queue. |
-| `maxFixRounds` | Auto-fix rounds when a reviewer returns `REVIEW_FAIL`: the extension dispatches a `worker` (briefed with the review's findings) then a `reviewer` re-review, repeating up to this many times before waking the main agent with the full chain. `0` disables it (the main agent handles fixes itself). Default 2. |
-| `idleTimeoutSec` | Idle timeout in seconds: a sub-agent whose stdout goes silent for this long is terminated and retried (same model first, then the main-window fallback, like any transient provider failure). `0` disables the idle watchdog. Default 90. A long but active run is never interrupted. |
+| `maxFixRounds` | Auto-fix rounds when a reviewer returns `REVIEW_FAIL` (default 2; `0` disables the loop). |
+| `idleTimeoutSec` | Idle watchdog: a sub-agent whose stdout goes silent for this long is terminated and retried. `0` disables it. Default 90. |
+
+### Model precedence
+
+```text
+per-agent override → current main-session model → agent frontmatter model
+```
+
+For vision-flagged runs:
+
+```text
+visionModel (configured) → current main-session model → agent model
+```
+
+Unavailable configured models are replaced with a usable current-session model
+and the repaired config is saved. At runtime, a model that fails at the provider
+level before producing output is retried (same model up to 5× on transient
+errors, then once with the main window's model — per-run only, never persisted);
+if everything fails, the task is handed back to the main window with
+instructions to execute it directly.
 
 ### Configuration migration
 
 The config file migrates itself on load — no manual steps after an upgrade:
-
-- **Schema upgrades** — a config written by an older version (missing newer keys or
-  holding invalid values) is normalized and saved back with the new fields filled in.
-- **Removed agents** — agents no longer shipped are stripped from `enabledAgents`,
-  `agentModels`, and `agentThinkingLevels` automatically.
-- **Merged limits** — the pre-0.13 `maxParallelTasks` key is folded into `maxConcurrency`
-  (the larger of the two wins) and dropped on the next save.
-- **Removed keys** — `maxSubagentDepth` (0.14) is dropped on load: sub-agent children are
-  always leaf processes. To disable delegation entirely, use `"enabledAgents": []`.
-- **New fields** — `idleTimeoutSec` (0.16) is filled in on load with its default (90)
-  when missing from an older config.
-
-Model selection uses this precedence:
-
-```text
-configured agent model → current main-session model → agent frontmatter model
-```
-
-Unavailable configured models are replaced with a usable current-session model when
-possible, and the repaired configuration is saved.
-
-At runtime, if an agent's model fails at the provider level before producing any output
-(bad model id, auth, thinking level, quota, ...), the run is retried **once** with the
-main window's current model. This degradation is per-run only and never persisted; it
-does not apply to task-level failures (the model worked, the task failed) or aborts.
-Idle timeouts count as model-level failures and do trigger the fallback, since a stalled
-stream is usually a provider-side issue. Results carry a `model fell back from …` note
-when it happened.
-
-If the model is unavailable or broken and the fallback retry also fails (or no fallback
-model is available), the task is **handed back to the main window**: the completion
-message tells the main agent to execute the task itself with its own tools. A background
-task that crashes with an exception is also surfaced — the user gets a `✗ dispatch
-failed` notification and the failure is delivered to the main agent, which can
-re-dispatch it.
-
-Thinking strength uses this precedence: `agentThinkingLevels` entry → agent frontmatter `thinking` → `thinkingLevel` default.
+schema upgrades are normalized and saved back, removed agents are stripped,
+legacy keys (`maxParallelTasks`, `maxSubagentDepth`) are folded in or dropped,
+and new fields are filled with defaults. New features are announced to you once
+after an update via a toast (marker persisted in `announcedFeatures`).
 
 ## Agent discovery and overrides
 
-- Built-in agents are shipped with the package.
-- User agents live in `~/.pi/agent/agents/`.
-- Project agents live in the nearest `.pi/agents/` directory.
-- For duplicate names, project overrides user and user overrides built-in.
+- Built-in agents ship with the package; user agents live in `~/.pi/agent/agents/`;
+  project agents in the nearest `.pi/agents/` directory.
+- For duplicate names: project overrides user overrides built-in. Keep the
+  matching filename and `name` field to replace a built-in agent.
+- Optional frontmatter: `model` (default model reference), `thinking` (default
+  thinking strength), `tools` (comma-separated tool allow-list; absent = all
+  tools). Config overrides win at spawn.
 
-Use a matching Markdown filename and `name` field to replace a built-in agent. Keep the
-task brief explicit: include the goal, relevant paths, constraints, and expected handoff.
+## How it stays reliable
 
-Optional frontmatter fields: `model` (default model reference) and `thinking` (default
-thinking strength). Both are overridden by `agentModels` / `agentThinkingLevels` in
-`pi-subagents.json` when set.
+- **Three-layer model resilience** — same-model retry with backoff on transient
+  provider errors (503/429/timeout/network), then a one-shot fallback to the main
+  window's model. Terminal errors (quota/billing/invalid key/auth) never retry.
+- **Startup-race retries** — a silent zero-activity child exit (concurrent pi
+  startup lock contention) is relaunched with backoff; only clean silent exits
+  qualify, so real work is never duplicated.
+- **Idle watchdog** — a stalled provider stream (no output for `idleTimeoutSec`)
+  terminates the child and retries via the normal fallback path.
+- **Dispatch crashes surface** — an exception in the dispatch layer produces a
+  failed result with a notification, never a silent hang.
+- **Leaf children** — no nested delegation, no runaway trees.
 
 ## Development
 
@@ -554,7 +235,11 @@ npm run check
 npm test
 ```
 
-The package has no runtime dependencies beyond pi peer dependencies.
+The source is modular: `dispatch.ts` (subagent tool + auto-fix chain + vision
+model), `tools.ts` (wait/status/stop), `widget.ts` (widget + announcements),
+`runtime.ts` (shared session state), `spawn.ts` (child process layer),
+`monitor.ts` (run tracking), `setup.ts` (wizard), `prompt.ts` (delegation
+directive). No runtime dependencies beyond pi peer dependencies.
 
 ## Acknowledgments
 
@@ -562,35 +247,18 @@ The package has no runtime dependencies beyond pi peer dependencies.
   (`examples/extensions/subagent`) — the child-process dispatch and
   event-stream handling build on it.
 - [tintinweb/pi-subagents](https://github.com/tintinweb/pi-subagents) — the
-  live widget (two lines per run: header + quiet gray activity row) and
-  parallel fan-out follow its design.
+  live widget and parallel fan-out follow its design.
 - [nicobailon/pi-subagents](https://github.com/nicobailon/pi-subagents) — the
-  result-delivery design is learned from it: prompt **steer** delivery (a
-  completion is injected right after the current tool call instead of waiting
-  for the turn to end), a blocking `subagent_wait` tool that returns the result
-  in-turn, status inspection and stop/interrupt management, and the rule that
-  an agent should never `sleep`/poll for a background run. Its status-file and
-  workflow-script orchestration (JS chains, checkpoints, scheduling, missions)
-  are deliberately out of scope here: this extension stays a focused 3-agent
-  delegation tool with a configuration wizard instead of a full orchestrator.
+  result-delivery design is learned from it: prompt **steer** delivery, a
+  non-blocking `subagent_wait`, status inspection, and stop/interrupt
+  management. Its status-file and workflow-script orchestration are deliberately
+  out of scope: this extension stays a focused 3-agent delegation tool with a
+  configuration wizard.
 - The sub-agent pattern itself, popularized by
-  [Claude Code](https://github.com/anthropics/claude-code): role-specialized
-  agents that receive self-contained briefs.
+  [Claude Code](https://github.com/anthropics/claude-code).
 
 The agent prompts and extension code are written independently for this
 project; the projects above served as design references.
-
-### What stays ours
-
-- **Exactly three focused agents** (`explore` / `worker` / `reviewer`) with
-  hand-tuned prompts, not a generic orchestration surface.
-- **`/subagents-setup` wizard** — per-agent model + thinking selection,
-  concurrency, fix rounds, idle watchdog, scope, injection — with config
-  migration and unavailable-model repair, all interactive.
-- **The auto-fix loop** — a `REVIEW_FAIL` reviewer automatically drives
-  worker → re-review rounds before waking anyone.
-- **Zero runtime dependencies**: agents are plain Markdown files; override or
-  add one by writing a file.
 
 ## License
 

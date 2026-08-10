@@ -24,6 +24,11 @@ import {
 } from "@earendil-works/pi-tui";
 import type { ExtensionCommandContext } from "@earendil-works/pi-coding-agent";
 
+/** The slice of the extension context the pickers need (mode + ui), so both
+ * command handlers (ExtensionCommandContext) and tool execute handlers
+ * (ExtensionContext) can use them. */
+export type PickerContext = Pick<ExtensionCommandContext, "mode" | "ui">;
+
 /** Rows shown at once; longer lists are reached with PageUp/PageDown. */
 export const PAGE_SIZE = 8;
 
@@ -185,7 +190,7 @@ function makeStyles(theme: { fg: (color: any, text: string) => string; bold: (te
 	};
 }
 
-function requireTui(ctx: ExtensionCommandContext): boolean {
+function requireTui(ctx: PickerContext): boolean {
 	if (ctx.mode !== "tui") {
 		ctx.ui.notify("/subagents-setup requires Pi's interactive TUI.", "error");
 		return false;
@@ -195,7 +200,7 @@ function requireTui(ctx: ExtensionCommandContext): boolean {
 
 /** Single-select with fuzzy filter + paging. Resolves undefined on Esc. */
 export function promptSelectOne(
-	ctx: ExtensionCommandContext,
+	ctx: PickerContext,
 	title: string,
 	hint: string,
 	items: SelectItem[],
@@ -213,7 +218,7 @@ export function promptSelectOne(
 
 /** Multi-select with fuzzy filter + paging. Resolves undefined on Esc. */
 export function promptSelectMany(
-	ctx: ExtensionCommandContext,
+	ctx: PickerContext,
 	title: string,
 	hint: string,
 	items: SelectItem[],

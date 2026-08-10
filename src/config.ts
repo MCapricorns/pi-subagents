@@ -108,6 +108,18 @@ export interface SubagentsConfig {
 	 * model. 0 disables the idle watchdog. Default: 90.
 	 */
 	idleTimeoutSec: number;
+	/**
+	 * Vision-capable model for tasks flagged `vision: true` (viewing screenshots,
+	 * mockups, designs). Unset means such tasks fall back to the main session's
+	 * current model.
+	 */
+	visionModel?: string;
+	/**
+	 * One-time feature announcements already shown to the user (e.g. "vision
+	 * model" after an update that introduced it). Persisted so the notice never
+	 * nags again.
+	 */
+	announcedFeatures: string[];
 }
 
 export const DEFAULT_CONFIG: SubagentsConfig = {
@@ -122,6 +134,7 @@ export const DEFAULT_CONFIG: SubagentsConfig = {
 	maxConcurrency: DEFAULT_MAX_CONCURRENCY,
 	maxFixRounds: DEFAULT_MAX_FIX_ROUNDS,
 	idleTimeoutSec: DEFAULT_IDLE_TIMEOUT_SEC,
+	announcedFeatures: [],
 };
 
 export function getConfigPath(agentDir: string = getAgentDir()): string {
@@ -168,6 +181,7 @@ export function normalizeConfig(raw: unknown): SubagentsConfig {
 		maxConcurrency: DEFAULT_CONFIG.maxConcurrency,
 		maxFixRounds: DEFAULT_CONFIG.maxFixRounds,
 		idleTimeoutSec: DEFAULT_CONFIG.idleTimeoutSec,
+		announcedFeatures: [],
 	};
 
 	if (Array.isArray(raw.enabledAgents)) {
@@ -240,6 +254,16 @@ export function normalizeConfig(raw: unknown): SubagentsConfig {
 		config.idleTimeoutSec = Math.max(0, Math.min(IDLE_TIMEOUT_SEC_LIMIT, Math.round(raw.idleTimeoutSec)));
 	}
 
+	if (isModelReference(raw.visionModel)) {
+		config.visionModel = (raw.visionModel as string).trim();
+	}
+
+	if (Array.isArray(raw.announcedFeatures)) {
+		config.announcedFeatures = raw.announcedFeatures.filter(
+			(feature): feature is string => typeof feature === "string" && feature.trim().length > 0,
+		);
+	}
+
 	return config;
 }
 
@@ -249,6 +273,7 @@ function defaultConfig(): SubagentsConfig {
 		enabledAgents: [...DEFAULT_CONFIG.enabledAgents],
 		agentModels: {},
 		agentThinkingLevels: {},
+		announcedFeatures: [],
 	};
 }
 

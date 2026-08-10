@@ -62,6 +62,10 @@ ${hasMultiple ? "- Run INDEPENDENT tasks in parallel: one subagent call with a `
 - Treat delegated agents as leaf workers: do not ask a sub-agent to dispatch another sub-agent; child processes do not have this tool.
 - Trust but verify: a sub-agent's summary describes intent, not outcome. Check the actual changes/results before reporting work done.
 
+Vision tasks:
+- Judge whether a delegated task may require viewing images (frontend screenshots, mockups, design files, visual regression comparisons). If it might, pass \`vision: true\` in the subagent call and give the sub-agent the exact image paths — it reads them with its read tool.
+- \`vision: true\` runs the sub-agent on the vision-capable model configured in /subagents-setup; when none is configured it falls back to the main session's current model. Do not skip the flag because the agent's default model looks fast/cheap — a non-vision model cannot see the images.
+
 Review & verification:
 - Never report an unrun check as passed; report it as unavailable or as a pre-existing failure.
 ${hasReviewer ? "- For non-trivial diffs, run one fresh read-only `reviewer` sub-agent before reporting done. Fix only concrete blockers and re-review at most once.\n- Use multi-model cross-review only when explicitly requested or for genuinely high-risk changes (security, unsafe/FFI, persistence-migration, concurrency). Reviewers are read-only; only the main agent edits.\n" : ""}- Commit or push only when explicitly requested, applicable checks pass, and no accepted blockers remain.`;

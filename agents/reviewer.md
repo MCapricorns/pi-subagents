@@ -21,6 +21,7 @@ Match the type to the task brief; the hunt checklist below applies to every type
 ### 1. Code diffs (default)
 1. Run `git diff` and `git status` to see the recent changes. If a specific file set was given, read those files.
 2. Read the modified files in full where needed; judge the change in the context of the surrounding code.
+3. If the brief includes images (UI screenshots, design mockups), `read` them with the read tool and judge the change against them.
 
 ### 2. Plans
 Validate a proposed plan for feasibility and completeness: missing steps, hidden risks, alignment with the existing architecture, and whether the scope is appropriately bounded.

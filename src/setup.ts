@@ -103,6 +103,31 @@ async function pickAgentModel(
 	);
 }
 
+/** Vision model pick for image tasks (screenshots/mockups); the inherit option
+ * leaves it unset, so vision-flagged dispatches fall back to the main session's
+ * current model. */
+async function pickVisionModel(
+	ctx: ExtensionCommandContext,
+	currentRef: string | undefined,
+	refs: readonly string[],
+): Promise<string | typeof INHERIT | undefined> {
+	const items = [
+		{
+			value: INHERIT,
+			label: currentRef
+				? `(not set — vision tasks fall back to the main session's model; drop "${currentRef}")`
+				: "(not set — vision tasks fall back to the main session's current model)",
+		},
+		...refs.map((ref) => ({ value: ref, label: ref === currentRef ? `${ref} (current)` : ref })),
+	];
+	return promptSelectOne(
+		ctx,
+		"Vision-capable model for image tasks (screenshots, mockups, designs)?",
+		"Type to filter • ↑/↓ • PgUp/PgDn • Enter selects • Esc cancels setup",
+		items,
+	);
+}
+
 async function pickAgentModelsAndStrength(
 	ctx: ExtensionCommandContext,
 	enabledAgents: readonly string[],
@@ -337,6 +362,18 @@ async function runFullSetup(ctx: ExtensionCommandContext, configPath: string, ba
 	const picked = await pickAgentModelsAndStrength(ctx, enabled, base.agentModels, base.agentThinkingLevels, thinkingLevel, defaults);
 	if (picked === undefined) return notifyCancelled(ctx);
 
+	let nextVisionModel: string | undefined;
+	// No models available: keep the vision model unset (vision tasks then fall
+	// back to the main session's model) instead of showing a one-option picker.
+	const refs = availableModelRefs(ctx);
+	if (refs.length === 0) {
+		ctx.ui.notify("No Pi models are currently available; vision model left unset.", "warning");
+	} else {
+		const visionModel = await pickVisionModel(ctx, base.visionModel, refs);
+		if (visionModel === undefined) return notifyCancelled(ctx);
+		if (visionModel !== INHERIT) nextVisionModel = visionModel;
+	}
+
 	const injection = await pickInjection(ctx, base.proactiveInjection);
 	if (injection === undefined) return notifyCancelled(ctx);
 
@@ -382,7 +419,9 @@ async function runFullSetup(ctx: ExtensionCommandContext, configPath: string, ba
 		maxConcurrency,
 		maxFixRounds,
 		idleTimeoutSec,
+		announcedFeatures: base.announcedFeatures,
 	};
+	if (nextVisionModel !== undefined) next.visionModel = nextVisionModel;
 	await saveConfig(next, configPath);
 	ctx.ui.notify(`pi-subagents configured. Saved to ${configPath}`, "info");
 }
@@ -391,6 +430,7 @@ async function runMenu(ctx: ExtensionCommandContext, configPath: string, config:
 	const choice = await ctx.ui.select("pi-subagents is already configured. What would you like to change?", [
 		"Enable/disable agents",
 		"Configure an agent (model + thinking)",
+		"Change vision model (image tasks)",
 		"Toggle proactive injection",
 		"Change agent scope",
 		"Change max concurrent sub-agents",
@@ -440,6 +480,16 @@ async function runMenu(ctx: ExtensionCommandContext, configPath: string, config:
 		const injection = await pickInjection(ctx, config.proactiveInjection);
 		if (injection === undefined) return notifyCancelled(ctx);
 		next.proactiveInjection = injection;
+	} else if (choice.startsWith("Change vision")) {
+		const refs = availableModelRefs(ctx);
+		if (refs.length === 0) {
+			ctx.ui.notify("No Pi models are currently available; vision model left unchanged.", "warning");
+			return;
+		}
+		const visionModel = await pickVisionModel(ctx, config.visionModel, refs);
+		if (visionModel === undefined) return notifyCancelled(ctx);
+		if (visionModel === INHERIT) delete next.visionModel;
+		else next.visionModel = visionModel;
 	} else if (choice.startsWith("Change agent scope")) {
 		const scope = await pickScope(ctx, config.agentScope);
 		if (scope === undefined) return notifyCancelled(ctx);
