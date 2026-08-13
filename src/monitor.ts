@@ -232,6 +232,28 @@ export function formatTaskSummary(task: string, maxWidth: number = TASK_SUMMARY_
 	return `${takeGraphemes(segments, headMax)}${TASK_SUMMARY_ELLIPSIS}${tailGraphemes(segments, tailMax)}`;
 }
 
+/** Max display width of a run's content label. */
+export const RUN_LABEL_MAX = 32;
+
+/**
+ * Short content label for a run, derived from its task: the single most
+ * distinguishing fragment (path, quoted phrase, symbol) so concurrent same-agent
+ * runs are told apart by WHAT they do, not just their run id. A long path keeps
+ * its tail (the filename is the recognisable part); a task with no recognizable
+ * fragment falls back to a head slice of its prose. Grapheme-safe.
+ */
+export function runLabel(task: string): string {
+	const fragment = extractKeyFragments(task)[0];
+	const src = fragment ?? stripVTControlCharacters(task).replace(/\s+/g, " ").trim();
+	if (visibleWidth(src) <= RUN_LABEL_MAX) return src;
+	const chars = [...graphemeSegmenter.segment(src)].map((s) => s.segment);
+	// A path/symbol fragment keeps its tail (filename/symbol is recognisable);
+	// a prose fallback keeps its head.
+	return fragment
+		? `${TASK_SUMMARY_ELLIPSIS}${tailGraphemes(chars, RUN_LABEL_MAX - 1)}`
+		: `${takeGraphemes(chars, RUN_LABEL_MAX - 1)}${TASK_SUMMARY_ELLIPSIS}`;
+}
+
 function formatTokens(count: number): string {
 	if (count >= 1_000_000) return `${(count / 1_000_000).toFixed(1)}M`;
 	if (count >= 1_000) return `${(count / 1_000).toFixed(1)}k`;
@@ -405,6 +427,7 @@ export class MonitorStore {
 			id,
 			agent,
 			task,
+			label: runLabel(task),
 			model,
 			thinking,
 			status: "queued",

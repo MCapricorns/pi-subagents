@@ -13,6 +13,7 @@ import {
 	formatTaskSummary,
 	formatToolActivity,
 	formatUsageCompact,
+	runLabel,
 	rightAlign,
 	compactLine,
 	statusLabel,
@@ -32,6 +33,15 @@ describe("MonitorStore", () => {
 		expect(runs[0].status).toBe("queued");
 		expect(runs[0].usage.input).toBe(0);
 		expect(runs[0].activity).toBeUndefined();
+	});
+
+	it("addRun derives a content label from the task", () => {
+		const store = new MonitorStore();
+		store.addRun("worker", "Fix the bug in src/index.ts and add tests");
+		store.addRun("explore", "Find where fixGridLayout is defined");
+		const [a, b] = store.getRuns();
+		expect(a.label).toBe("src/index.ts");
+		expect(b.label).toBe("fixGridLayout");
 	});
 
 	it("beginTurn clears finished runs but keeps active ones", () => {
@@ -256,6 +266,24 @@ describe("extractKeyFragments", () => {
 
 	it("drops kebab-case boilerplate words", () => {
 		expect(extractKeyFragments("a self-contained read-only review of main.ts")).toEqual(["main.ts"]);
+	});
+});
+
+describe("runLabel", () => {
+	it("uses the top distinguishing fragment as the label", () => {
+		expect(runLabel("Fix the bug in src/index.ts and add tests")).toBe("src/index.ts");
+		expect(runLabel("Find where fixGridLayout is defined")).toBe("fixGridLayout");
+	});
+
+	it("falls back to a head slice of the prose when no fragments are found", () => {
+		expect(runLabel("a quick check of things")).toBe("a quick check of things");
+	});
+
+	it("caps a long path, keeping the recognisable tail", () => {
+		const label = runLabel("Review src/very-long-component-name-here.ts end to end");
+		expect(visibleWidth(label)).toBeLessThanOrEqual(32);
+		expect(label.startsWith("…")).toBe(true);
+		expect(label.endsWith(".ts")).toBe(true);
 	});
 });
 

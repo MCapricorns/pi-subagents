@@ -126,7 +126,11 @@ export function registerWidget(pi: ExtensionAPI, runtime: SubagentRuntime): void
 							// uses the accent color, everything else is quiet.
 							if (!isChain && lines.length > 0) lines.push("");
 							const nodeBranch = isChain ? (chainContinues ? "├─ " : "└─ ") : "";
-							const left = `${dim(nodeBranch)}${icon} ${dim(`#${r.id}`)} ${isChain ? name : theme.fg("accent", theme.bold(name))}`;
+							// Content label (task-derived) trails the agent name so concurrent
+							// same-agent runs read as what they do, not just their run id. Chain
+							// nodes already carry a distinguishing relationLabel.
+							const labelPart = !isChain && r.label ? ` ${dim(`· ${r.label}`)}` : "";
+							const left = `${dim(nodeBranch)}${icon} ${dim(`#${r.id}`)} ${isChain ? name : theme.fg("accent", theme.bold(name))}${labelPart}`;
 
 							// Right side: full model ref (provider/model), token usage (in/out +
 							// cache read/write), tool count, elapsed, and the soft activity-state

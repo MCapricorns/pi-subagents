@@ -13,6 +13,7 @@ import {
 	formatElapsed,
 	formatUsageCompact,
 	monitor,
+	runLabel,
 	statusLabel,
 } from "./monitor.ts";
 import type { SubagentRuntime } from "./runtime.ts";
@@ -262,6 +263,7 @@ export function registerLookupTools(pi: ExtensionAPI, runtime: SubagentRuntime):
 			const activeLines = activeRuns.map((run) => {
 				const parts = [
 					`#${run.id} ${run.agent}`,
+					run.label,
 					run.model ?? "?",
 					formatUsageCompact(run.usage),
 					formatElapsed(run, now),
@@ -271,7 +273,8 @@ export function registerLookupTools(pi: ExtensionAPI, runtime: SubagentRuntime):
 			const completed = [...runtime.settledRuns.entries()].slice(-5);
 			const completedLines = completed.map(([id, result]) => {
 				const usage = formatUsage(result.usage);
-				return `- #${id} ${result.agent} · ${isFailedResult(result) ? "failed" : "completed"}${usage ? ` · ${usage}` : ""}`;
+				const label = runLabel(result.task);
+				return `- #${id} ${result.agent}${label ? ` · ${label}` : ""} · ${isFailedResult(result) ? "failed" : "completed"}${usage ? ` · ${usage}` : ""}`;
 			});
 
 			const sections: string[] = [];

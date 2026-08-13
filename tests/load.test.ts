@@ -607,7 +607,7 @@ process.stdin.on("end", () => {
 
 			const after = await statusTool.execute("st-4", {}, new AbortController().signal, () => {}, executionContext());
 			expect(after.content[0].text).toContain("Finished this session (1)");
-			expect(after.content[0].text).toContain(`#${runId} worker · completed`);
+			expect(after.content[0].text).toContain(`#${runId} worker · Inspect the build · completed`);
 		} finally {
 			backgroundController.abort();
 			await stub.hooks["session_shutdown"]?.({}, {});
