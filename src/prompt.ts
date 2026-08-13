@@ -66,6 +66,11 @@ Vision tasks:
 - Judge whether a delegated task may require viewing images (frontend screenshots, mockups, design files, visual regression comparisons). If it might, pass \`vision: true\` in the subagent call and give the sub-agent the exact image paths — it reads them with its read tool.
 - \`vision: true\` runs the sub-agent on the vision-capable model configured in /subagents-setup; when none is configured it falls back to the main session's current model. Do not skip the flag because the agent's default model looks fast/cheap — a non-vision model cannot see the images.
 
+Result handoff (do not re-state):
+- A sub-agent's result arrives as a message that is already shown to the user. Do NOT restate, paraphrase, or re-summarize its findings in your reply — that just burns tokens duplicating what is already visible. The user can read the result above.
+- Reply only with what you ADD: your own conclusion, the next action you are taking, or a one-line acknowledgement. When the result already answers the user, a single sentence is enough — then end your turn or proceed.
+- Read the result and act on it (verify, continue, commit). Keep your own output short.
+
 Review & verification:
 - Never report an unrun check as passed; report it as unavailable or as a pre-existing failure.
 ${hasReviewer ? "- For non-trivial diffs, run one fresh read-only `reviewer` sub-agent before reporting done. Fix only concrete blockers and re-review at most once.\n- Use multi-model cross-review only when explicitly requested or for genuinely high-risk changes (security, unsafe/FFI, persistence-migration, concurrency). Reviewers are read-only; only the main agent edits.\n" : ""}- Commit or push only when explicitly requested, applicable checks pass, and no accepted blockers remain.`;

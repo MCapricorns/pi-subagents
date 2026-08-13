@@ -28,6 +28,10 @@ on its own — no prompt engineering, no babysitting.
   "go check" step. `subagent_wait` is a **non-blocking** in-turn lookup by default
   (pass `timeoutMs` to block); `subagent_status` inspects runs; `subagent_stop`
   cancels one and delivers its partial output.
+- **Results are not re-narrated** — a sub-agent's completion is shown to you
+  verbatim, and the main agent is told not to paraphrase it back. It replies with
+  only its own conclusion or next step, so the same findings are never paid for
+  twice in tokens.
 - **A quality gate that closes the loop** — when a reviewer returns `REVIEW_FAIL`,
   the extension dispatches a worker briefed with the concrete findings, then a
   re-review, up to `maxFixRounds` times — and only then wakes the main agent.

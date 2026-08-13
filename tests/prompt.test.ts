@@ -59,4 +59,10 @@ describe("buildDelegationDirective", () => {
 		expect(directive).toContain("pass `vision: true`");
 		expect(directive).toContain("falls back to the main session's current model");
 	});
+
+	it("tells the main agent not to re-state a sub-agent result", () => {
+		const directive = buildDelegationDirective([agent("explore"), agent("worker"), agent("reviewer")]);
+		expect(directive).toContain("Result handoff");
+		expect(directive).toContain("Do NOT restate");
+	});
 });
