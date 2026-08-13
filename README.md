@@ -40,6 +40,10 @@ on its own — no prompt engineering, no babysitting.
   with backoff, then falls back once to the main window's model; terminal errors
   (quota/auth) short-circuit straight to the main agent; an idle watchdog kills
   runs that go silent; startup races are retried with backoff.
+- **Resumes, not restarts, on a model switch** — every run is session-backed, so
+  a model quota/auth failure resumes on another model with its earlier searches,
+  reads, and edits intact (no re-scanning). When every model is out, the run is
+  handed back with its session preserved for a one-call `subagent({ resume })`.
 - **Honest completions** — a run that ended with failed tool calls (e.g. a broken
   build) is reported as `completed with N failed tool call(s)` with the errors
   attached — a cheerful final text can never hide a failure.
@@ -260,25 +264,6 @@ model), `tools.ts` (wait/status/stop), `widget.ts` (widget + announcements),
 `runtime.ts` (shared session state), `spawn.ts` (child process layer),
 `monitor.ts` (run tracking), `setup.ts` (wizard), `prompt.ts` (delegation
 directive). No runtime dependencies beyond pi peer dependencies.
-
-## Acknowledgments
-
-- The official [pi subagent example](https://github.com/earendil-works/pi)
-  (`examples/extensions/subagent`) — the child-process dispatch and
-  event-stream handling build on it.
-- [tintinweb/pi-subagents](https://github.com/tintinweb/pi-subagents) — the
-  live widget and parallel fan-out follow its design.
-- [nicobailon/pi-subagents](https://github.com/nicobailon/pi-subagents) — the
-  result-delivery design is learned from it: prompt **steer** delivery, a
-  non-blocking `subagent_wait`, status inspection, and stop/interrupt
-  management. Its status-file and workflow-script orchestration are deliberately
-  out of scope: this extension stays a focused 3-agent delegation tool with a
-  configuration wizard.
-- The sub-agent pattern itself, popularized by
-  [Claude Code](https://github.com/anthropics/claude-code).
-
-The agent prompts and extension code are written independently for this
-project; the projects above served as design references.
 
 ## License
 
