@@ -10,7 +10,8 @@
  */
 
 import { spawn, type ChildProcess } from "node:child_process";
-import { existsSync, mkdirSync, unlinkSync, rmdirSync, writeFileSync } from "node:fs";
+import { randomUUID } from "node:crypto";
+import { existsSync, mkdirSync, readdirSync, unlinkSync, rmdirSync, writeFileSync } from "node:fs";
 import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { basename, join } from "node:path";
@@ -99,6 +100,16 @@ export interface SingleResult {
 	 * message must surface these so the main agent is never misled by a rosy final
 	 * text (e.g. a worker that ended with "keep waiting" while its build failed). */
 	failedTools?: Array<{ toolName: string; error: string }>;
+	/** The pi session id this run used (every run is session-backed so a
+	 * model-level failure can be resumed on another model without re-scanning). */
+	sessionId?: string;
+	/** Directory holding the run's pi session file. Preserved across the initial
+	 * attempt and any resume attempts; kept on disk only when a model-level
+	 * failure is handed back, so a later `resume` can pick up the context. */
+	sessionDir?: string;
+	/** True when the result was produced by resuming an earlier session (a
+	 * model-level fallback or an explicit resume) rather than a fresh start. */
+	resumed?: boolean;
 }
 
 export interface SubagentDetails {
@@ -348,6 +359,44 @@ export function getResultOutput(result: SingleResult): string {
 	return getFinalOutput(result.messages) || "(no output)";
 }
 
+/**
+ * True when a pi session file for `sessionId` already exists in `sessionDir`.
+ * Every sub-agent run is session-backed; the FIRST attempt creates the session
+ * (`--session-id`) and every later attempt on the same session RESUMES it
+ * (`--session`), so a model-level retry or fallback picks up the prior context
+ * instead of re-scanning. The session file is named `<timestamp>Z_<id>.jsonl`
+ * (pi's convention), so a suffix match is exact and cheap.
+ */
+export function sessionExists(sessionDir: string, sessionId: string): boolean {
+	try {
+		return readdirSync(sessionDir).some((file) => file.endsWith(`_${sessionId}.jsonl`));
+	} catch {
+		return false;
+	}
+}
+
+/**
+ * Build the continuation prompt sent to a RESUMED sub-agent session. The model
+ * sees the full prior history (loaded by `--session`) plus this new user turn,
+ * so it continues from where it stopped. Steering it not to redo finished work
+ * is what saves the re-scan the user wants to avoid.
+ *
+ * `reason` is a short clause describing why the session is resuming
+ * ("a transient provider error" / "your previous model hit a quota or auth
+ * limit, so a different model is now continuing").
+ */
+export function buildResumePrompt(task: string, reason: string): string {
+	return `You are resuming an earlier sub-agent session after ${reason}. Your earlier work — searches, reads, edits, and reasoning — is preserved in this session's history above; review it before acting. Original task: ${task}. Pick up exactly where you left off and finish it. Do NOT redo searches, reads, or edits you already completed unless a step clearly failed. Continue now.`;
+}
+
+/** Reason clause for resuming on a DIFFERENT model after the configured model
+ * failed at the provider level (quota/auth/overloaded/...). */
+export function buildFallbackResumeReason(fromModel?: string): string {
+	return fromModel
+		? `your previous model (${fromModel}) hit a quota, billing, or auth limit, so a different model is now continuing`
+		: "your previous model became unavailable, so a different model is now continuing";
+}
+
 async function writePromptToTempFile(agentName: string, prompt: string): Promise<{ dir: string; filePath: string }> {
 	const dir = await mkdtemp(join(tmpdir(), "pi-subagents-"));
 	const safeName = agentName.replace(/[^\w.-]+/g, "_");
@@ -424,6 +473,21 @@ export interface RunSingleOptions {
 	 * SUBAGENT_RUN_LEVEL_RETRY_DELAYS_MS; pass [] to disable (e.g. when an isolated
 	 * test wants to assert only the fallback path runs once). */
 	runLevelRetryDelaysMs?: readonly number[];
+	/** Directory holding this run's pi session. When set (with sessionId), the
+	 * child is session-backed: it creates the session on the first attempt and
+	 * RESUMES it on any later attempt (model-level retry/fallback), so a model
+	 * switch inherits the prior context. When unset, the child runs ephemerally
+	 * (--no-session) and cannot be resumed. The caller owns the directory's
+	 * lifecycle; runSingleAgent neither creates nor removes it. */
+	sessionDir?: string;
+	/** Pi session id paired with sessionDir. The first attempt creates it
+	 * (--session-id); later attempts resume (--session) once the session file
+	 * exists. */
+	sessionId?: string;
+	/** Text sent to the child via stdin. Defaults to `Task: ${task}`. A resumed
+	 * attempt passes a continuation prompt (see buildResumePrompt) so the model
+	 * picks up the prior session instead of starting the task over. */
+	stdinText?: string;
 	signal?: AbortSignal;
 	onLive?: (e: SubagentLiveEvent) => void;
 	makeDetails: (results: SingleResult[]) => SubagentDetails;
@@ -458,7 +522,20 @@ export async function runSingleAgent(options: RunSingleOptions): Promise<SingleR
 
 	// Defense in depth: even if another extension ignores the depth marker, a
 	// child process can never expose a tool named `subagent` back to its model.
-	const args: string[] = ["--mode", "json", "-p", "--no-session", "--exclude-tools", "subagent"];
+	const args: string[] = ["--mode", "json", "-p", "--exclude-tools", "subagent"];
+	// Session-backed: every run persists its pi session so a model-level retry or
+	// fallback can RESUME it (--session) instead of re-scanning from scratch. The
+	// first attempt creates the session (--session-id); once the session file
+	// exists, later attempts resume it. No sessionDir → ephemeral (--no-session).
+	if (options.sessionDir && options.sessionId) {
+		args.push("--session-dir", options.sessionDir);
+		args.push(
+			sessionExists(options.sessionDir, options.sessionId) ? "--session" : "--session-id",
+			options.sessionId,
+		);
+	} else {
+		args.push("--no-session");
+	}
 	if (agent.model) args.push("--model", agent.model);
 	// The configured level is clamped adaptively per model by pi.
 	args.push("--thinking", thinkingLevel);
@@ -467,6 +544,7 @@ export async function runSingleAgent(options: RunSingleOptions): Promise<SingleR
 	let tmpPromptDir: string | null = null;
 	let tmpPromptPath: string | null = null;
 
+	const hasSession = Boolean(options.sessionDir && options.sessionId);
 	const currentResult: SingleResult = {
 		agent: agentName,
 		agentSource: agent.source,
@@ -477,6 +555,9 @@ export async function runSingleAgent(options: RunSingleOptions): Promise<SingleR
 		usage: emptyUsage(),
 		model: agent.model,
 		thinking: thinkingLevel,
+		sessionId: options.sessionId,
+		sessionDir: options.sessionDir,
+		resumed: hasSession && sessionExists(options.sessionDir as string, options.sessionId as string),
 	};
 
 	try {
@@ -618,11 +699,11 @@ export async function runSingleAgent(options: RunSingleOptions): Promise<SingleR
 					currentResult.messages.push(event.message as Message);
 				}
 			};
-			// Send the task through the child stdin pipe instead of the process
-			// command line. This avoids OS argument-length limits and does not
-			// require another temporary file for conversation data.
+			// Send the task (or a continuation prompt for a resumed session) through
+			// the child stdin pipe instead of the command line. This avoids OS
+			// argument-length limits and requires no extra temp file for the data.
 			proc.stdin?.on("error", () => undefined);
-			proc.stdin?.end(`Task: ${task}`);
+			proc.stdin?.end(options.stdinText ?? `Task: ${task}`);
 
 			// Decode stdout through a StringDecoder so multi-byte UTF-8 characters
 			// (CJK, emoji) split across chunk boundaries never produce U+FFFD
@@ -725,7 +806,8 @@ export async function runSingleAgent(options: RunSingleOptions): Promise<SingleR
 }
 
 /**
- * Run one agent with three layers of resilience against transient dispatch failures:
+ * Run one agent with three layers of resilience, all session-backed so a model
+ * switch RESUMES the prior context instead of re-scanning from scratch:
  *
  * 1. Startup retry (inner loop): a concurrent pi startup race can make the child
  *    exit before any model/tool activity. Relaunch with backoff so the startup
@@ -733,23 +815,19 @@ export async function runSingleAgent(options: RunSingleOptions): Promise<SingleR
  *    model — and only a clean, silent, zero-activity exit qualifies (see
  *    isRetryableStartupFailure), so retrying can never duplicate real work.
  * 2. Run-level retry on the SAME configured model (middle): when the provider
- *    rejects the model before producing output with a TRANSIENT error
- *    (503/429/timeout/network/stream/...) — i.e. NOT a terminal one (quota
- *    exhausted, billing, an invalid API key, auth rejected — see
- *    isTerminalModelError) — relaunch the whole run up to
- *    SUBAGENT_RUN_LEVEL_RETRY_DELAYS_MS.length more times with backoff, so a
- *    one-off provider hiccup recovers without demoting the configured agent
- *    model. Each relaunch gets its own inner startup-retry loop. This sits
- *    outside pi-ai's per-request provider retry, which by then has already
- *    tried (default 3 attempts) and given up.
- * 3. Model fallback (outer): when the same model is still failing after all its
- *    run-level retries, retry once with the main window's current model. The
- *    fallback gets its own startup-retry loop, since a startup race can hit any
- *    relaunch regardless of model.
+ *    rejects the model with a TRANSIENT error (503/429/timeout/network/...) —
+ *    NOT a terminal one (quota/billing/invalid key/auth — see isTerminalModelError)
+ *    — RESUME the session on the same model up to
+ *    SUBAGENT_RUN_LEVEL_RETRY_DELAYS_MS.length more times with backoff. Resuming
+ *    preserves any work done before the hiccup.
+ * 3. Model fallback (outer): when the same model still fails, RESUME the session
+ *    once on the main window's current model — the fallback inherits the prior
+ *    context, so the user never pays to re-scan after a model switch.
  *
- * Terminal model errors short-circuit straight to the caller (modelRetries is
- * set): the account is the bottleneck, so neither same-model retry nor a
- * same-account fallback can help, and the run is left for the main agent to fix.
+ * Terminal model errors short-circuit to the caller: the account is the
+ * bottleneck, so neither same-model retry nor a same-account fallback can help.
+ * The session is preserved on disk (the result carries sessionId/sessionDir) so
+ * a later manual resume on a working model can continue without re-scanning.
  *
  * The fallback is per-run only and never persisted: a transient provider hiccup
  * must not silently downgrade the configured agent model.
@@ -802,55 +880,98 @@ export async function runSingleAgentWithModelFallback(
 		}
 	};
 
-	let result = await runWithStartupRetry(options);
+	// One pi session backs the whole logical run, shared by the initial attempt
+	// and every resume (model-level retry / fallback), so a model switch inherits
+	// the prior context instead of re-scanning. Created here unless the caller
+	// passed one in (an explicit resume of a handed-back session).
+	const sessionId = options.sessionId ?? randomUUID();
+	const sessionDir = options.sessionDir ?? (await mkdtemp(join(tmpdir(), "pi-subagent-session-")));
+	const baseOptions: RunSingleOptions = { ...options, sessionDir, sessionId };
 
-	// After a model-level failure, classify before reacting. A TERMINAL error
-	// (quota/billing/invalid key/auth) is account-scoped: neither same-model
-	// retry nor a same-account fallback can help, so hand the run straight back
-	// to the main agent instead of burning its time on a doomed retry.
-	if (agent && launchedRef && isModelLevelFailure(result) && isTerminalModelError(result)) return result;
-
-	// A TRANSIENT provider failure (503/429/timeout/network/stream/...) is usually
-	// a one-off hiccup. Relaunch the SAME configured model up to runDelays.length
-	// more times with backoff before degrading to a fallback model — the run's own
-	// provider retry already tried and failed, so each relaunch here is an
-	// independent, fresh attempt that can recover without losing the configured
-	// model's capability to review.
 	let modelRetries = 0;
-	if (agent && launchedRef && isModelLevelFailure(result) && runDelays.length > 0) {
-		for (let attempt = 0; ; attempt++) {
-			const delay = runDelays[attempt];
-			if (delay === undefined) break;
-			try {
-				options.onLive?.({ kind: "status", status: "running" });
-			} catch { /* never throw from event handling */ }
-			const shouldRetry = await waitForStartupRetry(delay, options.signal);
-			if (!shouldRetry) return { ...result, modelRetries };
-			const retried = await runWithStartupRetry(options);
-			modelRetries++;
-			if (!isModelLevelFailure(retried) || isTerminalModelError(retried)) {
-				// Each relaunch redoes the work; failedTools reflect ONLY the final
-				// attempt (no stale build errors from earlier transient failures),
-				// so the completion message's claim stays accurate.
-				return { ...retried, modelRetries };
+	let result: SingleResult | undefined;
+	try {
+		result = await runWithStartupRetry(baseOptions);
+
+		// A TERMINAL model error (quota/billing/invalid key/auth) is account-scoped:
+		// neither a same-model retry nor a same-account fallback can help. Skip the
+		// automatic retry/fallback and hand the run back — the session is preserved
+		// (see finally) so a later manual resume on a working model can continue
+		// without re-scanning.
+		const terminal = isModelLevelFailure(result) && isTerminalModelError(result);
+
+		// A TRANSIENT provider failure (503/429/timeout/network/...) usually
+		// recovers on a relaunch. RESUME the same session on the same configured
+		// model up to runDelays.length more times with backoff — resuming (not
+		// restarting) preserves any work done before the hiccup. This sits outside
+		// pi-ai's per-request provider retry, which by then already tried and gave up.
+		if (!terminal && agent && launchedRef && isModelLevelFailure(result) && runDelays.length > 0) {
+			const retryOpts: RunSingleOptions = {
+				...baseOptions,
+				stdinText: buildResumePrompt(options.task, "a transient provider error"),
+			};
+			for (let attempt = 0; ; attempt++) {
+				const delay = runDelays[attempt];
+				if (delay === undefined) break;
+				try {
+					options.onLive?.({ kind: "status", status: "running" });
+				} catch { /* never throw from event handling */ }
+				const shouldRetry = await waitForStartupRetry(delay, options.signal);
+				if (!shouldRetry) break;
+				const retried = await runWithStartupRetry(retryOpts);
+				modelRetries++;
+				// failedTools reflect ONLY the final attempt (each runSingleAgent call
+				// accumulates its own), so the completion message stays accurate.
+				result = retried;
+				if (!isModelLevelFailure(retried) || isTerminalModelError(retried)) break;
 			}
-			result = retried;
+		}
+
+		// Transient retries exhausted (or none) and still a model-level failure:
+		// RESUME the session on the main window's current model exactly once. The
+		// fallback inherits the prior context (no re-scan). Skipped when there is no
+		// fallback ref, it equals the configured model, or the failure is terminal
+		// (a same-account fallback would fail identically — leave it for manual resume).
+		if (
+			!terminal &&
+			agent &&
+			launchedRef &&
+			fallbackModelRef &&
+			launchedRef !== fallbackModelRef &&
+			isModelLevelFailure(result)
+		) {
+			const retried = await runWithStartupRetry({
+				...baseOptions,
+				stdinText: buildResumePrompt(options.task, buildFallbackResumeReason(launchedRef)),
+				agent: { ...agent, model: fallbackModelRef },
+			});
+			// The fallback replaces the result wholesale: failedTools reflect ONLY the
+			// fallback (final) attempt — stale build errors from the first model are
+			// not merged, so a clean final attempt is never misattributed a failure.
+			result = { ...retried, modelFallbackFrom: launchedRef };
+		}
+
+		// A terminal failure takes the bare result (no retries or fallback ran, so
+		// modelRetries stays undefined — matching the contract callers assert).
+		return terminal ? result : { ...result, modelRetries };
+	} finally {
+		// Keep the session on disk only for a model-level failure that did real work
+		// and is being handed back, so a later `resume` can continue it. A provider
+		// rejection before any work (no messages/tools/output) has nothing to resume,
+		// so it is cleaned up along with every success and task-level failure. Never
+		// remove a caller-provided sessionDir (an explicit resume owns its dir).
+		if (result) {
+			result.sessionId ??= sessionId;
+			result.sessionDir ??= sessionDir;
+		}
+		const hasWork =
+			!!result &&
+			(result.messages.length > 1 ||
+				(result.failedTools?.length ?? 0) > 0 ||
+				Boolean(getFinalOutput(result.messages)));
+		const keep = !!result && isModelLevelFailure(result) && hasWork;
+		if (!keep && !options.sessionDir) {
+			await rm(sessionDir, { recursive: true, force: true }).catch(() => undefined);
 		}
 	}
-
-	// Same-model retries exhausted (or none configured) and still failing: fall
-	// back to the main window's current model exactly once. Skipped when there is
-	// no fallback ref or it equals the configured model — a same-ref rerun would
-	// just repeat the already-exhausted failure for nothing.
-	if (agent && launchedRef && fallbackModelRef && launchedRef !== fallbackModelRef && isModelLevelFailure(result)) {
-		const retried = await runWithStartupRetry({ ...options, agent: { ...agent, model: fallbackModelRef } });
-		// The fallback replaces the result wholesale: `retried.failedTools` reflect
-		// ONLY the fallback (final) attempt. The original attempt's failedTools are
-		// intentionally not merged — a fallback relaunch redoes the work, so attaching
-		// the first attempt's stale build errors to a clean final attempt would
-		// misattribute failures the worker already fixed. This makes the README's
-		// "failed tool calls from the run's final attempt" claim accurate.
-		return { ...retried, modelFallbackFrom: launchedRef, modelRetries };
-	}
-	return { ...result, modelRetries };
 }

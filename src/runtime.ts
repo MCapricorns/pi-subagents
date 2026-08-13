@@ -9,6 +9,7 @@
  */
 
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
+import { rmSync } from "node:fs";
 import { BackgroundTaskQueue } from "./background.ts";
 import {
 	completionGroupTriggersTurn,
@@ -38,8 +39,21 @@ export interface SubagentRuntime {
 	settledRuns: Map<number, SingleResult>;
 	settledListeners: Map<number, Set<(result: SingleResult) => void>>;
 	registerRunResult: (runId: number, result: SingleResult) => void;
+	/** Sessions preserved on disk after a model-level handback (the run did real
+	 * work but its model quota/auth failed), keyed by the original run id so a
+	 * later `subagent({ resume: <runId> })` can continue in-context. Cleaned up
+	 * on shutdown so a crashed/ended session never leaks temp session dirs. */
+	preservedSessions: Map<number, PreservedSession>;
 	/** Flip sessionActive off and release all session-scoped resources. */
 	shutdown: () => void;
+}
+
+export interface PreservedSession {
+	sessionId: string;
+	sessionDir: string;
+	agentName: string;
+	task: string;
+	vision: boolean;
 }
 
 export function createRuntime(pi: ExtensionAPI, configPath: string): SubagentRuntime {
@@ -85,6 +99,7 @@ export function createRuntime(pi: ExtensionAPI, configPath: string): SubagentRun
 		runControllers: new Map<number, AbortController>(),
 		settledRuns: new Map<number, SingleResult>(),
 		settledListeners: new Map<number, Set<(result: SingleResult) => void>>(),
+		preservedSessions: new Map<number, PreservedSession>(),
 		registerRunResult: (runId, result) => {
 			runtime.settledRuns.set(runId, result);
 			const listeners = runtime.settledListeners.get(runId);
@@ -106,6 +121,17 @@ export function createRuntime(pi: ExtensionAPI, configPath: string): SubagentRun
 			runtime.settledRuns.clear();
 			runtime.settledListeners.clear();
 			runtime.runControllers.clear();
+			// Best-effort cleanup of preserved sub-agent session dirs so an
+			// ended/crashed session does not leak temp files; the OS reclaims
+			// tmpdir eventually, but this keeps things tidy between sessions.
+			for (const { sessionDir } of runtime.preservedSessions.values()) {
+				try {
+					rmSync(sessionDir, { recursive: true, force: true });
+				} catch {
+					/* best-effort */
+				}
+			}
+			runtime.preservedSessions.clear();
 			// Clear the monitor so stale runs from this session never leak into the
 			// next one (the module-level singleton survives across sessions).
 			monitor.clear();

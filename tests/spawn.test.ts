@@ -1,8 +1,10 @@
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 import {
+	buildFallbackResumeReason,
+	buildResumePrompt,
 	currentSubagentDepth,
 	extractToolErrorText,
 	getFinalOutput,
@@ -15,6 +17,7 @@ import {
 	reviewVerdict,
 	runSingleAgent,
 	runSingleAgentWithModelFallback,
+	sessionExists,
 	truncateResultOutput,
 	writeResultArtifact,
 	type SingleResult,
@@ -567,6 +570,137 @@ process.exit(1);`,
 		} finally {
 			rmSync(dir, { recursive: true, force: true });
 		}
+	});
+});
+
+describe("session resume helpers", () => {
+	it("sessionExists matches pi's <timestamp>Z_<id>.jsonl naming", () => {
+		const dir = mkdtempSync(join(tmpdir(), "pi-subagents-sesshelper-"));
+		try {
+			expect(sessionExists(dir, "abc")).toBe(false);
+			writeFileSync(join(dir, "2026-08-13T12-55-01-130Z_abc.jsonl"), "");
+			expect(sessionExists(dir, "abc")).toBe(true);
+			expect(sessionExists(dir, "other")).toBe(false);
+		} finally {
+			rmSync(dir, { recursive: true, force: true });
+		}
+	});
+
+	it("buildResumePrompt references the task and tells the model not to redo work", () => {
+		const prompt = buildResumePrompt("Implement X in src/foo.ts", "a transient provider error");
+		expect(prompt).toContain("Implement X in src/foo.ts");
+		expect(prompt).toContain("Do NOT redo");
+	});
+
+	it("buildFallbackResumeReason mentions the failed model", () => {
+		expect(buildFallbackResumeReason("openai-codex/gpt-5.6-sol")).toContain("openai-codex/gpt-5.6-sol");
+		expect(buildFallbackResumeReason()).toContain("different model");
+	});
+});
+
+describe("runSingleAgentWithModelFallback session resume", () => {
+	const agent = {
+		name: "fake",
+		description: "fake",
+		systemPrompt: "",
+		source: "builtin" as const,
+		filePath: "/agents/fake.md",
+	};
+
+	const withArgv = (script: string, fn: () => Promise<void>): Promise<void> => {
+		const previousScript = process.argv[1];
+		process.argv[1] = script;
+		return fn().finally(() => {
+			process.argv[1] = previousScript;
+		});
+	};
+
+	// Child that simulates a real pi session: it writes a session file named
+	// <ts>Z_<id>.jsonl into its --session-dir so the NEXT attempt resumes. Logs
+	// each invocation's flags so the test can assert --session-id vs --session.
+	const sessionAwareChild = (log: string): string => `
+const fs = require("node:fs");
+const path = require("node:path");
+const argv = process.argv;
+fs.appendFileSync(${JSON.stringify(log)}, JSON.stringify(argv.filter((a) => a.startsWith("--"))) + "\\n");
+const dirIdx = argv.indexOf("--session-dir");
+const idIdx = argv.indexOf("--session-id");
+const sidIdx = argv.indexOf("--session");
+const dir = dirIdx !== -1 ? argv[dirIdx + 1] : null;
+const id = idIdx !== -1 ? argv[idIdx + 1] : (sidIdx !== -1 ? argv[sidIdx + 1] : null);
+if (dir && id) fs.writeFileSync(path.join(dir, Date.now() + "Z_" + id + ".jsonl"), "");
+const modelIdx = argv.indexOf("--model");
+const model = modelIdx !== -1 ? argv[modelIdx + 1] : "";
+if (model.startsWith("openai-codex")) {
+  process.stdout.write(JSON.stringify({ type: "message_end", message: { role: "assistant", content: [], stopReason: "error", errorMessage: "model not found" } }) + "\\n");
+  process.exit(1);
+}
+process.stdout.write(JSON.stringify({ type: "message_end", message: { role: "assistant", content: [{ type: "text", text: "recovered" }], stopReason: "end" } }) + "\\n");
+process.exit(0);
+`;
+
+	it("resumes the session (not restarts) when falling back to another model", async () => {
+		const dir = mkdtempSync(join(tmpdir(), "pi-subagents-resume-"));
+		const script = join(dir, "resume-child.cjs");
+		const log = join(dir, "flags.log");
+		writeFileSync(script, sessionAwareChild(log), "utf8");
+		await withArgv(script, async () => {
+			const result = await runSingleAgentWithModelFallback(
+				{
+					defaultCwd: process.cwd(),
+					agent: { ...agent, model: "openai-codex/gpt-5.6-sol" },
+					agentName: agent.name,
+					task: "review src/index.ts",
+					runLevelRetryDelaysMs: [],
+					makeDetails: (results) => ({ mode: "single", results }),
+				},
+				"deepseek/deepseek-v4-flash",
+			);
+			expect(result.exitCode).toBe(0);
+			expect(result.model).toBe("deepseek/deepseek-v4-flash");
+			expect(result.modelFallbackFrom).toBe("openai-codex/gpt-5.6-sol");
+			// The fallback attempt resumed the prior session, inheriting its context.
+			expect(result.resumed).toBe(true);
+			const invocations = readFileSync(log, "utf8")
+				.split("\n")
+				.filter(Boolean)
+				.map((line) => JSON.parse(line) as string[]);
+			expect(invocations).toHaveLength(2);
+			// First attempt CREATES the session (--session-id, no bare --session);
+			// the fallback RESUMES it (bare --session, no --session-id). Both carry
+			// --session-dir; `arr.includes("--session")` is an exact-token match, so
+			// it is true only when the bare resume flag is present.
+			expect(invocations[0].includes("--session-id")).toBe(true);
+			expect(invocations[0].includes("--session")).toBe(false);
+			expect(invocations[1].includes("--session-id")).toBe(false);
+			expect(invocations[1].includes("--session")).toBe(true);
+		});
+		rmSync(dir, { recursive: true, force: true });
+	});
+
+	it("records but reclaims the session dir for a work-less model-level failure", async () => {
+		const dir = mkdtempSync(join(tmpdir(), "pi-subagents-nowork-"));
+		const script = join(dir, "always-fail.cjs");
+		writeFileSync(
+			script,
+			`process.stdout.write(JSON.stringify({ type: "message_end", message: { role: "assistant", content: [], stopReason: "error", errorMessage: "provider down" } }) + "\\n"); process.exit(1);`,
+			"utf8",
+		);
+		await withArgv(script, async () => {
+			const result = await runSingleAgentWithModelFallback({
+				defaultCwd: process.cwd(),
+				agent: { ...agent, model: "openai-codex/gpt-5.6-sol" },
+				agentName: agent.name,
+				task: "review",
+				runLevelRetryDelaysMs: [],
+				makeDetails: (results) => ({ mode: "single", results }),
+			});
+			expect(isModelLevelFailure(result)).toBe(true);
+			// A failure with no resumable work reclaims the temp session dir.
+			expect(result.sessionDir).toBeDefined();
+			expect(existsSync(result.sessionDir!)).toBe(false);
+		});
+		rmSync(dir, { recursive: true, force: true });
 	});
 });
 

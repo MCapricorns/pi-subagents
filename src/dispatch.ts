@@ -13,6 +13,7 @@
  */
 
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
+import { rm } from "node:fs/promises";
 import { Text } from "@earendil-works/pi-tui";
 import { Type } from "typebox";
 import { discoverAgents, type AgentConfig } from "./agents.ts";
@@ -47,6 +48,8 @@ import {
 } from "./monitor.ts";
 import type { SubagentRuntime } from "./runtime.ts";
 import {
+	buildFallbackResumeReason,
+	buildResumePrompt,
 	getResultOutput,
 	isFailedResult,
 	isModelLevelFailure,
@@ -81,6 +84,12 @@ const SubagentParams = Type.Object({
 	tasks: Type.Optional(Type.Array(TaskItem, { description: "Array of {agent, task} for parallel execution" })),
 	cwd: Type.Optional(Type.String({ description: "Working directory for the agent process (single mode)" })),
 	vision: Type.Optional(Type.Boolean({ description: VISION_DESCRIPTION })),
+	resume: Type.Optional(
+		Type.Number({
+			description:
+				"Resume a handed-back run by its id: continue a sub-agent whose model hit a quota/auth limit, picking up its preserved context without re-scanning. Use the run id from a model-level handback message.",
+		}),
+	),
 });
 
 /** True when any dispatched task carries the vision flag. */
@@ -142,6 +151,7 @@ export function registerSubagentTool(pi: ExtensionAPI, runtime: SubagentRuntime)
 			"Delegate a discrete, self-contained task to a specialized sub-agent running in an ISOLATED context window.",
 			"Agents: explore (read-only codebase recon), worker (implement/fix/refactor/test, full tools), reviewer (adversarial pre-commit review, read-only).",
 			"Modes: single ({agent, task}) or parallel ({tasks: [{agent, task}, ...]}).",
+			"Resume: pass { resume: <runId> } to continue a run that was handed back after its model hit a quota/auth limit — it picks up the preserved context without re-scanning.",
 			"It starts agents in the background and immediately returns control to the main window; completion messages automatically wake the main agent to continue.",
 			"Each agent has no memory of this conversation — brief it fully (goal, exact paths, constraints, expected output).",
 			"Results arrive as wake-up messages automatically — you do NOT need to wait. If you must get a result in-turn, subagent_wait is a non-blocking lookup by default (pass timeoutMs to block).",
@@ -252,6 +262,9 @@ export function registerSubagentTool(pi: ExtensionAPI, runtime: SubagentRuntime)
 
 			const hasTasks = (params.tasks?.length ?? 0) > 0;
 			const hasSingle = Boolean(params.agent) && params.task !== undefined;
+			// `resume` is its own exclusive mode (it re-dispatches a handed-back run
+			// from its preserved session), so it bypasses the single/parallel check.
+			const hasResume = typeof params.resume === "number";
 
 			const makeDetails =
 				(mode: "single" | "parallel", background = false) =>
@@ -259,7 +272,7 @@ export function registerSubagentTool(pi: ExtensionAPI, runtime: SubagentRuntime)
 
 			const catalog = agents.map((a) => a.name).join(", ") || "none";
 
-			if (Number(hasTasks) + Number(hasSingle) !== 1) {
+			if (!hasResume && Number(hasTasks) + Number(hasSingle) !== 1) {
 				return {
 					content: [
 						{
@@ -437,7 +450,16 @@ export function registerSubagentTool(pi: ExtensionAPI, runtime: SubagentRuntime)
 						const last = chain[chain.length - 1];
 						let block = formatChainSummary(chain);
 						if (isFailedResult(last.result) && isModelLevelFailure(last.result)) {
-							block = `${block}\n\n${formatCompletionBlock(last.result, config.maxResultLines, ctx.cwd)}\n\n${modelLevelTakeoverNote(last.result)}`;
+							if (last.result.sessionDir && last.result.sessionId) {
+								runtime.preservedSessions.set(parentRunId, {
+									sessionId: last.result.sessionId,
+									sessionDir: last.result.sessionDir,
+									agentName: last.result.agent,
+									task: last.result.task,
+									vision,
+								});
+							}
+							block = `${block}\n\n${formatCompletionBlock(last.result, config.maxResultLines, ctx.cwd)}\n\n${modelLevelTakeoverNote(last.result, { runId: parentRunId })}`;
 						} else if (isFailedResult(last.result) || reviewVerdict(getResultOutput(last.result)) === "fail") {
 							block = `${block}\n\n${formatCompletionBlock(last.result, config.maxResultLines, ctx.cwd)}`;
 						}
@@ -488,7 +510,13 @@ export function registerSubagentTool(pi: ExtensionAPI, runtime: SubagentRuntime)
 				));
 			};
 
-			const startBackground = (agentName: string, task: string, cwd?: string, vision = false): SingleResult => {
+			const startBackground = (
+				agentName: string,
+				task: string,
+				cwd?: string,
+				vision = false,
+				resumeSession?: { sessionId: string; sessionDir: string; preservedRunId: number },
+			): SingleResult => {
 				const agent = agents.find((candidate) => candidate.name === agentName);
 				if (!agent) return failedStartResult(agentName, task, `Unknown agent: "${agentName}".`);
 				// A vision-flagged task runs on the configured vision model (or the main
@@ -520,6 +548,17 @@ export function registerSubagentTool(pi: ExtensionAPI, runtime: SubagentRuntime)
 									onLive,
 									makeDetails: makeDetails("single", true),
 									idleTimeoutMs: config.idleTimeoutSec * 1000,
+									// A resume reuses a preserved session (handed back after a
+									// model-level failure) so it continues in-context instead of
+									// re-scanning. The wrapper detects the existing session file and
+									// resumes it; the continuation prompt steers the model to pick up.
+									...(resumeSession
+										? {
+											sessionId: resumeSession.sessionId,
+											sessionDir: resumeSession.sessionDir,
+											stdinText: buildResumePrompt(task, buildFallbackResumeReason()),
+										}
+										: {}),
 								},
 								sessionRef,
 							);
@@ -569,15 +608,36 @@ export function registerSubagentTool(pi: ExtensionAPI, runtime: SubagentRuntime)
 						// the result even though the run row is already gone from the monitor.
 						runtime.registerRunResult(runId, result);
 						runtime.runControllers.delete(runId);
+						// A successful resume consumed the preserved session: reclaim its temp
+						// dir and drop the id so it cannot be re-resumed. A failed resume keeps
+						// it (still filed under the original preserved run id) for another try.
+						if (resumeSession && !failed) {
+							runtime.preservedSessions.delete(resumeSession.preservedRunId);
+							void rm(resumeSession.sessionDir, { recursive: true, force: true }).catch(() => undefined);
+						}
 						if (!runtime.sessionActive) return;
+						// A model-level failure that preserved a session (the run did real work
+						// before the model quota/auth broke) files it under this run id so a
+						// later `subagent({ resume: <runId> })` can continue in-context. Skipped
+						// for a resume run — its session is already filed under the original id.
+						if (modelLevel && !resumeSession && result.sessionDir && result.sessionId) {
+							runtime.preservedSessions.set(runId, {
+								sessionId: result.sessionId,
+								sessionDir: result.sessionDir,
+								agentName: agent.name,
+								task,
+								vision,
+							});
+						}
 						// Model-level failure: the configured model is unavailable or broke
-						// and the retry with the main-window model (when distinct) also
-						// failed. Instead of leaving a dead failure, hand the task to the
-						// main window — the main agent executes it itself with its own tools.
+						// and the resume on the main-window model (when distinct) also failed.
+						// Hand the task back; when a session was preserved, steer the main agent
+						// to resume it in-context instead of executing it fresh.
+						const handbackRunId = resumeSession ? resumeSession.preservedRunId : runId;
 						const completion: CompletionMessageItem = {
 							agent: result.agent,
 							block: modelLevel
-								? `${formatCompletionBlock(result, config.maxResultLines, ctx.cwd)}\n\n${modelLevelTakeoverNote(result)}`
+								? `${formatCompletionBlock(result, config.maxResultLines, ctx.cwd)}\n\n${modelLevelTakeoverNote(result, { runId: handbackRunId })}`
 								: formatCompletionBlock(result, config.maxResultLines, ctx.cwd),
 							triggerTurn: completionTriggersTurn(result, config.notifyOnReviewPass),
 						};
@@ -629,6 +689,61 @@ export function registerSubagentTool(pi: ExtensionAPI, runtime: SubagentRuntime)
 
 				return pending;
 			};
+
+			// Resume mode (exclusive): continue a handed-back run in its preserved
+			// session on the agent's configured model, picking up the prior context
+			// instead of re-scanning. Triggered by a model-level handback that named
+			// the run id, after the user has a working model again.
+			if (typeof params.resume === "number") {
+				const preserved = runtime.preservedSessions.get(params.resume);
+				if (!preserved) {
+					return {
+						content: [
+							{
+								type: "text",
+								text: `No preservable session for run #${params.resume}. It completed normally, was not a model-level handback, or the session has ended.`,
+							},
+						],
+						details: makeDetails("single")([]),
+						isError: true,
+					};
+				}
+				const resumeAgent = agents.find((a) => a.name === preserved.agentName);
+				if (!resumeAgent) {
+					return {
+						content: [
+							{
+								type: "text",
+								text: `Cannot resume run #${params.resume}: agent "${preserved.agentName}" is not enabled. Re-enable it (or run /subagents-setup) and resume again.`,
+							},
+						],
+						details: makeDetails("single")([]),
+						isError: true,
+					};
+				}
+				const pending = startBackground(preserved.agentName, preserved.task, undefined, preserved.vision, {
+					sessionId: preserved.sessionId,
+					sessionDir: preserved.sessionDir,
+					preservedRunId: params.resume,
+				});
+				if (pending.exitCode !== -1) {
+					return {
+						content: [{ type: "text", text: getResultOutput(pending) }],
+						details: makeDetails("single")([pending]),
+						isError: true,
+					};
+				}
+				return {
+					content: [
+						{
+							type: "text",
+							text: `Resuming ${preserved.agentName} (run #${params.resume}) in the background on its configured model, picking up its preserved context. Its result will automatically resume the main agent when ready.`,
+						},
+					],
+					details: makeDetails("single", true)([pending]),
+					terminate: true,
+				};
+			}
 
 			// Sub-agents intentionally detach from the foreground turn. This makes the
 			// editor available immediately; completion messages later wake the main agent.

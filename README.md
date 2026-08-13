@@ -199,6 +199,22 @@ errors, then once with the main window's model — per-run only, never persisted
 if everything fails, the task is handed back to the main window with
 instructions to execute it directly.
 
+### Resuming after a model quota/auth failure
+
+Every sub-agent run is **session-backed**: its pi session is persisted to a
+temp dir for the run. When a model fails at the provider level, the retry and
+the fallback **resume that session** instead of starting over — so a model
+switch inherits the sub-agent's earlier searches, reads, and edits and never
+re-scans. If every available model is exhausted (e.g. the account is out of
+quota), the run is handed back with its session preserved; once you have a
+working model again, resume it in-context:
+
+```ts
+subagent({ resume: 7 }); // continue run #7 from where its model stopped
+```
+
+The session is reclaimed once the resume succeeds (or when the session ends).
+
 ### Configuration migration
 
 The config file migrates itself on load — no manual steps after an upgrade:

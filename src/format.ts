@@ -122,13 +122,20 @@ export function formatCompletionBlock(result: SingleResult, maxResultLines: numb
 
 /** Instruction appended to a model-level failure: the sub-agent's provider never
  * produced usable output (or the run stalled), so the task is handed back to the
- * main window instead of being left as a dead failure. */
-export function modelLevelTakeoverNote(result: SingleResult): string {
+ * main window instead of being left as a dead failure. When the run preserved a
+ * session with earlier work (and the run id is known), steer the main agent to
+ * RESUME it in-context once a model is available, instead of re-dispatching
+ * fresh (which would re-scan everything). */
+export function modelLevelTakeoverNote(result: SingleResult, opts?: { runId?: number }): string {
 	const sameModel = result.modelRetries
 		? `, after ${result.modelRetries} same-model retr${result.modelRetries === 1 ? "y" : "ies"} on transient errors`
 		: "";
-	const retry = result.modelFallbackFrom ? ", and the retry with the main-window model also failed" : "";
-	return `The sub-agent could not complete this task: its model was unavailable or failed (or the run stalled)${sameModel}${retry}. Please execute this task in the main window with your own tools; do not re-dispatch it as a sub-agent.`;
+	const retry = result.modelFallbackFrom ? ", and the resume on the main-window model also failed" : "";
+	const sessionPreserved = Boolean(result.sessionDir && result.sessionId) && opts?.runId !== undefined;
+	const recovery = sessionPreserved
+		? ` The sub-agent's earlier work in this run is preserved. Once a model is available again, call subagent with { resume: ${opts!.runId} } to CONTINUE it in-context (it picks up where it stopped — no re-scan), or execute the task in the main window with your own tools.`
+		: ` Please execute this task in the main window with your own tools; do not re-dispatch it as a sub-agent.`;
+	return `The sub-agent could not complete this task: its model was unavailable or failed (or the run stalled)${sameModel}${retry}.${recovery}`;
 }
 
 /** Resolve a run-id request to actual ids: an exact numeric match always wins

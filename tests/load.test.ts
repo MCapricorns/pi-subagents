@@ -170,6 +170,26 @@ describe("delegated task validation", () => {
 	});
 });
 
+describe("subagent resume param", () => {
+	it("rejects a resume for a run with no preserved session, without dispatching", async () => {
+		const enqueue = vi.spyOn(BackgroundTaskQueue.prototype, "enqueue").mockImplementation(() => new AbortController());
+		const stub = makeStub();
+		register(stub.api);
+		const tool = stub.tools.find((candidate) => candidate.name === "subagent");
+
+		const result = await tool.execute(
+			"call-resume",
+			{ resume: 999 },
+			new AbortController().signal,
+			() => {},
+			executionContext(),
+		);
+
+		expect(enqueue).not.toHaveBeenCalled();
+		expect(result.content[0].text).toContain("No preservable session for run #999");
+	});
+});
+
 describe("registered tool background dispatch", () => {
 	it("shows the task in the widget and reports its summary with cache reads on completion", async () => {
 		vi.useFakeTimers();
