@@ -65,4 +65,10 @@ describe("buildDelegationDirective", () => {
 		expect(directive).toContain("Result handoff");
 		expect(directive).toContain("Do NOT restate");
 	});
+
+	it("warns the main agent not to declare done while sibling runs may still be active", () => {
+		const directive = buildDelegationDirective([agent("explore"), agent("worker"), agent("reviewer")]);
+		expect(directive).toContain("does NOT mean all work is finished");
+		expect(directive).toContain("no runs are active");
+	});
 });

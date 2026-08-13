@@ -13,6 +13,7 @@ import { BackgroundTaskQueue } from "./background.ts";
 import {
 	completionGroupTriggersTurn,
 	createCompletionBatcher,
+	formatActiveRunsFooter,
 	formatCompletionMessage,
 	type CompletionBatcher,
 	type CompletionMessageItem,
@@ -53,9 +54,17 @@ export function createRuntime(pi: ExtensionAPI, configPath: string): SubagentRun
 		sessionActive: true,
 		sendCompletionGroup: (items) => {
 			if (!runtime.sessionActive || items.length === 0) return;
+			// A result arriving for one run does not mean sibling runs are done.
+			// Computing this at delivery (emit) time — not when the item was
+			// pushed — reflects the current monitor state, since finishing runs
+			// are removed from the monitor before their completion is pushed.
+			const active = monitor
+				.getRuns()
+				.filter((run) => run.status === "queued" || run.status === "running" || run.retained)
+				.map((run) => ({ id: run.id, agent: run.agent, label: run.label }));
 			const message = {
 				customType: "subagent-result",
-				content: formatCompletionMessage(items),
+				content: formatCompletionMessage(items) + formatActiveRunsFooter(active),
 				display: true,
 			};
 			if (completionGroupTriggersTurn(items)) {

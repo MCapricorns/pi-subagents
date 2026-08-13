@@ -151,3 +151,31 @@ export function completionTriggersTurn(result: SingleResult, notifyOnReviewPass:
 		reviewVerdict(getResultOutput(result)) === "pass"
 	);
 }
+
+/** Minimal shape of an active run, for the "others still running" footer. Kept
+ * decoupled from the monitor's RunView so this stays a pure, easily tested
+ * formatter; the caller maps its live runs into this shape. */
+export interface ActiveRunFoot {
+	id: number;
+	agent: string;
+	/** Optional content label (task-derived) shown next to the agent name. */
+	label?: string;
+}
+
+/**
+ * Footer appended to a completion message when OTHER runs are still active, so
+ * the main agent does not declare the overall task done prematurely. A result
+ * arriving for one run does not mean sibling runs are finished; naming them
+ * gives the main agent concrete, in-context awareness to keep waiting.
+ *
+ * Returns "" when nothing is active (the common, single-run case stays quiet).
+ */
+export function formatActiveRunsFooter(runs: readonly ActiveRunFoot[], maxListed = 4): string {
+	if (runs.length === 0) return "";
+	const listed = runs.slice(0, maxListed);
+	const items = listed
+		.map((run) => `#${run.id} ${run.agent}${run.label ? `·${run.label}` : ""}`)
+		.join(", ");
+	const more = runs.length > listed.length ? `, +${runs.length - listed.length} more` : "";
+	return `\n\n⚠ ${runs.length} other run${runs.length === 1 ? "" : "s"} still active: ${items}${more}. Do not conclude the overall task yet — wait for their results (they wake you automatically) or check subagent_status.`;
+}

@@ -39,6 +39,10 @@ export interface RunView {
 	id: number;
 	agent: string;
 	task: string;
+	/** Short content label derived from the task (paths/symbols), shown next to
+	 * the agent name so concurrent same-agent runs are told apart by what they
+	 * are doing, not just their run id. */
+	label?: string;
 	model?: string;
 	/** Effective thinking strength this run was launched with (frontmatter/config/global). */
 	thinking?: string;

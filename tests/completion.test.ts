@@ -3,7 +3,9 @@ import {
 	completionGroupTriggersTurn,
 	completionTriggersTurn,
 	createCompletionBatcher,
+	formatActiveRunsFooter,
 	formatCompletionMessage,
+	type ActiveRunFoot,
 	type CompletionMessageItem,
 } from "../src/completion.ts";
 import { DEFAULT_CONFIG } from "../src/config.ts";
@@ -244,5 +246,30 @@ describe("formatCompletionMessage", () => {
 		expect(formatCompletionMessage([worker, reviewer])).toBe(
 			`### Subagents completed (2): worker, reviewer\n\n${worker.block}\n\n${reviewer.block}`,
 		);
+	});
+});
+
+describe("formatActiveRunsFooter", () => {
+	it("returns empty when no runs are active", () => {
+		expect(formatActiveRunsFooter([])).toBe("");
+	});
+
+	it("names each active run with its label and warns against concluding", () => {
+		const runs: ActiveRunFoot[] = [
+			{ id: 3, agent: "worker", label: "src/index.ts" },
+			{ id: 4, agent: "reviewer" },
+		];
+		const footer = formatActiveRunsFooter(runs);
+		expect(footer).toContain("2 other runs still active");
+		expect(footer).toContain("#3 worker·src/index.ts");
+		expect(footer).toContain("#4 reviewer");
+		expect(footer).toContain("Do not conclude the overall task yet");
+	});
+
+	it("collapses a long active list behind a +N more", () => {
+		const runs: ActiveRunFoot[] = Array.from({ length: 6 }, (_, i) => ({ id: i + 1, agent: "worker" }));
+		const footer = formatActiveRunsFooter(runs);
+		expect(footer).toContain("6 other runs still active");
+		expect(footer).toContain("+2 more");
 	});
 });
