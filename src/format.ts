@@ -90,7 +90,7 @@ export function formatCompletionBlock(result: SingleResult, maxResultLines: numb
 	const output = getResultOutput(result);
 	const { text, truncated } = truncateResultOutput(output, maxResultLines);
 	const fallbackNote = result.modelFallbackFrom
-		? ` (model fell back from ${result.modelFallbackFrom} to ${result.model ?? "main-window model"})`
+		? ` (model pool fallback: primary ${result.modelFallbackFrom} → final ${result.model ?? "dynamic default"})`
 		: "";
 	const startupRetryNote = result.startupRetries
 		? ` (recovered after ${result.startupRetries} startup retr${result.startupRetries === 1 ? "y" : "ies"} — concurrent pi startup race)`
@@ -98,7 +98,32 @@ export function formatCompletionBlock(result: SingleResult, maxResultLines: numb
 	const modelRetryNote = result.modelRetries
 		? ` (recovered after ${result.modelRetries} same-model retr${result.modelRetries === 1 ? "y" : "ies"} on a transient provider error)`
 		: "";
-	const lines = [`### [${result.agent}] ${status}${usage ? ` (${usage})` : ""}${fallbackNote}${startupRetryNote}${modelRetryNote}`, "", `Task: ${formatTaskSummary(result.task, 80, false)}`, "", text];
+	const relations = [
+		result.forkedFromRunId !== undefined ? `forked from #${result.forkedFromRunId}` : undefined,
+		(result.forkChildRunIds?.length ?? 0) > 0 ? `fork children ${result.forkChildRunIds!.map((id) => `#${id}`).join(", ")}` : undefined,
+	].filter((value): value is string => Boolean(value));
+	const relationNote = relations.length > 0 ? ` · ${relations.join(" · ")}` : "";
+	const lines = [`### [${result.agent}] ${status}${usage ? ` (${usage})` : ""}${fallbackNote}${startupRetryNote}${modelRetryNote}`, "", `Task: ${formatTaskSummary(result.task, 80, false)}`, ""];
+	if (result.isolation === "worktree") {
+		const isolation =
+			result.integrationStatus === "integrated"
+				? "worktree · changes integrated into the original working tree"
+				: result.integrationStatus === "no_changes"
+					? "worktree · no changes; temporary worktree removed"
+					: result.integrationStatus === "retained"
+						? result.integrationApplied
+							? "worktree · changes applied, but cleanup failed; recovery artifacts retained"
+							: "worktree · integration failed; recovery artifacts retained"
+						: "worktree · isolated";
+		lines.push(`Isolation: ${isolation}${relationNote}`);
+		if (result.integrationWorktreePath) lines.push(`Retained worktree: ${result.integrationWorktreePath}`);
+		if (result.integrationPatchPath) lines.push(`Retained patch: ${result.integrationPatchPath}`);
+		if (result.integrationError) lines.push(`Integration error: ${result.integrationError}`);
+		lines.push("");
+	} else if (relations.length > 0) {
+		lines.push(`Relation: ${relations.join(" · ")}`, "");
+	}
+	lines.push(text);
 	// A run can exit cleanly while its last tools failed (e.g. a build that broke):
 	// the final text alone may claim more than the tools achieved, so surface the
 	// failures explicitly and tell the main agent to verify before relying on it.
@@ -130,10 +155,10 @@ export function modelLevelTakeoverNote(result: SingleResult, opts?: { runId?: nu
 	const sameModel = result.modelRetries
 		? `, after ${result.modelRetries} same-model retr${result.modelRetries === 1 ? "y" : "ies"} on transient errors`
 		: "";
-	const retry = result.modelFallbackFrom ? ", and the resume on the main-window model also failed" : "";
+	const retry = result.modelFallbackFrom ? ", and the configured backup chain also failed" : "";
 	const sessionPreserved = Boolean(result.sessionDir && result.sessionId) && opts?.runId !== undefined;
 	const recovery = sessionPreserved
-		? ` The sub-agent's earlier work in this run is preserved. Once a model is available again, call subagent with { resume: ${opts!.runId} } to CONTINUE it in-context (it picks up where it stopped — no re-scan), or execute the task in the main window with your own tools.`
+		? ` The sub-agent's earlier work in this run is preserved. Once a model is available again, call subagent_control with { action: "resume", id: ${opts!.runId} } to CONTINUE it in-context (it keeps the same run id and does not re-scan), or execute the task in the main window with your own tools.`
 		: ` Please execute this task in the main window with your own tools; do not re-dispatch it as a sub-agent.`;
 	return `The sub-agent could not complete this task: its model was unavailable or failed (or the run stalled)${sameModel}${retry}.${recovery}`;
 }

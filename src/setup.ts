@@ -1,14 +1,15 @@
 /**
  * Interactive configuration wizard for /subagents-setup.
  *
- * Everything is selection-driven (no free-text answers): a multi-select for which
- * agents to enable, a per-agent single-select for model overrides (fuzzy filter +
- * paging), and simple menus for the injection toggle and agent scope. Config is
- * written to <agentDir>/pi-subagents.json.
+ * Everything is selection-driven (no free-text answers). Enabled agents share a
+ * compact primary/backup model-pool editor backed by one searchable model list;
+ * the remaining settings use small selection menus. Config is written to
+ * <agentDir>/pi-subagents.json.
  */
 
 import { stat } from "node:fs/promises";
-import type { ExtensionCommandContext } from "@earendil-works/pi-coding-agent";
+import type { ExtensionCommandContext, KeybindingsManager } from "@earendil-works/pi-coding-agent";
+import { truncateToWidth, type Component, type TUI } from "@earendil-works/pi-tui";
 import {
 	AGENT_SCOPE_VALUES,
 	BUILTIN_AGENT_NAMES,
@@ -26,11 +27,22 @@ import {
 	loadConfig,
 	saveConfig,
 } from "./config.ts";
-import { availableModelRefs, repairUnavailableModelOverrides } from "./models.ts";
+import {
+	CURRENT_MAIN_MODEL,
+	applyModelPoolChoice,
+	availableModelRefs,
+	buildAgentModelPoolRows,
+	buildModelPickerItems,
+	currentModelRef,
+	type AgentModelPoolMaps,
+	type ModelPickerSlot,
+	type ModelPoolSlot,
+} from "./models.ts";
 import { promptSelectMany, promptSelectOne } from "./ui.ts";
 import { loadBuiltinAgents } from "./agents.ts";
 
 const INHERIT = "__inherit__";
+const MODEL_POOL_WIDE_MIN = 96;
 
 /** Effective per-agent default strength from builtin frontmatter (config overrides win at spawn). */
 function builtinThinkingDefaults(): Map<string, ThinkingLevel> {
@@ -76,86 +88,193 @@ async function pickEnabledAgents(
 	);
 }
 
-/** Single-agent model pick; the inherit option drops any existing override.
- * `escNote` describes what Esc does at this pick (whole-wizard cancel in the
- * full setup vs. ending the per-agent loop in the menu). */
-async function pickAgentModel(
+type ModelPoolEditorResult =
+	| { action: "edit"; agentName: string; slot: ModelPoolSlot }
+	| { action: "save" };
+
+interface ModelPoolEditorStyles {
+	border(text: string): string;
+	title(text: string): string;
+	dim(text: string): string;
+	accent(text: string): string;
+	selected(text: string): string;
+}
+
+/** Compact overview: every enabled agent shows Primary and Backup on one row. */
+class ModelPoolEditor implements Component {
+	private row = 0;
+	private slot: ModelPoolSlot = "primary";
+
+	constructor(
+		private readonly agentNames: readonly string[],
+		private readonly pools: AgentModelPoolMaps,
+		private readonly styles: ModelPoolEditorStyles,
+		private readonly tui: TUI,
+		private readonly keybindings: KeybindingsManager,
+		private readonly done: (result: ModelPoolEditorResult | undefined) => void,
+		initialCell?: { agentName: string; slot: ModelPoolSlot },
+	) {
+		const initialRow = initialCell ? agentNames.indexOf(initialCell.agentName) : -1;
+		if (initialCell && initialRow >= 0) {
+			this.row = initialRow;
+			this.slot = initialCell.slot;
+		}
+	}
+
+	render(width: number): string[] {
+		const fit = (line: string): string => truncateToWidth(line, width, "");
+		const border = this.styles.border("─".repeat(Math.max(1, width)));
+		const rows = buildAgentModelPoolRows(this.agentNames, this.pools);
+		const lines = [
+			fit(border),
+			fit(this.styles.title("Agent model pools")),
+			fit(this.styles.dim("↑/↓ agent • ←/→ Primary/Backup • Enter edit/save • Esc cancel")),
+			fit(border),
+		];
+		for (let index = 0; index < rows.length; index++) {
+			const pool = rows[index];
+			const active = this.row === index;
+			const mark = active ? this.styles.accent("❯ ") : "  ";
+			const primary = active && this.slot === "primary"
+				? this.styles.selected(`[Primary: ${pool.primary}]`)
+				: `Primary: ${pool.primary}`;
+			const backup = active && this.slot === "backup"
+				? this.styles.selected(`[Backup: ${pool.backup}]`)
+				: `Backup: ${pool.backup}`;
+			if (width >= MODEL_POOL_WIDE_MIN) {
+				lines.push(fit(`${mark}${this.styles.accent(pool.name)} · ${primary} · ${backup}`));
+			} else {
+				// Keep both cells visible on narrow terminals; a long primary can no
+				// longer push Backup (including its selected state) off-screen.
+				lines.push(fit(`${mark}${this.styles.accent(pool.name)}`));
+				lines.push(fit(`    ${primary}`));
+				lines.push(fit(`    ${backup}`));
+			}
+		}
+		const saveActive = this.row === rows.length;
+		lines.push(fit(`${saveActive ? this.styles.accent("❯ ") : "  "}${saveActive ? this.styles.selected("Save model pools and continue") : "Save model pools and continue"}`));
+		lines.push(fit(border));
+		return lines;
+	}
+
+	handleInput(data: string): void {
+		const lastRow = this.agentNames.length;
+		if (this.keybindings.matches(data, "tui.select.up")) {
+			this.row = this.row === 0 ? lastRow : this.row - 1;
+		} else if (this.keybindings.matches(data, "tui.select.down")) {
+			this.row = this.row === lastRow ? 0 : this.row + 1;
+		} else if (
+			this.row < lastRow &&
+			(this.keybindings.matches(data, "tui.editor.cursorLeft") ||
+				this.keybindings.matches(data, "tui.editor.cursorRight"))
+		) {
+			this.slot = this.slot === "primary" ? "backup" : "primary";
+		} else if (this.keybindings.matches(data, "tui.select.confirm")) {
+			if (this.row === lastRow) this.done({ action: "save" });
+			else this.done({ action: "edit", agentName: this.agentNames[this.row], slot: this.slot });
+			return;
+		} else if (this.keybindings.matches(data, "tui.select.cancel")) {
+			this.done(undefined);
+			return;
+		}
+		this.tui.requestRender();
+	}
+
+	invalidate(): void {}
+}
+
+async function promptModelPoolOverview(
 	ctx: ExtensionCommandContext,
-	name: string,
-	currentRef: string | undefined,
-	refs: readonly string[],
-	escNote = "cancels setup",
-): Promise<string | typeof INHERIT | undefined> {
-	const items = [
-		{
-			value: INHERIT,
-			label: currentRef
-				? `(use main session's model — drop override "${currentRef}")`
-				: "(use main session's current model — no override)",
-		},
-		...refs.map((ref) => ({ value: ref, label: ref === currentRef ? `${ref} (current)` : ref })),
-	];
-	return promptSelectOne(
-		ctx,
-		`Model for "${name}"`,
-		`Type to filter • ↑/↓ • PgUp/PgDn • Enter selects • Esc ${escNote}`,
-		items,
+	agentNames: readonly string[],
+	pools: AgentModelPoolMaps,
+	initialCell?: { agentName: string; slot: ModelPoolSlot },
+): Promise<ModelPoolEditorResult | undefined> {
+	return ctx.ui.custom<ModelPoolEditorResult | undefined>((tui, theme, keybindings, done) =>
+		new ModelPoolEditor(
+			agentNames,
+			pools,
+			{
+				border: (text) => theme.fg("accent", text),
+				title: (text) => theme.fg("accent", theme.bold(text)),
+				dim: (text) => theme.fg("dim", text),
+				accent: (text) => theme.fg("accent", text),
+				selected: (text) => theme.fg("accent", theme.bold(text)),
+			},
+			tui,
+			keybindings,
+			done,
+			initialCell,
+		),
 	);
 }
 
-/** Vision model pick for image tasks (screenshots/mockups); the inherit option
- * leaves it unset, so vision-flagged dispatches fall back to the main session's
- * current model. */
+async function pickConfiguredModel(
+	ctx: ExtensionCommandContext,
+	title: string,
+	slot: ModelPickerSlot,
+	configuredRef: string | undefined,
+	escNote: string,
+): Promise<string | undefined> {
+	const registry = ctx.modelRegistry as typeof ctx.modelRegistry & { getAll?: typeof ctx.modelRegistry.getAvailable };
+	const models = registry.getAll?.() ?? registry.getAvailable();
+	const items = buildModelPickerItems({
+		models,
+		availableRefs: availableModelRefs(ctx),
+		slot,
+		configuredRef,
+		mainRef: currentModelRef(ctx),
+	});
+	return promptSelectOne(
+		ctx,
+		title,
+		`Type to filter by provider, model, capability, or availability • ↑/↓ • Enter selects • Esc ${escNote}`,
+		items,
+		configuredRef ?? CURRENT_MAIN_MODEL,
+	);
+}
+
+/** Shared by full setup and configure-one-agent. Esc in a model list returns to
+ * the overview; Esc in the overview cancels the whole pool edit. */
+async function editModelPools(
+	ctx: ExtensionCommandContext,
+	agentNames: readonly string[],
+	initial: AgentModelPoolMaps,
+): Promise<AgentModelPoolMaps | undefined> {
+	let pools: AgentModelPoolMaps = {
+		agentModels: { ...initial.agentModels },
+		agentBackupModels: { ...initial.agentBackupModels },
+	};
+	let activeCell: { agentName: string; slot: ModelPoolSlot } | undefined;
+	while (true) {
+		const action = await promptModelPoolOverview(ctx, agentNames, pools, activeCell);
+		if (action === undefined) return undefined;
+		if (action.action === "save") return pools;
+		activeCell = { agentName: action.agentName, slot: action.slot };
+		const current = action.slot === "primary"
+			? pools.agentModels[action.agentName]
+			: pools.agentBackupModels[action.agentName];
+		const choice = await pickConfiguredModel(
+			ctx,
+			`${action.slot === "primary" ? "Primary" : "Backup"} model for "${action.agentName}"`,
+			action.slot,
+			current,
+			"returns to model pools",
+		);
+		if (choice !== undefined) pools = applyModelPoolChoice(pools, action.agentName, action.slot, choice);
+	}
+}
+
 async function pickVisionModel(
 	ctx: ExtensionCommandContext,
 	currentRef: string | undefined,
-	refs: readonly string[],
-): Promise<string | typeof INHERIT | undefined> {
-	const items = [
-		{
-			value: INHERIT,
-			label: currentRef
-				? `(not set — vision tasks fall back to the main session's model; drop "${currentRef}")`
-				: "(not set — vision tasks fall back to the main session's current model)",
-		},
-		...refs.map((ref) => ({ value: ref, label: ref === currentRef ? `${ref} (current)` : ref })),
-	];
-	return promptSelectOne(
+): Promise<string | undefined> {
+	return pickConfiguredModel(
 		ctx,
-		"Vision-capable model for image tasks (screenshots, mockups, designs)?",
-		"Type to filter • ↑/↓ • PgUp/PgDn • Enter selects • Esc cancels setup",
-		items,
+		"Vision primary for image tasks (then agent backup → current main model)",
+		"vision",
+		currentRef,
+		"cancels setup",
 	);
-}
-
-async function pickAgentModelsAndStrength(
-	ctx: ExtensionCommandContext,
-	enabledAgents: readonly string[],
-	currentModels: Record<string, string>,
-	currentStrengths: Record<string, ThinkingLevel>,
-	defaultLevel: ThinkingLevel,
-	defaults: ReadonlyMap<string, ThinkingLevel>,
-): Promise<{ models: Record<string, string>; strengths: Record<string, ThinkingLevel> } | undefined> {
-	const refs = availableModelRefs(ctx);
-	if (refs.length === 0) {
-		ctx.ui.notify("No Pi models are currently available; model overrides left unchanged.", "warning");
-		return { models: { ...currentModels }, strengths: { ...currentStrengths } };
-	}
-
-	const models: Record<string, string> = {};
-	const strengths: Record<string, ThinkingLevel> = {};
-	for (const name of enabledAgents) {
-		const modelChoice = await pickAgentModel(ctx, name, currentModels[name], refs);
-		if (modelChoice === undefined) return undefined; // Esc aborts the whole wizard
-		if (modelChoice !== INHERIT) models[name] = modelChoice;
-
-		// Convenience: the model pick is immediately followed by the strength pick,
-		// so per-agent model + strength are configured in one pass.
-		const strength = await pickAgentStrength(ctx, name, currentStrengths[name], defaultLevel, defaults);
-		if (strength === undefined) return undefined; // Esc aborts the whole wizard
-		if (strength !== INHERIT) strengths[name] = strength;
-	}
-	return { models, strengths };
 }
 
 const THINKING_LEVEL_HINTS: Record<ThinkingLevel, string> = {
@@ -215,48 +334,37 @@ async function pickAgentToConfigure(
 	);
 }
 
-/**
- * Configure a single agent picked from the enabled set: choose its model, then
- * its thinking strength. Only that one agent is touched, so re-running the menu
- * to tweak one agent no longer walks every enabled agent. Both picks offer an
- * "inherit" option that drops any existing per-agent override for that field.
- * Resolves undefined when the user presses Esc at any step; the caller keeps
- * changes from agents already configured earlier in the same pass.
- */
+/** Configure one selected agent with the same pool overview/picker used by
+ * full setup, then retain the existing focused thinking-strength picker. */
 async function configureOneAgent(
 	ctx: ExtensionCommandContext,
 	enabledAgents: readonly string[],
-	currentModels: Record<string, string>,
+	currentPools: AgentModelPoolMaps,
 	currentStrengths: Record<string, ThinkingLevel>,
 	defaultLevel: ThinkingLevel,
 	defaults: ReadonlyMap<string, ThinkingLevel>,
 ): Promise<
 	| {
 			name: string;
-			model: string | typeof INHERIT;
-			modelsAvailable: boolean;
+			pools: AgentModelPoolMaps;
 			strength: ThinkingLevel | typeof INHERIT;
 	  }
 	| undefined
 > {
 	const name = await pickAgentToConfigure(ctx, enabledAgents);
-	if (name === undefined) return undefined; // Esc cancels
-
-	const refs = availableModelRefs(ctx);
-	const modelsAvailable = refs.length > 0;
-	let model: string | typeof INHERIT = INHERIT;
-	if (!modelsAvailable) {
-		ctx.ui.notify("No Pi models are currently available; model override left unchanged.", "warning");
-	} else {
-		const modelChoice = await pickAgentModel(ctx, name, currentModels[name], refs, "stops — earlier agent picks are kept");
-		if (modelChoice === undefined) return undefined; // Esc ends the loop
-		model = modelChoice;
-	}
-
-	const strength = await pickAgentStrength(ctx, name, currentStrengths[name], defaultLevel, defaults, "stops — earlier agent picks are kept");
-	if (strength === undefined) return undefined; // Esc ends the loop
-
-	return { name, model, modelsAvailable, strength };
+	if (name === undefined) return undefined;
+	const pools = await editModelPools(ctx, [name], currentPools);
+	if (pools === undefined) return undefined;
+	const strength = await pickAgentStrength(
+		ctx,
+		name,
+		currentStrengths[name],
+		defaultLevel,
+		defaults,
+		"stops — earlier agent changes are kept",
+	);
+	if (strength === undefined) return undefined;
+	return { name, pools, strength };
 }
 
 async function pickThinkingLevel(
@@ -320,59 +428,26 @@ async function pickScope(ctx: ExtensionCommandContext, current: AgentScope): Pro
 	return scope;
 }
 
-/** Replace unavailable overrides with a model usable by the current main window. */
-function repairStaleModels(ctx: ExtensionCommandContext, agentModels: Record<string, string>): Record<string, string> {
-	const repair = repairUnavailableModelOverrides(ctx, agentModels);
-	if (repair.changed) {
-		const detail = repair.fallbackRef
-			? `Switched ${repair.replaced} unavailable model override(s) to ${repair.fallbackRef}.`
-			: `Removed ${repair.removed} unavailable model override(s); no model is currently available.`;
-		ctx.ui.notify(detail, "warning");
-	}
-	return repair.agentModels;
-}
-
-async function repairConfigModels(
-	ctx: ExtensionCommandContext,
-	configPath: string,
-	config: SubagentsConfig,
-): Promise<SubagentsConfig> {
-	const repairedModels = repairUnavailableModelOverrides(ctx, config.agentModels);
-	if (!repairedModels.changed) return config;
-
-	const repaired = { ...config, agentModels: repairedModels.agentModels };
-	try {
-		await saveConfig(repaired, configPath);
-		ctx.ui.notify(`Repaired unavailable model overrides in ${configPath}.`, "warning");
-	} catch (error) {
-		ctx.ui.notify(`Could not persist repaired model overrides: ${errorMessage(error)}`, "warning");
-	}
-	return repaired;
+function keepAgentEntries<T>(record: Record<string, T>, enabled: readonly string[]): Record<string, T> {
+	const keep = new Set(enabled);
+	return Object.fromEntries(Object.entries(record).filter(([name]) => keep.has(name)));
 }
 
 async function runFullSetup(ctx: ExtensionCommandContext, configPath: string, base: SubagentsConfig): Promise<void> {
 	const enabled = await pickEnabledAgents(ctx, base.enabledAgents);
 	if (enabled === undefined) return notifyCancelled(ctx);
 
-	// Global default first, so per-agent strength picks can show "inherit" against it.
 	const thinkingLevel = await pickThinkingLevel(ctx, base.thinkingLevel);
 	if (thinkingLevel === undefined) return notifyCancelled(ctx);
 
-	const defaults = builtinThinkingDefaults();
-	const picked = await pickAgentModelsAndStrength(ctx, enabled, base.agentModels, base.agentThinkingLevels, thinkingLevel, defaults);
-	if (picked === undefined) return notifyCancelled(ctx);
+	const pools = await editModelPools(ctx, enabled, {
+		agentModels: base.agentModels,
+		agentBackupModels: base.agentBackupModels,
+	});
+	if (pools === undefined) return notifyCancelled(ctx);
 
-	let nextVisionModel: string | undefined;
-	// No models available: keep the vision model unset (vision tasks then fall
-	// back to the main session's model) instead of showing a one-option picker.
-	const refs = availableModelRefs(ctx);
-	if (refs.length === 0) {
-		ctx.ui.notify("No Pi models are currently available; vision model left unset.", "warning");
-	} else {
-		const visionModel = await pickVisionModel(ctx, base.visionModel, refs);
-		if (visionModel === undefined) return notifyCancelled(ctx);
-		if (visionModel !== INHERIT) nextVisionModel = visionModel;
-	}
+	const visionModel = await pickVisionModel(ctx, base.visionModel);
+	if (visionModel === undefined) return notifyCancelled(ctx);
 
 	const injection = await pickInjection(ctx, base.proactiveInjection);
 	if (injection === undefined) return notifyCancelled(ctx);
@@ -389,28 +464,29 @@ async function runFullSetup(ctx: ExtensionCommandContext, configPath: string, ba
 	);
 	if (maxConcurrency === undefined) return notifyCancelled(ctx);
 
-		const maxFixRounds = await pickCount(
-			ctx,
-			"Auto-fix rounds when a reviewer returns REQUEST_CHANGES? (0 = main agent handles fixes)",
-			FIX_ROUNDS_STEPS,
-			base.maxFixRounds,
-			DEFAULT_MAX_FIX_ROUNDS,
-		);
-		if (maxFixRounds === undefined) return notifyCancelled(ctx);
+	const maxFixRounds = await pickCount(
+		ctx,
+		"Auto-fix rounds when a reviewer returns REQUEST_CHANGES? (0 = main agent handles fixes)",
+		FIX_ROUNDS_STEPS,
+		base.maxFixRounds,
+		DEFAULT_MAX_FIX_ROUNDS,
+	);
+	if (maxFixRounds === undefined) return notifyCancelled(ctx);
 
-		const idleTimeoutSec = await pickCount(
-			ctx,
-			"Idle timeout in seconds? (0 = disabled, kills a sub-agent whose output goes silent)",
-			IDLE_TIMEOUT_STEPS,
-			base.idleTimeoutSec,
-			DEFAULT_IDLE_TIMEOUT_SEC,
-		);
-		if (idleTimeoutSec === undefined) return notifyCancelled(ctx);
+	const idleTimeoutSec = await pickCount(
+		ctx,
+		"Idle timeout in seconds? (0 = disabled, kills a sub-agent whose output goes silent)",
+		IDLE_TIMEOUT_STEPS,
+		base.idleTimeoutSec,
+		DEFAULT_IDLE_TIMEOUT_SEC,
+	);
+	if (idleTimeoutSec === undefined) return notifyCancelled(ctx);
 
-		const next: SubagentsConfig = {
+	const next: SubagentsConfig = {
 		enabledAgents: enabled,
-		agentModels: repairStaleModels(ctx, picked.models),
-		agentThinkingLevels: picked.strengths,
+		agentModels: keepAgentEntries(pools.agentModels, enabled),
+		agentBackupModels: keepAgentEntries(pools.agentBackupModels, enabled),
+		agentThinkingLevels: keepAgentEntries(base.agentThinkingLevels, enabled),
 		thinkingLevel,
 		notifyOnReviewPass: base.notifyOnReviewPass,
 		maxResultLines: base.maxResultLines,
@@ -421,7 +497,7 @@ async function runFullSetup(ctx: ExtensionCommandContext, configPath: string, ba
 		idleTimeoutSec,
 		announcedFeatures: base.announcedFeatures,
 	};
-	if (nextVisionModel !== undefined) next.visionModel = nextVisionModel;
+	if (visionModel !== CURRENT_MAIN_MODEL) next.visionModel = visionModel;
 	await saveConfig(next, configPath);
 	ctx.ui.notify(`pi-subagents configured. Saved to ${configPath}`, "info");
 }
@@ -429,7 +505,7 @@ async function runFullSetup(ctx: ExtensionCommandContext, configPath: string, ba
 async function runMenu(ctx: ExtensionCommandContext, configPath: string, config: SubagentsConfig): Promise<void> {
 	const choice = await ctx.ui.select("pi-subagents is already configured. What would you like to change?", [
 		"Enable/disable agents",
-		"Configure an agent (model + thinking)",
+		"Configure an agent (model pool + thinking)",
 		"Change vision model (image tasks)",
 		"Toggle proactive injection",
 		"Change agent scope",
@@ -442,17 +518,19 @@ async function runMenu(ctx: ExtensionCommandContext, configPath: string, config:
 
 	if (choice.startsWith("Full")) return runFullSetup(ctx, configPath, config);
 
-	let next: SubagentsConfig = { ...config, agentModels: { ...config.agentModels } };
+	let next: SubagentsConfig = {
+		...config,
+		agentModels: { ...config.agentModels },
+		agentBackupModels: { ...config.agentBackupModels },
+	};
 
 	if (choice.startsWith("Enable")) {
 		const enabled = await pickEnabledAgents(ctx, config.enabledAgents);
 		if (enabled === undefined) return notifyCancelled(ctx);
 		next.enabledAgents = enabled;
 	} else if (choice.startsWith("Configure an agent")) {
-		// Per-agent loop: pick one agent, then its model and thinking strength, then
-		// return to the agent picker so several agents can be configured in one
-		// pass. Esc at any step ends the loop; agents already configured in this
-		// pass are kept.
+		// Per-agent loop: pick one agent, edit Primary + Backup together, then its
+		// thinking strength. Esc ends the loop; earlier saved agent changes remain.
 		const defaults = builtinThinkingDefaults();
 		let configuredAny = false;
 		next.agentThinkingLevels = { ...config.agentThinkingLevels };
@@ -460,35 +538,30 @@ async function runMenu(ctx: ExtensionCommandContext, configPath: string, config:
 			const picked = await configureOneAgent(
 				ctx,
 				next.enabledAgents,
-				next.agentModels,
+				{
+					agentModels: next.agentModels,
+					agentBackupModels: next.agentBackupModels,
+				},
 				next.agentThinkingLevels,
 				next.thinkingLevel,
 				defaults,
 			);
-			if (picked === undefined) break; // Esc ends the loop
+			if (picked === undefined) break;
 			configuredAny = true;
-			if (picked.modelsAvailable) {
-				if (picked.model === INHERIT) delete next.agentModels[picked.name];
-				else next.agentModels[picked.name] = picked.model;
-			}
+			next.agentModels = picked.pools.agentModels;
+			next.agentBackupModels = picked.pools.agentBackupModels;
 			if (picked.strength === INHERIT) delete next.agentThinkingLevels[picked.name];
 			else next.agentThinkingLevels[picked.name] = picked.strength;
 		}
 		if (!configuredAny) return notifyCancelled(ctx);
-		next.agentModels = repairStaleModels(ctx, next.agentModels);
 	} else if (choice.startsWith("Toggle")) {
 		const injection = await pickInjection(ctx, config.proactiveInjection);
 		if (injection === undefined) return notifyCancelled(ctx);
 		next.proactiveInjection = injection;
 	} else if (choice.startsWith("Change vision")) {
-		const refs = availableModelRefs(ctx);
-		if (refs.length === 0) {
-			ctx.ui.notify("No Pi models are currently available; vision model left unchanged.", "warning");
-			return;
-		}
-		const visionModel = await pickVisionModel(ctx, config.visionModel, refs);
+		const visionModel = await pickVisionModel(ctx, config.visionModel);
 		if (visionModel === undefined) return notifyCancelled(ctx);
-		if (visionModel === INHERIT) delete next.visionModel;
+		if (visionModel === CURRENT_MAIN_MODEL) delete next.visionModel;
 		else next.visionModel = visionModel;
 	} else if (choice.startsWith("Change agent scope")) {
 		const scope = await pickScope(ctx, config.agentScope);
@@ -542,8 +615,7 @@ export async function runSetup(ctx: ExtensionCommandContext, configPath: string 
 	}
 	try {
 		const exists = await configExists(configPath);
-		const loaded = await loadConfig(configPath);
-		const config = await repairConfigModels(ctx, configPath, loaded);
+		const config = await loadConfig(configPath);
 		if (exists) await runMenu(ctx, configPath, config);
 		else await runFullSetup(ctx, configPath, { ...DEFAULT_CONFIG, enabledAgents: [...DEFAULT_ENABLED_AGENTS] });
 	} catch (error) {

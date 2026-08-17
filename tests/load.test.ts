@@ -6,6 +6,7 @@ import { BackgroundTaskQueue, type BackgroundTask } from "../src/background.ts";
 import register, { matchRunIds } from "../src/index.ts";
 import { monitor } from "../src/monitor.ts";
 import * as spawn from "../src/spawn.ts";
+import { fakeRpcScript } from "./fake-rpc.ts";
 
 interface StubPi {
 	tools: any[];
@@ -82,7 +83,9 @@ describe("extension registration", () => {
 		const stub = makeStub();
 		register(stub.api);
 		expect(stub.tools.map((t) => t.name)).toContain("subagent");
+		expect(stub.tools.map((t) => t.name)).toContain("subagent_control");
 		expect(stub.commands).toContain("subagents-setup");
+		expect(stub.commands).toContain("subagents-inspect");
 		expect(typeof stub.hooks["before_agent_start"]).toBe("function");
 
 		const tool = stub.tools.find((t) => t.name === "subagent");
@@ -90,6 +93,11 @@ describe("extension registration", () => {
 		expect(tool.description).toContain("explore");
 		expect(tool.parameters.properties.task).toMatchObject({ minLength: 1, pattern: "\\S" });
 		expect(tool.parameters.properties.tasks.items.properties.task).toMatchObject({ minLength: 1, pattern: "\\S" });
+		expect(tool.parameters.properties.isolation).toBeDefined();
+		expect(tool.parameters.properties.tasks.items.properties.isolation).toBeDefined();
+		const control = stub.tools.find((t) => t.name === "subagent_control");
+		expect(control.description).toContain("fork copies");
+		expect(JSON.stringify(control.parameters.properties.action)).toContain("fork");
 	});
 
 	it("does not register the tool inside any child sub-agent process", () => {
@@ -97,6 +105,7 @@ describe("extension registration", () => {
 		const stub = makeStub();
 		register(stub.api);
 		expect(stub.tools.map((t) => t.name)).not.toContain("subagent");
+		expect(stub.tools.map((t) => t.name)).not.toContain("subagent_control");
 		expect(stub.commands).toContain("subagents-setup");
 	});
 
@@ -105,6 +114,7 @@ describe("extension registration", () => {
 		const stub = makeStub();
 		register(stub.api);
 		expect(stub.tools.map((t) => t.name)).not.toContain("subagent");
+		expect(stub.tools.map((t) => t.name)).not.toContain("subagent_control");
 	});
 });
 
@@ -170,23 +180,23 @@ describe("delegated task validation", () => {
 	});
 });
 
-describe("subagent resume param", () => {
-	it("rejects a resume for a run with no preserved session, without dispatching", async () => {
+describe("subagent control lookup", () => {
+	it("rejects control for an unknown logical run without dispatching", async () => {
 		const enqueue = vi.spyOn(BackgroundTaskQueue.prototype, "enqueue").mockImplementation(() => new AbortController());
 		const stub = makeStub();
 		register(stub.api);
-		const tool = stub.tools.find((candidate) => candidate.name === "subagent");
+		const control = stub.tools.find((candidate) => candidate.name === "subagent_control");
 
-		const result = await tool.execute(
-			"call-resume",
-			{ resume: 999 },
+		const result = await control.execute(
+			"call-control",
+			{ action: "resume", id: 999 },
 			new AbortController().signal,
 			() => {},
 			executionContext(),
 		);
 
 		expect(enqueue).not.toHaveBeenCalled();
-		expect(result.content[0].text).toContain("No preservable session for run #999");
+		expect(result.content[0].text).toContain("No subagent thread matches run #999");
 	});
 });
 
@@ -210,20 +220,17 @@ describe("registered tool background dispatch", () => {
 			const childScript = join(childDir, "fake-pi-child.mjs");
 			writeFileSync(
 				childScript,
-				`process.stdin.resume();
-process.stdin.on("end", () => {
-	process.stdout.write(JSON.stringify({ type: "agent_start" }) + "\\n");
-	process.stdout.write(JSON.stringify({
-		type: "message_end",
-		message: {
-			role: "assistant",
-			content: [{ type: "text", text: "fake child completed" }],
-			usage: { input: 0, output: 0, cacheRead: 321, cacheWrite: 0, cost: { total: 0 }, totalTokens: 321 },
-			stopReason: "stop"
-		}
-	}) + "\\n");
-});
-`,
+				fakeRpcScript({
+					onPrompt: `send({
+	type: "message_end",
+	message: {
+		role: "assistant",
+		content: [{ type: "text", text: "fake child completed" }],
+		usage: { input: 0, output: 0, cacheRead: 321, cacheWrite: 0, cost: { total: 0 }, totalTokens: 321 },
+		stopReason: "stop"
+	}
+});`,
+				}),
 				"utf8",
 			);
 			process.argv[1] = childScript;
@@ -298,27 +305,24 @@ process.stdin.on("end", () => {
 			// exactly the shape that used to produce a misleading "completed" message.
 			writeFileSync(
 				childScript,
-				`process.stdin.resume();
-process.stdin.on("end", () => {
-	process.stdout.write(JSON.stringify({ type: "agent_start" }) + "\\n");
-	process.stdout.write(JSON.stringify({ type: "tool_execution_start", toolName: "bash", args: {} }) + "\\n");
-	process.stdout.write(JSON.stringify({
-		type: "tool_execution_end",
-		toolName: "bash",
-		isError: true,
-		result: { content: [{ type: "text", text: "MSBuild.exe failed\\nfatal error C3861: execute_wake_task: undeclared identifier" }] }
-	}) + "\\n");
-	process.stdout.write(JSON.stringify({
-		type: "message_end",
-		message: {
-			role: "assistant",
-			content: [{ type: "text", text: "still fixing, keep waiting" }],
-			usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, cost: { total: 0 }, totalTokens: 0 },
-			stopReason: "stop"
-		}
-	}) + "\\n");
+				fakeRpcScript({
+					onPrompt: `send({ type: "tool_execution_start", toolName: "bash", args: {} });
+send({
+	type: "tool_execution_end",
+	toolName: "bash",
+	isError: true,
+	result: { content: [{ type: "text", text: "MSBuild.exe failed\\nfatal error C3861: execute_wake_task: undeclared identifier" }] }
 });
-`,
+send({
+	type: "message_end",
+	message: {
+		role: "assistant",
+		content: [{ type: "text", text: "still fixing, keep waiting" }],
+		usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, cost: { total: 0 }, totalTokens: 0 },
+		stopReason: "stop"
+	}
+});`,
+				}),
 				"utf8",
 			);
 			process.argv[1] = childScript;
@@ -367,20 +371,17 @@ process.stdin.on("end", () => {
 			const childScript = join(childDir, "fake-pi-child.mjs");
 			writeFileSync(
 				childScript,
-				`process.stdin.resume();
-process.stdin.on("end", () => {
-	process.stdout.write(JSON.stringify({ type: "agent_start" }) + "\\n");
-	process.stdout.write(JSON.stringify({
-		type: "message_end",
-		message: {
-			role: "assistant",
-			content: [{ type: "text", text: "worker result payload" }],
-			usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, cost: { total: 0 }, totalTokens: 0 },
-			stopReason: "stop"
-		}
-	}) + "\\n");
-});
-`,
+				fakeRpcScript({
+					onPrompt: `send({
+	type: "message_end",
+	message: {
+		role: "assistant",
+		content: [{ type: "text", text: "worker result payload" }],
+		usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, cost: { total: 0 }, totalTokens: 0 },
+		stopReason: "stop"
+	}
+});`,
+				}),
 				"utf8",
 			);
 			process.argv[1] = childScript;
@@ -572,20 +573,9 @@ process.stdin.on("end", () => {
 			const childScript = join(childDir, "fake-pi-child.mjs");
 			writeFileSync(
 				childScript,
-				`process.stdin.resume();
-process.stdin.on("end", () => {
-	process.stdout.write(JSON.stringify({ type: "agent_start" }) + "\\n");
-	process.stdout.write(JSON.stringify({
-		type: "message_end",
-		message: {
-			role: "assistant",
-			content: [{ type: "text", text: "status payload" }],
-			usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, cost: { total: 0 }, totalTokens: 0 },
-			stopReason: "stop"
-		}
-	}) + "\\n");
-});
-`,
+				fakeRpcScript({
+					onPrompt: `send({ type: "message_end", message: { role: "assistant", content: [{ type: "text", text: "status payload" }], usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, cost: { total: 0 }, totalTokens: 0 }, stopReason: "stop" } });`,
+				}),
 				"utf8",
 			);
 			process.argv[1] = childScript;
@@ -655,7 +645,7 @@ process.stdin.on("end", () => {
 
 			// Unknown id: nothing to stop.
 			const unknown = await stopTool.execute("stop-x", { id: "99" }, new AbortController().signal, () => {}, executionContext());
-			expect(unknown.content[0].text).toContain('No active subagent run matches "99"');
+			expect(unknown.content[0].text).toContain('No subagent thread matches "99"');
 
 			await tool.execute(
 				"call-st",
@@ -676,7 +666,7 @@ process.stdin.on("end", () => {
 				executionContext(),
 			);
 			const stopped = await stopTool.execute("stop-1", { id: String(runId) }, new AbortController().signal, () => {}, executionContext());
-			expect(stopped.content[0].text).toContain(`Stopped 1 run: #${runId} worker (queued)`);
+			expect(stopped.content[0].text).toContain(`Stopped 1 thread: #${runId} worker (queued)`);
 
 			const waited = await waitPromise;
 			expect(waited.content[0].text).toContain("### [worker] failed");
@@ -708,14 +698,9 @@ process.stdin.on("end", () => {
 			const childScript = join(childDir, "fake-pi-child.mjs");
 			writeFileSync(
 				childScript,
-				`process.stdin.resume();
-process.stdin.on("end", () => {
-	process.stdout.write(JSON.stringify({
-		type: "message_end",
-		message: { role: "assistant", content: [{ type: "text", text: "batch result" }], stopReason: "stop" }
-	}) + "\\n");
-});
-`,
+				fakeRpcScript({
+					onPrompt: `send({ type: "message_end", message: { role: "assistant", content: [{ type: "text", text: "batch result" }], stopReason: "stop" } });`,
+				}),
 				"utf8",
 			);
 			process.argv[1] = childScript;
@@ -782,18 +767,9 @@ process.stdin.on("end", () => {
 			const childScript = join(childDir, "fake-pi-child.mjs");
 			writeFileSync(
 				childScript,
-				`process.stdin.resume();
-process.stdin.on("end", () => {
-	process.stdout.write(JSON.stringify({
-		type: "message_end",
-		message: {
-			role: "assistant",
-			content: [{ type: "text", text: "APPROVE\\nVERDICT: REVIEW_PASS" }],
-			stopReason: "stop"
-		}
-	}) + "\\n");
-});
-`,
+				fakeRpcScript({
+					onPrompt: `send({ type: "message_end", message: { role: "assistant", content: [{ type: "text", text: "APPROVE\\nVERDICT: REVIEW_PASS" }], stopReason: "stop" } });`,
+				}),
 				"utf8",
 			);
 			process.argv[1] = childScript;
@@ -843,19 +819,11 @@ process.stdin.on("end", () => {
 			const childScript = join(childDir, "fake-pi-child.mjs");
 			writeFileSync(
 				childScript,
-				`let input = "";
-process.stdin.setEncoding("utf8");
-process.stdin.on("data", (chunk) => input += chunk);
-process.stdin.on("end", () => {
-	const failed = input.includes("must fail");
-	const text = failed ? "VERDICT: REVIEW_FAIL" : "successful result";
-	process.stdout.write(JSON.stringify({
-		type: "message_end",
-		message: { role: "assistant", content: [{ type: "text", text }], stopReason: "stop" }
-	}) + "\\n");
-	process.exitCode = failed ? 1 : 0;
-});
-`,
+				fakeRpcScript({
+					onPrompt: `const failed = input.includes("must fail");
+const text = failed ? "VERDICT: REVIEW_FAIL" : "successful result";
+send({ type: "message_end", message: { role: "assistant", content: [{ type: "text", text }], stopReason: failed ? "error" : "stop" } });`,
+				}),
 				"utf8",
 			);
 			process.argv[1] = childScript;
@@ -914,15 +882,10 @@ process.stdin.on("end", () => {
 			const childScript = join(childDir, "fake-pi-child.mjs");
 			writeFileSync(
 				childScript,
-				`process.stdin.resume();
-process.stdin.on("end", () => {
-	const lines = Array.from({ length: 100 }, (_, i) => "line " + i).join("\\n");
-	process.stdout.write(JSON.stringify({
-		type: "message_end",
-		message: { role: "assistant", content: [{ type: "text", text: lines }], stopReason: "stop" }
-	}) + "\\n");
-});
-`,
+				fakeRpcScript({
+					onPrompt: `const lines = Array.from({ length: 100 }, (_, i) => "line " + i).join("\\n");
+send({ type: "message_end", message: { role: "assistant", content: [{ type: "text", text: lines }], stopReason: "stop" } });`,
+				}),
 				"utf8",
 			);
 			process.argv[1] = childScript;
@@ -980,19 +943,12 @@ describe("auto-fix loop dispatch", () => {
 			const childScript = join(childDir, "fake-pi-child.mjs");
 			writeFileSync(
 				childScript,
-				`let input = "";
-process.stdin.setEncoding("utf8");
-process.stdin.on("data", (chunk) => input += chunk);
-process.stdin.on("end", () => {
-	let text = "REQUEST_CHANGES\\nVERDICT: REVIEW_FAIL";
-	if (input.includes("Auto-fix round")) text = "all blockers fixed";
-	else if (input.includes("Re-review after auto-fix round")) text = "APPROVE\\nVERDICT: REVIEW_PASS";
-	process.stdout.write(JSON.stringify({
-		type: "message_end",
-		message: { role: "assistant", content: [{ type: "text", text }], stopReason: "stop" }
-	}) + "\\n");
-});
-`,
+				fakeRpcScript({
+					onPrompt: `let text = "REQUEST_CHANGES\\nVERDICT: REVIEW_FAIL";
+if (input.includes("Auto-fix round")) text = "all blockers fixed";
+else if (input.includes("Re-review after auto-fix round")) text = "APPROVE\\nVERDICT: REVIEW_PASS";
+send({ type: "message_end", message: { role: "assistant", content: [{ type: "text", text }], stopReason: "stop" } });`,
+				}),
 				"utf8",
 			);
 			process.argv[1] = childScript;
@@ -1069,20 +1025,15 @@ process.stdin.on("end", () => {
 			const childScript = join(childDir, "fake-pi-child.mjs");
 			writeFileSync(
 				childScript,
-				`let input = "";
-process.stdin.setEncoding("utf8");
-process.stdin.on("data", (chunk) => input += chunk);
-process.stdin.on("end", () => {
-	if (input.includes("Auto-fix round")) {
-		process.stdout.write(JSON.stringify({ type: "message_end", message: { role: "assistant", content: [{ type: "text", text: "fixed" }], stopReason: "stop" } }) + "\\n");
-	} else if (input.includes("Re-review after auto-fix round")) {
-		process.stdout.write(JSON.stringify({ type: "message_end", message: { role: "assistant", content: [{ type: "text", text: "crashed mid-review" }], stopReason: "error" } }) + "\\n");
-		process.exitCode = 1;
-	} else {
-		process.stdout.write(JSON.stringify({ type: "message_end", message: { role: "assistant", content: [{ type: "text", text: "REQUEST_CHANGES\\nVERDICT: REVIEW_FAIL" }], stopReason: "stop" } }) + "\\n");
-	}
-});
-`,
+				fakeRpcScript({
+					onPrompt: `if (input.includes("Auto-fix round")) {
+	send({ type: "message_end", message: { role: "assistant", content: [{ type: "text", text: "fixed" }], stopReason: "stop" } });
+} else if (input.includes("Re-review after auto-fix round")) {
+	send({ type: "message_end", message: { role: "assistant", content: [{ type: "text", text: "crashed mid-review" }], stopReason: "error" } });
+} else {
+	send({ type: "message_end", message: { role: "assistant", content: [{ type: "text", text: "REQUEST_CHANGES\\nVERDICT: REVIEW_FAIL" }], stopReason: "stop" } });
+}`,
+				}),
 				"utf8",
 			);
 			process.argv[1] = childScript;
@@ -1142,11 +1093,9 @@ process.stdin.on("end", () => {
 			const childScript = join(childDir, "fake-pi-child.mjs");
 			writeFileSync(
 				childScript,
-				`process.stdin.resume();
-process.stdin.on("end", () => {
-	process.stdout.write(JSON.stringify({ type: "message_end", message: { role: "assistant", content: [{ type: "text", text: "REQUEST_CHANGES\\nVERDICT: REVIEW_FAIL" }], stopReason: "stop" } }) + "\\n");
-});
-`,
+				fakeRpcScript({
+					onPrompt: `send({ type: "message_end", message: { role: "assistant", content: [{ type: "text", text: "REQUEST_CHANGES\\nVERDICT: REVIEW_FAIL" }], stopReason: "stop" } });`,
+				}),
 				"utf8",
 			);
 			process.argv[1] = childScript;
@@ -1200,11 +1149,9 @@ process.stdin.on("end", () => {
 			const childScript = join(childDir, "fake-pi-child.mjs");
 			writeFileSync(
 				childScript,
-				`process.stdin.resume();
-process.stdin.on("end", () => {
-	process.stdout.write(JSON.stringify({ type: "message_end", message: { role: "assistant", content: [{ type: "text", text: "REQUEST_CHANGES\\nVERDICT: REVIEW_FAIL" }], stopReason: "stop" } }) + "\\n");
-});
-`,
+				fakeRpcScript({
+					onPrompt: `send({ type: "message_end", message: { role: "assistant", content: [{ type: "text", text: "REQUEST_CHANGES\\nVERDICT: REVIEW_FAIL" }], stopReason: "stop" } });`,
+				}),
 				"utf8",
 			);
 			process.argv[1] = childScript;
@@ -1267,12 +1214,9 @@ process.stdin.on("end", () => {
 			const childScript = join(childDir, "fake-pi-child.mjs");
 			writeFileSync(
 				childScript,
-				`process.stdin.resume();
-process.stdin.on("end", () => {
-	process.stdout.write(JSON.stringify({ type: "message_end", message: { role: "assistant", content: [{ type: "text", text: "I found issues.\\nVERDICT: REVIEW_FAIL" }], stopReason: "error" } }) + "\\n");
-	process.exitCode = 1;
-});
-`,
+				fakeRpcScript({
+					onPrompt: `send({ type: "message_end", message: { role: "assistant", content: [{ type: "text", text: "I found issues.\\nVERDICT: REVIEW_FAIL" }], stopReason: "error" } });`,
+				}),
 				"utf8",
 			);
 			process.argv[1] = childScript;
@@ -1385,58 +1329,72 @@ describe("vision-flagged dispatch", () => {
 		return { controller, runSpy };
 	}
 
-	it("runs a vision-flagged task on the configured vision model, overriding the per-agent model", async () => {
+	it("uses vision as primary, then the agent backup and current main model", async () => {
 		const uiNotify = vi.fn();
 		const { controller, runSpy } = await dispatchWithVision(
 			true,
 			{
 				agentModels: { reviewer: "anthropic/sonnet" },
+				agentBackupModels: { reviewer: "google/backup" },
 				visionModel: "anthropic/vision",
 			},
 			uiNotify,
 		);
 		expect(runSpy.mock.calls[0][0].agent.model).toBe("anthropic/vision");
+		expect(runSpy.mock.calls[0][1]).toEqual(["google/backup", "openai/current"]);
 		controller.abort();
 	});
 
-	it("falls back to the main session's current model when no vision model is configured", async () => {
-		const uiNotify = vi.fn();
-		const { controller, runSpy } = await dispatchWithVision(
-			true,
-			{ agentModels: { reviewer: "anthropic/sonnet" } },
-			uiNotify,
-		);
-		expect(runSpy.mock.calls[0][0].agent.model).toBe("openai/current");
-		controller.abort();
-	});
-
-	it("keeps the per-agent model when the task is not vision-flagged", async () => {
-		const uiNotify = vi.fn();
-		const { controller, runSpy } = await dispatchWithVision(
-			false,
-			{ agentModels: { reviewer: "anthropic/sonnet" } },
-			uiNotify,
-		);
-		expect(runSpy.mock.calls[0][0].agent.model).toBe("anthropic/sonnet");
-		controller.abort();
-	});
-
-	it("warns and falls back (no picker) outside the TUI when the configured vision model is unavailable", async () => {
+	it("uses current main as the dynamic vision primary when no vision override is configured", async () => {
 		const uiNotify = vi.fn();
 		const { controller, runSpy } = await dispatchWithVision(
 			true,
 			{
 				agentModels: { reviewer: "anthropic/sonnet" },
+				agentBackupModels: { reviewer: "google/backup" },
+			},
+			uiNotify,
+		);
+		expect(runSpy.mock.calls[0][0].agent.model).toBe("openai/current");
+		expect(runSpy.mock.calls[0][1]).toEqual(["google/backup"]);
+		controller.abort();
+	});
+
+	it("attempts a stale per-agent primary before backup and main without rewriting config", async () => {
+		const uiNotify = vi.fn();
+		const { controller, runSpy } = await dispatchWithVision(
+			false,
+			{
+				agentModels: { reviewer: "removed/primary" },
+				agentBackupModels: { reviewer: "google/backup" },
+			},
+			uiNotify,
+		);
+		expect(runSpy.mock.calls[0][0].agent.model).toBe("removed/primary");
+		expect(runSpy.mock.calls[0][1]).toEqual(["google/backup", "openai/current"]);
+		const saved = JSON.parse(readFileSync(join(testAgentDir!, "pi-subagents.json"), "utf8"));
+		expect(saved.agentModels.reviewer).toBe("removed/primary");
+		expect(saved.agentBackupModels.reviewer).toBe("google/backup");
+		controller.abort();
+	});
+
+	it("keeps a stale vision primary in the chain instead of rewriting it", async () => {
+		const uiNotify = vi.fn();
+		const { controller, runSpy } = await dispatchWithVision(
+			true,
+			{
+				agentModels: { reviewer: "anthropic/sonnet" },
+				agentBackupModels: { reviewer: "google/backup" },
 				visionModel: "anthropic/gone",
 			},
 			uiNotify,
 		);
-		// The unavailable vision model degrades to the main session's model.
-		expect(runSpy.mock.calls[0][0].agent.model).toBe("openai/current");
-		expect(uiNotify).toHaveBeenCalledWith(
-			'Configured vision model "anthropic/gone" is unavailable; this dispatch uses the main session\'s model.',
-			"warning",
-		);
+		expect(runSpy.mock.calls[0][0].agent.model).toBe("anthropic/gone");
+		expect(runSpy.mock.calls[0][1]).toEqual(["google/backup", "openai/current"]);
+		expect(uiNotify.mock.calls.some(([, level]) => level === "warning")).toBe(false);
+		const saved = JSON.parse(readFileSync(join(testAgentDir!, "pi-subagents.json"), "utf8"));
+		expect(saved.visionModel).toBe("anthropic/gone");
+		expect(saved.agentBackupModels.reviewer).toBe("google/backup");
 		controller.abort();
 	});
 });

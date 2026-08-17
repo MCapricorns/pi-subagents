@@ -125,14 +125,12 @@ export interface DiscoverOptions {
 	scope?: AgentScope;
 	/** If provided and non-empty, only agents whose name is listed are returned. */
 	enabledNames?: readonly string[];
-	/** Per-agent model override ("provider/model-id"), keyed by agent name. */
-	modelOverrides?: Record<string, string>;
 	/** Override the built-in agents directory (used by tests). */
 	builtinDir?: string;
 }
 
 /**
- * Discover agents across scopes, apply enable-filter and model overrides.
+ * Discover agents across scopes and apply the enabled-name filter.
  * Override priority for the same name: project > user > builtin.
  */
 export function discoverAgents(cwd: string, options: DiscoverOptions = {}): AgentDiscoveryResult {
@@ -156,13 +154,6 @@ export function discoverAgents(cwd: string, options: DiscoverOptions = {}): Agen
 	if (options.enabledNames && options.enabledNames.length > 0) {
 		const enabled = new Set(options.enabledNames);
 		agents = agents.filter((agent) => enabled.has(agent.name));
-	}
-
-	if (options.modelOverrides) {
-		agents = agents.map((agent) => {
-			const override = options.modelOverrides?.[agent.name];
-			return override ? { ...agent, model: override } : agent;
-		});
 	}
 
 	return { agents, projectAgentsDir };

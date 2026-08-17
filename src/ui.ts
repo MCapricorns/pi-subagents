@@ -15,10 +15,10 @@
 
 import {
 	fuzzyFilter,
-	getKeybindings,
 	truncateToWidth,
 	type Component,
 	type Focusable,
+	type KeybindingsManager,
 	type SelectItem,
 	type TUI,
 } from "@earendil-works/pi-tui";
@@ -45,6 +45,14 @@ export interface PickerStyles {
 	filterEcho: (t: string) => string;
 }
 
+export interface PickerItem extends SelectItem {
+	disabled?: boolean;
+}
+
+export function pickerItemSearchText(item: PickerItem): string {
+	return `${item.value} ${item.label} ${item.description ?? ""}`;
+}
+
 interface PickerCallbacks {
 	/** single-select: fired with the highlighted value on Enter. */
 	onSelect?: (value: string) => void;
@@ -57,18 +65,22 @@ export class Picker implements Component, Focusable {
 	private _focused = false;
 	private query = "";
 	private cursor = 0;
-	private filtered: SelectItem[];
+	private filtered: PickerItem[];
 
 	constructor(
-		private readonly items: SelectItem[],
+		private readonly items: PickerItem[],
 		private readonly multi: boolean,
 		private readonly selected: Set<string>,
 		private readonly styles: PickerStyles,
 		private readonly headerLines: string[],
 		private readonly tui: TUI,
+		private readonly keybindings: KeybindingsManager,
 		private readonly cb: PickerCallbacks,
+		initialValue?: string,
 	) {
 		this.filtered = items;
+		const initialIndex = initialValue === undefined ? -1 : items.findIndex((item) => item.value === initialValue);
+		if (initialIndex >= 0) this.cursor = initialIndex;
 	}
 
 	get focused(): boolean {
@@ -80,7 +92,7 @@ export class Picker implements Component, Focusable {
 
 	private recompute(): void {
 		const q = this.query.trim();
-		this.filtered = q ? fuzzyFilter(this.items, q, (i) => `${i.value} ${i.label}`) : this.items;
+		this.filtered = q ? fuzzyFilter(this.items, q, pickerItemSearchText) : this.items;
 		this.cursor = Math.max(0, Math.min(this.cursor, this.filtered.length - 1));
 	}
 
@@ -106,10 +118,13 @@ export class Picker implements Component, Focusable {
 				const item = visible[i];
 				const isCursor = start + i === this.cursor;
 				const mark = isCursor ? s.cursorMark("❯ ") : "  ";
-				const label = isCursor ? s.selectedLabel(item.label) : s.label(item.label);
+				const label = item.disabled
+					? s.dim(item.label)
+					: isCursor ? s.selectedLabel(item.label) : s.label(item.label);
+				const description = item.description ? s.dim(` — ${item.description}`) : "";
 				const line = this.multi
-					? mark + (this.selected.has(item.value) ? s.checked("[x] ") : s.unchecked("[ ] ")) + label
-					: mark + label;
+					? mark + (this.selected.has(item.value) ? s.checked("[x] ") : s.unchecked("[ ] ")) + label + description
+					: mark + label + description;
 				lines.push(fit(line));
 			}
 			const more = this.filtered.length > PAGE_SIZE ? "  ↑/↓ move • PgUp/PgDn page" : "";
@@ -121,7 +136,7 @@ export class Picker implements Component, Focusable {
 	}
 
 	handleInput(data: string): void {
-		const kb = getKeybindings();
+		const kb = this.keybindings;
 		if (kb.matches(data, "tui.select.up")) {
 			if (this.filtered.length > 0) this.cursor = this.cursor === 0 ? this.filtered.length - 1 : this.cursor - 1;
 		} else if (kb.matches(data, "tui.select.down")) {
@@ -134,7 +149,7 @@ export class Picker implements Component, Focusable {
 			if (this.multi) this.cb.onConfirm?.([...this.selected]);
 			else {
 				const item = this.filtered[this.cursor];
-				if (item) this.cb.onSelect?.(item.value);
+				if (item && !item.disabled) this.cb.onSelect?.(item.value);
 			}
 			return;
 		} else if (kb.matches(data, "tui.select.cancel")) {
@@ -203,16 +218,17 @@ export function promptSelectOne(
 	ctx: PickerContext,
 	title: string,
 	hint: string,
-	items: SelectItem[],
+	items: PickerItem[],
+	initialValue?: string,
 ): Promise<string | undefined> {
 	if (!requireTui(ctx)) return Promise.resolve(undefined);
-	return ctx.ui.custom<string | undefined>((tui, theme, _kb, done) => {
+	return ctx.ui.custom<string | undefined>((tui, theme, keybindings, done) => {
 		const styles = makeStyles(theme);
 		const header = [styles.title(title), styles.hint(hint)];
-		return new Picker(items, false, new Set<string>(), styles, header, tui, {
+		return new Picker(items, false, new Set<string>(), styles, header, tui, keybindings, {
 			onSelect: (value) => done(value),
 			onCancel: () => done(undefined),
-		});
+		}, initialValue);
 	});
 }
 
@@ -221,14 +237,14 @@ export function promptSelectMany(
 	ctx: PickerContext,
 	title: string,
 	hint: string,
-	items: SelectItem[],
+	items: PickerItem[],
 	initialSelected: readonly string[],
 ): Promise<string[] | undefined> {
 	if (!requireTui(ctx)) return Promise.resolve(undefined);
-	return ctx.ui.custom<string[] | undefined>((tui, theme, _kb, done) => {
+	return ctx.ui.custom<string[] | undefined>((tui, theme, keybindings, done) => {
 		const styles = makeStyles(theme);
 		const header = [styles.title(title), styles.hint(hint)];
-		return new Picker(items, true, new Set<string>(initialSelected), styles, header, tui, {
+		return new Picker(items, true, new Set<string>(initialSelected), styles, header, tui, keybindings, {
 			onConfirm: (values) => done(values),
 			onCancel: () => done(undefined),
 		});

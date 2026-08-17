@@ -4,7 +4,7 @@
  * Assembly point: builds the shared runtime and registers everything.
  * The heavy lifting lives in focused modules:
  *   - dispatch.ts  — the `subagent` tool (spawn, auto-fix chain, vision model)
- *   - tools.ts     — subagent_wait / subagent_status / subagent_stop
+ *   - tools.ts     — subagent_control / subagent_wait / status / stop
  *   - widget.ts    — session_start widget + one-time feature announcements
  *   - runtime.ts   — shared per-session state
  *
@@ -22,6 +22,7 @@ import { discoverAgents } from "./agents.ts";
 import { getConfigPath, loadConfig } from "./config.ts";
 import { registerSubagentTool } from "./dispatch.ts";
 import { matchRunIds } from "./format.ts";
+import { registerInspectorCommand } from "./inspector-panel.ts";
 import { buildDelegationDirective } from "./prompt.ts";
 import { createRuntime } from "./runtime.ts";
 import { runSetup } from "./setup.ts";
@@ -57,15 +58,16 @@ export default function (pi: ExtensionAPI): void {
 		),
 	);
 
-	pi.on("session_shutdown", () => {
-		runtime.shutdown();
+	pi.on("session_shutdown", async () => {
+		await runtime.shutdown();
 	});
 
 	registerSubagentTool(pi, runtime);
 	registerLookupTools(pi, runtime);
+	registerInspectorCommand(pi, runtime);
 
 	pi.registerCommand("subagents-setup", {
-		description: "Configure pi-subagents: enable agents, pick per-agent models, toggle proactive injection",
+		description: "Configure pi-subagents: enabled agents, primary/backup model pools, and runtime settings",
 		handler: async (_args, ctx) => {
 			await runSetup(ctx, configPath);
 		},

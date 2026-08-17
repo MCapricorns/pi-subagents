@@ -56,6 +56,16 @@ describe("MonitorStore", () => {
 		expect(runs[0].id).toBe(active);
 	});
 
+	it("beginTurn preserves parked threads", () => {
+		const store = new MonitorStore();
+		const id = store.addRun("worker", "Checkpoint work");
+		store.setStatus(id, "running");
+		store.setStatus(id, "parked");
+		store.beginTurn();
+		expect(store.getRuns()).toHaveLength(1);
+		expect(store.getRuns()[0].status).toBe("parked");
+	});
+
 	it("beginTurn preserves retained runs (auto-fix chain parent)", () => {
 		const store = new MonitorStore();
 		const parent = store.addRun("reviewer", "Review the change");
@@ -80,6 +90,14 @@ describe("MonitorStore", () => {
 		expect(run.model).toBe("openai/gpt-x");
 		expect(run.usage.input).toBe(10);
 		expect(run.usage.cost).toBe(0.5);
+	});
+
+	it("setModel records the final pool candidate and fallback origin", () => {
+		const store = new MonitorStore();
+		const id = store.addRun("worker", "Implement the change", "anthropic/primary");
+		store.setModel(id, "openai/backup", "anthropic/primary");
+		expect(store.getRuns()[0].model).toBe("openai/backup");
+		expect(store.getRuns()[0].modelFallbackFrom).toBe("anthropic/primary");
 	});
 
 	it("setAnnotation records a widget note without touching status", () => {
@@ -559,6 +577,9 @@ describe("status labels and timing", () => {
 	it("statusLabel maps statuses to user-facing words", () => {
 		expect(statusLabel("queued")).toBe("ready");
 		expect(statusLabel("running")).toBe("running");
+		expect(statusLabel("steering")).toBe("steering");
+		expect(statusLabel("interrupting")).toBe("interrupting");
+		expect(statusLabel("parked")).toBe("parked");
 		expect(statusLabel("done")).toBe("done");
 		expect(statusLabel("failed")).toBe("stopped");
 	});

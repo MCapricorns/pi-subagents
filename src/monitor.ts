@@ -14,12 +14,17 @@ import { stripVTControlCharacters } from "node:util";
 import type { Theme } from "@earendil-works/pi-coding-agent";
 import { truncateToWidth, visibleWidth } from "@earendil-works/pi-tui";
 import type { UsageStats } from "./spawn.ts";
+import type { IsolationMode, WorktreeFinalizationStatus } from "./worktree.ts";
 
 // ---------------------------------------------------------------------------
 // Types
 // ---------------------------------------------------------------------------
 
-export type RunStatus = "queued" | "running" | "done" | "failed";
+export type RunStatus = "queued" | "running" | "steering" | "interrupting" | "parked" | "done" | "failed";
+
+export function isRunActiveStatus(status: RunStatus): boolean {
+	return status === "queued" || status === "running" || status === "steering" || status === "interrupting";
+}
 
 /** Soft state-awareness signals, complementary to the hard idle-kill: a run may
  * be alive (stdout streaming) yet "stuck thinking" (no tool running for a while),
@@ -44,8 +49,14 @@ export interface RunView {
 	 * are doing, not just their run id. */
 	label?: string;
 	model?: string;
+	/** Primary model ref when the run advanced to another candidate in its pool. */
+	modelFallbackFrom?: string;
 	/** Effective thinking strength this run was launched with (frontmatter/config/global). */
 	thinking?: string;
+	isolation?: IsolationMode;
+	integrationStatus?: "pending" | WorktreeFinalizationStatus;
+	forkedFromRunId?: number;
+	forkChildRunIds?: number[];
 	status: RunStatus;
 	usage: UsageStats;
 	/** Concise current activity ("thinking", "read src/index.ts"); last writer wins. */
@@ -83,6 +94,8 @@ export interface RunView {
 export interface RunChainMeta {
 	groupId?: string;
 	relationLabel?: string;
+	isolation?: IsolationMode;
+	forkedFromRunId?: number;
 }
 
 // ---------------------------------------------------------------------------
@@ -311,7 +324,7 @@ export function activityStateLabel(state: ActivityState): string {
  * active_long_running (total elapsed past its threshold). Both are suppressed
  * for non-running runs. */
 export function deriveActivityState(run: RunView, now: number = Date.now()): ActivityState | undefined {
-	if (run.status !== "running") return undefined;
+	if (run.status !== "running" && run.status !== "steering") return undefined;
 	if (!run.currentTool) {
 		const since = run.lastActivityAt ?? run.startedAt ?? now;
 		if (now - since >= NEEDS_ATTENTION_AFTER_MS) return "needs_attention";
@@ -416,7 +429,7 @@ export class MonitorStore {
 		// running) are also preserved — their status is "done" but they must
 		// stay visible until the chain resolves.
 		this.runs = this.runs.filter(
-			(r) => r.status === "queued" || r.status === "running" || r.retained,
+			(r) => isRunActiveStatus(r.status) || r.status === "parked" || r.retained,
 		);
 		this.notify();
 	}
@@ -434,6 +447,8 @@ export class MonitorStore {
 			usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, cost: 0, contextTokens: 0, turns: 0 },
 			...(meta?.groupId ? { groupId: meta.groupId } : {}),
 			...(meta?.relationLabel ? { relationLabel: meta.relationLabel } : {}),
+			...(meta?.isolation ? { isolation: meta.isolation, integrationStatus: meta.isolation === "worktree" ? "pending" : undefined } : {}),
+			...(meta?.forkedFromRunId !== undefined ? { forkedFromRunId: meta.forkedFromRunId } : {}),
 		});
 		this.notify();
 		return id;
@@ -443,13 +458,13 @@ export class MonitorStore {
 		const run = this.find(id);
 		if (!run) return;
 		run.status = status;
-		if (status === "running") {
+		if (status === "running" || status === "steering" || status === "interrupting") {
 			if (run.startedAt === undefined) run.startedAt = Date.now();
-			// A model-fallback retry after a failed attempt restarts the clock; a
+			// A model-fallback retry or resumed generation restarts the clock; a
 			// stale endedAt would freeze the elapsed display at the first attempt.
 			if (run.endedAt !== undefined) run.endedAt = undefined;
 			run.lastActivityAt = Date.now();
-		} else if ((status === "done" || status === "failed") && run.endedAt === undefined) {
+		} else if ((status === "parked" || status === "done" || status === "failed") && run.endedAt === undefined) {
 			run.endedAt = Date.now();
 		}
 		this.notify();
@@ -460,6 +475,15 @@ export class MonitorStore {
 		run.usage = { ...usage };
 		if (model) run.model = model;
 		run.lastActivityAt = Date.now();
+		this.notify();
+	}
+
+	/** Record the final actual model and primary-to-backup transition. */
+	setModel(id: number, model?: string, fallbackFrom?: string): void {
+		const run = this.find(id);
+		if (!run) return;
+		if (model) run.model = model;
+		run.modelFallbackFrom = fallbackFrom;
 		this.notify();
 	}
 
@@ -520,6 +544,73 @@ export class MonitorStore {
 		this.notify();
 	}
 
+	setIsolation(id: number, isolation: IsolationMode, integrationStatus?: "pending" | WorktreeFinalizationStatus): void {
+		const run = this.find(id);
+		if (!run) return;
+		run.isolation = isolation;
+		run.integrationStatus = integrationStatus;
+		this.notify();
+	}
+
+	setForkRelation(sourceRunId: number, childRunId: number): void {
+		const source = this.find(sourceRunId);
+		if (source) {
+			source.forkChildRunIds ??= [];
+			if (!source.forkChildRunIds.includes(childRunId)) source.forkChildRunIds.push(childRunId);
+		}
+		const child = this.find(childRunId);
+		if (child) child.forkedFromRunId = sourceRunId;
+		this.notify();
+	}
+
+	/** Update the objective shown for a queued retarget or resumed generation. */
+	setTask(id: number, task: string): void {
+		const run = this.find(id);
+		if (!run) return;
+		run.task = task;
+		run.label = runLabel(task);
+		this.notify();
+	}
+
+	/** Reuse a stable logical run id for a resumed generation. */
+	restartRun(id: number, agent: string, task: string, model?: string, thinking?: string, isolation?: IsolationMode): void {
+		const run = this.find(id);
+		if (!run) {
+			this.runs.push({
+				id,
+				agent,
+				task,
+				label: runLabel(task),
+				model,
+				thinking,
+				...(isolation ? { isolation, integrationStatus: isolation === "worktree" ? "pending" as const : undefined } : {}),
+				status: "queued",
+				usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, cost: 0, contextTokens: 0, turns: 0 },
+			});
+			this.notify();
+			return;
+		}
+		run.agent = agent;
+		run.task = task;
+		run.label = runLabel(task);
+		run.model = model;
+		run.thinking = thinking;
+		if (isolation) run.isolation = isolation;
+		run.integrationStatus = isolation === "worktree" ? "pending" : undefined;
+		run.status = "queued";
+		run.usage = { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, cost: 0, contextTokens: 0, turns: 0 };
+		run.activity = undefined;
+		run.toolCount = undefined;
+		run.currentTool = undefined;
+		run.lastActivityAt = undefined;
+		run.startedAt = undefined;
+		run.endedAt = undefined;
+		run.annotation = undefined;
+		run.summary = undefined;
+		run.retained = undefined;
+		this.notify();
+	}
+
 	/** Look up a run by id without removing it. */
 	findRun(id: number): RunView | undefined {
 		return this.find(id);
@@ -560,6 +651,7 @@ export class MonitorStore {
 		if (run.summary) parts.push(run.summary);
 		if (run.model) parts.push(run.model);
 		if (run.thinking) parts.push(`thinking ${run.thinking}`);
+		if (run.isolation === "worktree") parts.push(`worktree ${run.integrationStatus ?? "active"}`);
 		if (usage) parts.push(usage);
 		const elapsed = formatElapsed(run);
 		if (elapsed) parts.push(elapsed);
@@ -591,6 +683,12 @@ export function statusIcon(status: RunStatus, theme: Theme): string {
 	switch (status) {
 		case "running":
 			return theme.fg("accent", "●");
+		case "steering":
+			return theme.fg("accent", "◆");
+		case "interrupting":
+			return theme.fg("warning", "◐");
+		case "parked":
+			return theme.fg("dim", "■");
 		case "done":
 			return theme.fg("success", "✓");
 		case "failed":
@@ -607,6 +705,12 @@ export function statusLabel(status: RunStatus): string {
 			return "ready";
 		case "running":
 			return "running";
+		case "steering":
+			return "steering";
+		case "interrupting":
+			return "interrupting";
+		case "parked":
+			return "parked";
 		case "done":
 			return "done";
 		case "failed":
@@ -615,10 +719,13 @@ export function statusLabel(status: RunStatus): string {
 }
 
 /** Theme color matching the status label. */
-export function statusColor(status: RunStatus): "accent" | "success" | "error" | "dim" {
+export function statusColor(status: RunStatus): "accent" | "success" | "error" | "warning" | "dim" {
 	switch (status) {
 		case "running":
+		case "steering":
 			return "accent";
+		case "interrupting":
+			return "warning";
 		case "done":
 			return "success";
 		case "failed":

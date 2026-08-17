@@ -25,7 +25,7 @@ export const DEFAULT_ENABLED_AGENTS: readonly string[] = ["explore", "worker", "
 
 /**
  * Agents that used to ship but were removed. normalizeConfig strips them from
- * enabledAgents/agentModels so upgraded installs clean their config automatically
+ * enabledAgents/model mappings so upgraded installs clean their config automatically
  * (the schema-upgrade save in loadConfig then persists the cleanup).
  */
 export const REMOVED_AGENT_NAMES: readonly string[] = ["plan"];
@@ -70,8 +70,10 @@ export const IDLE_TIMEOUT_SEC_LIMIT = 600;
 export interface SubagentsConfig {
 	/** Agent names that are discoverable and injected. Default: explore, worker, reviewer. */
 	enabledAgents: string[];
-	/** Per-agent model override, keyed by agent name, as "provider/model-id". */
+	/** Per-agent primary model override, keyed by agent name, as "provider/model-id". */
 	agentModels: Record<string, string>;
+	/** Optional per-agent backup model, tried after the primary and before the current main-window model. */
+	agentBackupModels: Record<string, string>;
 	/** Per-agent thinking-level override, keyed by agent name. */
 	agentThinkingLevels: Record<string, ThinkingLevel>;
 	/** Thinking level for sub-agents without a per-agent override or frontmatter default. Default: "high". */
@@ -125,6 +127,7 @@ export interface SubagentsConfig {
 export const DEFAULT_CONFIG: SubagentsConfig = {
 	enabledAgents: [...DEFAULT_ENABLED_AGENTS],
 	agentModels: {},
+	agentBackupModels: {},
 	agentThinkingLevels: {},
 	thinkingLevel: DEFAULT_THINKING_LEVEL,
 	notifyOnReviewPass: false,
@@ -172,6 +175,7 @@ export function normalizeConfig(raw: unknown): SubagentsConfig {
 	const config: SubagentsConfig = {
 		enabledAgents: [...DEFAULT_CONFIG.enabledAgents],
 		agentModels: {},
+		agentBackupModels: {},
 		agentThinkingLevels: {},
 		thinkingLevel: DEFAULT_CONFIG.thinkingLevel,
 		notifyOnReviewPass: DEFAULT_CONFIG.notifyOnReviewPass,
@@ -199,6 +203,13 @@ export function normalizeConfig(raw: unknown): SubagentsConfig {
 		for (const [key, value] of Object.entries(raw.agentModels)) {
 			if (REMOVED_AGENT_NAMES.includes(key.trim())) continue;
 			if (isModelReference(value)) config.agentModels[key.trim()] = value.trim();
+		}
+	}
+
+	if (isRecord(raw.agentBackupModels)) {
+		for (const [key, value] of Object.entries(raw.agentBackupModels)) {
+			if (REMOVED_AGENT_NAMES.includes(key.trim())) continue;
+			if (isModelReference(value)) config.agentBackupModels[key.trim()] = value.trim();
 		}
 	}
 
@@ -272,6 +283,7 @@ function defaultConfig(): SubagentsConfig {
 		...DEFAULT_CONFIG,
 		enabledAgents: [...DEFAULT_CONFIG.enabledAgents],
 		agentModels: {},
+		agentBackupModels: {},
 		agentThinkingLevels: {},
 		announcedFeatures: [],
 	};

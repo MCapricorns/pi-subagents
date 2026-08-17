@@ -1,9 +1,10 @@
 /**
- * Lookup tools around the subagent runtime: subagent_wait (in-turn result
- * lookup, non-blocking by default), subagent_status (overview / full result by
- * id), and subagent_stop (cancel active runs).
+ * Thread controls and lookup tools around the subagent runtime:
+ * subagent_control (steer/retarget/park/resume), subagent_wait (in-turn result
+ * lookup), subagent_status, and destructive subagent_stop.
  */
 
+import { StringEnum } from "@earendil-works/pi-ai";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { Text } from "@earendil-works/pi-tui";
 import { Type } from "typebox";
@@ -12,12 +13,15 @@ import { emptyUsage, formatCompletionBlock, formatUsage, matchRunIds } from "./f
 import {
 	formatElapsed,
 	formatUsageCompact,
+	isRunActiveStatus,
 	monitor,
 	runLabel,
 	statusLabel,
+	type RunStatus,
 } from "./monitor.ts";
 import type { SubagentRuntime } from "./runtime.ts";
-import { isFailedResult, type SingleResult } from "./spawn.ts";
+import { getResultOutput, isFailedResult, type SingleResult } from "./spawn.ts";
+import { inspectorStore } from "./trajectory.ts";
 
 /** In-turn result lookup. Dispatch already ended the turn and results arrive as
  * wake-up messages, so the default must NOT block: a settled run returns its
@@ -38,6 +42,150 @@ function renderFirstLine(result: { content?: unknown }, label: string, theme: an
 }
 
 export function registerLookupTools(pi: ExtensionAPI, runtime: SubagentRuntime): void {
+	const SubagentControlParams = Type.Object({
+		action: StringEnum(["steer", "retarget", "park", "resume", "fork"] as const, {
+			description: "Control operation for the logical sub-agent thread.",
+		}),
+		id: Type.Integer({ minimum: 1, description: "Stable run id shown in the subagent widget/status output." }),
+		instruction: Type.Optional(
+			Type.String({ description: "Instruction queued by steer after the current child tool batch." }),
+		),
+		objective: Type.Optional(
+			Type.String({ description: "Replacement objective for retarget, or optional objective for resume/fork." }),
+		),
+	});
+
+	pi.registerTool({
+		name: "subagent_control",
+		label: "Subagent Control",
+		description: [
+			"Control an existing sub-agent thread by stable run id.",
+			"steer queues an instruction after the current child tool batch.",
+			"retarget aborts the current objective to a stable checkpoint, suppresses that aborted completion, then starts the replacement objective in the same session.",
+			"park aborts to a stable checkpoint, terminates the child, preserves context, and releases its concurrency slot.",
+			"resume restarts a parked, completed, or failed retained thread with the same run id; objective is optional.",
+			"fork copies a parked/completed/failed retained session branch into a new logical thread and run id; objective is optional.",
+		].join(" "),
+		promptSnippet: "Control a subagent thread: steer, retarget, park, resume, or fork by stable run id.",
+		promptGuidelines: [
+			"Use subagent_control steer to refine active work without restarting it; the instruction is delivered after the child's current tool batch.",
+			"Use subagent_control retarget when the active objective is obsolete; do not call subagent_stop and start a fresh thread because retarget preserves context and suppresses the abandoned completion.",
+			"Use subagent_control park to checkpoint useful context while releasing the process/concurrency slot, and resume to continue the same run id later.",
+			"Use subagent_control fork only on a parked or settled retained thread; park active work first. Fork creates a new run id while leaving the source untouched.",
+			"Use subagent_stop only for destructive cancellation; it retires that thread's retained session without retiring independent forks.",
+		],
+		parameters: SubagentControlParams,
+
+		async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
+			const thread = runtime.threads.get(params.id);
+			if (!thread) {
+				return { content: [{ type: "text", text: `No subagent thread matches run #${params.id}.` }], details: {} };
+			}
+			const nonBlank = (value: string | undefined): string | undefined => {
+				const trimmed = value?.trim();
+				return trimmed ? trimmed : undefined;
+			};
+
+			try {
+				switch (params.action) {
+					case "steer": {
+						const instruction = nonBlank(params.instruction);
+						if (!instruction) {
+							return { content: [{ type: "text", text: "steer requires a non-blank instruction." }], details: {} };
+						}
+						if (!(["running", "steering"] as const).includes(thread.control.getPhase() as any)) {
+							return { content: [{ type: "text", text: `Run #${thread.id} is ${thread.control.getPhase()}; only a running thread can be steered.` }], details: {} };
+						}
+						await thread.control.steer(instruction);
+						inspectorStore.get(thread.id).trajectory.append({ kind: "steer", instruction });
+						return { content: [{ type: "text", text: `Queued steering instruction for run #${thread.id} after its current tool batch.` }], details: {} };
+					}
+					case "retarget": {
+						const objective = nonBlank(params.objective);
+						if (!objective) {
+							return { content: [{ type: "text", text: "retarget requires a non-blank objective." }], details: {} };
+						}
+						const phase = thread.control.getPhase();
+						if (thread.state === "queued" && phase === "queued") {
+							thread.task = objective;
+							thread.control.retargetPending(objective);
+							monitor.setTask(thread.id, objective);
+							inspectorStore.get(thread.id).trajectory.append({ kind: "retarget", objective });
+							return { content: [{ type: "text", text: `Updated queued run #${thread.id} to the new objective; no child was spawned by this control action.` }], details: {} };
+						}
+						if (!(["starting", "running", "steering", "interrupting", "retrying"] as const).includes(phase as any)) {
+							return { content: [{ type: "text", text: `Run #${thread.id} is ${thread.state}; use resume with objective to restart retained context.` }], details: {} };
+						}
+						thread.task = objective;
+						monitor.setTask(thread.id, objective);
+						await thread.control.retarget(objective);
+						inspectorStore.get(thread.id).trajectory.append({ kind: "retarget", objective });
+						return { content: [{ type: "text", text: `Retargeted run #${thread.id} in the same session; the aborted objective will not be delivered as a completion.` }], details: {} };
+					}
+					case "park": {
+						if (thread.state === "parked") {
+							return { content: [{ type: "text", text: `Run #${thread.id} is already parked.` }], details: {} };
+						}
+						const disposition = await thread.park();
+						return disposition === "queued"
+							? {
+								content: [{ type: "text", text: `Parked queued run #${thread.id}; it never spawned a child or empty session.` }],
+								details: {},
+							}
+							: {
+								content: [{ type: "text", text: `Parked run #${thread.id} at a stable checkpoint; its session is retained and concurrency slot released.` }],
+								details: {},
+							};
+					}
+					case "resume": {
+						if (thread.retired) {
+							return { content: [{ type: "text", text: `Run #${thread.id} was retired by subagent_stop and has no resumable session.` }], details: {} };
+						}
+						if (!(["parked", "completed", "failed"] as const).includes(thread.state as any)) {
+							return { content: [{ type: "text", text: `Run #${thread.id} is ${thread.state}; it must be parked or settled before resume.` }], details: {} };
+						}
+						const objective = params.objective === undefined ? undefined : nonBlank(params.objective);
+						if (params.objective !== undefined && !objective) {
+							return { content: [{ type: "text", text: "resume objective must be non-blank when provided." }], details: {} };
+						}
+						const pending = await thread.resume(objective, ctx);
+						if (pending.exitCode !== -1) {
+							return { content: [{ type: "text", text: getResultOutput(pending) }], details: {} };
+						}
+						return { content: [{ type: "text", text: `Resumed run #${thread.id}${objective ? " with a new objective" : " from retained context"}; completion will arrive automatically.` }], details: {}, terminate: true };
+					}
+					case "fork": {
+						const objective = params.objective === undefined ? undefined : nonBlank(params.objective);
+						if (params.objective !== undefined && !objective) {
+							return { content: [{ type: "text", text: "fork objective must be non-blank when provided." }], details: {} };
+						}
+						const pending = await thread.fork(objective, ctx);
+						if (pending.exitCode !== -1 || pending.runId === undefined) {
+							return { content: [{ type: "text", text: getResultOutput(pending) }], details: {} };
+						}
+						return {
+							content: [{
+								type: "text",
+								text: `Forked run #${thread.id} into new run #${pending.runId}${objective ? " with a new objective" : " from retained context"}; the source is unchanged and child completion will arrive automatically.`,
+							}],
+							details: { sourceRunId: thread.id, childRunId: pending.runId, result: pending },
+							terminate: true,
+						};
+					}
+				}
+			} catch (error) {
+				throw new Error(`Could not ${params.action} run #${thread.id}: ${error instanceof Error ? error.message : String(error)}`);
+			}
+		},
+
+		renderCall(args, theme) {
+			return new Text(`${theme.fg("toolTitle", theme.bold("subagent_control "))}${theme.fg("accent", `${args.action} #${args.id}`)}`, 0, 0);
+		},
+		renderResult(result, _options, theme) {
+			return renderFirstLine(result, "subagent_control ", theme);
+		},
+	});
+
 	const SubagentWaitParams = Type.Object({
 		id: Type.Optional(
 			Type.String({
@@ -81,8 +229,8 @@ export function registerLookupTools(pi: ExtensionAPI, runtime: SubagentRuntime):
 				typeof params.timeoutMs === "number" && Number.isFinite(params.timeoutMs) && params.timeoutMs >= 0
 					? params.timeoutMs
 					: SUBAGENT_WAIT_DEFAULT_TIMEOUT_MS;
-			const isActive = (run: { status: string; retained?: boolean }): boolean =>
-				run.status === "queued" || run.status === "running" || run.retained === true;
+			const isActive = (run: { status: RunStatus; retained?: boolean }): boolean =>
+				isRunActiveStatus(run.status) || run.retained === true;
 
 			const requested = params.id?.trim();
 			// A run that already settled resolves immediately with its result.
@@ -146,7 +294,12 @@ export function registerLookupTools(pi: ExtensionAPI, runtime: SubagentRuntime):
 							finish({ result: current });
 							return;
 						}
-						if (!monitor.findRun(runId)) {
+						const live = monitor.findRun(runId);
+						if (live?.status === "parked") {
+							finish({ note: `run #${runId} was parked at a stable checkpoint; use subagent_control resume to continue it` });
+							return;
+						}
+						if (!live) {
 							// Removal is followed synchronously by registerRunResult in the
 							// finishing task; re-check on the next tick so the result wins.
 							setTimeout(() => {
@@ -243,11 +396,20 @@ export function registerLookupTools(pi: ExtensionAPI, runtime: SubagentRuntime):
 				const activeId = matchRunIds(runs.map((run) => run.id), requested)[0];
 				const active = activeId === undefined ? undefined : runs.find((run) => run.id === activeId);
 				if (active) {
+					const parked = active.status === "parked";
+					const activeThread = runtime.threads.get(active.id);
+					const metadata = [
+						activeThread?.isolation === "worktree" ? `worktree ${active.integrationStatus ?? activeThread.worktree?.state ?? "active"}` : undefined,
+						activeThread?.forkedFromRunId !== undefined ? `forked from #${activeThread.forkedFromRunId}` : undefined,
+						(activeThread?.forkChildRunIds.length ?? 0) > 0 ? `forks ${activeThread!.forkChildRunIds.map((id) => `#${id}`).join(",")}` : undefined,
+					].filter(Boolean).join(" · ");
 					return {
 						content: [
 							{
 								type: "text",
-								text: `Run #${active.id} ${active.agent} is still active (${active.activity ?? statusLabel(active.status)}). Use subagent_wait to block for its result, or subagent_stop to cancel it.`,
+								text: parked
+									? `Run #${active.id} ${active.agent} is parked with retained context${metadata ? ` (${metadata})` : ""}. Use subagent_control resume to restart it, or subagent_stop to retire it.`
+									: `Run #${active.id} ${active.agent} is still active (${active.activity ?? statusLabel(active.status)}${metadata ? ` · ${metadata}` : ""}). Use subagent_wait to block for its result, subagent_control to steer/park it, or subagent_stop to cancel it.`,
 							},
 						],
 						details: {},
@@ -258,31 +420,59 @@ export function registerLookupTools(pi: ExtensionAPI, runtime: SubagentRuntime):
 
 			const now = Date.now();
 			const activeRuns = monitor.getRuns().filter(
-				(run) => run.status === "queued" || run.status === "running" || run.retained,
+				(run) => isRunActiveStatus(run.status) || run.retained,
 			);
 			const activeLines = activeRuns.map((run) => {
+				const thread = runtime.threads.get(run.id);
+				const model = run.modelFallbackFrom
+					? `${run.model ?? "?"} (pool fallback from ${run.modelFallbackFrom})`
+					: (run.model ?? "?");
 				const parts = [
 					`#${run.id} ${run.agent}`,
 					run.label,
-					run.model ?? "?",
+					model,
 					formatUsageCompact(run.usage),
 					formatElapsed(run, now),
+					thread?.isolation === "worktree" ? `worktree ${run.integrationStatus ?? thread.worktree?.state ?? "active"}` : undefined,
+					thread?.forkedFromRunId !== undefined ? `forked from #${thread.forkedFromRunId}` : undefined,
+					(thread?.forkChildRunIds.length ?? 0) > 0 ? `forks ${thread!.forkChildRunIds.map((id) => `#${id}`).join(",")}` : undefined,
 				].filter(Boolean);
 				return `- ${parts.join(" · ")} · ${run.activity ?? statusLabel(run.status)}`;
+			});
+			const parkedThreads = [...runtime.threads.values()].filter((thread) => thread.state === "parked");
+			const parkedLines = parkedThreads.map((thread) => {
+				const relations = [
+					thread.forkedFromRunId !== undefined ? `forked from #${thread.forkedFromRunId}` : undefined,
+					thread.forkChildRunIds.length > 0 ? `forks ${thread.forkChildRunIds.map((id) => `#${id}`).join(",")}` : undefined,
+				].filter(Boolean);
+				const relation = relations.length > 0 ? ` · ${relations.join(" · ")}` : "";
+				const isolation = thread.isolation === "worktree" ? ` · worktree ${thread.worktree?.state ?? "active"}` : "";
+				return `- #${thread.id} ${thread.agentName} · ${runLabel(thread.task)} · parked${thread.sessionDir ? " · context retained" : " · not started"}${isolation}${relation}`;
 			});
 			const completed = [...runtime.settledRuns.entries()].slice(-5);
 			const completedLines = completed.map(([id, result]) => {
 				const usage = formatUsage(result.usage);
 				const label = runLabel(result.task);
-				return `- #${id} ${result.agent}${label ? ` · ${label}` : ""} · ${isFailedResult(result) ? "failed" : "completed"}${usage ? ` · ${usage}` : ""}`;
+				const model = result.modelFallbackFrom
+					? `${result.model ?? "?"} (pool fallback from ${result.modelFallbackFrom})`
+					: (result.model ?? "?");
+				const isolation = result.isolation === "worktree" ? ` · worktree ${result.integrationStatus ?? "unknown"}` : "";
+				const relations = [
+					result.forkedFromRunId !== undefined ? `forked from #${result.forkedFromRunId}` : undefined,
+					(result.forkChildRunIds?.length ?? 0) > 0 ? `forks ${result.forkChildRunIds!.map((childId) => `#${childId}`).join(",")}` : undefined,
+				].filter(Boolean);
+				const relation = relations.length > 0 ? ` · ${relations.join(" · ")}` : "";
+				return `- #${id} ${result.agent}${label ? ` · ${label}` : ""} · ${isFailedResult(result) ? "failed" : "completed"} · ${model}${isolation}${relation}${usage ? ` · ${usage}` : ""}`;
 			});
 
 			const sections: string[] = [];
 			sections.push(`### Active subagent runs (${activeRuns.length})`);
 			sections.push(activeLines.length > 0 ? activeLines.join("\n") : "(none)");
+			sections.push(`### Parked subagent threads (${parkedThreads.length})`);
+			sections.push(parkedLines.length > 0 ? parkedLines.join("\n") : "(none)");
 			sections.push(`### Finished this session (${runtime.settledRuns.size})`);
 			sections.push(completedLines.length > 0 ? completedLines.join("\n") : "(none)");
-			sections.push("Pass a run id to subagent_status for the full result, or subagent_wait to block for an active run.");
+			sections.push("Pass a run id to subagent_status for the full result, use subagent_control to steer/park/resume/fork, or subagent_wait for active work.");
 			return { content: [{ type: "text", text: sections.join("\n\n") }], details: {} };
 		},
 
@@ -315,8 +505,8 @@ export function registerLookupTools(pi: ExtensionAPI, runtime: SubagentRuntime):
 		name: "subagent_stop",
 		label: "Subagent Stop",
 		description: [
-			"Cancel one or more active background sub-agent runs: the child process is terminated and an aborted result (with partial output) is delivered.",
-			"Pass id (run id or prefix) to stop one run, or all: true to stop every active run.",
+			"Destructively stop a sub-agent thread: terminate active work, deliver its aborted partial result, and retire any retained session so it cannot be resumed.",
+			"Pass id (run id or prefix) to stop one active, parked, or completed thread; all: true stops every active run.",
 		].join(" "),
 		promptSnippet: "Stop a running background subagent (id from the widget/subagent_status; or all: true).",
 		promptGuidelines: [
@@ -326,70 +516,121 @@ export function registerLookupTools(pi: ExtensionAPI, runtime: SubagentRuntime):
 		parameters: SubagentStopParams,
 
 		async execute(_toolCallId, params, _signal, _onUpdate) {
+			const candidateIds = params.all === true
+				? [...runtime.runControllers.keys()]
+				: [...runtime.threads.keys()];
 			const targets =
 				params.all === true
-					? [...runtime.runControllers.keys()]
+					? candidateIds
 					: params.id !== undefined && params.id.trim() !== ""
-						? matchRunIds([...runtime.runControllers.keys()], params.id!.trim())
+						? matchRunIds(candidateIds, params.id.trim())
 						: [];
 
 			if (targets.length === 0) {
-				const activeList = [...runtime.runControllers.keys()].map((id) => `#${id}`).join(", ");
+				const available = [...runtime.threads.keys()].map((id) => `#${id}`).join(", ");
 				return {
-					content: [
-						{
-							type: "text",
-							text:
-								params.all === true
-									? "No active subagent runs to stop."
-									: `No active subagent run matches "${params.id}".${activeList ? ` Active runs: ${activeList}.` : ""}`,
-						},
-					],
+					content: [{
+						type: "text",
+						text: params.all === true
+							? "No active subagent runs to stop."
+							: `No subagent thread matches "${params.id}".${available ? ` Known threads: ${available}.` : ""}`,
+					}],
 					details: {},
 				};
 			}
 
 			const stopped: string[] = [];
+			const retainedIntegration: string[] = [];
 			for (const runId of targets) {
+				const thread = runtime.threads.get(runId);
+				if (!thread) continue;
 				const run = monitor.findRun(runId);
-				if (!run) {
-					runtime.runControllers.delete(runId);
-					continue;
+				const previousState = thread.state;
+				const wasQueued = previousState === "queued";
+				const wasResuming = previousState === "resuming";
+				const wasActive = ["queued", "resuming", "running", "steering", "interrupting"].includes(previousState);
+				const generation = thread.generation;
+				const controller = thread.queueController;
+				const completion = thread.generationCompletion;
+				const control = thread.control;
+				const stopVersion = ++thread.lifecycleVersion;
+				// Destructive retirement is claimed synchronously before the first await.
+				// This invalidates any resume/fork preflight before it can enqueue work.
+				thread.lifecycleOperation = "stop";
+				thread.retired = true;
+				thread.retireOnSettle = true;
+				thread.state = "stopped";
+
+				const stopMessage = wasQueued
+					? "Stopped by subagent_stop before the run started."
+					: wasResuming
+						? "Stopped by subagent_stop while resume was preparing."
+						: wasActive
+							? "Stopped by subagent_stop."
+							: previousState === "parked"
+								? "Stopped by subagent_stop from a parked checkpoint."
+								: "Retired by subagent_stop.";
+				await control.stop(stopMessage).catch(() => undefined);
+				runtime.backgroundQueue.cancel(controller);
+				await completion;
+				if (runtime.runControllers.get(runId) === controller) runtime.runControllers.delete(runId);
+				if (thread.queueController === controller) thread.queueController = undefined;
+
+				// Normal active generations publish their own aborted partial result. A
+				// queued/resuming task, parked checkpoint, or cancelled auto-fix chain has
+				// no such publisher, so synthesize exactly one result after quiescence.
+				if (
+					wasQueued ||
+					wasResuming ||
+					previousState === "parked" ||
+					!runtime.settledRuns.has(runId)
+				) {
+					const prior = thread.lastResult;
+					const stoppedResult: SingleResult = prior
+						? {
+							...prior,
+							task: thread.task,
+							parked: undefined,
+							exitCode: 1,
+							stopReason: "aborted",
+							errorMessage: stopMessage,
+							runId,
+						}
+						: {
+							agent: thread.agentName,
+							agentSource: "builtin",
+							task: thread.task,
+							exitCode: 1,
+							messages: [],
+							stderr: stopMessage,
+							usage: emptyUsage(),
+							model: run?.model,
+							thinking: run?.thinking,
+							stopReason: "aborted",
+							errorMessage: stopMessage,
+							runId,
+							isolation: thread.isolation,
+							originalCwd: thread.cwd,
+							isolationCwd: thread.executionCwd,
+						};
+					const finalization = await thread.finalizeIsolation(generation, stoppedResult);
+					if (finalization?.status === "retained") retainedIntegration.push(`#${runId}`);
+					runtime.registerRunResult(runId, stoppedResult);
+					thread.lastResult = stoppedResult;
 				}
-				// Abort before registering the synthetic result: abort() only marks the
-				// queue entry (drain delivers the cancellation callback later), so the
-				// has() re-check right after it distinguishes an entry that never ran
-				// from one whose task already started under a stale "queued" status —
-				// a started task owns its own (real, partial-output) result.
-				const controller = runtime.runControllers.get(runId);
-				controller?.abort();
-				// A queued run never reaches the child-spawn code path, so its abort
-				// goes through the queue's cancelled callback with no result object;
-				// register a synthetic aborted result so subagent_wait resolves.
-				if (run.status === "queued" && runtime.runControllers.has(runId)) {
-					runtime.registerRunResult(runId, {
-						agent: run.agent,
-						agentSource: "builtin",
-						task: run.task,
-						exitCode: 1,
-						messages: [],
-						stderr: "Stopped by subagent_stop before the run started.",
-						usage: emptyUsage(),
-						model: run.model,
-						thinking: run.thinking,
-						stopReason: "aborted",
-						errorMessage: "Stopped by subagent_stop before the run started.",
-					});
+				monitor.setStatus(runId, "failed");
+				monitor.removeRun(runId);
+				runtime.retireThreadSession(thread);
+				if (thread.lifecycleVersion === stopVersion && thread.lifecycleOperation === "stop") {
+					thread.lifecycleOperation = undefined;
 				}
-				stopped.push(`#${runId} ${run.agent}${run.status === "queued" ? " (queued)" : ""}`);
+				stopped.push(`#${runId} ${thread.agentName}${wasQueued ? " (queued)" : wasActive ? "" : ` (${previousState})`}`);
 			}
 			return {
-				content: [
-					{
-						type: "text",
-						text: `Stopped ${stopped.length} run${stopped.length === 1 ? "" : "s"}: ${stopped.join(", ")}. An aborted result (with partial output) is delivered.`,
-					},
-				],
+				content: [{
+					type: "text",
+					text: `Stopped ${stopped.length} thread${stopped.length === 1 ? "" : "s"}: ${stopped.join(", ")}. Retained sessions were retired; worktree changes are integrated on settlement.${retainedIntegration.length > 0 ? ` Integration failed for ${retainedIntegration.join(", ")}; inspect its result for retained recovery paths.` : ""}`,
+				}],
 				details: {},
 			};
 		},

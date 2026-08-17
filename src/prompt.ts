@@ -58,8 +58,9 @@ ${routing ? `Routing:\n${routing}\n` : ""}Dispatch discipline:
 - Delegate only when isolation genuinely pays: a self-contained implementation/fix with its own validation (worker), or a fresh-context review gate (reviewer).
 - When in doubt, start with a direct tool call in the main context; escalate to \`explore\` as soon as the search turns broad or crosses multiple files.
 - For an already-known or trivial target, use a direct search/read tool (e.g. grep/find/read) — do not over-delegate a one-line lookup.
-${hasMultiple ? "- Run INDEPENDENT tasks in parallel: one subagent call with a `tasks` array, and track them with your todo list. Let the automatically resumed main agent launch dependent work only after its prerequisite result arrives (e.g. explore, then worker, then reviewer).\n" : ""}- Brief each sub-agent as self-contained: goal, exact paths, constraints, expected output. It has NO memory of this conversation.
-- Treat delegated agents as leaf workers: do not ask a sub-agent to dispatch another sub-agent; child processes do not have this tool.
+${hasMultiple ? "- Run INDEPENDENT tasks in parallel: one subagent call with a `tasks` array, and track them with your todo list. Parallel worker items default to detached Git worktree isolation; pass `isolation: \"shared\"` only when a worker intentionally needs the caller's live uncommitted tree. Let the automatically resumed main agent launch dependent work only after its prerequisite result arrives (e.g. explore, then worker, then reviewer).\n" : ""}- Single dispatch stays in the shared working tree by default. Use \`isolation: "worktree"\` only for worker/write-capable agents in a Git repository; never request it for explore/reviewer, and never silently retry shared after setup fails.
+- Brief each sub-agent as self-contained: goal, exact paths, constraints, expected output. It has NO memory of this conversation.
+- Treat delegated agents as leaf workers: do not ask a sub-agent to dispatch another sub-agent; child processes do not have this tool. Use \`subagent_control fork\` on a parked/settled retained thread when you need an independent continuation with preserved context and a new run id.
 - Trust but verify: a sub-agent's summary describes intent, not outcome. Check the actual changes/results before reporting work done.
 
 Vision tasks:

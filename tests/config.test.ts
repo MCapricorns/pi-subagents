@@ -15,6 +15,7 @@ import {
 	MAX_RESULT_LINES_LIMIT,
 	loadConfig,
 	normalizeConfig,
+	saveConfig,
 } from "../src/config.ts";
 
 describe("normalizeConfig", () => {
@@ -24,6 +25,7 @@ describe("normalizeConfig", () => {
 		expect(config.proactiveInjection).toBe(true);
 		expect(config.agentScope).toBe("user");
 		expect(config.agentModels).toEqual({});
+		expect(config.agentBackupModels).toEqual({});
 		expect(config.agentThinkingLevels).toEqual({});
 		expect(config.thinkingLevel).toBe(DEFAULT_THINKING_LEVEL);
 		expect(config.notifyOnReviewPass).toBe(false);
@@ -39,10 +41,12 @@ describe("normalizeConfig", () => {
 		const config = normalizeConfig({
 			enabledAgents: ["explore", "plan", "worker"],
 			agentModels: { plan: "anthropic/claude-haiku-4-5", worker: "openai/gpt-5" },
+			agentBackupModels: { plan: "openai/old", worker: "anthropic/backup" },
 			agentThinkingLevels: { plan: "high", worker: "medium" },
 		});
 		expect(config.enabledAgents).toEqual(["explore", "worker"]);
 		expect(config.agentModels).toEqual({ worker: "openai/gpt-5" });
+		expect(config.agentBackupModels).toEqual({ worker: "anthropic/backup" });
 		expect(config.agentThinkingLevels).toEqual({ worker: "medium" });
 	});
 
@@ -55,6 +59,19 @@ describe("normalizeConfig", () => {
 			agentModels: { explore: "anthropic/claude-haiku-4-5", bad: "noslash", empty: "  " },
 		});
 		expect(config.agentModels).toEqual({ explore: "anthropic/claude-haiku-4-5" });
+	});
+
+	it("keeps valid backup model refs and defaults a missing key to an empty pool", () => {
+		const config = normalizeConfig({
+			agentBackupModels: {
+				explore: " anthropic/claude-sonnet-4-5 ",
+				bad: "noslash",
+				empty: "  ",
+				spaced: "openai/model id",
+			},
+		});
+		expect(config.agentBackupModels).toEqual({ explore: "anthropic/claude-sonnet-4-5" });
+		expect(normalizeConfig({}).agentBackupModels).toEqual({});
 	});
 
 	it("defaults maxResultLines to 80 and clamps invalid values", () => {
@@ -160,6 +177,20 @@ describe("normalizeConfig", () => {
 });
 
 describe("loadConfig", () => {
+	it("round-trips configured backup model refs through save/load", async () => {
+		const dir = mkdtempSync(join(tmpdir(), "pi-subagents-test-"));
+		const path = join(dir, "pi-subagents.json");
+		const config = normalizeConfig({
+			agentModels: { worker: "anthropic/primary" },
+			agentBackupModels: { worker: "openai/backup" },
+		});
+		await saveConfig(config, path);
+		const loaded = await loadConfig(path);
+		expect(loaded.agentModels).toEqual({ worker: "anthropic/primary" });
+		expect(loaded.agentBackupModels).toEqual({ worker: "openai/backup" });
+		expect(JSON.parse(readFileSync(path, "utf8")).agentBackupModels).toEqual({ worker: "openai/backup" });
+	});
+
 	it("returns defaults when the file is missing", async () => {
 		const dir = mkdtempSync(join(tmpdir(), "pi-subagents-test-"));
 		const config = await loadConfig(join(dir, "does-not-exist.json"));
@@ -186,6 +217,7 @@ describe("loadConfig", () => {
 
 		const saved = JSON.parse(readFileSync(path, "utf8"));
 		expect(saved.enabledAgents).toEqual(["explore"]);
+		expect(saved.agentBackupModels).toEqual({});
 		expect(saved.thinkingLevel).toBe("high");
 		expect(saved.maxConcurrency).toBe(DEFAULT_MAX_CONCURRENCY);
 	});

@@ -48,16 +48,6 @@ describe("discoverAgents", () => {
 		expect(agents.map((a) => a.name)).toEqual(["worker"]);
 	});
 
-	it("applies model overrides", () => {
-		writeAgent(builtinDir, "explore", "---\nname: explore\ndescription: d\nmodel: original\n---\nb");
-		const { agents } = discoverAgents(cwd, {
-			scope: "user",
-			builtinDir,
-			modelOverrides: { explore: "anthropic/override" },
-		});
-		expect(agents[0].model).toBe("anthropic/override");
-	});
-
 	it("parses a valid thinking level and ignores invalid ones", () => {
 		writeAgent(builtinDir, "explore", "---\nname: explore\ndescription: d\nthinking: low\n---\nb");
 		writeAgent(builtinDir, "worker", "---\nname: worker\ndescription: d\nthinking: ultra\n---\nb");

@@ -1,7 +1,8 @@
 import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { describe, expect, it } from "vitest";
+import { afterAll, beforeAll, describe, expect, it } from "vitest";
+import { fakeRpcScript } from "./fake-rpc.ts";
 import {
 	buildFallbackResumeReason,
 	buildResumePrompt,
@@ -11,6 +12,7 @@ import {
 	getResultOutput,
 	isFailedResult,
 	isModelLevelFailure,
+	isPermanentModelCandidateError,
 	isRetryableStartupFailure,
 	isTerminalModelError,
 	RESULT_LINE_MAX,
@@ -22,6 +24,26 @@ import {
 	writeResultArtifact,
 	type SingleResult,
 } from "../src/spawn.ts";
+
+let savedTemp: string | undefined;
+let savedTmp: string | undefined;
+let isolatedTemp: string;
+
+beforeAll(() => {
+	savedTemp = process.env.TEMP;
+	savedTmp = process.env.TMP;
+	isolatedTemp = mkdtempSync(join(tmpdir(), "pi-subagents-spawn-suite-"));
+	process.env.TEMP = isolatedTemp;
+	process.env.TMP = isolatedTemp;
+});
+
+afterAll(() => {
+	if (savedTemp === undefined) delete process.env.TEMP;
+	else process.env.TEMP = savedTemp;
+	if (savedTmp === undefined) delete process.env.TMP;
+	else process.env.TMP = savedTmp;
+	rmSync(isolatedTemp, { recursive: true, force: true });
+});
 
 function assistant(text: string): any {
 	return { role: "assistant", content: [{ type: "text", text }] };
@@ -108,11 +130,9 @@ describe("runSingleAgent transport and lifecycle", () => {
 		const script = join(dir, "stdin-child.mjs");
 		writeFileSync(
 			script,
-			`let input = "";
-process.stdin.setEncoding("utf8");
-process.stdin.on("data", (chunk) => input += chunk);
-process.stdin.on("end", () => process.stdout.write(JSON.stringify({ type: "message_end", message: { role: "assistant", content: [{ type: "text", text: input }] } }) + "\\n"));
-`,
+			fakeRpcScript({
+				onPrompt: `send({ type: "message_end", message: { role: "assistant", content: [{ type: "text", text: input }], stopReason: "stop" } });`,
+			}),
 			"utf8",
 		);
 		const previousScript = process.argv[1];
@@ -139,10 +159,10 @@ process.stdin.on("end", () => process.stdout.write(JSON.stringify({ type: "messa
 		// Start with one stdout line, then go silent (resume stdin, no more output).
 		writeFileSync(
 			script,
-		`process.stdout.write(JSON.stringify({ type: "message_end", message: { role: "assistant", content: [{ type: "text", text: "started" }] } }) + "\\n");
-process.stdin.resume();
-setInterval(() => {}, 1000);
-`,
+		fakeRpcScript({
+			onPrompt: `send({ type: "message_end", message: { role: "assistant", content: [{ type: "text", text: "started" }], stopReason: "stop" } }); setInterval(() => {}, 1000);`,
+			autoSettle: false,
+		}),
 		"utf8",
 	);
 		const previousScript = process.argv[1];
@@ -171,14 +191,19 @@ setInterval(() => {}, 1000);
 		// Emit a line every 20ms so stdout never goes idle; finish before the idle timeout.
 		writeFileSync(
 			script,
-			`let n = 0;
+			fakeRpcScript({
+				onPrompt: `let n = 0;
 const timer = setInterval(() => {
 	n++;
-	process.stdout.write(JSON.stringify({ type: "message_update", assistantMessageEvent: { type: "thinking_delta" } }) + "\\n");
-	if (n >= 5) { clearInterval(timer); process.stdout.write(JSON.stringify({ type: "message_end", message: { role: "assistant", content: [{ type: "text", text: "done" }] } }) + "\\n"); process.exit(0); }
-}, 20);
-process.stdin.resume();
-`,
+	send({ type: "message_update", assistantMessageEvent: { type: "thinking_delta" } });
+	if (n >= 5) {
+		clearInterval(timer);
+		send({ type: "message_end", message: { role: "assistant", content: [{ type: "text", text: "done" }], stopReason: "stop" } });
+		send({ type: "agent_settled" });
+	}
+}, 20);`,
+				autoSettle: false,
+			}),
 			"utf8",
 		);
 		const previousScript = process.argv[1];
@@ -208,6 +233,21 @@ describe("isModelLevelFailure", () => {
 			stopReason: "error",
 			messages: [{ role: "assistant", content: [], stopReason: "error", errorMessage: "model not found" } as any],
 		});
+		expect(isModelLevelFailure(failed)).toBe(true);
+	});
+
+	it("uses the final assistant error even after earlier text and failed tools", () => {
+		const failed = result({
+			exitCode: 1,
+			stopReason: "error",
+			errorMessage: "503 Service Unavailable",
+			messages: [
+				{ ...assistant("I inspected the repository."), stopReason: "toolUse" },
+				{ role: "assistant", content: [], stopReason: "error", errorMessage: "503 Service Unavailable" } as any,
+			],
+			failedTools: [{ toolName: "bash", error: "an earlier test command failed" }],
+		});
+		expect(getFinalOutput(failed.messages)).toBe("I inspected the repository.");
 		expect(isModelLevelFailure(failed)).toBe(true);
 	});
 
@@ -279,26 +319,23 @@ describe("runSingleAgentWithModelFallback", () => {
 
 	// Child script: fails fast when launched with the broken model, succeeds on
 	// any other model; appends one line per attempt so tests can count retries.
-	const fallbackChildScript = (attemptLog: string): string => `
-const fs = require("node:fs");
-fs.appendFileSync(${JSON.stringify(attemptLog)}, "attempt\\n");
-const modelArg = process.argv.indexOf("--model");
-const model = modelArg !== -1 ? process.argv[modelArg + 1] : "";
-if (model.startsWith("openai-codex")) {
-  process.stdout.write(JSON.stringify({ type: "message_end", message: { role: "assistant", content: [], stopReason: "error", errorMessage: "model not found" } }) + "\\n");
-  process.exit(1);
-}
-process.stdout.write(JSON.stringify({ type: "message_end", message: { role: "assistant", content: [{ type: "text", text: "recovered on main model" }], stopReason: "end" } }) + "\\n");
-process.exit(0);
-`;
+	const fallbackChildScript = (attemptLog: string): string => fakeRpcScript({
+		setup: `fs.appendFileSync(${JSON.stringify(attemptLog)}, "attempt\\n");\nconst modelArg = process.argv.indexOf("--model");\nconst model = modelArg !== -1 ? process.argv[modelArg + 1] : "";`,
+		onPrompt: `if (model.startsWith("openai-codex")) {
+	send({ type: "message_end", message: { role: "assistant", content: [], stopReason: "error", errorMessage: "model not found" } });
+} else {
+	send({ type: "message_end", message: { role: "assistant", content: [{ type: "text", text: "recovered on main model" }], stopReason: "stop" } });
+}`,
+	});
 
-	it("falls back to the main-window model after a model-level failure (run-level retry disabled)", async () => {
+	it("falls back to the next pool model and reports the live/final model", async () => {
 		const dir = mkdtempSync(join(tmpdir(), "pi-subagents-fallback-"));
 		const script = join(dir, "fallback-child.cjs");
 		const log = join(dir, "attempts.log");
 		writeFileSync(script, fallbackChildScript(log), "utf8");
 		const previousScript = process.argv[1];
 		process.argv[1] = script;
+		const liveModels: Array<{ model?: string; fallbackFrom?: string }> = [];
 		try {
 			const result = await runSingleAgentWithModelFallback(
 				{
@@ -307,15 +344,22 @@ process.exit(0);
 					agentName: agent.name,
 					task: "review",
 					runLevelRetryDelaysMs: [],
+					onLive: (event) => {
+						if (event.kind === "model") liveModels.push(event);
+					},
 					makeDetails: (results) => ({ mode: "single", results }),
 				},
-				"deepseek/deepseek-v4-flash",
+				["deepseek/deepseek-v4-flash"],
 			);
 			expect(result.exitCode).toBe(0);
 			expect(getFinalOutput(result.messages)).toBe("recovered on main model");
 			expect(result.model).toBe("deepseek/deepseek-v4-flash");
 			expect(result.modelFallbackFrom).toBe("openai-codex/gpt-5.6-sol");
 			expect(result.modelRetries).toBe(0);
+			expect(liveModels).toEqual([
+				{ kind: "model", model: "openai-codex/gpt-5.6-sol" },
+				{ kind: "model", model: "deepseek/deepseek-v4-flash", fallbackFrom: "openai-codex/gpt-5.6-sol" },
+			]);
 			expect(readFileSync(log, "utf8").split("\n").filter(Boolean)).toHaveLength(2);
 		} finally {
 			process.argv[1] = previousScript;
@@ -328,9 +372,9 @@ process.exit(0);
 		const script = join(dir, "always-fail-child.mjs");
 		writeFileSync(
 			script,
-			`process.stdout.write(JSON.stringify({ type: "message_end", message: { role: "assistant", content: [], stopReason: "error", errorMessage: "provider down" } }) + "\\n");
-process.exit(1);
-`,
+			fakeRpcScript({
+				onPrompt: `send({ type: "message_end", message: { role: "assistant", content: [], stopReason: "error", errorMessage: "provider down" } });`,
+			}),
 			"utf8",
 		);
 		const previousScript = process.argv[1];
@@ -345,7 +389,7 @@ process.exit(1);
 					makeDetails: (results) => ({ mode: "single", results }),
 					runLevelRetryDelaysMs: [],
 				},
-				"deepseek/deepseek-v4-flash",
+				["deepseek/deepseek-v4-flash"],
 			);
 			expect(result.exitCode).toBe(1);
 			expect(result.stopReason).toBe("error");
@@ -384,6 +428,44 @@ process.exit(1);
 			rmSync(dir, { recursive: true, force: true });
 		}
 	});
+
+	it("does not advance the model pool for an ordinary tool failure", async () => {
+		const dir = mkdtempSync(join(tmpdir(), "pi-subagents-tool-failure-"));
+		const script = join(dir, "tool-failure-child.mjs");
+		const log = join(dir, "attempts.log");
+		writeFileSync(
+			script,
+			fakeRpcScript({
+				setup: `const modelIndex = process.argv.indexOf("--model");\nfs.appendFileSync(${JSON.stringify(log)}, process.argv[modelIndex + 1] + "\\n");`,
+				onPrompt: `send({ type: "tool_execution_end", toolName: "bash", isError: true, result: { content: [{ type: "text", text: "tests failed" }] } });
+	send({ type: "message_end", message: { role: "assistant", content: [{ type: "text", text: "The task failed because its test tool failed." }], stopReason: "error", errorMessage: "task failed after a tool error" } });`,
+			}),
+			"utf8",
+		);
+		const previousScript = process.argv[1];
+		process.argv[1] = script;
+		try {
+			const result = await runSingleAgentWithModelFallback(
+				{
+					defaultCwd: process.cwd(),
+					agent: { ...agent, model: "anthropic/primary" },
+					agentName: agent.name,
+					task: "run tests",
+					runLevelRetryDelaysMs: [10, 10],
+					makeDetails: (results) => ({ mode: "single", results }),
+				},
+				["openai/backup", "google/main"],
+			);
+			expect(result.exitCode).toBe(1);
+			expect(result.failedTools).toHaveLength(1);
+			expect(result.model).toBe("anthropic/primary");
+			expect(result.modelFallbackFrom).toBeUndefined();
+			expect(readFileSync(log, "utf8").trim()).toBe("anthropic/primary");
+		} finally {
+			process.argv[1] = previousScript;
+			rmSync(dir, { recursive: true, force: true });
+		}
+	});
 });
 
 describe("runSingleAgentWithModelFallback run-level retry", () => {
@@ -397,18 +479,14 @@ describe("runSingleAgentWithModelFallback run-level retry", () => {
 
 	// Child that fails with a transient error for the first `failTimes` launches
 	// (counting via LOG_PATH), then emits a normal success on the same model.
-	const transientThenRecoverScript = (failTimes: number): string => `
-const fs = require("node:fs");
-const log = process.env.LOG_PATH;
-fs.appendFileSync(log, "attempt\\n");
-const count = fs.readFileSync(log, "utf8").split("\\n").filter(Boolean).length;
-if (count <= ${failTimes}) {
-  process.stdout.write(JSON.stringify({ type: "message_end", message: { role: "assistant", content: [], stopReason: "error", errorMessage: "provider down" } }) + "\\n");
-  process.exit(1);
-}
-process.stdout.write(JSON.stringify({ type: "message_end", message: { role: "assistant", content: [{ type: "text", text: "recovered on same model" }], stopReason: "end" } }) + "\\n");
-process.exit(0);
-`;
+	const transientThenRecoverScript = (failTimes: number): string => fakeRpcScript({
+		setup: `const log = process.env.LOG_PATH;\nfs.appendFileSync(log, "attempt\\n");\nconst count = fs.readFileSync(log, "utf8").split("\\n").filter(Boolean).length;`,
+		onPrompt: `if (count <= ${failTimes}) {
+	send({ type: "message_end", message: { role: "assistant", content: [], stopReason: "error", errorMessage: "provider down" } });
+} else {
+	send({ type: "message_end", message: { role: "assistant", content: [{ type: "text", text: "recovered on same model" }], stopReason: "stop" } });
+}`,
+	});
 
 	const withArgv = (script: string, fn: () => Promise<void>): Promise<void> => {
 		const previousScript = process.argv[1];
@@ -418,24 +496,22 @@ process.exit(0);
 		});
 	};
 
-	it("retries the same model up to N times on a transient error, then falls back", async () => {
+	it("skips same-model retries for a permanent model error, then falls back", async () => {
 		const dir = mkdtempSync(join(tmpdir(), "pi-subagents-runlevel-fallback-"));
 		const script = join(dir, "broken-child.cjs");
 		const log = join(dir, "attempts.log");
-		// Always fails on the configured model with a transient "model not found"
-		// (NOT a terminal error), then succeeds on the fallback model.
+		// A stale model id is permanent for that candidate; the fallback should
+		// start immediately even when retry delays are configured.
 		writeFileSync(
 			script,
-			`const fs = require("node:fs");
-fs.appendFileSync(${JSON.stringify(log)}, "attempt\\n");
-const modelArg = process.argv.indexOf("--model");
-const model = modelArg !== -1 ? process.argv[modelArg + 1] : "";
-if (model.startsWith("openai-codex")) {
-  process.stdout.write(JSON.stringify({ type: "message_end", message: { role: "assistant", content: [], stopReason: "error", errorMessage: "model not found" } }) + "\\n");
-  process.exit(1);
-}
-process.stdout.write(JSON.stringify({ type: "message_end", message: { role: "assistant", content: [{ type: "text", text: "recovered on main model" }], stopReason: "end" } }) + "\\n");
-process.exit(0);`,
+			fakeRpcScript({
+				setup: `fs.appendFileSync(${JSON.stringify(log)}, "attempt\\n");\nconst modelArg = process.argv.indexOf("--model");\nconst model = modelArg !== -1 ? process.argv[modelArg + 1] : "";`,
+				onPrompt: `if (model.startsWith("openai-codex")) {
+	send({ type: "message_end", message: { role: "assistant", content: [], stopReason: "error", errorMessage: "model not found" } });
+} else {
+	send({ type: "message_end", message: { role: "assistant", content: [{ type: "text", text: "recovered on main model" }], stopReason: "stop" } });
+}`,
+			}),
 			"utf8",
 		);
 		try {
@@ -449,15 +525,15 @@ process.exit(0);`,
 						runLevelRetryDelaysMs: [10, 10, 10, 10, 10],
 						makeDetails: (results) => ({ mode: "single", results }),
 					},
-					"deepseek/deepseek-v4-flash",
+					["deepseek/deepseek-v4-flash"],
 				);
 				expect(result.exitCode).toBe(0);
 				expect(getFinalOutput(result.messages)).toBe("recovered on main model");
 				expect(result.model).toBe("deepseek/deepseek-v4-flash");
 				expect(result.modelFallbackFrom).toBe("openai-codex/gpt-5.6-sol");
-				expect(result.modelRetries).toBe(5);
-				// 1 initial + 5 same-model retries (all fail) + 1 fallback success = 7.
-				expect(readFileSync(log, "utf8").split("\n").filter(Boolean)).toHaveLength(7);
+				expect(result.modelRetries).toBe(0);
+				// One stale-primary attempt, then one fallback attempt — no 60s backoff.
+				expect(readFileSync(log, "utf8").split("\n").filter(Boolean)).toHaveLength(2);
 			});
 		} finally {
 			rmSync(dir, { recursive: true, force: true });
@@ -481,7 +557,7 @@ process.exit(0);`,
 						env: { ...process.env, LOG_PATH: log },
 						makeDetails: (results) => ({ mode: "single", results }),
 					},
-					"deepseek/deepseek-v4-flash",
+					["deepseek/deepseek-v4-flash"],
 				);
 				expect(result.exitCode).toBe(0);
 				expect(getFinalOutput(result.messages)).toBe("recovered on same model");
@@ -496,16 +572,20 @@ process.exit(0);`,
 		}
 	});
 
-	it("does not retry or fall back on a terminal quota error", async () => {
+	it("advances immediately to backup on a terminal primary error", async () => {
 		const dir = mkdtempSync(join(tmpdir(), "pi-subagents-runlevel-terminal-"));
 		const script = join(dir, "quota-child.cjs");
 		const log = join(dir, "attempts.log");
 		writeFileSync(
 			script,
-			`const fs = require("node:fs");
-fs.appendFileSync(${JSON.stringify(log)}, "attempt\\n");
-process.stdout.write(JSON.stringify({ type: "message_end", message: { role: "assistant", content: [], stopReason: "error", errorMessage: "insufficient_quota: you exceeded your quota" } }) + "\\n");
-process.exit(1);`,
+			fakeRpcScript({
+				setup: `fs.appendFileSync(${JSON.stringify(log)}, "attempt\\n");\nconst modelIndex = process.argv.indexOf("--model");\nconst model = modelIndex === -1 ? "" : process.argv[modelIndex + 1];`,
+				onPrompt: `if (model.startsWith("openai-codex")) {
+	send({ type: "message_end", message: { role: "assistant", content: [], stopReason: "error", errorMessage: "insufficient_quota: you exceeded your quota" } });
+} else {
+	send({ type: "message_end", message: { role: "assistant", content: [{ type: "text", text: "backup recovered" }], stopReason: "stop" } });
+}`,
+			}),
 			"utf8",
 		);
 		try {
@@ -520,31 +600,36 @@ process.exit(1);`,
 						env: { ...process.env, LOG_PATH: log },
 						makeDetails: (results) => ({ mode: "single", results }),
 					},
-					"deepseek/deepseek-v4-flash",
+					["deepseek/deepseek-v4-flash"],
 				);
-				expect(result.exitCode).toBe(1);
-				expect(result.stopReason).toBe("error");
-				expect(result.errorMessage).toContain("insufficient_quota");
-				expect(result.model).toBe("openai-codex/gpt-5.6-sol");
-				expect(result.modelFallbackFrom).toBeUndefined();
-				expect(result.modelRetries).toBeUndefined();
-				expect(readFileSync(log, "utf8").split("\n").filter(Boolean)).toHaveLength(1);
+				expect(result.exitCode).toBe(0);
+				expect(getFinalOutput(result.messages)).toBe("backup recovered");
+				expect(result.model).toBe("deepseek/deepseek-v4-flash");
+				expect(result.modelFallbackFrom).toBe("openai-codex/gpt-5.6-sol");
+				expect(result.modelRetries).toBe(0);
+				expect(readFileSync(log, "utf8").split("\n").filter(Boolean)).toHaveLength(2);
 			});
 		} finally {
 			rmSync(dir, { recursive: true, force: true });
 		}
 	});
 
-	it("does not retry or fall back on a terminal auth error (401)", async () => {
-		const dir = mkdtempSync(join(tmpdir(), "pi-subagents-runlevel-auth-"));
-		const script = join(dir, "auth-child.cjs");
+	it("stops same-model retries and advances when a retry becomes terminal", async () => {
+		const dir = mkdtempSync(join(tmpdir(), "pi-subagents-runlevel-late-terminal-"));
+		const script = join(dir, "late-terminal-child.cjs");
 		const log = join(dir, "attempts.log");
 		writeFileSync(
 			script,
-			`const fs = require("node:fs");
-fs.appendFileSync(${JSON.stringify(log)}, "attempt\\n");
-process.stdout.write(JSON.stringify({ type: "message_end", message: { role: "assistant", content: [], stopReason: "error", errorMessage: "Request failed with status 401 Unauthorized" } }) + "\\n");
-process.exit(1);`,
+			fakeRpcScript({
+				setup: `fs.appendFileSync(${JSON.stringify(log)}, "attempt\\n");\nconst count = fs.readFileSync(${JSON.stringify(log)}, "utf8").split("\\n").filter(Boolean).length;\nconst modelArg = process.argv.indexOf("--model");\nconst model = modelArg === -1 ? "" : process.argv[modelArg + 1];`,
+				onPrompt: `if (!model.startsWith("openai-codex")) {
+	send({ type: "message_end", message: { role: "assistant", content: [{ type: "text", text: "backup recovered after terminal retry" }], stopReason: "stop" } });
+} else if (count === 1) {
+	send({ type: "message_end", message: { role: "assistant", content: [], stopReason: "error", errorMessage: "503 provider down" } });
+} else {
+	send({ type: "message_end", message: { role: "assistant", content: [], stopReason: "error", errorMessage: "insufficient_quota" } });
+}`,
+			}),
 			"utf8",
 		);
 		try {
@@ -555,17 +640,65 @@ process.exit(1);`,
 						agent: { ...agent, model: "openai-codex/gpt-5.6-sol" },
 						agentName: agent.name,
 						task: "review",
-						runLevelRetryDelaysMs: [10, 10, 10, 10, 10],
-						env: { ...process.env, LOG_PATH: log },
+						runLevelRetryDelaysMs: [10, 10],
 						makeDetails: (results) => ({ mode: "single", results }),
 					},
-					"deepseek/deepseek-v4-flash",
+					["deepseek/deepseek-v4-flash"],
 				);
-				expect(result.exitCode).toBe(1);
-				expect(result.model).toBe("openai-codex/gpt-5.6-sol");
-				expect(result.modelFallbackFrom).toBeUndefined();
-				expect(result.modelRetries).toBeUndefined();
-				expect(readFileSync(log, "utf8").split("\n").filter(Boolean)).toHaveLength(1);
+				expect(result.exitCode).toBe(0);
+				expect(getFinalOutput(result.messages)).toBe("backup recovered after terminal retry");
+				expect(result.model).toBe("deepseek/deepseek-v4-flash");
+				expect(result.modelFallbackFrom).toBe("openai-codex/gpt-5.6-sol");
+				expect(result.modelRetries).toBe(1);
+				expect(readFileSync(log, "utf8").split("\n").filter(Boolean)).toHaveLength(3);
+			});
+		} finally {
+			rmSync(dir, { recursive: true, force: true });
+		}
+	});
+
+	it("retries a transient backup, then advances to the current main model", async () => {
+		const dir = mkdtempSync(join(tmpdir(), "pi-subagents-runlevel-chain-"));
+		const script = join(dir, "chain-child.cjs");
+		const log = join(dir, "attempts.log");
+		writeFileSync(
+			script,
+			fakeRpcScript({
+				setup: `const modelIndex = process.argv.indexOf("--model");\nconst model = modelIndex === -1 ? "" : process.argv[modelIndex + 1];\nfs.appendFileSync(${JSON.stringify(log)}, model + "\\n");`,
+				onPrompt: `if (model.startsWith("openai-codex")) {
+	send({ type: "message_end", message: { role: "assistant", content: [], stopReason: "error", errorMessage: "Request failed with status 401 Unauthorized" } });
+} else if (model.startsWith("deepseek")) {
+	send({ type: "message_end", message: { role: "assistant", content: [], stopReason: "error", errorMessage: "provider down" } });
+} else {
+	send({ type: "message_end", message: { role: "assistant", content: [{ type: "text", text: "main recovered" }], stopReason: "stop" } });
+}`,
+			}),
+			"utf8",
+		);
+		try {
+			await withArgv(script, async () => {
+				const result = await runSingleAgentWithModelFallback(
+					{
+						defaultCwd: process.cwd(),
+						agent: { ...agent, model: "openai-codex/gpt-5.6-sol" },
+						agentName: agent.name,
+						task: "review",
+						runLevelRetryDelaysMs: [10],
+						makeDetails: (results) => ({ mode: "single", results }),
+					},
+					["deepseek/deepseek-v4-flash", "anthropic/main"],
+				);
+				expect(result.exitCode).toBe(0);
+				expect(getFinalOutput(result.messages)).toBe("main recovered");
+				expect(result.model).toBe("anthropic/main");
+				expect(result.modelFallbackFrom).toBe("openai-codex/gpt-5.6-sol");
+				expect(result.modelRetries).toBe(1);
+				expect(readFileSync(log, "utf8").trim().split("\n")).toEqual([
+					"openai-codex/gpt-5.6-sol",
+					"deepseek/deepseek-v4-flash",
+					"deepseek/deepseek-v4-flash",
+					"anthropic/main",
+				]);
 			});
 		} finally {
 			rmSync(dir, { recursive: true, force: true });
@@ -594,7 +727,7 @@ describe("session resume helpers", () => {
 
 	it("buildFallbackResumeReason mentions the failed model", () => {
 		expect(buildFallbackResumeReason("openai-codex/gpt-5.6-sol")).toContain("openai-codex/gpt-5.6-sol");
-		expect(buildFallbackResumeReason()).toContain("different model");
+		expect(buildFallbackResumeReason()).toContain("configured pool");
 	});
 });
 
@@ -618,26 +751,14 @@ describe("runSingleAgentWithModelFallback session resume", () => {
 	// Child that simulates a real pi session: it writes a session file named
 	// <ts>Z_<id>.jsonl into its --session-dir so the NEXT attempt resumes. Logs
 	// each invocation's flags so the test can assert --session-id vs --session.
-	const sessionAwareChild = (log: string): string => `
-const fs = require("node:fs");
-const path = require("node:path");
-const argv = process.argv;
-fs.appendFileSync(${JSON.stringify(log)}, JSON.stringify(argv.filter((a) => a.startsWith("--"))) + "\\n");
-const dirIdx = argv.indexOf("--session-dir");
-const idIdx = argv.indexOf("--session-id");
-const sidIdx = argv.indexOf("--session");
-const dir = dirIdx !== -1 ? argv[dirIdx + 1] : null;
-const id = idIdx !== -1 ? argv[idIdx + 1] : (sidIdx !== -1 ? argv[sidIdx + 1] : null);
-if (dir && id) fs.writeFileSync(path.join(dir, Date.now() + "Z_" + id + ".jsonl"), "");
-const modelIdx = argv.indexOf("--model");
-const model = modelIdx !== -1 ? argv[modelIdx + 1] : "";
-if (model.startsWith("openai-codex")) {
-  process.stdout.write(JSON.stringify({ type: "message_end", message: { role: "assistant", content: [], stopReason: "error", errorMessage: "model not found" } }) + "\\n");
-  process.exit(1);
-}
-process.stdout.write(JSON.stringify({ type: "message_end", message: { role: "assistant", content: [{ type: "text", text: "recovered" }], stopReason: "end" } }) + "\\n");
-process.exit(0);
-`;
+	const sessionAwareChild = (log: string): string => fakeRpcScript({
+		setup: `const argv = process.argv;\nfs.appendFileSync(${JSON.stringify(log)}, JSON.stringify(argv) + "\\n");\nconst modelIdx = argv.indexOf("--model");\nconst model = modelIdx !== -1 ? argv[modelIdx + 1] : "";`,
+		onPrompt: `if (model.startsWith("openai-codex")) {
+	send({ type: "message_end", message: { role: "assistant", content: [], stopReason: "error", errorMessage: "model not found" } });
+} else {
+	send({ type: "message_end", message: { role: "assistant", content: [{ type: "text", text: "recovered" }], stopReason: "stop" } });
+}`,
+	});
 
 	it("resumes the session (not restarts) when falling back to another model", async () => {
 		const dir = mkdtempSync(join(tmpdir(), "pi-subagents-resume-"));
@@ -654,7 +775,7 @@ process.exit(0);
 					runLevelRetryDelaysMs: [],
 					makeDetails: (results) => ({ mode: "single", results }),
 				},
-				"deepseek/deepseek-v4-flash",
+				["deepseek/deepseek-v4-flash"],
 			);
 			expect(result.exitCode).toBe(0);
 			expect(result.model).toBe("deepseek/deepseek-v4-flash");
@@ -674,16 +795,25 @@ process.exit(0);
 			expect(invocations[0].includes("--session")).toBe(false);
 			expect(invocations[1].includes("--session-id")).toBe(false);
 			expect(invocations[1].includes("--session")).toBe(true);
+			const firstSessionId = invocations[0][invocations[0].indexOf("--session-id") + 1];
+			const resumedSessionId = invocations[1][invocations[1].indexOf("--session") + 1];
+			expect(resumedSessionId).toBe(firstSessionId);
+			expect(invocations[1][invocations[1].indexOf("--session-dir") + 1]).toBe(
+				invocations[0][invocations[0].indexOf("--session-dir") + 1],
+			);
+			expect(result.sessionId).toBe(firstSessionId);
 		});
 		rmSync(dir, { recursive: true, force: true });
 	});
 
-	it("records but reclaims the session dir for a work-less model-level failure", async () => {
+	it("retains the session dir for a model-level failure until runtime cleanup", async () => {
 		const dir = mkdtempSync(join(tmpdir(), "pi-subagents-nowork-"));
 		const script = join(dir, "always-fail.cjs");
 		writeFileSync(
 			script,
-			`process.stdout.write(JSON.stringify({ type: "message_end", message: { role: "assistant", content: [], stopReason: "error", errorMessage: "provider down" } }) + "\\n"); process.exit(1);`,
+			fakeRpcScript({
+				onPrompt: `send({ type: "message_end", message: { role: "assistant", content: [], stopReason: "error", errorMessage: "provider down" } });`,
+			}),
 			"utf8",
 		);
 		await withArgv(script, async () => {
@@ -696,9 +826,11 @@ process.exit(0);
 				makeDetails: (results) => ({ mode: "single", results }),
 			});
 			expect(isModelLevelFailure(result)).toBe(true);
-			// A failure with no resumable work reclaims the temp session dir.
+			// Logical thread sessions are retained regardless of outcome so control
+			// resume can restart completed/failed context until parent shutdown.
 			expect(result.sessionDir).toBeDefined();
-			expect(existsSync(result.sessionDir!)).toBe(false);
+			expect(existsSync(result.sessionDir!)).toBe(true);
+			rmSync(result.sessionDir!, { recursive: true, force: true });
 		});
 		rmSync(dir, { recursive: true, force: true });
 	});
@@ -758,6 +890,16 @@ describe("isTerminalModelError (unit)", () => {
 		expect(isTerminalModelError(base({}))).toBe(false);
 		expect(isTerminalModelError(base({ errorMessage: "" }))).toBe(false);
 	});
+
+	it("classifies permanent model/provider configuration failures separately", () => {
+		expect(isPermanentModelCandidateError(base({ errorMessage: "model not found" }))).toBe(true);
+		expect(isPermanentModelCandidateError(base({ errorMessage: "Unknown model: stale/id" }))).toBe(true);
+		expect(isPermanentModelCandidateError(base({ errorMessage: "404 Not Found" }))).toBe(true);
+		expect(isPermanentModelCandidateError(base({ stderr: "provider does not exist" }))).toBe(true);
+		expect(isPermanentModelCandidateError(base({ errorMessage: "503 Service Unavailable" }))).toBe(false);
+		expect(isPermanentModelCandidateError(base({ errorMessage: "429 Too Many Requests" }))).toBe(false);
+		expect(isPermanentModelCandidateError(base({ errorMessage: "network timeout" }))).toBe(false);
+	});
 });
 
 describe("runSingleAgentWithModelFallback startup retry", () => {
@@ -771,15 +913,10 @@ describe("runSingleAgentWithModelFallback startup retry", () => {
 
 	// Child that records each launch to LOG_PATH: it exits silently (no stdout, no
 	// stderr) on the first `failTimes` launches, then emits a normal success.
-	const retryThenSucceedScript = (failTimes: number): string => `
-const fs = require("node:fs");
-const log = process.env.LOG_PATH;
-fs.appendFileSync(log, "attempt\\n");
-const count = fs.readFileSync(log, "utf8").split("\\n").filter(Boolean).length;
-if (count <= ${failTimes}) { process.exit(1); }
-process.stdout.write(JSON.stringify({ type: "message_end", message: { role: "assistant", content: [{ type: "text", text: "recovered after startup retry" }], stopReason: "end" } }) + "\\n");
-process.exit(0);
-`;
+	const retryThenSucceedScript = (failTimes: number): string => fakeRpcScript({
+		setup: `const log = process.env.LOG_PATH;\nfs.appendFileSync(log, "attempt\\n");\nconst count = fs.readFileSync(log, "utf8").split("\\n").filter(Boolean).length;\nif (count <= ${failTimes}) process.exit(1);`,
+		onPrompt: `send({ type: "message_end", message: { role: "assistant", content: [{ type: "text", text: "recovered after startup retry" }], stopReason: "stop" } });`,
+	});
 
 	const withArgv = (script: string, fn: () => Promise<void>): Promise<void> => {
 		const previousScript = process.argv[1];
@@ -870,6 +1007,7 @@ process.exit(1);`,
 					agentName: agent.name,
 					task: "real error",
 					startupRetryDelaysMs: [10, 10, 10],
+					runLevelRetryDelaysMs: [],
 					env: { ...process.env, LOG_PATH: log },
 					makeDetails: (results) => ({ mode: "single", results }),
 				});
@@ -892,10 +1030,10 @@ process.exit(1);`,
 		const log = join(dir, "attempts.log");
 		writeFileSync(
 			script,
-			`const fs = require("node:fs");
-fs.appendFileSync(process.env.LOG_PATH, "attempt\\n");
-process.stdout.write(JSON.stringify({ type: "message_end", message: { role: "assistant", content: [], stopReason: "error", errorMessage: "provider down" } }) + "\\n");
-process.exit(1);`,
+			fakeRpcScript({
+				setup: `fs.appendFileSync(process.env.LOG_PATH, "attempt\\n");`,
+				onPrompt: `send({ type: "message_end", message: { role: "assistant", content: [], stopReason: "error", errorMessage: "provider down" } });`,
+			}),
 			"utf8",
 		);
 		try {
@@ -906,6 +1044,7 @@ process.exit(1);`,
 					agentName: agent.name,
 					task: "real model error",
 					startupRetryDelaysMs: [10, 10, 10],
+					runLevelRetryDelaysMs: [],
 					env: { ...process.env, LOG_PATH: log },
 					makeDetails: (results) => ({ mode: "single", results }),
 				});

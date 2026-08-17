@@ -8,7 +8,7 @@
  * to every registration site, so state stays in one place without globals.
  */
 
-import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
+import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { rmSync } from "node:fs";
 import { BackgroundTaskQueue } from "./background.ts";
 import {
@@ -19,9 +19,78 @@ import {
 	type CompletionBatcher,
 	type CompletionMessageItem,
 } from "./completion.ts";
-import { loadConfigSync } from "./config.ts";
-import { monitor } from "./monitor.ts";
+import { loadConfigSync, type ThinkingLevel } from "./config.ts";
+import { isRunActiveStatus, monitor } from "./monitor.ts";
+import {
+	persistRecoveryRecords,
+	recoveryRecordFromFinalization,
+	type RecoveryRecord,
+} from "./recovery.ts";
+import type { RpcRunControl } from "./rpc-run.ts";
+import { inspectorStore } from "./trajectory.ts";
 import type { SingleResult } from "./spawn.ts";
+import type { IsolationMode, WorktreeFinalization, WorktreeIsolation } from "./worktree.ts";
+
+export type ThreadState =
+	| "queued"
+	| "resuming"
+	| "running"
+	| "steering"
+	| "interrupting"
+	| "parked"
+	| "completed"
+	| "failed"
+	| "stopped";
+
+export type ThreadLifecycleOperation = "park" | "resume" | "fork" | "stop";
+
+export interface SubagentThread {
+	id: number;
+	generation: number;
+	agentName: string;
+	task: string;
+	/** Caller-facing cwd in the original worktree. */
+	cwd: string;
+	/** Actual child cwd (the equivalent path inside an isolated worktree). */
+	executionCwd: string;
+	vision: boolean;
+	/** Exact primary→fallback refs inherited by a session fork. */
+	modelPool: string[];
+	thinkingLevel?: ThinkingLevel;
+	isolation: IsolationMode;
+	worktree?: WorktreeIsolation;
+	state: ThreadState;
+	control: RpcRunControl;
+	queueController?: AbortController;
+	/** Resolves only after the current generation's queue work has fully
+	 * quiesced and released its concurrency slot. Auto-fix orchestration is part
+	 * of the parent generation and replaces/extends this promise. */
+	generationCompletion: Promise<void>;
+	/** Synchronous CAS used by lifecycle controls across their async preflight. */
+	lifecycleVersion: number;
+	lifecycleOperation?: ThreadLifecycleOperation;
+	sessionId?: string;
+	sessionDir?: string;
+	/** Most recent generation result, retained for parked destructive-stop output. */
+	lastResult?: SingleResult;
+	/** A destructive stop retires context even if the active child settles later. */
+	retireOnSettle?: boolean;
+	retired?: boolean;
+	/** Abort the active generation to a stable checkpoint and wait until its
+	 * queue work has published that checkpoint and released its slot. */
+	park: () => Promise<"queued" | "active">;
+	/** Installed by dispatch so the control tool can restart the same logical id. */
+	resume: (objective?: string, ctx?: ExtensionContext) => Promise<SingleResult>;
+	/** Create a new logical thread from this thread's retained Pi session branch. */
+	fork: (objective?: string, ctx?: ExtensionContext) => Promise<SingleResult>;
+	forkedFromRunId?: number;
+	forkChildRunIds: number[];
+	/** Dispatch-owned, generation-guarded worktree settlement hook. */
+	finalizeIsolation: (generation: number, result?: SingleResult) => Promise<WorktreeFinalization | undefined>;
+	/** Best-effort shutdown notification for retained integration artifacts. */
+	notifyIsolationFailure?: (finalization: WorktreeFinalization) => void;
+	isolationFailureNotified?: boolean;
+}
 
 export interface SubagentRuntime {
 	configPath: string;
@@ -39,21 +108,18 @@ export interface SubagentRuntime {
 	settledRuns: Map<number, SingleResult>;
 	settledListeners: Map<number, Set<(result: SingleResult) => void>>;
 	registerRunResult: (runId: number, result: SingleResult) => void;
-	/** Sessions preserved on disk after a model-level handback (the run did real
-	 * work but its model quota/auth failed), keyed by the original run id so a
-	 * later `subagent({ resume: <runId> })` can continue in-context. Cleaned up
-	 * on shutdown so a crashed/ended session never leaks temp session dirs. */
-	preservedSessions: Map<number, PreservedSession>;
+	/** Logical threads outlive process attempts and completed generations. */
+	threads: Map<number, SubagentThread>;
+	/** Every session directory retained for this parent session, including
+	 * auto-fix internals that are not directly controllable. */
+	sessionDirs: Set<string>;
+	retainSession: (result: Pick<SingleResult, "sessionDir">) => void;
+	retireThreadSession: (thread: SubagentThread) => void;
+	/** Worktree/patch paths intentionally retained after a failed integration. */
+	retainedArtifactPaths: Set<string>;
+	retainWorktreeArtifacts: (finalization: WorktreeFinalization) => void;
 	/** Flip sessionActive off and release all session-scoped resources. */
-	shutdown: () => void;
-}
-
-export interface PreservedSession {
-	sessionId: string;
-	sessionDir: string;
-	agentName: string;
-	task: string;
-	vision: boolean;
+	shutdown: () => Promise<void>;
 }
 
 export function createRuntime(pi: ExtensionAPI, configPath: string): SubagentRuntime {
@@ -74,7 +140,7 @@ export function createRuntime(pi: ExtensionAPI, configPath: string): SubagentRun
 			// are removed from the monitor before their completion is pushed.
 			const active = monitor
 				.getRuns()
-				.filter((run) => run.status === "queued" || run.status === "running" || run.retained)
+				.filter((run) => isRunActiveStatus(run.status) || run.retained)
 				.map((run) => ({ id: run.id, agent: run.agent, label: run.label }));
 			const message = {
 				customType: "subagent-result",
@@ -99,7 +165,29 @@ export function createRuntime(pi: ExtensionAPI, configPath: string): SubagentRun
 		runControllers: new Map<number, AbortController>(),
 		settledRuns: new Map<number, SingleResult>(),
 		settledListeners: new Map<number, Set<(result: SingleResult) => void>>(),
-		preservedSessions: new Map<number, PreservedSession>(),
+		threads: new Map<number, SubagentThread>(),
+		sessionDirs: new Set<string>(),
+		retainedArtifactPaths: new Set<string>(),
+		retainWorktreeArtifacts: (finalization) => {
+			if (finalization.worktreePath) runtime.retainedArtifactPaths.add(finalization.worktreePath);
+			if (finalization.patchPath) runtime.retainedArtifactPaths.add(finalization.patchPath);
+		},
+		retainSession: (result) => {
+			if (result.sessionDir) runtime.sessionDirs.add(result.sessionDir);
+		},
+		retireThreadSession: (thread) => {
+			thread.retired = true;
+			if (!thread.sessionDir) return;
+			const sessionDir = thread.sessionDir;
+			try {
+				rmSync(sessionDir, { recursive: true, force: true });
+				runtime.sessionDirs.delete(sessionDir);
+				thread.sessionDir = undefined;
+				thread.sessionId = undefined;
+			} catch {
+				/* best-effort; shutdown retries the still-retained directory */
+			}
+		},
 		registerRunResult: (runId, result) => {
 			runtime.settledRuns.set(runId, result);
 			const listeners = runtime.settledListeners.get(runId);
@@ -114,27 +202,59 @@ export function createRuntime(pi: ExtensionAPI, configPath: string): SubagentRun
 				}
 			}
 		},
-		shutdown: () => {
+		shutdown: async () => {
+			if (!runtime.sessionActive) return;
 			runtime.sessionActive = false;
 			runtime.completionBatcher.dispose();
 			runtime.backgroundQueue.cancelAll();
+			// Await live RPC process-tree cleanup before removing append-only session
+			// files (especially important on Windows, where open files cannot be removed).
+			await Promise.all(
+				[...runtime.threads.values()].map((thread) =>
+					thread.control.stop("Parent session shut down").catch(() => undefined),
+				),
+			);
+			await runtime.backgroundQueue.waitForIdle();
+			// Parked work owns no queue task, so shutdown is its final settlement.
+			// Active/stopped tasks may already have finalized; the handle and callback
+			// are idempotent and generation-guarded.
+			const recoveryRecords: RecoveryRecord[] = [];
+			for (const thread of runtime.threads.values()) {
+				const finalization = await thread.finalizeIsolation(thread.generation).catch(() => undefined);
+				if (finalization?.status === "retained") {
+					runtime.retainWorktreeArtifacts(finalization);
+					recoveryRecords.push(recoveryRecordFromFinalization(thread.id, finalization));
+					if (!thread.isolationFailureNotified) {
+						thread.isolationFailureNotified = true;
+						try {
+							thread.notifyIsolationFailure?.(finalization);
+						} catch {
+							/* the parent UI may already be shutting down */
+						}
+					}
+				}
+			}
+			// Persist before tearing down the old runtime. A /new, /resume, or quit
+			// must not make the only recovery paths unreachable.
+			await persistRecoveryRecords(runtime.configPath, recoveryRecords).catch(() => undefined);
 			runtime.settledRuns.clear();
 			runtime.settledListeners.clear();
 			runtime.runControllers.clear();
-			// Best-effort cleanup of preserved sub-agent session dirs so an
-			// ended/crashed session does not leak temp files; the OS reclaims
-			// tmpdir eventually, but this keeps things tidy between sessions.
-			for (const { sessionDir } of runtime.preservedSessions.values()) {
+			for (const sessionDir of runtime.sessionDirs) {
 				try {
 					rmSync(sessionDir, { recursive: true, force: true });
 				} catch {
 					/* best-effort */
 				}
 			}
-			runtime.preservedSessions.clear();
-			// Clear the monitor so stale runs from this session never leak into the
-			// next one (the module-level singleton survives across sessions).
+			runtime.sessionDirs.clear();
+			// Deliberately do not remove retainedArtifactPaths: they are the recovery
+			// path after a failed patch apply/cleanup.
+			runtime.threads.clear();
 			monitor.clear();
+			// The append-only inspector history (trajectory + transcript) is
+			// parent-session scoped: it must never leak into the next session.
+			inspectorStore.clearAll();
 		},
 	};
 

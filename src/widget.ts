@@ -14,10 +14,12 @@ import {
 	deriveActivityState,
 	formatElapsed,
 	formatUsageCompact,
+	isRunActiveStatus,
 	monitor,
 	statusIcon,
 	statusLabel,
 } from "./monitor.ts";
+import { announceRecoveryRecords } from "./recovery.ts";
 import type { SubagentRuntime } from "./runtime.ts";
 
 /** Features whose one-time announcement is still pending (keyed by config
@@ -80,6 +82,9 @@ async function announceNewFeatures(
 
 export function registerWidget(pi: ExtensionAPI, runtime: SubagentRuntime): void {
 	pi.on("session_start", async (_e, ctx) => {
+		// Recovery paths survive the old runtime and are shown again in the next
+		// UI-capable session before any transient widget state is rebuilt.
+		await announceRecoveryRecords(runtime.configPath, ctx);
 		if (ctx.mode !== "tui") return;
 		await announceNewFeatures(ctx, runtime);
 
@@ -89,7 +94,7 @@ export function registerWidget(pi: ExtensionAPI, runtime: SubagentRuntime): void
 				const unsub = monitor.subscribe(() => tui.requestRender());
 				// Tick once a second so elapsed time stays live while runs are active.
 				const timer = setInterval(() => {
-					if (monitor.getRuns().some((r) => r.status === "queued" || r.status === "running")) {
+					if (monitor.getRuns().some((r) => isRunActiveStatus(r.status))) {
 						tui.requestRender();
 					}
 				}, 1000);
@@ -110,7 +115,7 @@ export function registerWidget(pi: ExtensionAPI, runtime: SubagentRuntime): void
 							const isChain = Boolean(r.groupId);
 							const chainContinues = isChain && runs[idx + 1]?.groupId === r.groupId;
 							const activity =
-								r.activity && (r.status === "running" || r.status === "queued") ? r.activity : undefined;
+								r.activity && isRunActiveStatus(r.status) ? r.activity : undefined;
 							const hasActivity = activity !== undefined;
 							const icon = statusIcon(r.status, theme);
 							// Chain-internal runs (auto-fix worker/reviewer) are child nodes under
@@ -137,14 +142,22 @@ export function registerWidget(pi: ExtensionAPI, runtime: SubagentRuntime): void
 							// annotation (idle / long-running). Trailing the header with a single
 							// " · " chain keeps the row compact (no center gap); compactLine
 							// clips on overflow, never the right side on its own.
-							const model = r.model ?? "?";
+							const model = r.modelFallbackFrom
+								? `${r.model ?? "?"} (pool fallback from ${r.modelFallbackFrom})`
+								: (r.model ?? "?");
 							const usage = formatUsageCompact(r.usage);
 							const tools = r.toolCount ? `${r.toolCount} tool${r.toolCount === 1 ? "" : "s"}` : "";
 							const elapsed = formatElapsed(r, now);
 							// The round outcome summary leads the metadata so a finished chain
 							// row reads as what it did ("fail · src/index.ts · render()",
 							// "pass", "src/index.ts · tests/monitor.test.ts").
-							const metaParts = [r.summary, model, usage, tools, elapsed].filter(Boolean);
+							const isolation = r.isolation === "worktree" ? `worktree ${r.integrationStatus ?? "active"}` : undefined;
+							const relation = r.forkedFromRunId !== undefined
+								? `fork of #${r.forkedFromRunId}`
+								: (r.forkChildRunIds?.length ?? 0) > 0
+									? `forks ${r.forkChildRunIds!.map((id) => `#${id}`).join(",")}`
+									: undefined;
+							const metaParts = [r.summary, relation, isolation, model, usage, tools, elapsed].filter(Boolean);
 							// Running is conveyed by the icon + elapsed; spell out the label only for
 							// the other states (ready / done / stopped) so they are unambiguous.
 							if (r.status !== "running") metaParts.push(statusLabel(r.status));

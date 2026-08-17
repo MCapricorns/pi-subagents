@@ -36,6 +36,28 @@ describe("BackgroundTaskQueue", () => {
 		second.resolve();
 	});
 
+	it("resolves per-task completion only after the slot is released", async () => {
+		const queue = new BackgroundTaskQueue(1);
+		const first = deferred();
+		let secondStarted = false;
+		const controller = queue.enqueue(async () => {
+			await first.promise;
+		});
+		queue.enqueue(async () => {
+			secondStarted = true;
+		});
+		let completed = false;
+		const completion = queue.waitForTask(controller).then(() => {
+			completed = true;
+		});
+		expect(completed).toBe(false);
+		expect(secondStarted).toBe(false);
+		first.resolve();
+		await completion;
+		expect(completed).toBe(true);
+		expect(secondStarted).toBe(true);
+	});
+
 	it("starts more queued work when the concurrency limit is raised", async () => {
 		const queue = new BackgroundTaskQueue(1);
 		const gates = [deferred(), deferred(), deferred()];
@@ -78,11 +100,17 @@ describe("BackgroundTaskQueue", () => {
 		);
 
 		queue.cancelAll();
+		let becameIdle = false;
+		const idle = queue.waitForIdle().then(() => {
+			becameIdle = true;
+		});
 		expect(activeSignal?.aborted).toBe(true);
 		expect(queuedCancelled).toBe(true);
 		expect(queuedStarted).toBe(false);
+		expect(becameIdle).toBe(false);
 		gate.resolve();
-		await nextTask();
+		await idle;
+		expect(becameIdle).toBe(true);
 	});
 
 	it("surfaces task exceptions through onError without breaking the queue", async () => {
