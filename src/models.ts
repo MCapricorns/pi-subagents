@@ -72,18 +72,25 @@ export function currentModelRef(ctx: Pick<ModelContext, "model">): string | unde
 }
 
 /**
- * Models usable by this main window. Scoped models replace the full available
- * registry, matching pi's built-in model picker semantics.
+ * Current authenticated registry models narrowed by the session scope. Scope
+ * entries are a session snapshot, so they act only as a whitelist; the live
+ * registry remains the source of truth for availability and model metadata.
  */
-export function availableModelRefs(ctx: ModelContext): string[] {
+export function availableModelsInScope(ctx: ModelContext): readonly Model<Api>[] {
+	const models = ctx.modelRegistry.getAvailable();
 	// scopedModels was added after the declared Pi 0.80.6 minimum. Treat a
-	// missing field exactly like an empty scope and use the registry fallback.
+	// missing field exactly like an empty scope and use the full live registry.
 	const scopedModels = ctx.scopedModels ?? [];
-	const scoped = scopedModels.length > 0 ? scopedModels.map((entry) => entry.model) : undefined;
-	const models = scoped ?? ctx.modelRegistry.getAvailable();
-	const refs = [...new Set(models.map(modelRef))];
+	if (scopedModels.length === 0) return models;
+	const scopedRefs = new Set(scopedModels.map((entry) => modelRef(entry.model)));
+	return models.filter((model) => scopedRefs.has(modelRef(model)));
+}
+
+/** Model refs usable by setup, with an available current main model first. */
+export function availableModelRefs(ctx: ModelContext): string[] {
+	const refs = [...new Set(availableModelsInScope(ctx).map(modelRef))];
 	const currentRef = currentModelRef(ctx);
-	if (!currentRef) return refs;
+	if (!currentRef || !refs.includes(currentRef)) return refs;
 	return [currentRef, ...refs.filter((ref) => ref !== currentRef)];
 }
 
@@ -118,7 +125,9 @@ function modelCapabilities(model: ModelListEntry): string {
 	return capabilities.join(" + ");
 }
 
-/** Build the single searchable model list shared by primary/backup/vision picks. */
+/** Build the single searchable model list shared by primary/backup/vision picks.
+ * Only refs Pi currently reports as available are shown, which means providers
+ * without a configured API key/OAuth session never flood the setup picker. */
 export function buildModelPickerItems(options: {
 	models: readonly ModelListEntry[];
 	availableRefs: readonly string[];
@@ -132,21 +141,16 @@ export function buildModelPickerItems(options: {
 	const byRef = new Map<string, ModelListEntry>();
 	for (const model of options.models) {
 		const ref = modelRef(model);
-		if (!byRef.has(ref)) byRef.set(ref, model);
+		if (available.has(ref) && !byRef.has(ref)) byRef.set(ref, model);
 	}
 
 	const refs = [...byRef.keys()]
-		.filter((ref) =>
-			options.slot !== "vision" ||
-			byRef.get(ref)?.input.includes("image") === true ||
-			ref === configuredRef,
-		)
+		.filter((ref) => options.slot !== "vision" || byRef.get(ref)?.input.includes("image") === true)
 		.sort((left, right) => {
 			const leftRank = left === configuredRef ? 0 : left === mainRef ? 1 : 2;
 			const rightRank = right === configuredRef ? 0 : right === mainRef ? 1 : 2;
 			return leftRank - rightRank || left.localeCompare(right);
 		});
-	if (configuredRef && !byRef.has(configuredRef)) refs.unshift(configuredRef);
 
 	const dynamic = options.slot === "backup"
 		? {
@@ -164,31 +168,15 @@ export function buildModelPickerItems(options: {
 
 	const items: ModelPickerItem[] = [dynamic];
 	for (const ref of refs) {
-		const model = byRef.get(ref);
-		const tags = [available.has(ref) ? "available" : "unavailable"];
+		const model = byRef.get(ref)!;
+		const tags = ["available"];
 		if (ref === configuredRef) tags.push("configured");
 		if (ref === mainRef) tags.push("current main");
-		if (!model) {
-			const compatibility = options.slot === "vision"
-				? "incompatible with vision (capability unknown)"
-				: undefined;
-			items.push({
-				value: ref,
-				label: ref,
-				description: [...tags, compatibility, "saved model reference"].filter(Boolean).join(" · "),
-				...(options.slot === "vision" ? { disabled: true } : {}),
-			});
-			continue;
-		}
 		const name = model.name.trim() && model.name !== model.id ? model.name.trim() : undefined;
-		const compatibility = options.slot === "vision" && !model.input.includes("image")
-			? "incompatible with vision"
-			: undefined;
 		items.push({
 			value: ref,
 			label: ref,
-			description: [name, modelCapabilities(model), compatibility, ...tags].filter(Boolean).join(" · "),
-			...(compatibility ? { disabled: true } : {}),
+			description: [name, modelCapabilities(model), ...tags].filter(Boolean).join(" · "),
 		});
 	}
 	return items;

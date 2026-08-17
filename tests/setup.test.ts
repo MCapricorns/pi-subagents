@@ -35,19 +35,17 @@ describe("setup model picker helpers", () => {
 		expect(pickerItemSearchText(model)).toContain("available");
 	});
 
-	it("uses a first-class clear/default option for backup picks", () => {
+	it("uses a first-class clear/default option and hides unavailable saved backups", () => {
 		const items = buildModelPickerItems({
 			models: [],
 			availableRefs: [],
 			slot: "backup",
 			configuredRef: "removed/stale-backup",
 		});
-		expect(items[0]).toMatchObject({
+		expect(items).toEqual([expect.objectContaining({
 			value: CURRENT_MAIN_MODEL,
 			label: "Current main model (default)",
-		});
-		expect(items[1].label).toBe("removed/stale-backup");
-		expect(items[1].description).toContain("unavailable");
+		})]);
 	});
 });
 

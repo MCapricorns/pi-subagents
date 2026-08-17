@@ -30,10 +30,11 @@ import {
 import {
 	CURRENT_MAIN_MODEL,
 	applyModelPoolChoice,
-	availableModelRefs,
+	availableModelsInScope,
 	buildAgentModelPoolRows,
 	buildModelPickerItems,
 	currentModelRef,
+	modelRef,
 	type AgentModelPoolMaps,
 	type ModelPickerSlot,
 	type ModelPoolSlot,
@@ -215,11 +216,10 @@ async function pickConfiguredModel(
 	configuredRef: string | undefined,
 	escNote: string,
 ): Promise<string | undefined> {
-	const registry = ctx.modelRegistry as typeof ctx.modelRegistry & { getAll?: typeof ctx.modelRegistry.getAvailable };
-	const models = registry.getAll?.() ?? registry.getAvailable();
+	const models = availableModelsInScope(ctx);
 	const items = buildModelPickerItems({
 		models,
-		availableRefs: availableModelRefs(ctx),
+		availableRefs: models.map(modelRef),
 		slot,
 		configuredRef,
 		mainRef: currentModelRef(ctx),

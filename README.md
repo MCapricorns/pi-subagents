@@ -19,8 +19,8 @@ on its own — no prompt engineering, no babysitting.
   to `reviewer`. You just use pi; delegation happens by itself.
 - **Vision-capable image tasks** — flag screenshot/mockup/design work with
   `vision: true`. The configured vision primary is followed by that agent's
-  backup and the current main-window model. The setup picker offers only
-  image-capable models (while clearly marking an incompatible stale saved ref),
+  backup and the current main-window model. Setup lists only in-scope,
+  image-capable models from providers with a configured API key or OAuth session,
   and runtime failures never silently rewrite your configuration.
 - **Results come back on their own** — completions are delivered as messages that
   wake the main agent automatically, even mid-turn. No polling, no `sleep`, no
@@ -187,8 +187,9 @@ Stored at `~/.pi/agent/pi-subagents.json` (follows `PI_CODING_AGENT_DIR` when
 set). The `/subagents-setup` wizard drives every field interactively — models, the
 default plus each enabled agent's thinking level, the vision model, concurrency,
 fix rounds, idle timeout, scope, and injection — with a per-agent "configure
-one" menu when the config already exists. `notifyOnReviewPass` and
-`maxResultLines` are edited directly in the file.
+one" menu when the config already exists. Model pickers show only models in the
+current session scope that are available through a configured API key or OAuth
+session. `notifyOnReviewPass` and `maxResultLines` are edited directly in the file.
 
 ```json
 {

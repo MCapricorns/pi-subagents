@@ -39,10 +39,25 @@ describe("availableModelRefs", () => {
 		expect(availableModelRefs(ctx)).toEqual(["openai/registry"]);
 	});
 
-	it("uses scoped models instead of the full registry", () => {
-		const ctx = context(undefined, ["openai/registry"]);
-		ctx.scopedModels = [{ model: toModel("anthropic/scoped") }] as unknown as ModelContext["scopedModels"];
+	it("intersects scoped models with current registry availability", () => {
+		const ctx = context(undefined, ["openai/registry", "anthropic/scoped"]);
+		ctx.scopedModels = [
+			{ model: toModel("anthropic/scoped") },
+			{ model: toModel("removed/stale") },
+		] as unknown as ModelContext["scopedModels"];
 		expect(availableModelRefs(ctx)).toEqual(["anthropic/scoped"]);
+	});
+
+	it("hides scoped snapshot refs that are no longer available", () => {
+		const ctx = context(undefined, ["openai/registry"]);
+		ctx.scopedModels = [{ model: toModel("anthropic/stale") }] as unknown as ModelContext["scopedModels"];
+		expect(availableModelRefs(ctx)).toEqual([]);
+	});
+
+	it("does not re-add an unavailable current main model", () => {
+		expect(availableModelRefs(context("removed/current", ["openai/available"]))).toEqual([
+			"openai/available",
+		]);
 	});
 });
 
@@ -112,7 +127,7 @@ describe("model-pool setup helpers", () => {
 		},
 	];
 
-	it("builds one searchable list with dynamic/default choices and concise refs", () => {
+	it("shows only models backed by configured API keys or OAuth", () => {
 		const primary = buildModelPickerItems({
 			models,
 			availableRefs: ["openai/gpt-fast"],
@@ -120,16 +135,18 @@ describe("model-pool setup helpers", () => {
 			mainRef: "openai/gpt-fast",
 		});
 		expect(primary[0]).toMatchObject({ value: CURRENT_MAIN_MODEL, label: "Current main model (dynamic)" });
-		expect(primary.map((item) => item.label)).toContain("anthropic/claude-vision");
-		expect(primary.find((item) => item.value === "anthropic/claude-vision")?.description).toContain("vision + reasoning");
-		expect(primary.find((item) => item.value === "anthropic/claude-vision")?.description).toContain("unavailable");
+		expect(primary.map((item) => item.value)).toEqual([
+			CURRENT_MAIN_MODEL,
+			"openai/gpt-fast",
+		]);
 		expect(primary.find((item) => item.value === "openai/gpt-fast")?.description).toContain("available");
+		expect(primary.some((item) => item.description?.includes("unavailable"))).toBe(false);
 
 		const backup = buildModelPickerItems({ models, availableRefs: [], slot: "backup" });
-		expect(backup[0].label).toBe("Current main model (default)");
+		expect(backup).toEqual([expect.objectContaining({ label: "Current main model (default)" })]);
 	});
 
-	it("offers only image-capable vision models and marks incompatible saved refs", () => {
+	it("offers only available image-capable vision models", () => {
 		const selectable = buildModelPickerItems({
 			models,
 			availableRefs: ["anthropic/claude-vision", "openai/gpt-fast"],
@@ -144,10 +161,7 @@ describe("model-pool setup helpers", () => {
 			slot: "vision",
 			configuredRef: "openai/gpt-fast",
 		});
-		expect(configuredTextOnly.find((item) => item.value === "openai/gpt-fast"))
-			.toMatchObject({ disabled: true });
-		expect(configuredTextOnly.find((item) => item.value === "openai/gpt-fast")?.description)
-			.toContain("incompatible with vision");
+		expect(configuredTextOnly.map((item) => item.value)).not.toContain("openai/gpt-fast");
 
 		const stale = buildModelPickerItems({
 			models,
@@ -155,24 +169,20 @@ describe("model-pool setup helpers", () => {
 			slot: "vision",
 			configuredRef: "removed/stale-vision",
 		});
-		expect(stale.find((item) => item.value === "removed/stale-vision"))
-			.toMatchObject({ disabled: true });
-		expect(stale.find((item) => item.value === "removed/stale-vision")?.description)
-			.toContain("incompatible with vision (capability unknown)");
+		expect(stale.map((item) => item.value)).toEqual([CURRENT_MAIN_MODEL]);
 	});
 
-	it("keeps a configured stale ref visible instead of repairing it", () => {
+	it("keeps stale refs in runtime config but hides them from setup choices", () => {
 		const items = buildModelPickerItems({
 			models,
 			availableRefs: ["openai/gpt-fast"],
 			slot: "primary",
 			configuredRef: "removed/stale",
 		});
-		expect(items[1]).toEqual({
-			value: "removed/stale",
-			label: "removed/stale",
-			description: "unavailable · configured · saved model reference",
-		});
+		expect(items.map((item) => item.value)).toEqual([
+			CURRENT_MAIN_MODEL,
+			"openai/gpt-fast",
+		]);
 	});
 
 	it("applies primary and backup choices without persisting a dynamic placeholder", () => {
