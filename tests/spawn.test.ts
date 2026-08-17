@@ -540,6 +540,47 @@ describe("runSingleAgentWithModelFallback run-level retry", () => {
 		}
 	});
 
+	it("stops same-model backoff when a transient retry becomes permanently invalid", async () => {
+		const dir = mkdtempSync(join(tmpdir(), "pi-subagents-runlevel-permanent-after-retry-"));
+		const script = join(dir, "permanent-after-retry-child.cjs");
+		const log = join(dir, "attempts.log");
+		writeFileSync(
+			script,
+			fakeRpcScript({
+				setup: `const log = ${JSON.stringify(log)};\nfs.appendFileSync(log, "attempt\\n");\nconst count = fs.readFileSync(log, "utf8").split("\\n").filter(Boolean).length;\nconst modelIndex = process.argv.indexOf("--model");\nconst model = modelIndex === -1 ? "" : process.argv[modelIndex + 1];`,
+				onPrompt: `if (model === "anthropic/primary" && count === 1) {
+	send({ type: "message_end", message: { role: "assistant", content: [], stopReason: "error", errorMessage: "provider down" } });
+} else if (model === "anthropic/primary") {
+	send({ type: "message_end", message: { role: "assistant", content: [], stopReason: "error", errorMessage: "model not found" } });
+} else {
+	send({ type: "message_end", message: { role: "assistant", content: [{ type: "text", text: "backup recovered" }], stopReason: "stop" } });
+}`,
+			}),
+			"utf8",
+		);
+		try {
+			await withArgv(script, async () => {
+				const result = await runSingleAgentWithModelFallback(
+					{
+						defaultCwd: process.cwd(),
+						agent: { ...agent, model: "anthropic/primary" },
+						agentName: agent.name,
+						task: "review",
+						runLevelRetryDelaysMs: [10, 10, 10, 10, 10],
+						makeDetails: (results) => ({ mode: "single", results }),
+					},
+					["openai/backup"],
+				);
+				expect(result.exitCode).toBe(0);
+				expect(result.model).toBe("openai/backup");
+				expect(result.modelRetries).toBe(1);
+				expect(readFileSync(log, "utf8").split("\n").filter(Boolean)).toHaveLength(3);
+			});
+		} finally {
+			rmSync(dir, { recursive: true, force: true });
+		}
+	});
+
 	it("recovers on a later same-model retry without falling back", async () => {
 		const dir = mkdtempSync(join(tmpdir(), "pi-subagents-runlevel-recover-"));
 		const script = join(dir, "recover-child.cjs");
@@ -897,6 +938,7 @@ describe("isTerminalModelError (unit)", () => {
 		expect(isPermanentModelCandidateError(base({ errorMessage: "404 Not Found" }))).toBe(true);
 		expect(isPermanentModelCandidateError(base({ stderr: "provider does not exist" }))).toBe(true);
 		expect(isPermanentModelCandidateError(base({ errorMessage: "503 Service Unavailable" }))).toBe(false);
+		expect(isPermanentModelCandidateError(base({ errorMessage: "503: model temporarily unavailable" }))).toBe(false);
 		expect(isPermanentModelCandidateError(base({ errorMessage: "429 Too Many Requests" }))).toBe(false);
 		expect(isPermanentModelCandidateError(base({ errorMessage: "network timeout" }))).toBe(false);
 	});

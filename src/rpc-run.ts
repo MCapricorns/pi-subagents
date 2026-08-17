@@ -23,6 +23,14 @@ export const SUBAGENT_KILL_GRACE_MS = 5_000;
 export const RPC_COMMAND_TIMEOUT_MS = 30_000;
 export const RPC_ABORT_SETTLE_TIMEOUT_MS = 5_000;
 
+/** Prevent RPC prompt expansion when a control objective itself starts with
+ * slash (for example `/subagents-setup`). The original text stays verbatim
+ * below a non-command prefix and therefore always starts a model turn. */
+export function asPlainTextRpcPrompt(message: string): string {
+	if (!message.trimStart().startsWith("/")) return message;
+	return `Treat the following as plain-text sub-agent instructions, not a Pi command:\n\n${message}`;
+}
+
 export interface UsageStats {
 	input: number;
 	output: number;
@@ -543,7 +551,9 @@ export async function runRpcAgentAttempt(options: RunRpcAttemptOptions): Promise
 	const settleRun = (): void => {
 		const failed = result.stopReason === "error" || result.stopReason === "aborted";
 		result.exitCode = failed ? 1 : 0;
-		emit({ kind: "status", status: failed ? "failed" : "done" });
+		// RPC settlement only means model transport is quiescent. Dispatch may still
+		// be applying an isolated worktree, so it alone publishes the terminal live
+		// status after filesystem finalization completes.
 		finish();
 	};
 
@@ -626,7 +636,7 @@ export async function runRpcAgentAttempt(options: RunRpcAttemptOptions): Promise
 			continuationTurnCompleted = false;
 			deferredAgentSettlement = false;
 			try {
-				await send({ type: "prompt", message: instruction, streamingBehavior: "steer" });
+				await send({ type: "prompt", message: asPlainTextRpcPrompt(instruction), streamingBehavior: "steer" });
 				continuationAccepted = true;
 				if (deferredAgentSettlement && !continuationTurnStarted) {
 					// A handled input can succeed without starting a turn. Confirm the
@@ -669,7 +679,7 @@ export async function runRpcAgentAttempt(options: RunRpcAttemptOptions): Promise
 			// history, but do not classify a successful replacement as failed.
 			result.failedTools = undefined;
 			try {
-				await send({ type: "prompt", message: objective });
+				await send({ type: "prompt", message: asPlainTextRpcPrompt(objective) });
 				setAttemptPhase("running");
 			} catch (error) {
 				const promptError = error instanceof Error ? error : new Error(String(error));
@@ -712,11 +722,10 @@ export async function runRpcAgentAttempt(options: RunRpcAttemptOptions): Promise
 				timer = setTimeout(() => resolve(false), RPC_ABORT_SETTLE_TIMEOUT_MS);
 				if (typeof timer.unref === "function") timer.unref();
 			});
-			let graceful = false;
 			try {
-				graceful = await Promise.race([abortAcceptedPrompt(), timeout]);
+				await Promise.race([abortAcceptedPrompt(), timeout]);
 			} catch {
-				graceful = false;
+				/* process termination below is the bounded fallback */
 			} finally {
 				if (timer) clearTimeout(timer);
 			}
@@ -729,7 +738,10 @@ export async function runRpcAgentAttempt(options: RunRpcAttemptOptions): Promise
 			result.stopReason = "aborted";
 			result.errorMessage = reason;
 			finish();
-			terminate(!graceful);
+			// Even when RPC abort/settle times out, give Pi SIGTERM first so its
+			// shutdown handler can reap detached tool process groups. terminate()
+			// retains the hard-kill timer as the bounded fallback.
+			terminate(false);
 			if (!closed) await processClosed.promise;
 		},
 	};
@@ -965,7 +977,7 @@ export async function runRpcAgentAttempt(options: RunRpcAttemptOptions): Promise
 			resolveInitialPrompt(false, new Error("Run was stopped before its initial prompt."));
 			await attemptControl.stop();
 		} else {
-			void send({ type: "prompt", message: options.prompt }).then(
+			void send({ type: "prompt", message: asPlainTextRpcPrompt(options.prompt) }).then(
 				() => resolveInitialPrompt(true),
 				(error) => {
 					const promptError = error instanceof Error ? error : new Error(String(error));

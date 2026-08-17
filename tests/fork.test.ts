@@ -193,6 +193,9 @@ function fakeWorktree(cwd: string): WorktreeIsolation {
 		get state() {
 			return state;
 		},
+		async snapshotCheckpoint() {
+			return { baseHead: "deadbeef", commit: "deadbeef", patch: Buffer.alloc(0) };
+		},
 		async finalize() {
 			state = "no_changes";
 			return { status: "no_changes", integrated: false, hadChanges: false };
@@ -344,6 +347,32 @@ describe("subagent_control fork", () => {
 		await queued[1].task(queued[1].controller.signal);
 		expect(childOptions.stdinText).toBe(FORK_CONTINUATION_PROMPT);
 		expect(childOptions.task).toBe("parked task");
+	});
+
+	it("rejects forking a parked isolated seed before it has been integrated", async () => {
+		const cwd = mkdtempSync(join(tmpdir(), "pi-subagents-fork-parked-isolated-cwd-"));
+		tempPaths.push(cwd);
+		const source = createSession(cwd);
+		tempPaths.push(source.dir);
+		const queued = captureQueue();
+		const handle = fakeWorktree(cwd);
+		vi.spyOn(worktreeModule, "createWorktreeIsolation").mockResolvedValue(handle);
+		vi.spyOn(spawnModule, "runSingleAgentWithModelFallback").mockResolvedValue(
+			result("parked isolated", { id: source.id, dir: source.dir }, { parked: true }),
+		);
+		const { subagent, control } = registered();
+		const dispatched = await execute(subagent, {
+			agent: "worker",
+			task: "parked isolated",
+			isolation: "worktree",
+		}, cwd);
+		const sourceRunId = dispatched.details.results[0].runId;
+		await queued[0].task(queued[0].controller.signal);
+
+		const forked = await execute(control, { action: "fork", id: sourceRunId }, cwd);
+		expect(forked.content[0].text).toMatch(/has not been integrated.*applied exactly once/i);
+		expect(queued).toHaveLength(1);
+		expect(handle.state).toBe("active");
 	});
 
 	it("forks a failed retained session without changing the failed source state", async () => {

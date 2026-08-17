@@ -8,7 +8,7 @@ import { StringEnum } from "@earendil-works/pi-ai";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { Text } from "@earendil-works/pi-tui";
 import { Type } from "typebox";
-import { loadConfig } from "./config.ts";
+import { DEFAULT_MAX_RESULT_LINES, loadConfig } from "./config.ts";
 import { emptyUsage, formatCompletionBlock, formatUsage, matchRunIds } from "./format.ts";
 import {
 	formatElapsed,
@@ -19,7 +19,7 @@ import {
 	statusLabel,
 	type RunStatus,
 } from "./monitor.ts";
-import type { SubagentRuntime } from "./runtime.ts";
+import type { SubagentRuntime, SubagentThread } from "./runtime.ts";
 import { getResultOutput, isFailedResult, type SingleResult } from "./spawn.ts";
 import { inspectorStore } from "./trajectory.ts";
 
@@ -64,14 +64,14 @@ export function registerLookupTools(pi: ExtensionAPI, runtime: SubagentRuntime):
 			"retarget aborts the current objective to a stable checkpoint, suppresses that aborted completion, then starts the replacement objective in the same session.",
 			"park aborts to a stable checkpoint, terminates the child, preserves context, and releases its concurrency slot.",
 			"resume restarts a parked, completed, or failed retained thread with the same run id; objective is optional.",
-			"fork copies a parked/completed/failed retained session branch into a new logical thread and run id; objective is optional.",
+			"fork copies a parked/completed/failed retained session branch into a new logical thread and run id; an isolated checkpoint must be settled and integrated first; objective is optional.",
 		].join(" "),
 		promptSnippet: "Control a subagent thread: steer, retarget, park, resume, or fork by stable run id.",
 		promptGuidelines: [
 			"Use subagent_control steer to refine active work without restarting it; the instruction is delivered after the child's current tool batch.",
 			"Use subagent_control retarget when the active objective is obsolete; do not call subagent_stop and start a fresh thread because retarget preserves context and suppresses the abandoned completion.",
 			"Use subagent_control park to checkpoint useful context while releasing the process/concurrency slot, and resume to continue the same run id later.",
-			"Use subagent_control fork only on a parked or settled retained thread; park active work first. Fork creates a new run id while leaving the source untouched.",
+			"Use subagent_control fork only on a parked or settled retained thread; isolated work must settle and integrate before it can fork. Fork creates a new run id while leaving the source untouched.",
 			"Use subagent_stop only for destructive cancellation; it retires that thread's retained session without retiring independent forks.",
 		],
 		parameters: SubagentControlParams,
@@ -515,9 +515,21 @@ export function registerLookupTools(pi: ExtensionAPI, runtime: SubagentRuntime):
 		],
 		parameters: SubagentStopParams,
 
-		async execute(_toolCallId, params, _signal, _onUpdate) {
+		async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
+			// Start config I/O without yielding: every target below must be claimed
+			// synchronously before a resume/fork preflight can cross its next await.
+			const configPromise = loadConfig(runtime.configPath).catch(() => undefined);
+			const completionResults: SingleResult[] = [];
 			const candidateIds = params.all === true
-				? [...runtime.runControllers.keys()]
+				? [...new Set([
+					...runtime.runControllers.keys(),
+					...[...runtime.threads.values()]
+						.filter((thread) =>
+							thread.lifecycleOperation !== undefined ||
+							["queued", "resuming", "running", "steering", "interrupting"].includes(thread.state),
+						)
+						.map((thread) => thread.id),
+				])]
 				: [...runtime.threads.keys()];
 			const targets =
 				params.all === true
@@ -539,28 +551,36 @@ export function registerLookupTools(pi: ExtensionAPI, runtime: SubagentRuntime):
 				};
 			}
 
-			const stopped: string[] = [];
-			const retainedIntegration: string[] = [];
+			const claimed: Array<{
+				runId: number;
+				thread: SubagentThread;
+				run: ReturnType<typeof monitor.findRun>;
+				previousState: SubagentThread["state"];
+				wasQueued: boolean;
+				wasResuming: boolean;
+				wasActive: boolean;
+				generation: number;
+				controller: AbortController | undefined;
+				completion: Promise<void>;
+				stopVersion: number;
+				stopMessage: string;
+			}> = [];
 			for (const runId of targets) {
 				const thread = runtime.threads.get(runId);
 				if (!thread) continue;
-				const run = monitor.findRun(runId);
 				const previousState = thread.state;
 				const wasQueued = previousState === "queued";
 				const wasResuming = previousState === "resuming";
-				const wasActive = ["queued", "resuming", "running", "steering", "interrupting"].includes(previousState);
-				const generation = thread.generation;
-				const controller = thread.queueController;
-				const completion = thread.generationCompletion;
-				const control = thread.control;
+				const wasActive =
+					thread.lifecycleOperation !== undefined ||
+					["queued", "resuming", "running", "steering", "interrupting"].includes(previousState);
 				const stopVersion = ++thread.lifecycleVersion;
-				// Destructive retirement is claimed synchronously before the first await.
-				// This invalidates any resume/fork preflight before it can enqueue work.
+				// Stop-all claims every target before the first await. This invalidates
+				// all concurrent resume/fork preflights as one synchronous operation.
 				thread.lifecycleOperation = "stop";
 				thread.retired = true;
 				thread.retireOnSettle = true;
 				thread.state = "stopped";
-
 				const stopMessage = wasQueued
 					? "Stopped by subagent_stop before the run started."
 					: wasResuming
@@ -570,15 +590,49 @@ export function registerLookupTools(pi: ExtensionAPI, runtime: SubagentRuntime):
 							: previousState === "parked"
 								? "Stopped by subagent_stop from a parked checkpoint."
 								: "Retired by subagent_stop.";
-				await control.stop(stopMessage).catch(() => undefined);
+				claimed.push({
+					runId,
+					thread,
+					run: monitor.findRun(runId),
+					previousState,
+					wasQueued,
+					wasResuming,
+					wasActive,
+					generation: thread.generation,
+					controller: thread.queueController,
+					completion: thread.generationCompletion,
+					stopVersion,
+					stopMessage,
+				});
+			}
+
+			const stopped: string[] = [];
+			const retainedIntegration: string[] = [];
+			for (const claim of claimed) {
+				const {
+					runId,
+					thread,
+					run,
+					previousState,
+					wasQueued,
+					wasResuming,
+					wasActive,
+					generation,
+					controller,
+					completion,
+					stopVersion,
+					stopMessage,
+				} = claim;
+				await thread.control.stop(stopMessage).catch(() => undefined);
 				runtime.backgroundQueue.cancel(controller);
 				await completion;
 				if (runtime.runControllers.get(runId) === controller) runtime.runControllers.delete(runId);
 				if (thread.queueController === controller) thread.queueController = undefined;
 
-				// Normal active generations publish their own aborted partial result. A
-				// queued/resuming task, parked checkpoint, or cancelled auto-fix chain has
-				// no such publisher, so synthesize exactly one result after quiescence.
+				// Dispatch yields publication ownership as soon as stop claims the
+				// lifecycle. Synthesize and publish the one aborted result here only when
+				// this stop actually interrupted unfinished work.
+				let stoppedResult: SingleResult | undefined;
 				if (
 					wasQueued ||
 					wasResuming ||
@@ -586,10 +640,9 @@ export function registerLookupTools(pi: ExtensionAPI, runtime: SubagentRuntime):
 					!runtime.settledRuns.has(runId)
 				) {
 					const prior = thread.lastResult;
-					const stoppedResult: SingleResult = prior
+					stoppedResult = prior
 						? {
 							...prior,
-							task: thread.task,
 							parked: undefined,
 							exitCode: 1,
 							stopReason: "aborted",
@@ -619,12 +672,57 @@ export function registerLookupTools(pi: ExtensionAPI, runtime: SubagentRuntime):
 					thread.lastResult = stoppedResult;
 				}
 				monitor.setStatus(runId, "failed");
+				if (stoppedResult) {
+					const inspectState = inspectorStore.get(runId);
+					const alreadyStampedStopped = inspectState.trajectory.getGenerationEvents().some(
+						(event) => event.kind === "settled" && event.status === "stopped",
+					);
+					if (!alreadyStampedStopped) {
+						inspectState.trajectory.append({
+							kind: "settled",
+							status: "stopped",
+							model: stoppedResult.model ?? run?.model,
+							isolation: thread.isolation,
+							...(stoppedResult.integrationStatus && stoppedResult.integrationStatus !== "pending"
+								? { integrationStatus: stoppedResult.integrationStatus }
+								: {}),
+						});
+					}
+					const stoppedRun = monitor.findRun(runId);
+					inspectState.retainFrom(stoppedRun
+						? {
+							...stoppedRun,
+							agent: stoppedResult.agent,
+							task: stoppedResult.task,
+							model: stoppedResult.model ?? stoppedRun.model,
+							usage: stoppedResult.usage,
+						}
+						: {
+							agent: stoppedResult.agent,
+							task: stoppedResult.task,
+							model: stoppedResult.model,
+							thinking: stoppedResult.thinking,
+							status: "failed",
+							endedAt: inspectState.trajectory.summary().endedAt,
+							usage: stoppedResult.usage,
+						});
+					completionResults.push(stoppedResult);
+				}
 				monitor.removeRun(runId);
 				runtime.retireThreadSession(thread);
 				if (thread.lifecycleVersion === stopVersion && thread.lifecycleOperation === "stop") {
 					thread.lifecycleOperation = undefined;
 				}
 				stopped.push(`#${runId} ${thread.agentName}${wasQueued ? " (queued)" : wasActive ? "" : ` (${previousState})`}`);
+			}
+			if (completionResults.length > 0) {
+				const maxResultLines = (await configPromise)?.maxResultLines ?? DEFAULT_MAX_RESULT_LINES;
+				runtime.sendCompletionGroup(completionResults.map((result) => ({
+					agent: result.agent,
+					block: formatCompletionBlock(result, maxResultLines, ctx.cwd),
+					triggerTurn: true,
+				})));
+				runtime.completionBatcher.flush();
 			}
 			return {
 				content: [{

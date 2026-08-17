@@ -158,7 +158,7 @@ export function isModelLevelFailure(result: SingleResult): boolean {
 const TERMINAL_MODEL_ERROR_PATTERN =
 	/insufficient_quota|quota\s+exceeded|exceeded[^.\n]{0,40}quota|out\s+of\s+budget|billing|usage\s+limit|usage_limit|gousagelimiterror|freeusagelimiterror|monthly\s+usage\s+limit\s+reached|available\s+balance|invalid\s+(?:api\s+)?key|incorrect\s+api\s+key|unauthori[sz]ed|\b401\b|\b403\b|forbidden|permission\s+denied/i;
 const PERMANENT_MODEL_CANDIDATE_ERROR_PATTERN =
-	/model[_ -]?not[_ -]?found|no\s+models?\s+(?:found|matched)|(?:model|provider)[^.\n]{0,80}(?:not\s+found|unknown|does\s+not\s+exist|unsupported|invalid|unavailable)|(?:not\s+found|unknown|unsupported|invalid)[^.\n]{0,40}(?:model|provider)|\b404\b/i;
+	/model[_ -]?not[_ -]?found|no\s+models?\s+(?:found|matched)|(?:model|provider)[^.\n]{0,80}(?:not\s+found|unknown|does\s+not\s+exist|unsupported|invalid)|(?:not\s+found|unknown|unsupported|invalid)[^.\n]{0,40}(?:model|provider)|\b404\b/i;
 
 export function isTerminalModelError(result: SingleResult): boolean {
 	const message = result.errorMessage?.trim();
@@ -545,7 +545,11 @@ export async function runSingleAgentWithModelFallback(
 				result = await runWithStartupRetry(retryOptions);
 				modelRetries++;
 				if (result.parked || result.stopReason === "aborted") return result;
-				if (!isModelLevelFailure(result) || isTerminalModelError(result)) break;
+				if (
+					!isModelLevelFailure(result) ||
+					isTerminalModelError(result) ||
+					isPermanentModelCandidateError(result)
+				) break;
 			}
 		}
 

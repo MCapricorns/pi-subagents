@@ -42,7 +42,7 @@ export type ThreadState =
 	| "failed"
 	| "stopped";
 
-export type ThreadLifecycleOperation = "park" | "resume" | "fork" | "stop";
+export type ThreadLifecycleOperation = "park" | "resume" | "fork" | "stop" | "settle";
 
 export interface SubagentThread {
 	id: number;
@@ -110,6 +110,9 @@ export interface SubagentRuntime {
 	registerRunResult: (runId: number, result: SingleResult) => void;
 	/** Logical threads outlive process attempts and completed generations. */
 	threads: Map<number, SubagentThread>;
+	/** Resume/fork setup that has claimed a thread but has not yet enqueued its
+	 * next generation. Shutdown invalidates these claims and waits for cleanup. */
+	preflightOperations: Set<Promise<void>>;
 	/** Every session directory retained for this parent session, including
 	 * auto-fix internals that are not directly controllable. */
 	sessionDirs: Set<string>;
@@ -166,6 +169,7 @@ export function createRuntime(pi: ExtensionAPI, configPath: string): SubagentRun
 		settledRuns: new Map<number, SingleResult>(),
 		settledListeners: new Map<number, Set<(result: SingleResult) => void>>(),
 		threads: new Map<number, SubagentThread>(),
+		preflightOperations: new Set<Promise<void>>(),
 		sessionDirs: new Set<string>(),
 		retainedArtifactPaths: new Set<string>(),
 		retainWorktreeArtifacts: (finalization) => {
@@ -205,16 +209,31 @@ export function createRuntime(pi: ExtensionAPI, configPath: string): SubagentRun
 		shutdown: async () => {
 			if (!runtime.sessionActive) return;
 			runtime.sessionActive = false;
+			const shutdownThreads = [...runtime.threads.values()];
+			// Invalidate every lifecycle claim synchronously before the first await.
+			// Resume/fork preflight checks both this version and sessionActive, then
+			// cleans any worktree/session it created before resolving its tracker.
+			for (const thread of shutdownThreads) {
+				thread.lifecycleVersion++;
+				thread.lifecycleOperation = "stop";
+				thread.retired = true;
+				thread.retireOnSettle = true;
+				thread.state = "stopped";
+			}
+			const preflights = [...runtime.preflightOperations];
 			runtime.completionBatcher.dispose();
 			runtime.backgroundQueue.cancelAll();
-			// Await live RPC process-tree cleanup before removing append-only session
-			// files (especially important on Windows, where open files cannot be removed).
-			await Promise.all(
-				[...runtime.threads.values()].map((thread) =>
-					thread.control.stop("Parent session shut down").catch(() => undefined),
+			// Await live RPC process-tree cleanup and continuation preflight rollback
+			// before removing sessions/worktrees or clearing ownership maps.
+			await Promise.all([
+				Promise.all(
+					shutdownThreads.map((thread) =>
+						thread.control.stop("Parent session shut down").catch(() => undefined),
+					),
 				),
-			);
-			await runtime.backgroundQueue.waitForIdle();
+				Promise.allSettled(preflights),
+				runtime.backgroundQueue.waitForIdle(),
+			]);
 			// Parked work owns no queue task, so shutdown is its final settlement.
 			// Active/stopped tasks may already have finalized; the handle and callback
 			// are idempotent and generation-guarded.
@@ -248,6 +267,7 @@ export function createRuntime(pi: ExtensionAPI, configPath: string): SubagentRun
 				}
 			}
 			runtime.sessionDirs.clear();
+			runtime.preflightOperations.clear();
 			// Deliberately do not remove retainedArtifactPaths: they are the recovery
 			// path after a failed patch apply/cleanup.
 			runtime.threads.clear();

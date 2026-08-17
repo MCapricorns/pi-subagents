@@ -446,6 +446,21 @@ async function runFullSetup(ctx: ExtensionCommandContext, configPath: string, ba
 	});
 	if (pools === undefined) return notifyCancelled(ctx);
 
+	const defaults = builtinThinkingDefaults();
+	const agentThinkingLevels = keepAgentEntries({ ...base.agentThinkingLevels }, enabled);
+	for (const agentName of enabled) {
+		const strength = await pickAgentStrength(
+			ctx,
+			agentName,
+			agentThinkingLevels[agentName],
+			thinkingLevel,
+			defaults,
+		);
+		if (strength === undefined) return notifyCancelled(ctx);
+		if (strength === INHERIT) delete agentThinkingLevels[agentName];
+		else agentThinkingLevels[agentName] = strength;
+	}
+
 	const visionModel = await pickVisionModel(ctx, base.visionModel);
 	if (visionModel === undefined) return notifyCancelled(ctx);
 
@@ -486,7 +501,7 @@ async function runFullSetup(ctx: ExtensionCommandContext, configPath: string, ba
 		enabledAgents: enabled,
 		agentModels: keepAgentEntries(pools.agentModels, enabled),
 		agentBackupModels: keepAgentEntries(pools.agentBackupModels, enabled),
-		agentThinkingLevels: keepAgentEntries(base.agentThinkingLevels, enabled),
+		agentThinkingLevels,
 		thinkingLevel,
 		notifyOnReviewPass: base.notifyOnReviewPass,
 		maxResultLines: base.maxResultLines,

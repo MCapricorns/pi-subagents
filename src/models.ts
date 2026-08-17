@@ -10,7 +10,8 @@
 import type { Api, Model } from "@earendil-works/pi-ai";
 import type { ExtensionContext } from "@earendil-works/pi-coding-agent";
 
-export type ModelContext = Pick<ExtensionContext, "model" | "scopedModels" | "modelRegistry">;
+export type ModelContext = Pick<ExtensionContext, "model" | "modelRegistry"> &
+	Partial<Pick<ExtensionContext, "scopedModels">>;
 
 export const CURRENT_MAIN_MODEL = "__current_main_model__";
 
@@ -75,7 +76,10 @@ export function currentModelRef(ctx: Pick<ModelContext, "model">): string | unde
  * registry, matching pi's built-in model picker semantics.
  */
 export function availableModelRefs(ctx: ModelContext): string[] {
-	const scoped = ctx.scopedModels.length > 0 ? ctx.scopedModels.map((entry) => entry.model) : undefined;
+	// scopedModels was added after the declared Pi 0.80.6 minimum. Treat a
+	// missing field exactly like an empty scope and use the registry fallback.
+	const scopedModels = ctx.scopedModels ?? [];
+	const scoped = scopedModels.length > 0 ? scopedModels.map((entry) => entry.model) : undefined;
 	const models = scoped ?? ctx.modelRegistry.getAvailable();
 	const refs = [...new Set(models.map(modelRef))];
 	const currentRef = currentModelRef(ctx);

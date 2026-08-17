@@ -671,6 +671,8 @@ send({
 			const waited = await waitPromise;
 			expect(waited.content[0].text).toContain("### [worker] failed");
 			expect(waited.content[0].text).toContain("Stopped by subagent_stop");
+			expect(stub.messages).toHaveLength(1);
+			expect(stub.messages[0].message.content).toContain("Stopped by subagent_stop");
 		} finally {
 			backgroundController.abort();
 			await stub.hooks["session_shutdown"]?.({}, {});
@@ -1003,6 +1005,64 @@ send({ type: "message_end", message: { role: "assistant", content: [{ type: "tex
 			process.argv[1] = previousScript;
 			if (childDir) rmSync(childDir, { recursive: true, force: true });
 		}
+	});
+
+	it("publishes the interrupted auto-fix sub-step partial instead of the old review", async () => {
+		const stub = makeStub();
+		let activeWorkerOptions: any;
+		vi.spyOn(spawn, "runSingleAgentWithModelFallback")
+			.mockResolvedValueOnce({
+				agent: "reviewer",
+				agentSource: "builtin",
+				task: "Review the change",
+				exitCode: 0,
+				messages: [{ role: "assistant", content: [{ type: "text", text: "OLD INITIAL REVIEW\nVERDICT: REVIEW_FAIL" }], stopReason: "stop" }],
+				stderr: "",
+				usage: { input: 1, output: 1, cacheRead: 0, cacheWrite: 0, cost: 0, contextTokens: 2, turns: 1 },
+			} as any)
+			.mockImplementationOnce(async (options: any) => {
+				activeWorkerOptions = options;
+				return new Promise((resolve) => {
+					const finish = () => resolve({
+						agent: "worker",
+						agentSource: "builtin",
+						task: options.task,
+						exitCode: 1,
+						messages: [{ role: "assistant", content: [{ type: "text", text: "CURRENT FIX PARTIAL" }], stopReason: "aborted" }],
+						stderr: "",
+						usage: { input: 2, output: 2, cacheRead: 0, cacheWrite: 0, cost: 0, contextTokens: 4, turns: 1 },
+						stopReason: "aborted",
+						errorMessage: "Subagent was aborted",
+					} as any);
+					if (options.signal.aborted) finish();
+					else options.signal.addEventListener("abort", finish, { once: true });
+				});
+			});
+
+		register(stub.api);
+		const tool = stub.tools.find((candidate) => candidate.name === "subagent");
+		const stopTool = stub.tools.find((candidate) => candidate.name === "subagent_stop");
+		const dispatched = await tool.execute(
+			"call-chain-stop",
+			{ agent: "reviewer", task: "Review the change" },
+			new AbortController().signal,
+			() => {},
+			executionContext(),
+		);
+		const runId = dispatched.details.results[0].runId;
+		await vi.waitFor(() => expect(activeWorkerOptions).toBeDefined());
+
+		await stopTool.execute(
+			"stop-chain",
+			{ id: String(runId) },
+			new AbortController().signal,
+			() => {},
+			executionContext(),
+		);
+		expect(stub.messages).toHaveLength(1);
+		expect(stub.messages[0].message.content).toContain("CURRENT FIX PARTIAL");
+		expect(stub.messages[0].message.content).not.toContain("OLD INITIAL REVIEW");
+		await stub.hooks["session_shutdown"]?.({}, {});
 	});
 
 	it("stops the chain when a re-review fails, without starting another fix round", async () => {

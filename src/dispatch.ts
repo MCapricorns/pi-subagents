@@ -497,6 +497,21 @@ export function registerSubagentTool(pi: ExtensionAPI, runtime: SubagentRuntime)
 								groupId: parentGroupId,
 								relationLabel: `fix round ${round}`,
 							}, vision);
+							// Preserve the newest sub-step before checking chain ownership. A
+							// destructive stop invalidates ownsParent() while this child is
+							// aborting, and its partial output must become the parent's stopped
+							// result instead of falling back to the old triggering review.
+							if (
+								runtime.threads.get(parentRunId) === parentThreadAtStart &&
+								parentThreadAtStart.generation === parentGeneration
+							) {
+								parentThreadAtStart.lastResult = workerStep.result;
+								parentThreadAtStart.agentName = workerStep.result.agent;
+								parentThreadAtStart.task = workerStep.result.task;
+								parentThreadAtStart.sessionId = workerStep.result.sessionId;
+								parentThreadAtStart.sessionDir = workerStep.result.sessionDir;
+								runtime.retainSession(workerStep.result);
+							}
 							if (!ownsParent()) return;
 							chain.push({ ...workerStep, relation: `fix round ${round}` });
 							if (!runtime.sessionActive || isFailedResult(workerStep.result)) break;
@@ -505,6 +520,17 @@ export function registerSubagentTool(pi: ExtensionAPI, runtime: SubagentRuntime)
 								groupId: parentGroupId,
 								relationLabel: `re-review round ${round}`,
 							}, vision);
+							if (
+								runtime.threads.get(parentRunId) === parentThreadAtStart &&
+								parentThreadAtStart.generation === parentGeneration
+							) {
+								parentThreadAtStart.lastResult = reviewStep.result;
+								parentThreadAtStart.agentName = reviewStep.result.agent;
+								parentThreadAtStart.task = reviewStep.result.task;
+								parentThreadAtStart.sessionId = reviewStep.result.sessionId;
+								parentThreadAtStart.sessionDir = reviewStep.result.sessionDir;
+								runtime.retainSession(reviewStep.result);
+							}
 							if (!ownsParent()) return;
 							chain.push({ ...reviewStep, relation: `re-review round ${round}` });
 							lastReviewer = reviewStep.result;
@@ -669,12 +695,26 @@ export function registerSubagentTool(pi: ExtensionAPI, runtime: SubagentRuntime)
 				thread: SubagentThread,
 				reservation: ResumeReservation,
 			): boolean =>
+				runtime.sessionActive &&
+				runtime.threads.get(thread.id) === thread &&
 				!thread.retired &&
 				thread.lifecycleOperation === "resume" &&
 				thread.lifecycleVersion === reservation.version &&
 				thread.generation === reservation.generation &&
 				thread.sessionId === reservation.sessionId &&
 				thread.sessionDir === reservation.sessionDir;
+
+			const beginPreflight = (): (() => void) => {
+				let resolvePreflight!: () => void;
+				const preflight = new Promise<void>((resolve) => {
+					resolvePreflight = resolve;
+				});
+				runtime.preflightOperations.add(preflight);
+				return () => {
+					runtime.preflightOperations.delete(preflight);
+					resolvePreflight();
+				};
+			};
 
 			const startBackground = async (
 				agentName: string,
@@ -688,6 +728,9 @@ export function registerSubagentTool(pi: ExtensionAPI, runtime: SubagentRuntime)
 				seed?: SessionSeed,
 				resumeReservation?: ResumeReservation,
 			): Promise<SingleResult> => {
+				if (!runtime.sessionActive) {
+					return failedStartResult(agentName, task, "Parent session shut down before this subagent generation could start.");
+				}
 				if (existingThread && (!resumeReservation || !ownsResumeReservation(existingThread, resumeReservation))) {
 					return failedStartResult(agentName, task, `Run #${existingThread.id} changed while resume was preparing; no new generation was started.`);
 				}
@@ -981,11 +1024,9 @@ export function registerSubagentTool(pi: ExtensionAPI, runtime: SubagentRuntime)
 					if (source.state === "finalizing") {
 						throw new Error(`Run #${runId}'s worktree is still finalizing.`);
 					}
-					const seedPatch = source.snapshotChanges
-						? await source.snapshotChanges()
-						: undefined;
+					const seedCheckpoint = await source.snapshotCheckpoint();
 					return createWorktreeIsolation(thread.cwd, {
-						seedPatch,
+						seedCheckpoint,
 						seedIsIntegrated,
 					});
 				};
@@ -1041,6 +1082,9 @@ export function registerSubagentTool(pi: ExtensionAPI, runtime: SubagentRuntime)
 
 				thread.resume = async (objective?: string, resumeCtx?: ExtensionContext): Promise<SingleResult> => {
 					const requestedObjective = objective?.trim();
+					if (!runtime.sessionActive || runtime.threads.get(runId) !== thread) {
+						return failedStartResult(thread.agentName, thread.task, `Run #${runId} belongs to a parent session that has shut down.`);
+					}
 					if (objective !== undefined && !requestedObjective) {
 						return failedStartResult(thread.agentName, thread.task, "resume objective must be non-blank when provided.");
 					}
@@ -1067,6 +1111,7 @@ export function registerSubagentTool(pi: ExtensionAPI, runtime: SubagentRuntime)
 					};
 					thread.lifecycleOperation = "resume";
 					thread.state = "resuming";
+					const finishPreflight = beginPreflight();
 					const supersededController = thread.queueController;
 					runtime.backgroundQueue.cancel(supersededController);
 					runtime.runControllers.delete(runId);
@@ -1091,6 +1136,9 @@ export function registerSubagentTool(pi: ExtensionAPI, runtime: SubagentRuntime)
 							if (!thread.worktree) throw new Error(`Run #${runId} has no isolated worktree checkpoint.`);
 							const seedAlreadyIntegrated = thread.worktree.state === "integrated" || thread.lastResult?.integrationApplied === true;
 							continuationWorktree = await createContinuationWorktree(thread.worktree, seedAlreadyIntegrated);
+							if (!ownsResumeReservation(thread, reservation)) {
+								throw new Error(`Run #${runId} changed while its continuation worktree was being created.`);
+							}
 							seed = { worktree: continuationWorktree };
 							if (previousSessionId && previousSessionDir) {
 								clonedSession = await forkRetainedSession({
@@ -1100,12 +1148,18 @@ export function registerSubagentTool(pi: ExtensionAPI, runtime: SubagentRuntime)
 									sessionId: previousSessionId,
 								});
 								runtime.sessionDirs.add(clonedSession.sessionDir);
+								if (!ownsResumeReservation(thread, reservation)) {
+									throw new Error(`Run #${runId} changed while its retained session was being cloned.`);
+								}
 								seed.sessionId = clonedSession.sessionId;
 								seed.sessionDir = clonedSession.sessionDir;
 							}
 						}
 
 						const currentConfig = await loadConfig(runtime.configPath);
+						if (!ownsResumeReservation(thread, reservation)) {
+							throw new Error(`Run #${runId} changed while resume configuration was loading.`);
+						}
 						runtime.backgroundQueue.setConcurrency(currentConfig.maxConcurrency);
 						const currentAgents = discoverAgents(currentCtx.cwd, {
 							scope: currentConfig.agentScope,
@@ -1168,6 +1222,7 @@ export function registerSubagentTool(pi: ExtensionAPI, runtime: SubagentRuntime)
 							`Could not resume run #${runId}: ${error instanceof Error ? error.message : String(error)}`,
 						);
 					} finally {
+						finishPreflight();
 						if (
 							thread.lifecycleOperation === "resume" &&
 							thread.lifecycleVersion === reservation.version
@@ -1179,6 +1234,9 @@ export function registerSubagentTool(pi: ExtensionAPI, runtime: SubagentRuntime)
 
 				thread.fork = async (objective?: string, forkCtx?: ExtensionContext): Promise<SingleResult> => {
 					const forkObjective = objective?.trim();
+					if (!runtime.sessionActive || runtime.threads.get(runId) !== thread) {
+						return failedStartResult(thread.agentName, thread.task, `Run #${runId} belongs to a parent session that has shut down.`);
+					}
 					if (objective !== undefined && !forkObjective) {
 						return failedStartResult(thread.agentName, thread.task, "fork objective must be non-blank when provided.");
 					}
@@ -1200,6 +1258,20 @@ export function registerSubagentTool(pi: ExtensionAPI, runtime: SubagentRuntime)
 					if (!thread.sessionId || !thread.sessionDir) {
 						return failedStartResult(thread.agentName, thread.task, `Run #${runId} has no retained session to fork (it may have been parked before starting).`);
 					}
+					if (thread.isolation === "worktree") {
+						const worktreeState = thread.worktree?.state;
+						const seedIntegrated =
+							worktreeState === "integrated" ||
+							worktreeState === "no_changes" ||
+							thread.lastResult?.integrationApplied === true;
+						if (!seedIntegrated) {
+							return failedStartResult(
+								thread.agentName,
+								thread.task,
+								`Run #${runId}'s isolated checkpoint has not been integrated. Resume and settle it before forking so its seed is applied exactly once.`,
+							);
+						}
+					}
 
 					// Same lifecycle CAS as resume: a concurrent resume/fork cannot consume
 					// or clone this session while the branch copy is in progress.
@@ -1208,6 +1280,8 @@ export function registerSubagentTool(pi: ExtensionAPI, runtime: SubagentRuntime)
 					const forkSessionId = thread.sessionId;
 					const forkSessionDir = thread.sessionDir;
 					const ownsFork = (): boolean =>
+						runtime.sessionActive &&
+						runtime.threads.get(runId) === thread &&
 						!thread.retired &&
 						thread.lifecycleOperation === "fork" &&
 						thread.lifecycleVersion === forkVersion &&
@@ -1215,6 +1289,7 @@ export function registerSubagentTool(pi: ExtensionAPI, runtime: SubagentRuntime)
 						thread.sessionId === forkSessionId &&
 						thread.sessionDir === forkSessionDir;
 					thread.lifecycleOperation = "fork";
+					const finishPreflight = beginPreflight();
 					let childWorktree: WorktreeIsolation | undefined;
 					let forkedSession: Awaited<ReturnType<typeof forkRetainedSession>> | undefined;
 					try {
@@ -1227,6 +1302,7 @@ export function registerSubagentTool(pi: ExtensionAPI, runtime: SubagentRuntime)
 							if (!thread.worktree) throw new Error(`Run #${runId} has no isolated worktree checkpoint.`);
 							const seedAlreadyIntegrated = thread.worktree.state === "integrated" || thread.lastResult?.integrationApplied === true;
 							childWorktree = await createContinuationWorktree(thread.worktree, seedAlreadyIntegrated);
+							if (!ownsFork()) throw new Error(`Run #${runId} changed while its fork worktree was being created.`);
 						}
 						forkedSession = await forkRetainedSession({
 							cwd: thread.executionCwd,
@@ -1235,7 +1311,9 @@ export function registerSubagentTool(pi: ExtensionAPI, runtime: SubagentRuntime)
 							sessionId: thread.sessionId,
 						});
 						runtime.sessionDirs.add(forkedSession.sessionDir);
+						if (!ownsFork()) throw new Error(`Run #${runId} changed while its retained session was being forked.`);
 						const currentConfig = await loadConfig(runtime.configPath);
+						if (!ownsFork()) throw new Error(`Run #${runId} changed while fork configuration was loading.`);
 						runtime.backgroundQueue.setConcurrency(currentConfig.maxConcurrency);
 						const currentAgents = discoverAgents(thread.cwd, {
 							scope: currentConfig.agentScope,
@@ -1304,6 +1382,7 @@ export function registerSubagentTool(pi: ExtensionAPI, runtime: SubagentRuntime)
 							`Could not fork retained session for run #${runId}: ${error instanceof Error ? error.message : String(error)}`,
 						);
 					} finally {
+						finishPreflight();
 						if (thread.lifecycleVersion === forkVersion && thread.lifecycleOperation === "fork") {
 							thread.lifecycleOperation = undefined;
 						}
@@ -1374,6 +1453,12 @@ export function registerSubagentTool(pi: ExtensionAPI, runtime: SubagentRuntime)
 						runtime.retainSession(result);
 						monitor.setModel(runId, result.model, result.modelFallbackFrom);
 
+						// Destructive stop owns publication once it has synchronously claimed
+						// the lifecycle. Leave the partial result/session on the thread; the
+						// stop path waits for this queue task, finalizes isolation, and emits
+						// exactly one aborted result.
+						if (thread.lifecycleOperation === "stop") return;
+
 						if (result.parked) {
 							thread.state = "parked";
 							monitor.setStatus(runId, "parked");
@@ -1392,61 +1477,78 @@ export function registerSubagentTool(pi: ExtensionAPI, runtime: SubagentRuntime)
 							startFixLoop(result, `fix-${runId}`, runId, vision);
 							return;
 						}
-						// Worktree isolation is rejected for reviewers, the only role that can
-						// trigger auto-fix. Keep that invariant explicit: an isolated result is
-						// finalized once here and can never start a chain that would integrate
-						// the same worktree early.
-						await thread.finalizeIsolation(generation, result);
-						const failed = isFailedResult(result);
-						const stopped = thread.retireOnSettle === true;
-						thread.state = stopped ? "stopped" : failed ? "failed" : "completed";
-						// Stamp the terminal monitor state before projecting it. This gives every
-						// path a fixed endedAt even when the row is removed immediately.
-						monitor.setStatus(runId, stopped || failed ? "failed" : "done");
-						inspectState.trajectory.append({
-							kind: "settled",
-							status: stopped ? "stopped" : failed ? "failed" : "done",
-							model: result.model,
-							isolation,
-							...(result.integrationStatus && result.integrationStatus !== "pending"
-								? { integrationStatus: result.integrationStatus }
-								: {}),
-						});
-						const terminalRun = monitor.findRun(runId);
-						inspectState.retainFrom(terminalRun
-							? { ...terminalRun, task: result.task, model: result.model ?? terminalRun.model, usage: result.usage }
-							: {
-								agent: pool.agent.name,
-								task: result.task,
-								model: result.model,
-								thinking: thinkingLevel,
-								status: stopped || failed ? "failed" : "done",
-								endedAt: inspectState.trajectory.summary().endedAt,
-								usage: result.usage,
-							});
-						if (!runtime.sessionActive) return;
+						// Claim terminal settlement synchronously before the first slow await.
+						// Park therefore either wins while RPC is still active, or is rejected
+						// once settlement owns the generation. Destructive stop may supersede
+						// this reservation; publication is revalidated after Git finalization.
+						const settlementVersion = ++thread.lifecycleVersion;
+						thread.lifecycleOperation = "settle";
+						const ownsSettlement = (): boolean =>
+							runtime.threads.get(runId) === thread &&
+							thread.generation === generation &&
+							thread.lifecycleVersion === settlementVersion &&
+							thread.lifecycleOperation === "settle" &&
+							!thread.retired;
+						try {
+							// Worktree isolation is rejected for reviewers, the only role that can
+							// trigger auto-fix. Keep that invariant explicit: an isolated result is
+							// finalized once here and can never start a chain that would integrate
+							// the same worktree early.
+							await thread.finalizeIsolation(generation, result);
+							if (!ownsSettlement()) return;
 
-						const modelLevel = failed && isModelLevelFailure(result);
-						const dispatchFailed = result.dispatchFailed === true;
-						finishRun(runId, stopped || failed ? "failed" : "done", modelLevel || dispatchFailed ? { silent: true } : undefined);
-						runtime.registerRunResult(runId, result);
-						const completion: CompletionMessageItem = {
-							agent: result.agent,
-							block: modelLevel
-								? `${formatCompletionBlock(result, runConfig.maxResultLines, runCtx.cwd)}\n\n${modelLevelTakeoverNote(result, { runId })}`
-								: formatCompletionBlock(result, runConfig.maxResultLines, runCtx.cwd),
-							triggerTurn: completionTriggersTurn(result, runConfig.notifyOnReviewPass),
-						};
-						if (modelLevel) {
-							runCtx.ui.notify(`✗ ${result.agent} dispatch failed: model unavailable or broken — task handed to the main window`, "error");
-						} else if (dispatchFailed) {
-							runCtx.ui.notify(`✗ ${result.agent} dispatch failed: ${result.errorMessage ?? "dispatch crashed"}`, "error");
-						}
-						if (failed) {
-							runtime.sendCompletionGroup([completion]);
-							runtime.completionBatcher.flush();
-						} else {
-							runtime.completionBatcher.push(completion);
+							const failed = isFailedResult(result);
+							thread.state = failed ? "failed" : "completed";
+							// Stamp the terminal monitor state before projecting it. This gives every
+							// path a fixed endedAt even when the row is removed immediately.
+							monitor.setStatus(runId, failed ? "failed" : "done");
+							inspectState.trajectory.append({
+								kind: "settled",
+								status: failed ? "failed" : "done",
+								model: result.model,
+								isolation,
+								...(result.integrationStatus && result.integrationStatus !== "pending"
+									? { integrationStatus: result.integrationStatus }
+									: {}),
+							});
+							const terminalRun = monitor.findRun(runId);
+							inspectState.retainFrom(terminalRun
+								? { ...terminalRun, task: result.task, model: result.model ?? terminalRun.model, usage: result.usage }
+								: {
+									agent: pool.agent.name,
+									task: result.task,
+									model: result.model,
+									thinking: thinkingLevel,
+									status: failed ? "failed" : "done",
+									endedAt: inspectState.trajectory.summary().endedAt,
+									usage: result.usage,
+								});
+							if (!runtime.sessionActive || !ownsSettlement()) return;
+
+							const modelLevel = failed && isModelLevelFailure(result);
+							const dispatchFailed = result.dispatchFailed === true;
+							finishRun(runId, failed ? "failed" : "done", modelLevel || dispatchFailed ? { silent: true } : undefined);
+							runtime.registerRunResult(runId, result);
+							const completion: CompletionMessageItem = {
+								agent: result.agent,
+								block: modelLevel
+									? `${formatCompletionBlock(result, runConfig.maxResultLines, runCtx.cwd)}\n\n${modelLevelTakeoverNote(result, { runId })}`
+									: formatCompletionBlock(result, runConfig.maxResultLines, runCtx.cwd),
+								triggerTurn: completionTriggersTurn(result, runConfig.notifyOnReviewPass),
+							};
+							if (modelLevel) {
+								runCtx.ui.notify(`✗ ${result.agent} dispatch failed: model unavailable or broken — task handed to the main window`, "error");
+							} else if (dispatchFailed) {
+								runCtx.ui.notify(`✗ ${result.agent} dispatch failed: ${result.errorMessage ?? "dispatch crashed"}`, "error");
+							}
+							if (failed) {
+								runtime.sendCompletionGroup([completion]);
+								runtime.completionBatcher.flush();
+							} else {
+								runtime.completionBatcher.push(completion);
+							}
+						} finally {
+							if (ownsSettlement()) thread.lifecycleOperation = undefined;
 						}
 					},
 					() => {
@@ -1470,45 +1572,62 @@ export function registerSubagentTool(pi: ExtensionAPI, runtime: SubagentRuntime)
 					},
 					async (error) => {
 						if (runtime.threads.get(runId)?.generation !== generation) return;
-						const crashed: SingleResult = {
-							...dispatchFailedResult(pool.agent, control.getObjective(), error, thinkingLevel),
-							runId,
-							isolation,
-							originalCwd,
-							isolationCwd: executionCwd,
-							forkedFromRunId: thread.forkedFromRunId,
-						};
-						await thread.finalizeIsolation(generation, crashed);
-						thread.state = "failed";
-						monitor.setStatus(runId, "failed");
-						inspectState.trajectory.append({
-							kind: "settled",
-							status: "failed",
-							model: crashed.model,
-							isolation,
-							...(crashed.integrationStatus && crashed.integrationStatus !== "pending"
-								? { integrationStatus: crashed.integrationStatus }
-								: {}),
-						});
-						const crashedRun = monitor.findRun(runId);
-						if (crashedRun) inspectState.retainFrom({ ...crashedRun, usage: crashed.usage });
-						finishRun(runId, "failed", { silent: true });
-						runtime.registerRunResult(runId, crashed);
-						runtime.runControllers.delete(runId);
-						thread.queueController = undefined;
-						if (!runtime.sessionActive) return;
+						// Queue-level crashes use the same settlement reservation as ordinary
+						// results. A concurrent destructive stop may supersede it while slow
+						// worktree finalization is running, in which case stop publishes once.
+						if (thread.lifecycleOperation === "stop") return;
+						const settlementVersion = ++thread.lifecycleVersion;
+						thread.lifecycleOperation = "settle";
+						const ownsSettlement = (): boolean =>
+							runtime.threads.get(runId) === thread &&
+							thread.generation === generation &&
+							thread.lifecycleVersion === settlementVersion &&
+							thread.lifecycleOperation === "settle" &&
+							!thread.retired;
 						try {
-							runCtx.ui.notify(`✗ ${agent.name} dispatch failed: ${crashed.errorMessage}`, "error");
-							runtime.sendCompletionGroup([
-								{
-									agent: agent.name,
-									block: formatCompletionBlock(crashed, runConfig.maxResultLines, runCtx.cwd),
-									triggerTurn: true,
-								},
-							]);
-							runtime.completionBatcher.flush();
-						} catch {
-							/* a second delivery failure must not throw through the queue */
+							const crashed: SingleResult = {
+								...dispatchFailedResult(pool.agent, control.getObjective(), error, thinkingLevel),
+								runId,
+								isolation,
+								originalCwd,
+								isolationCwd: executionCwd,
+								forkedFromRunId: thread.forkedFromRunId,
+							};
+							await thread.finalizeIsolation(generation, crashed);
+							if (!ownsSettlement()) return;
+							thread.state = "failed";
+							monitor.setStatus(runId, "failed");
+							inspectState.trajectory.append({
+								kind: "settled",
+								status: "failed",
+								model: crashed.model,
+								isolation,
+								...(crashed.integrationStatus && crashed.integrationStatus !== "pending"
+									? { integrationStatus: crashed.integrationStatus }
+									: {}),
+							});
+							const crashedRun = monitor.findRun(runId);
+							if (crashedRun) inspectState.retainFrom({ ...crashedRun, usage: crashed.usage });
+							finishRun(runId, "failed", { silent: true });
+							runtime.registerRunResult(runId, crashed);
+							runtime.runControllers.delete(runId);
+							thread.queueController = undefined;
+							if (!runtime.sessionActive || !ownsSettlement()) return;
+							try {
+								runCtx.ui.notify(`✗ ${agent.name} dispatch failed: ${crashed.errorMessage}`, "error");
+								runtime.sendCompletionGroup([
+									{
+										agent: agent.name,
+										block: formatCompletionBlock(crashed, runConfig.maxResultLines, runCtx.cwd),
+										triggerTurn: true,
+									},
+								]);
+								runtime.completionBatcher.flush();
+							} catch {
+								/* a second delivery failure must not throw through the queue */
+							}
+						} finally {
+							if (ownsSettlement()) thread.lifecycleOperation = undefined;
 						}
 					},
 				);

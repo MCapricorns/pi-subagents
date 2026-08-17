@@ -8,7 +8,7 @@
  * Failed integration deliberately retains both the worktree and patch.
  */
 
-import { spawn } from "node:child_process";
+import { spawn, type ChildProcess } from "node:child_process";
 import { existsSync } from "node:fs";
 import { mkdir, mkdtemp, realpath, rm, stat, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
@@ -20,6 +20,8 @@ export interface CommandRunOptions {
 	cwd: string;
 	input?: Buffer;
 	signal?: AbortSignal;
+	timeoutMs?: number;
+	maxOutputBytes?: number;
 }
 
 export interface CommandResult {
@@ -35,26 +37,114 @@ export type CommandRunner = (
 	options: CommandRunOptions,
 ) => Promise<CommandResult>;
 
-/** Default argument-safe runner. stdout remains a Buffer for binary patches. */
+export const GIT_COMMAND_TIMEOUT_MS = 120_000;
+export const GIT_COMMAND_KILL_GRACE_MS = 2_000;
+export const GIT_OUTPUT_MAX_BYTES = 64 * 1024 * 1024;
+export const WORKTREE_PATCH_MAX_BYTES = GIT_OUTPUT_MAX_BYTES;
+
+function terminateCommandTree(child: ChildProcess, force: boolean, processGroup: boolean): void {
+	if (process.platform === "win32" && child.pid !== undefined) {
+		const fallback = (): void => {
+			try {
+				child.kill(force ? "SIGKILL" : "SIGTERM");
+			} catch {
+				/* process may already be gone */
+			}
+		};
+		const killer = spawn("taskkill", ["/pid", String(child.pid), "/t", "/f"], {
+			stdio: "ignore",
+			windowsHide: true,
+		});
+		killer.once("error", fallback);
+		killer.once("close", (code) => {
+			if (code !== 0) fallback();
+		});
+		return;
+	}
+	try {
+		if (processGroup && child.pid !== undefined) {
+			process.kill(-child.pid, force ? "SIGKILL" : "SIGTERM");
+		} else {
+			child.kill(force ? "SIGKILL" : "SIGTERM");
+		}
+	} catch {
+		/* process may already be gone */
+	}
+}
+
+/** Default argument-safe runner. Output is bounded before binary patches enter
+ * memory, and timeout/abort terminates the complete checkout-filter process tree. */
 export const runCommand: CommandRunner = (command, args, options) =>
 	new Promise<CommandResult>((resolveResult, reject) => {
+		if (options.signal?.aborted) {
+			reject(new Error(`Command aborted before start: ${command}`));
+			return;
+		}
+		const usePosixProcessGroup = process.platform !== "win32";
 		const child = spawn(command, [...args], {
 			cwd: options.cwd,
 			shell: false,
 			windowsHide: true,
 			stdio: ["pipe", "pipe", "pipe"],
-			signal: options.signal,
+			detached: usePosixProcessGroup,
 		});
 		const stdout: Buffer[] = [];
 		const stderr: Buffer[] = [];
-		child.stdout?.on("data", (chunk: Buffer | string) =>
-			stdout.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk)),
-		);
-		child.stderr?.on("data", (chunk: Buffer | string) =>
-			stderr.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk)),
-		);
-		child.once("error", reject);
+		const maxOutputBytes = options.maxOutputBytes ?? GIT_OUTPUT_MAX_BYTES;
+		let outputBytes = 0;
+		let finished = false;
+		let failure: Error | undefined;
+		let timeout: ReturnType<typeof setTimeout> | undefined;
+		let forceKillTimer: ReturnType<typeof setTimeout> | undefined;
+
+		const terminate = (): void => {
+			terminateCommandTree(child, false, usePosixProcessGroup);
+			if (!forceKillTimer) {
+				forceKillTimer = setTimeout(
+					() => terminateCommandTree(child, true, usePosixProcessGroup),
+					GIT_COMMAND_KILL_GRACE_MS,
+				);
+				if (typeof forceKillTimer.unref === "function") forceKillTimer.unref();
+			}
+		};
+		const fail = (error: Error): void => {
+			if (failure || finished) return;
+			failure = error;
+			terminate();
+		};
+		const append = (target: Buffer[], chunk: Buffer | string): void => {
+			if (failure || finished) return;
+			const value = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
+			outputBytes += value.length;
+			if (outputBytes > maxOutputBytes) {
+				fail(new Error(`Command output exceeded ${maxOutputBytes} bytes: ${command}`));
+				return;
+			}
+			target.push(value);
+		};
+		const onAbort = (): void => fail(new Error(`Command aborted: ${command}`));
+		options.signal?.addEventListener("abort", onAbort, { once: true });
+		if (options.timeoutMs !== undefined && options.timeoutMs > 0) {
+			timeout = setTimeout(
+				() => fail(new Error(`Command timed out after ${options.timeoutMs}ms: ${command}`)),
+				options.timeoutMs,
+			);
+			if (typeof timeout.unref === "function") timeout.unref();
+		}
+
+		child.stdout?.on("data", (chunk: Buffer | string) => append(stdout, chunk));
+		child.stderr?.on("data", (chunk: Buffer | string) => append(stderr, chunk));
+		child.once("error", (error) => fail(error));
 		child.once("close", (code) => {
+			if (finished) return;
+			finished = true;
+			if (timeout) clearTimeout(timeout);
+			if (forceKillTimer) clearTimeout(forceKillTimer);
+			options.signal?.removeEventListener("abort", onAbort);
+			if (failure) {
+				reject(failure);
+				return;
+			}
 			resolveResult({
 				code: code ?? 1,
 				stdout: Buffer.concat(stdout),
@@ -75,12 +165,21 @@ export interface WorktreeTarget {
 	head: string;
 }
 
+export interface WorktreeCheckpoint {
+	/** Commit checked out when this isolated generation began. */
+	baseHead: string;
+	/** Synthetic commit whose tree is the generation's complete final state. */
+	commit: string;
+	/** Binary delta from baseHead, retained for size checks and diagnostics. */
+	patch: Buffer;
+}
+
 export interface WorktreeCreateOptions {
 	runner?: CommandRunner;
 	/** Test hook; production uses the OS temp directory. */
 	tempBaseDir?: string;
-	/** Full source-thread patch used to seed a continuation/fork worktree. */
-	seedPatch?: Buffer;
+	/** Complete source generation checkpoint merged onto the current HEAD. */
+	seedCheckpoint?: WorktreeCheckpoint;
 	/** The seed is already present in the parent checkout, so only later edits
 	 * should be integrated when this continuation settles. */
 	seedIsIntegrated?: boolean;
@@ -107,9 +206,10 @@ export interface WorktreeIsolation {
 	readonly patchPath: string;
 	readonly head: string;
 	readonly state: "active" | "finalizing" | WorktreeFinalizationStatus;
-	/** Capture the complete isolated filesystem delta for a fresh continuation.
-	 * Optional only so external/test handles written against older releases stay usable. */
-	snapshotChanges?(): Promise<Buffer>;
+	/** Capture the complete isolated filesystem state for a fresh continuation.
+	 * The synthetic commit lets Git merge an already-committed seed without
+	 * attempting to apply the same patch twice. */
+	snapshotCheckpoint(): Promise<WorktreeCheckpoint>;
 	/** Remove a newly-created continuation that failed before it was dispatched. */
 	discard?(): Promise<void>;
 	/** Idempotent across stale generations and repeated stop/shutdown paths. */
@@ -127,6 +227,10 @@ export class WorktreeSetupError extends Error {
 }
 
 const ERROR_OUTPUT_MAX = 8_000;
+
+function cloneCheckpoint(checkpoint: WorktreeCheckpoint): WorktreeCheckpoint {
+	return { ...checkpoint, patch: Buffer.from(checkpoint.patch) };
+}
 
 function outputText(result: CommandResult): string {
 	const text = (result.stderr.length > 0 ? result.stderr : result.stdout).toString("utf8").trim();
@@ -148,9 +252,14 @@ async function runGit(
 ): Promise<CommandResult> {
 	let result: CommandResult;
 	try {
-		result = await runner("git", args, { cwd, input });
+		result = await runner("git", args, {
+			cwd,
+			input,
+			timeoutMs: GIT_COMMAND_TIMEOUT_MS,
+			maxOutputBytes: GIT_OUTPUT_MAX_BYTES,
+		});
 	} catch (error) {
-		throw new Error(`${action} failed to start: ${error instanceof Error ? error.message : String(error)}`);
+		throw new Error(`${action} failed: ${error instanceof Error ? error.message : String(error)}`);
 	}
 	if (result.code !== 0) throw commandFailure(action, result);
 	return result;
@@ -224,9 +333,9 @@ class GitWorktreeIsolation implements WorktreeIsolation {
 	private currentState: WorktreeIsolation["state"] = "active";
 	private finalization?: Promise<WorktreeFinalization>;
 	private discardPromise?: Promise<void>;
-	/** Full workspace snapshot relative to the repository HEAD, retained in
-	 * memory after successful cleanup so settled threads can continue safely. */
-	private continuationPatch?: Buffer;
+	/** Full workspace checkpoint relative to the generation's starting HEAD,
+	 * retained after cleanup so settled threads can continue safely. */
+	private continuationCheckpoint?: WorktreeCheckpoint;
 
 	constructor(
 		readonly originalCwd: string,
@@ -246,14 +355,17 @@ class GitWorktreeIsolation implements WorktreeIsolation {
 		return this.currentState;
 	}
 
-	async snapshotChanges(): Promise<Buffer> {
-		if (this.continuationPatch !== undefined) return Buffer.from(this.continuationPatch);
-		if (this.currentState === "no_changes") return Buffer.alloc(0);
+	async snapshotCheckpoint(): Promise<WorktreeCheckpoint> {
+		if (this.continuationCheckpoint) return cloneCheckpoint(this.continuationCheckpoint);
+		if (this.currentState === "no_changes") {
+			return { baseHead: this.head, commit: this.head, patch: Buffer.alloc(0) };
+		}
 		if (!existsSync(this.worktreePath)) {
 			throw new Error(`Cannot snapshot isolated worktree after it was removed: ${this.worktreePath}`);
 		}
 		const snapshot = await this.collectChanges(this.head);
-		return Buffer.from(snapshot.stdout);
+		this.continuationCheckpoint = await this.createCheckpoint(snapshot.stdout);
+		return cloneCheckpoint(this.continuationCheckpoint);
 	}
 
 	discard(): Promise<void> {
@@ -297,6 +409,41 @@ class GitWorktreeIsolation implements WorktreeIsolation {
 		);
 	}
 
+	private async createCheckpoint(patch: Buffer): Promise<WorktreeCheckpoint> {
+		if (patch.length === 0) {
+			return { baseHead: this.head, commit: this.head, patch: Buffer.alloc(0) };
+		}
+		await runGit(
+			this.runner,
+			this.worktreePath,
+			["add", "-A", "--", "."],
+			`Preparing isolated checkpoint in ${this.worktreePath}`,
+		);
+		const tree = await runGit(
+			this.runner,
+			this.worktreePath,
+			["write-tree"],
+			`Writing isolated checkpoint tree in ${this.worktreePath}`,
+		);
+		const treeId = tree.stdout.toString("utf8").trim();
+		if (!treeId) throw new Error("Git returned no isolated checkpoint tree id.");
+		const commit = await runGit(
+			this.runner,
+			this.worktreePath,
+			[
+				"-c", "user.name=pi-subagents",
+				"-c", "user.email=pi-subagents@example.invalid",
+				"commit-tree", treeId,
+				"-p", this.head,
+				"-m", "pi-subagents isolated checkpoint",
+			],
+			`Creating isolated checkpoint commit in ${this.worktreePath}`,
+		);
+		const commitId = commit.stdout.toString("utf8").trim();
+		if (!commitId) throw new Error("Git returned no isolated checkpoint commit id.");
+		return { baseHead: this.head, commit: commitId, patch: Buffer.from(patch) };
+	}
+
 	private async finalizeOnce(): Promise<WorktreeFinalization> {
 		let hadChanges = false;
 		let patchWritten = false;
@@ -306,7 +453,7 @@ class GitWorktreeIsolation implements WorktreeIsolation {
 			const snapshot = this.integrationBaseHead === this.head
 				? diff
 				: await this.collectChanges(this.head);
-			this.continuationPatch = Buffer.from(snapshot.stdout);
+			this.continuationCheckpoint = await this.createCheckpoint(snapshot.stdout);
 			hadChanges = diff.stdout.length > 0;
 			if (hadChanges) {
 				await writeFile(this.patchPath, diff.stdout, { flag: "wx" });
@@ -418,35 +565,39 @@ export async function createWorktreeIsolation(
 		await mkdir(isolatedCwd, { recursive: true });
 
 		let integrationBaseHead = target.head;
-		if (options.seedPatch && options.seedPatch.length > 0) {
+		const checkpoint = options.seedCheckpoint;
+		if (checkpoint && checkpoint.patch.length > WORKTREE_PATCH_MAX_BYTES) {
+			throw new Error(
+				`Isolated checkpoint exceeds the ${WORKTREE_PATCH_MAX_BYTES}-byte patch limit (${checkpoint.patch.length} bytes).`,
+			);
+		}
+		if (checkpoint && checkpoint.patch.length > 0) {
+			// Merge the checkpoint commit with today's HEAD instead of blindly
+			// applying its old patch. If the parent committed generation one after
+			// integration, Git recognizes the equivalent tree and produces HEAD
+			// unchanged; unrelated newer commits are preserved by the three-way merge.
+			const merged = await runGit(
+				runner,
+				worktreePath,
+				["merge-tree", "--write-tree", "--messages", target.head, checkpoint.commit],
+				`Merging isolated checkpoint into continuation ${worktreePath}`,
+			);
+			const mergedTree = merged.stdout.toString("utf8").split(/\r?\n/, 1)[0]?.trim();
+			if (!mergedTree) throw new Error("Git returned no merged continuation tree id.");
 			await runGit(
 				runner,
 				worktreePath,
-				["apply", "--binary", "--whitespace=nowarn", "-"],
-				`Seeding isolated continuation ${worktreePath}`,
-				options.seedPatch,
+				["read-tree", "--reset", "-u", mergedTree],
+				`Materializing isolated checkpoint in ${worktreePath}`,
 			);
 			if (options.seedIsIntegrated) {
-				await runGit(
-					runner,
-					worktreePath,
-					["add", "-A", "--", "."],
-					`Preparing continuation baseline in ${worktreePath}`,
-				);
-				const tree = await runGit(
-					runner,
-					worktreePath,
-					["write-tree"],
-					`Writing continuation baseline tree in ${worktreePath}`,
-				);
-				const treeId = tree.stdout.toString("utf8").trim();
 				const commit = await runGit(
 					runner,
 					worktreePath,
 					[
 						"-c", "user.name=pi-subagents",
 						"-c", "user.email=pi-subagents@example.invalid",
-						"commit-tree", treeId,
+						"commit-tree", mergedTree,
 						"-p", target.head,
 						"-m", "pi-subagents continuation baseline",
 					],

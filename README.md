@@ -145,7 +145,8 @@ they may need to inspect the same images.
 - `/subagents-inspect` — interactive live thread/transcript/tool/trajectory
   overlay; press `p` to park or resume the selected thread.
 - `subagent_stop` — destructive cancellation. It retires that thread's retained
-  session (independent forks survive) and delivers an aborted partial result.
+  session (independent forks survive) and delivers exactly one aborted partial
+  result after the run and any worktree integration have quiesced.
 
 Examples:
 
@@ -163,22 +164,29 @@ to `isolation: "worktree"`; opt into shared mode only when a worker must see the
 caller's live uncommitted tree. Worktree mode requires a Git repository with a
 committed `HEAD` and is rejected for read-only agents.
 
-A parked isolated thread keeps its current worktree. Resuming or forking a
-settled isolated thread creates a fresh worktree, seeds the prior thread's
-filesystem state, and clones the Pi session with the new cwd. On settlement the
-extension applies only that generation's changes to the parent working tree. If
-apply or cleanup fails, the patch/worktree is retained and recorded in
-`~/.pi/agent/pi-subagents-recovery.json`; later sessions show the recovery paths
-again until the artifacts are removed.
+A parked isolated thread keeps its current worktree. Resume it there; fork is
+available after that isolated checkpoint settles and its seed is integrated.
+Resuming or forking a settled isolated thread creates a fresh worktree, merges a
+recorded checkpoint onto the current `HEAD` (including when the seed was already
+committed), and clones the Pi session with the new cwd. Forks then integrate only
+their unique follow-on edits, so a shared seed is applied once. A run remains
+active while final Git integration is in progress and becomes `done` only after
+that boundary finishes.
+
+Every Git operation has a 120-second deadline and process-tree cleanup; captured
+Git output and binary patches are capped at 64 MiB. Setup/bound failures surface
+instead of hanging. Finalization failures retain the patch/worktree when
+available and are recorded in `~/.pi/agent/pi-subagents-recovery.json`; later
+sessions show the recovery paths again until the artifacts are removed.
 
 ## Configuration
 
 Stored at `~/.pi/agent/pi-subagents.json` (follows `PI_CODING_AGENT_DIR` when
-set). The `/subagents-setup` wizard drives every field interactively — models,
-thinking levels, the vision model, concurrency, fix rounds, idle timeout, scope,
-and injection — with a per-agent "configure one" menu when the config already
-exists. `notifyOnReviewPass` and `maxResultLines` are edited directly in the
-file.
+set). The `/subagents-setup` wizard drives every field interactively — models, the
+default plus each enabled agent's thinking level, the vision model, concurrency,
+fix rounds, idle timeout, scope, and injection — with a per-agent "configure
+one" menu when the config already exists. `notifyOnReviewPass` and
+`maxResultLines` are edited directly in the file.
 
 ```json
 {

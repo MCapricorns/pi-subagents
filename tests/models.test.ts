@@ -33,6 +33,12 @@ describe("availableModelRefs", () => {
 		]);
 	});
 
+	it("falls back to the registry when older Pi does not expose scopedModels", () => {
+		const ctx = context(undefined, ["openai/registry"]);
+		delete ctx.scopedModels;
+		expect(availableModelRefs(ctx)).toEqual(["openai/registry"]);
+	});
+
 	it("uses scoped models instead of the full registry", () => {
 		const ctx = context(undefined, ["openai/registry"]);
 		ctx.scopedModels = [{ model: toModel("anthropic/scoped") }] as unknown as ModelContext["scopedModels"];

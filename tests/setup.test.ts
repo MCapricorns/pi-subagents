@@ -1,10 +1,14 @@
-import { describe, expect, it } from "vitest";
+import { mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { describe, expect, it, vi } from "vitest";
 import {
 	CURRENT_MAIN_MODEL,
 	applyModelPoolChoice,
 	buildAgentModelPoolRows,
 	buildModelPickerItems,
 } from "../src/models.ts";
+import { runSetup } from "../src/setup.ts";
 import { pickerItemSearchText } from "../src/ui.ts";
 
 describe("setup model picker helpers", () => {
@@ -44,6 +48,57 @@ describe("setup model picker helpers", () => {
 		});
 		expect(items[1].label).toBe("removed/stale-backup");
 		expect(items[1].description).toContain("unavailable");
+	});
+});
+
+describe("full setup flow", () => {
+	it("asks every enabled agent for an explicit thinking-strength choice", async () => {
+		const dir = mkdtempSync(join(tmpdir(), "pi-subagents-setup-full-"));
+		const configPath = join(dir, "pi-subagents.json");
+		const screens: string[] = [];
+		const keybindings = {
+			matches(data: string, action: string) {
+				return (data === "down" && action === "tui.select.down") ||
+					(data === "enter" && action === "tui.select.confirm");
+			},
+		};
+		const ctx: any = {
+			mode: "tui",
+			model: undefined,
+			modelRegistry: { getAvailable: () => [] },
+			ui: {
+				notify: vi.fn(),
+				select: vi.fn(async (_title: string, options: string[]) =>
+					options.find((option) => option.includes("(current)")) ?? options[0]),
+				custom: (factory: any) => new Promise((resolve) => {
+					const component = factory(
+						{ requestRender: () => {} },
+						{ fg: (_color: string, text: string) => text, bold: (text: string) => text },
+						keybindings,
+						resolve,
+					);
+					const rendered = component.render(160).join("\n");
+					screens.push(rendered);
+					if (rendered.includes("Agent model pools")) {
+						component.handleInput("down");
+						component.handleInput("down");
+						component.handleInput("down");
+					}
+					component.handleInput("enter");
+				}),
+			},
+		};
+		try {
+			await runSetup(ctx, configPath);
+			const config = JSON.parse(readFileSync(configPath, "utf8"));
+			expect(config.enabledAgents).toEqual(["explore", "worker", "reviewer"]);
+			expect(config.agentThinkingLevels).toEqual({});
+			expect(screens.some((screen) => screen.includes('Thinking strength for "explore"?'))).toBe(true);
+			expect(screens.some((screen) => screen.includes('Thinking strength for "worker"?'))).toBe(true);
+			expect(screens.some((screen) => screen.includes('Thinking strength for "reviewer"?'))).toBe(true);
+		} finally {
+			rmSync(dir, { recursive: true, force: true });
+		}
 	});
 });
 

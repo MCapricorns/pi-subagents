@@ -71,6 +71,38 @@ for (let index = 0; index < record.length; index++) process.stdout.write(record.
 		}
 	});
 
+	it("wraps slash-prefixed objectives so RPC starts a model turn instead of an extension command", async () => {
+		const dir = mkdtempSync(join(tmpdir(), "pi-subagents-rpc-slash-prompt-"));
+		const script = join(dir, "slash-child.mjs");
+		writeFileSync(
+			script,
+			fakeRpcScript({
+				onPrompt: `send({ type: "message_end", message: { role: "assistant", content: [{ type: "text", text: input }], stopReason: "stop" } });`,
+			}),
+			"utf8",
+		);
+		const previous = process.argv[1];
+		process.argv[1] = script;
+		try {
+			const result = await runSingleAgent({
+				defaultCwd: process.cwd(),
+				agent,
+				agentName: agent.name,
+				task: "/subagents-setup",
+				stdinText: "/subagents-setup",
+				makeDetails: (results) => ({ mode: "single", results }),
+			});
+			const output = getFinalOutput(result.messages);
+			expect(result.exitCode).toBe(0);
+			expect(output).toContain("plain-text sub-agent instructions");
+			expect(output).toContain("/subagents-setup");
+			expect(output.trimStart().startsWith("/")).toBe(false);
+		} finally {
+			process.argv[1] = previous;
+			rmSync(dir, { recursive: true, force: true });
+		}
+	});
+
 	it("forwards complete large deltas and toolCallId values to inspector observers", async () => {
 		const dir = mkdtempSync(join(tmpdir(), "pi-subagents-rpc-records-"));
 		const script = join(dir, "records-child.mjs");
@@ -102,6 +134,10 @@ send({ type: "message_end", message: { role: "assistant", content: [{ type: "tex
 			expect(records).toEqual([{ kind: "text", delta: "x".repeat(5000) }]);
 			expect(live).toContainEqual(expect.objectContaining({ kind: "tool_start", toolCallId: "read-a" }));
 			expect(live).toContainEqual(expect.objectContaining({ kind: "tool_end", toolCallId: "read-a" }));
+			expect(live.filter((event) => event.kind === "status").map((event) => event.status))
+				.not.toContain("done");
+			expect(live.filter((event) => event.kind === "status").map((event) => event.status))
+				.not.toContain("failed");
 		} finally {
 			process.argv[1] = previous;
 			rmSync(dir, { recursive: true, force: true });

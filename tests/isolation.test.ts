@@ -1,4 +1,4 @@
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { Agent } from "@earendil-works/pi-agent-core";
@@ -98,7 +98,10 @@ function fakeWorktree(root: string, final: WorktreeFinalization = {
 	status: "no_changes",
 	integrated: false,
 	hadChanges: false,
-}, label = "isolated"): WorktreeIsolation & { finalizeMock: ReturnType<typeof vi.fn> } {
+}, label = "isolated"): WorktreeIsolation & {
+	finalizeMock: ReturnType<typeof vi.fn>;
+	discardMock: ReturnType<typeof vi.fn>;
+} {
 	let state: WorktreeIsolation["state"] = "active";
 	let promise: Promise<WorktreeFinalization> | undefined;
 	const finalizeMock = vi.fn(() => {
@@ -107,6 +110,9 @@ function fakeWorktree(root: string, final: WorktreeFinalization = {
 			return value;
 		});
 		return promise;
+	});
+	const discardMock = vi.fn(async () => {
+		state = "no_changes";
 	});
 	return {
 		originalCwd: root,
@@ -119,8 +125,13 @@ function fakeWorktree(root: string, final: WorktreeFinalization = {
 		get state() {
 			return state;
 		},
+		async snapshotCheckpoint() {
+			return { baseHead: "deadbeef", commit: "deadbeef", patch: Buffer.alloc(0) };
+		},
 		finalize: finalizeMock,
 		finalizeMock,
+		discard: discardMock,
+		discardMock,
 	};
 }
 
@@ -546,6 +557,72 @@ describe("logical worktree reuse and guarded finalization", () => {
 		rmSync(root, { recursive: true, force: true });
 	});
 
+	it("rejects park after terminal settlement has claimed a slow worktree finalization", async () => {
+		const root = mkdtempSync(join(tmpdir(), "pi-subagents-isolation-settle-park-"));
+		const finalization = deferred<WorktreeFinalization>();
+		const handle = fakeWorktree(root);
+		handle.finalizeMock.mockImplementation(() => finalization.promise);
+		vi.spyOn(worktreeModule, "createWorktreeIsolation").mockResolvedValue(handle);
+		vi.spyOn(spawnModule, "runSingleAgentWithModelFallback").mockImplementation(async (options: any) => {
+			options.onLive?.({ kind: "status", status: "running" });
+			return emptyResult("settling");
+		});
+		const { stub, subagent, control } = registered();
+		const dispatched = await execute(subagent, {
+			agent: "worker",
+			task: "settling",
+			isolation: "worktree",
+		}, root);
+		const runId = dispatched.details.results[0].runId;
+		await waitFor(() => handle.finalizeMock.mock.calls.length === 1);
+		expect(monitor.findRun(runId)?.status).toBe("running");
+
+		await expect(execute(control, { action: "park", id: runId }, root))
+			.rejects.toThrow(/handling settle/i);
+		expect(stub.messages).toHaveLength(0);
+		finalization.resolve({ status: "no_changes", integrated: false, hadChanges: false });
+		await waitFor(() => stub.messages.length === 1);
+		expect(stub.messages[0].message.content).toContain("settling");
+		expect(monitor.findRun(runId)).toBeUndefined();
+		rmSync(root, { recursive: true, force: true });
+	});
+
+	it("lets destructive stop supersede slow settlement without publishing success", async () => {
+		const root = mkdtempSync(join(tmpdir(), "pi-subagents-isolation-settle-stop-"));
+		const finalization = deferred<WorktreeFinalization>();
+		const handle = fakeWorktree(root);
+		handle.finalizeMock.mockImplementation(() => finalization.promise);
+		vi.spyOn(worktreeModule, "createWorktreeIsolation").mockResolvedValue(handle);
+		vi.spyOn(spawnModule, "runSingleAgentWithModelFallback").mockResolvedValue(emptyResult("stop while settling"));
+		const { stub, subagent, stop, status } = registered();
+		const dispatched = await execute(subagent, {
+			agent: "worker",
+			task: "stop while settling",
+			isolation: "worktree",
+		}, root);
+		const runId = dispatched.details.results[0].runId;
+		await waitFor(() => handle.finalizeMock.mock.calls.length === 1);
+
+		let stopResolved = false;
+		const stopping = execute(stop, { all: true }, root).then((value) => {
+			stopResolved = true;
+			return value;
+		});
+		await new Promise((resolve) => setTimeout(resolve, 20));
+		expect(stopResolved).toBe(false);
+		finalization.resolve({ status: "no_changes", integrated: false, hadChanges: false });
+		const stopped = await stopping;
+		expect(stopped.content[0].text).toContain(`#${runId}`);
+		expect(stub.messages).toHaveLength(1);
+		expect(stub.messages[0].message.content).toContain("Stopped by subagent_stop");
+		expect(stub.messages[0].message.content).toContain("--- Partial output ---");
+		expect(stub.messages[0].message.content).toContain("done");
+		const full = await execute(status, { id: String(runId) }, root);
+		expect(full.content[0].text).toContain("Stopped by subagent_stop");
+		expect(full.content[0].text).not.toContain("done\n");
+		rmSync(root, { recursive: true, force: true });
+	});
+
 	it("surfaces retained recovery paths in result, status, completion, and trajectory", async () => {
 		const root = mkdtempSync(join(tmpdir(), "pi-subagents-isolation-conflict-"));
 		const retainedResult: WorktreeFinalization = {
@@ -583,6 +660,50 @@ describe("logical worktree reuse and guarded finalization", () => {
 });
 
 describe("shutdown and destructive-stop integration", () => {
+	it.each(["resume", "fork"] as const)(
+		"invalidates and rolls back an isolated %s preflight before clearing the runtime",
+		async (action) => {
+			const root = mkdtempSync(join(tmpdir(), `pi-subagents-isolation-shutdown-${action}-`));
+			const firstHandle = fakeWorktree(root, undefined, "source");
+			const childHandle = fakeWorktree(root, undefined, "continuation");
+			const childCreation = deferred<WorktreeIsolation>();
+			const create = vi.spyOn(worktreeModule, "createWorktreeIsolation")
+				.mockResolvedValueOnce(firstHandle)
+				.mockImplementationOnce(async () => childCreation.promise);
+			const queued: Array<{ task: BackgroundTask; controller: AbortController }> = [];
+			vi.spyOn(BackgroundTaskQueue.prototype, "enqueue").mockImplementation((task) => {
+				const controller = new AbortController();
+				queued.push({ task, controller });
+				return controller;
+			});
+			const retained = createRetainedSession(firstHandle.cwd);
+			vi.spyOn(spawnModule, "runSingleAgentWithModelFallback").mockResolvedValue(
+				emptyResult("source", { sessionId: retained.id, sessionDir: retained.dir }),
+			);
+			const { stub, subagent, control } = registered();
+			const dispatched = await execute(subagent, {
+				agent: "worker",
+				task: "source",
+				isolation: "worktree",
+			}, root);
+			const runId = dispatched.details.results[0].runId;
+			await queued[0].task(queued[0].controller.signal);
+
+			const controlling = execute(control, { action, id: runId }, root);
+			await waitFor(() => create.mock.calls.length === 2);
+			const shuttingDown = stub.hooks["session_shutdown"]?.({}, {});
+			childCreation.resolve(childHandle);
+			const result = await controlling;
+			await shuttingDown;
+
+			expect(result.content[0].text).toMatch(/changed|shut down/i);
+			expect(childHandle.discardMock).toHaveBeenCalledTimes(1);
+			expect(queued).toHaveLength(1);
+			expect(existsSync(retained.dir)).toBe(false);
+			rmSync(root, { recursive: true, force: true });
+		},
+	);
+
 	it("best-effort integrates a parked worktree during parent session shutdown", async () => {
 		const root = mkdtempSync(join(tmpdir(), "pi-subagents-isolation-shutdown-parent-"));
 		const { execFileSync } = await import("node:child_process");
@@ -633,7 +754,7 @@ describe("shutdown and destructive-stop integration", () => {
 				messages: [{ role: "assistant", content: [{ type: "text", text: "partial output" }], stopReason: "aborted" }],
 			});
 		});
-		const { subagent, stop, status } = registered();
+		const { stub, subagent, stop, status } = registered();
 		const dispatched = await execute(subagent, { agent: "worker", task: "partial", isolation: "worktree" }, root);
 		const runId = dispatched.details.results[0].runId;
 		await waitFor(() => monitor.findRun(runId)?.status === "running");
@@ -642,6 +763,8 @@ describe("shutdown and destructive-stop integration", () => {
 		const full = await execute(status, { id: String(runId) }, root);
 		expect(full.content[0].text).toContain("worktree · changes integrated");
 		expect(full.content[0].text).toContain("partial output");
+		expect(stub.messages).toHaveLength(1);
+		expect(stub.messages[0].message.content).toContain("partial output");
 		rmSync(root, { recursive: true, force: true });
 	});
 });

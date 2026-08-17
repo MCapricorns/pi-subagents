@@ -372,7 +372,7 @@ send({ type: "agent_settled" });`,
 		// Start resume first so it claims the lifecycle and yields in preflight;
 		// destructive stop must invalidate that claim before any child is enqueued.
 		const resuming = execute(control, { action: "resume", id: runId });
-		const stopping = execute(stop, { id: String(runId) });
+		const stopping = execute(stop, { all: true });
 		const [stopped, resume] = await Promise.all([stopping, resuming]);
 		expect(stopped.content[0].text).toContain("Retained sessions were retired");
 		expect(existsSync(sessionDir)).toBe(false);
