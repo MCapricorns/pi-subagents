@@ -9,16 +9,8 @@ import register from "../src/index.ts";
 import { monitor } from "../src/monitor.ts";
 import { findRetainedSessionFile, forkRetainedSession } from "../src/session-fork.ts";
 import * as spawnModule from "../src/spawn.ts";
-import { trajectoryStore } from "../src/trajectory.ts";
 import * as worktreeModule from "../src/worktree.ts";
 import type { WorktreeIsolation } from "../src/worktree.ts";
-
-function settledStatus(runId: number): string | undefined {
-	const event = [...trajectoryStore.get(runId).trajectory.getEvents()]
-		.reverse()
-		.find((candidate) => candidate.kind === "settled");
-	return event?.kind === "settled" ? event.status : undefined;
-}
 
 function assistant(text: string): any {
 	return {
@@ -92,7 +84,7 @@ describe("SessionManager-backed retained branch fork", () => {
 		tempPaths.push(source.dir);
 		const before = readFileSync(source.file);
 
-		expect(await findRetainedSessionFile(cwd, source.dir, source.id)).toBe(source.file);
+		expect(await findRetainedSessionFile(source.dir, source.id)).toBe(source.file);
 		const forked = await forkRetainedSession({ cwd, sessionDir: source.dir, sessionId: source.id });
 		tempPaths.push(forked.sessionDir);
 		expect(forked.sessionId).not.toBe(source.id);
@@ -132,7 +124,7 @@ describe("SessionManager-backed retained branch fork", () => {
 		const cwd = mkdtempSync(join(tmpdir(), "pi-subagents-fork-missing-cwd-"));
 		const dir = mkdtempSync(join(tmpdir(), "pi-subagents-fork-missing-dir-"));
 		tempPaths.push(cwd, dir);
-		await expect(findRetainedSessionFile(cwd, dir, "missing-id")).rejects.toThrow(/was not found/i);
+		await expect(findRetainedSessionFile(dir, "missing-id")).rejects.toThrow(/was not found/i);
 	});
 });
 
@@ -176,7 +168,6 @@ function execute(tool: any, params: any, cwd: string): Promise<any> {
 function result(task: string, session?: { id: string; dir: string }, extra: Record<string, unknown> = {}): any {
 	return {
 		agent: "worker",
-		agentSource: "builtin",
 		task,
 		exitCode: 0,
 		messages: [assistant(`result for ${task}`)],
@@ -203,6 +194,9 @@ function fakeWorktree(cwd: string): WorktreeIsolation {
 		async snapshotCheckpoint() {
 			return { baseHead: "deadbeef", commit: "deadbeef", patch: Buffer.alloc(0) };
 		},
+		async discard() {
+			state = "no_changes";
+		},
 		async finalize() {
 			state = "no_changes";
 			return { status: "no_changes", integrated: false, hadChanges: false };
@@ -228,7 +222,6 @@ afterEach(async () => {
 	for (const stub of activeStubs) await stub.hooks["session_shutdown"]?.({}, {});
 	vi.restoreAllMocks();
 	monitor.clear();
-	trajectoryStore.clearAll();
 	rmSync(agentDir, { recursive: true, force: true });
 	if (savedDepth === undefined) delete process.env.PI_SUBAGENT_DEPTH;
 	else process.env.PI_SUBAGENT_DEPTH = savedDepth;
@@ -335,7 +328,6 @@ describe("subagent_control fork", () => {
 		const dispatched = await execute(subagent, { agent: "worker", task: "source task" }, cwd);
 		const sourceRunId = dispatched.details.results[0].runId;
 		await queued[0].task(queued[0].controller.signal);
-		expect(settledStatus(sourceRunId)).toBe("done");
 
 		const forked = await execute(control, {
 			action: "fork",
@@ -349,23 +341,15 @@ describe("subagent_control fork", () => {
 			runId: childRunId,
 			forkedFromRunId: sourceRunId,
 			isolation: "shared",
-			resumed: true,
 		});
 		expect(readFileSync(source.file)).toEqual(sourceBytes);
 		expect(queued).toHaveLength(2);
-		expect(trajectoryStore.get(childRunId).generation).toBe(1);
-		expect(trajectoryStore.get(sourceRunId).trajectory.getEvents()).toContainEqual(
-			expect.objectContaining({ kind: "fork", sourceRunId, childRunId, objective: "independent objective" }),
-		);
-		expect(trajectoryStore.get(childRunId).trajectory.getEvents()).toContainEqual(
-			expect.objectContaining({ kind: "fork", sourceRunId, childRunId, objective: "independent objective" }),
-		);
 
 		await queued[1].task(queued[1].controller.signal);
 		expect(childOptions.stdinText).toBe("independent objective");
 		expect(childOptions.sessionId).not.toBe(source.id);
 		expect(childOptions.sessionDir).not.toBe(source.dir);
-		const childFile = await findRetainedSessionFile(cwd, childOptions.sessionDir, childOptions.sessionId);
+		const childFile = await findRetainedSessionFile(childOptions.sessionDir, childOptions.sessionId);
 		const childContext = contextTexts(SessionManager.open(childFile));
 		expect(childContext).toContain("active branch context");
 		expect(childContext).not.toContain("abandoned context");
@@ -448,12 +432,10 @@ describe("subagent_control fork", () => {
 		const dispatched = await execute(subagent, { agent: "worker", task: "failed task" }, cwd);
 		const sourceRunId = dispatched.details.results[0].runId;
 		await queued[0].task(queued[0].controller.signal);
-		expect(settledStatus(sourceRunId)).toBe("failed");
 
 		const forked = await execute(control, { action: "fork", id: sourceRunId }, cwd);
 		expect(forked.isError).not.toBe(true);
 		expect(forked.details.childRunId).not.toBe(sourceRunId);
-		expect(settledStatus(sourceRunId)).toBe("failed");
 	});
 
 	it("rejects queued/active sources and blank objectives, but forks settled worktrees", async () => {
@@ -545,8 +527,7 @@ describe("subagent_control fork", () => {
 		}, cwd);
 		expect(resumed.content[0].text).toContain(`Resumed run #${childRunId}`);
 		expect(monitor.findRun(childRunId)?.id).toBe(childRunId);
-		expect(trajectoryStore.get(childRunId).generation).toBe(2);
-		const retainedFile = await findRetainedSessionFile(cwd, childSessionDir, childSessionId);
+		const retainedFile = await findRetainedSessionFile(childSessionDir, childSessionId);
 		expect(existsSync(retainedFile)).toBe(true);
 
 		await execute(stop, { id: String(childRunId) }, cwd);
@@ -575,7 +556,7 @@ describe("subagent_control fork", () => {
 
 		await execute(stop, { id: String(childOne.details.childRunId) }, cwd);
 		expect(() => readFileSync(source.file)).not.toThrow();
-		const childTwoFile = await findRetainedSessionFile(cwd, childTwoDir, childTwo.details.result.sessionId);
+		const childTwoFile = await findRetainedSessionFile(childTwoDir, childTwo.details.result.sessionId);
 		expect(() => readFileSync(childTwoFile)).not.toThrow();
 		expect(existsSync(childOneDir)).toBe(false);
 

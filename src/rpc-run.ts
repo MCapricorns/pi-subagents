@@ -14,7 +14,7 @@ import { tmpdir } from "node:os";
 import { basename, join } from "node:path";
 import { StringDecoder } from "node:string_decoder";
 import type { Message } from "@earendil-works/pi-ai";
-import type { AgentConfig, AgentSource } from "./agents.ts";
+import type { AgentConfig } from "./agents.ts";
 import type { ThinkingLevel } from "./config.ts";
 import type { IsolationMode, WorktreeFinalizationStatus } from "./worktree.ts";
 
@@ -43,7 +43,6 @@ export interface UsageStats {
 
 export interface RpcSingleResult {
 	agent: string;
-	agentSource: AgentSource | "unknown";
 	task: string;
 	exitCode: number;
 	messages: Message[];
@@ -65,16 +64,12 @@ export interface RpcSingleResult {
 	failedTools?: Array<{ toolName: string; error: string }>;
 	sessionId?: string;
 	sessionDir?: string;
-	resumed?: boolean;
 	/** Internal disposition: dispatch suppresses completion delivery for parks. */
 	parked?: boolean;
 	/** Stable logical run id assigned by dispatch (also present on queued results). */
 	runId?: number;
 	/** Filesystem isolation selected for this logical thread. */
 	isolation?: IsolationMode;
-	/** Original parent cwd; isolated children execute at isolationCwd instead. */
-	originalCwd?: string;
-	isolationCwd?: string;
 	/** Final integration state for a worktree-isolated settlement. */
 	integrationStatus?: "pending" | WorktreeFinalizationStatus;
 	integrationApplied?: boolean;
@@ -166,10 +161,6 @@ export class RpcRunControl {
 	parkPending(): void {
 		this.parkRequested = true;
 		this.setPhase("parked");
-	}
-
-	markQueued(): void {
-		this.setPhase("queued");
 	}
 
 	markStarting(): void {
@@ -431,12 +422,8 @@ export async function runRpcAgentAttempt(options: RunRpcAttemptOptions): Promise
 		args.push("--append-system-prompt", tmpPromptPath);
 	}
 
-	const resumed = Boolean(
-		options.sessionDir && options.sessionId && sessionExists(options.sessionDir, options.sessionId),
-	);
 	const result: RpcSingleResult = {
 		agent: agentName,
-		agentSource: agent.source,
 		task,
 		exitCode: 0,
 		messages: [],
@@ -446,7 +433,6 @@ export async function runRpcAgentAttempt(options: RunRpcAttemptOptions): Promise
 		thinking: thinkingLevel,
 		sessionId: options.sessionId,
 		sessionDir: options.sessionDir,
-		resumed,
 	};
 
 	const childDepth = currentSubagentDepth(options.env) + 1;

@@ -7,7 +7,7 @@
  * never break the extension at runtime.
  *
  * Schema upgrades happen transparently on load: a config written by an older
- * version (missing newer keys, holding removed agents, or containing invalid
+ * version (missing newer keys or containing invalid
  * values) is normalized and persisted back with the new fields filled in.
  */
 
@@ -18,17 +18,9 @@ import { getAgentDir, withFileMutationQueue } from "@earendil-works/pi-coding-ag
 
 /** Full catalog of agents shipped with the package (selectable in /subagents-setup). */
 export const BUILTIN_AGENT_NAMES = ["explore", "worker", "reviewer"] as const;
-export type BuiltinAgentName = (typeof BUILTIN_AGENT_NAMES)[number];
 
 /** Agents enabled out of the box. */
 export const DEFAULT_ENABLED_AGENTS: readonly string[] = ["explore", "worker", "reviewer"];
-
-/**
- * Agents that used to ship but were removed. normalizeConfig strips them from
- * enabledAgents/model mappings so upgraded installs clean their config automatically
- * (the schema-upgrade save in loadConfig then persists the cleanup).
- */
-export const REMOVED_AGENT_NAMES: readonly string[] = ["plan"];
 
 export const AGENT_SCOPE_VALUES = ["user", "project", "both"] as const;
 export type AgentScope = (typeof AGENT_SCOPE_VALUES)[number];
@@ -43,7 +35,7 @@ export const DEFAULT_MAX_RESULT_LINES = 80;
 /** Upper bound accepted for maxResultLines (defensive clamp). */
 export const MAX_RESULT_LINES_LIMIT = 2000;
 
-export const CONFIG_FILE_NAME = "pi-subagents.json";
+const CONFIG_FILE_NAME = "pi-subagents.json";
 
 /** How many sub-agent processes may run at once, and how many tasks one parallel `subagent` call may contain. Default: 4. */
 export const DEFAULT_MAX_CONCURRENCY = 4;
@@ -170,52 +162,31 @@ function clampCount(value: unknown, upper: number): number | undefined {
  * Exported for tests.
  */
 export function normalizeConfig(raw: unknown): SubagentsConfig {
-	if (!isRecord(raw)) return { ...DEFAULT_CONFIG, enabledAgents: [...DEFAULT_CONFIG.enabledAgents] };
-
-	const config: SubagentsConfig = {
-		enabledAgents: [...DEFAULT_CONFIG.enabledAgents],
-		agentModels: {},
-		agentBackupModels: {},
-		agentThinkingLevels: {},
-		thinkingLevel: DEFAULT_CONFIG.thinkingLevel,
-		notifyOnReviewPass: DEFAULT_CONFIG.notifyOnReviewPass,
-		maxResultLines: DEFAULT_CONFIG.maxResultLines,
-		proactiveInjection: DEFAULT_CONFIG.proactiveInjection,
-		agentScope: DEFAULT_CONFIG.agentScope,
-		maxConcurrency: DEFAULT_CONFIG.maxConcurrency,
-		maxFixRounds: DEFAULT_CONFIG.maxFixRounds,
-		idleTimeoutSec: DEFAULT_CONFIG.idleTimeoutSec,
-		announcedFeatures: [],
-	};
+	const config = defaultConfig();
+	if (!isRecord(raw)) return config;
 
 	if (Array.isArray(raw.enabledAgents)) {
 		const names = raw.enabledAgents.filter(
 			(name): name is string => typeof name === "string" && name.trim().length > 0,
 		);
 		// An explicitly empty array is honored (disables all agents); otherwise keep valid names.
-		// Agents removed from the package (e.g. plan) are stripped from upgraded configs.
-		config.enabledAgents = [...new Set(names.map((name) => name.trim()))].filter(
-			(name) => !REMOVED_AGENT_NAMES.includes(name),
-		);
+		config.enabledAgents = [...new Set(names.map((name) => name.trim()))];
 	}
 
 	if (isRecord(raw.agentModels)) {
 		for (const [key, value] of Object.entries(raw.agentModels)) {
-			if (REMOVED_AGENT_NAMES.includes(key.trim())) continue;
 			if (isModelReference(value)) config.agentModels[key.trim()] = value.trim();
 		}
 	}
 
 	if (isRecord(raw.agentBackupModels)) {
 		for (const [key, value] of Object.entries(raw.agentBackupModels)) {
-			if (REMOVED_AGENT_NAMES.includes(key.trim())) continue;
 			if (isModelReference(value)) config.agentBackupModels[key.trim()] = value.trim();
 		}
 	}
 
 	if (isRecord(raw.agentThinkingLevels)) {
 		for (const [key, value] of Object.entries(raw.agentThinkingLevels)) {
-			if (REMOVED_AGENT_NAMES.includes(key.trim())) continue;
 			if (
 				typeof value === "string" &&
 				(THINKING_LEVEL_VALUES as readonly string[]).includes(value)
@@ -246,14 +217,6 @@ export function normalizeConfig(raw: unknown): SubagentsConfig {
 
 	const maxConcurrency = clampCount(raw.maxConcurrency, MAX_CONCURRENCY_LIMIT);
 	if (maxConcurrency !== undefined) config.maxConcurrency = maxConcurrency;
-
-	// Schema migration: maxParallelTasks (pre-0.13) merged into maxConcurrency.
-	// Take the larger of the two so an upgraded config never loses capacity it
-	// was explicitly given; the old key is dropped on the persisted save.
-	const legacyParallelTasks = clampCount(raw.maxParallelTasks, MAX_CONCURRENCY_LIMIT);
-	if (legacyParallelTasks !== undefined && legacyParallelTasks > config.maxConcurrency) {
-		config.maxConcurrency = legacyParallelTasks;
-	}
 
 	// 0 disables the auto-fix loop (main agent handles fixes itself).
 	if (typeof raw.maxFixRounds === "number" && Number.isFinite(raw.maxFixRounds)) {
@@ -292,7 +255,7 @@ function defaultConfig(): SubagentsConfig {
 /**
  * Load config. A missing file is a normal state and yields the defaults (not an error).
  * A corrupt file also falls back to defaults rather than throwing, so startup never breaks.
- * A file from an older version (missing newer keys or holding removed agents) is
+ * A file from an older version (missing newer keys or holding extra keys) is
  * normalized and persisted back, so the on-disk config stays current.
  */
 export async function loadConfig(configPath: string = getConfigPath()): Promise<SubagentsConfig> {
@@ -314,7 +277,7 @@ export async function loadConfig(configPath: string = getConfigPath()): Promise<
 	const config = normalizeConfig(parsed);
 
 	// Schema upgrade: persist the normalized shape when the file gained fields
-	// (new version) or dropped invalid/removed ones.
+	// (new version) or dropped invalid ones.
 	if (JSON.stringify(config) !== JSON.stringify(parsed)) {
 		try {
 			await saveConfig(config, configPath);

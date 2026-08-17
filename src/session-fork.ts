@@ -7,7 +7,6 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 
 export interface ForkedSession {
-	sourceSessionFile: string;
 	sessionDir: string;
 	sessionId: string;
 	sessionFile: string;
@@ -15,7 +14,6 @@ export interface ForkedSession {
 
 /** Locate one retained session by its authoritative header id. */
 export async function findRetainedSessionFile(
-	cwd: string,
 	sessionDir: string,
 	sessionId: string,
 ): Promise<string> {
@@ -47,7 +45,6 @@ export async function forkRetainedSession(options: {
 	sessionId: string;
 }): Promise<ForkedSession> {
 	const sourceSessionFile = await findRetainedSessionFile(
-		options.cwd,
 		options.sessionDir,
 		options.sessionId,
 	);
@@ -72,7 +69,6 @@ export async function forkRetainedSession(options: {
 			throw new Error(`Forked session branch has no persisted assistant checkpoint at ${sessionFile}.`);
 		}
 		return {
-			sourceSessionFile,
 			sessionDir,
 			sessionId: manager.getSessionId(),
 			sessionFile,

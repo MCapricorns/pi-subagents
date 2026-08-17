@@ -10,7 +10,6 @@ import register from "../src/index.ts";
 import { monitor } from "../src/monitor.ts";
 import { readRecoveryRecords } from "../src/recovery.ts";
 import * as spawnModule from "../src/spawn.ts";
-import { trajectoryStore } from "../src/trajectory.ts";
 import * as worktreeModule from "../src/worktree.ts";
 import type { WorktreeFinalization, WorktreeIsolation } from "../src/worktree.ts";
 
@@ -53,7 +52,6 @@ function execute(tool: any, params: any, cwd: string): Promise<any> {
 function emptyResult(task: string, extra: Record<string, unknown> = {}): any {
 	return {
 		agent: "worker",
-		agentSource: "builtin",
 		task,
 		exitCode: 0,
 		messages: [{ role: "assistant", content: [{ type: "text", text: "done" }], stopReason: "stop" }],
@@ -162,7 +160,6 @@ afterEach(async () => {
 	for (const stub of activeStubs) await stub.hooks["session_shutdown"]?.({}, {});
 	vi.restoreAllMocks();
 	monitor.clear();
-	trajectoryStore.clearAll();
 	rmSync(agentDir, { recursive: true, force: true });
 	if (savedDepth === undefined) delete process.env.PI_SUBAGENT_DEPTH;
 	else process.env.PI_SUBAGENT_DEPTH = savedDepth;
@@ -225,7 +222,6 @@ describe("dispatch isolation selection", () => {
 		}, root);
 		expect(explicit.details.results[0]).toMatchObject({
 			isolation: "worktree",
-			isolationCwd: handles[1].cwd,
 			integrationStatus: "pending",
 		});
 		expect(create).toHaveBeenCalledTimes(2);
@@ -677,7 +673,7 @@ describe("logical worktree reuse and guarded finalization", () => {
 		rmSync(root, { recursive: true, force: true });
 	});
 
-	it("surfaces retained recovery paths in result, status, completion, and trajectory", async () => {
+	it("surfaces retained recovery paths in result, status, and completion", async () => {
 		const root = mkdtempSync(join(tmpdir(), "pi-subagents-isolation-conflict-"));
 		const retainedResult: WorktreeFinalization = {
 			status: "retained",
@@ -707,8 +703,6 @@ describe("logical worktree reuse and guarded finalization", () => {
 		expect(text).toContain("Integration error: patch does not apply");
 		expect(text).not.toContain("diff --git");
 		expect(stub.messages[0].message.content).toContain("recovery artifacts retained");
-		const worktreeEvent = trajectoryStore.get(runId).trajectory.getEvents().find((event) => event.kind === "worktree" && event.status === "retained");
-		expect(worktreeEvent).toMatchObject({ patchPath: retainedResult.patchPath, error: retainedResult.error });
 		rmSync(root, { recursive: true, force: true });
 	});
 });

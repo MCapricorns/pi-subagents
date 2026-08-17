@@ -16,9 +16,9 @@ on its own — no prompt engineering, no babysitting.
 Version 1.0 turns pi-subagents from a one-shot background runner into a small
 thread runtime. Every dispatch has a stable run id and retained Pi session, so
 work can be steered while it runs, parked without losing context, resumed after
-settlement, retargeted, or forked into another path. An internal append-only
-lifecycle trajectory keeps retries and stale generations from corrupting the
-logical thread.
+settlement, retargeted, or forked into another path. Generation ownership keeps
+retries and stale child processes from corrupting the logical thread without
+retaining a duplicate event history.
 
 The common quality loop now runs end to end without waking the main agent between
 steps:
@@ -28,8 +28,10 @@ reviewer (find blockers) → worker (fix) → reviewer (verify) → final PASS/F
 ```
 
 Each chain is delivered as one concise completion group, while full per-run
-reports remain available through `subagent_status`. Ordered model pools keep the
-same retained context across provider fallback, and isolated parallel workers
+reports remain available through `subagent_status`. Its parent stays `running`
+until the whole chain settles; completed internal rounds leave active status
+immediately, so no `done` row keeps accumulating elapsed time. Ordered model
+pools keep the same retained context across provider fallback, and isolated parallel workers
 use detached Git worktrees whose changes are applied back without touching the
 parent index.
 
@@ -49,6 +51,9 @@ parent index.
   "go check" step. `subagent_wait` is a **non-blocking** in-turn lookup by default
   (pass `timeoutMs` to block); `subagent_status` inspects runs; `subagent_stop`
   cancels one and delivers its partial output.
+- **Active-only live widget** — the TUI shows queued and running sub-agents above
+  the editor with live activity and elapsed time. Settled and parked rows disappear
+  immediately; an auto-fix parent remains `running` until its whole chain settles.
 - **Results are not re-narrated** — a sub-agent's completion is shown to you
   verbatim, and the main agent is told not to paraphrase it back. It replies with
   only its own conclusion or next step, so the same findings are never paid for
@@ -286,11 +291,11 @@ sessions live until the parent Pi session shuts down.
 
 ### Configuration migration
 
-The config file migrates itself on load — no manual steps after an upgrade:
-schema upgrades are normalized and saved back, removed agents are stripped,
-legacy keys (`maxParallelTasks`, `maxSubagentDepth`) are folded in or dropped,
-and new fields are filled with defaults. New features are announced to you once
-after an update via a toast (marker persisted in `announcedFeatures`).
+The config file normalizes itself on load — no manual steps after an upgrade:
+configured non-empty agent names are preserved, invalid values and unsupported
+keys (including `maxParallelTasks` and `maxSubagentDepth`) are dropped, and
+missing current fields are filled with defaults. New features are announced to
+you once after an update via a toast (marker persisted in `announcedFeatures`).
 
 ## Agent discovery and overrides
 
@@ -329,10 +334,9 @@ npm test
 
 The source is modular: `dispatch.ts` (dispatch, controls, isolation, auto-fix),
 `rpc-run.ts` / `spawn.ts` (persistent child transport + model pools),
-`worktree.ts` / `session-fork.ts` (filesystem/session branching),
-`trajectory.ts` (internal lifecycle history), `tools.ts`
-(wait/status/control/stop), `announcements.ts` (recovery and feature notices),
-and `runtime.ts` (session-scoped ownership). No runtime dependencies beyond pi peer
+`worktree.ts` / `session-fork.ts` (filesystem/session branching), `tools.ts`
+(wait/status/control/stop), `widget.ts` (active-only TUI status), `announcements.ts`
+(recovery and feature notices), and `runtime.ts` (session-scoped ownership). No runtime dependencies beyond pi peer
 dependencies.
 
 ## License

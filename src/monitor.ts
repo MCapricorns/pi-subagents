@@ -11,8 +11,7 @@
 import { stripVTControlCharacters } from "node:util";
 import type { Theme } from "@earendil-works/pi-coding-agent";
 import { visibleWidth } from "@earendil-works/pi-tui";
-import type { UsageStats } from "./spawn.ts";
-import { redactSensitiveText } from "./trajectory.ts";
+import { emptyUsage, type UsageStats } from "./rpc-run.ts";
 import type { IsolationMode, WorktreeFinalizationStatus } from "./worktree.ts";
 
 // ---------------------------------------------------------------------------
@@ -46,14 +45,6 @@ export interface RunView {
 	usage: UsageStats;
 	/** Concise current activity ("thinking", "read src/index.ts"); last writer wins. */
 	activity?: string;
-	/** Total tool calls started by the run so far (a progress signal). */
-	toolCount?: number;
-	/** Tool currently executing (set on tool_start, cleared on tool_end). When set,
-	 * the run is NOT idle for needs-attention purposes. */
-	currentTool?: string;
-	/** Epoch ms of the last live activity (tool, usage, status). Used to derive
-	 * the needs-attention state: no tool running AND now - lastActivityAt > threshold. */
-	lastActivityAt?: number;
 	/** Epoch ms when the run started executing (set on first "running" status). */
 	startedAt?: number;
 	/** Epoch ms when the run finished (set on "done"/"failed"). */
@@ -62,16 +53,6 @@ export interface RunView {
 	groupId?: string;
 	/** Human-readable role within a chain, e.g. "fix round 1" or "re-review round 1". */
 	relationLabel?: string;
-	/** Free-form orchestration note (e.g. "auto-fix chain running"). */
-	annotation?: string;
-	/** One-line outcome summary of a finished chain run: a reviewer reports its verdict
-	 * plus key fragments of what it found ("fail · src/index.ts · render()"), a
-	 * worker the fragments of what it changed. Unset for non-chain runs. */
-	summary?: string;
-	/** True when a finished run remains in monitor state (e.g. an auto-fix
-	 * parent whose chain is still running). beginTurn preserves
-	 * retained runs so they are not swept between turns. */
-	retained?: boolean;
 }
 
 /** Optional chain metadata for runs spawned by an auto-fix loop. */
@@ -280,17 +261,39 @@ export function formatDuration(ms: number): string {
 /** Elapsed wall time of a run: live while running, final once finished. */
 export function formatElapsed(run: RunView, now: number = Date.now()): string {
 	if (run.startedAt === undefined) return "";
-	// A retained row (e.g. an auto-fix chain parent whose chain is still running)
-	// must keep ticking: its `endedAt` was stamped when the review itself
-	// finished, but the work is ongoing, so show live elapsed until the chain
-	// resolves and the row is removed. Without this, subagent_status would show a
-	// frozen elapsed for a run the UI otherwise presents as still active.
-	const end = run.retained ? now : (run.endedAt ?? now);
-	return formatDuration(end - run.startedAt);
+	return formatDuration((run.endedAt ?? now) - run.startedAt);
 }
 
 /** Max length of the argument target inside a formatted activity line. */
 export const ACTIVITY_TARGET_MAX = 60;
+
+const REDACTED = "<redacted>";
+
+/** Remove credentials embedded in otherwise ordinary activity strings such as
+ * shell commands and HTTP headers. */
+function redactSensitiveText(value: string): string {
+	let text = stripVTControlCharacters(value);
+	text = text.replace(
+		/(\bauthorization\s*:\s*(?:bearer|basic)\s+)([^\s'"`;,]+)/giu,
+		`$1${REDACTED}`,
+	);
+	text = text.replace(
+		/(\bbearer\s+)([A-Za-z0-9._~+/=-]{6,})/giu,
+		`$1${REDACTED}`,
+	);
+	text = text.replace(
+		/(\b(?:api[-_]?key|apikey|access[-_]?token|refresh[-_]?token|token|password|passwd|secret|credential|cookie)\b\s*(?:=|:)\s*)(?:"[^"]*"|'[^']*'|[^\s;&,]+)/giu,
+		`$1${REDACTED}`,
+	);
+	text = text.replace(
+		/((?:--?(?:api[-_]?key|access[-_]?token|token|password|secret|credential))\s+)(?:"[^"]*"|'[^']*'|\S+)/giu,
+		`$1${REDACTED}`,
+	);
+	return text.replace(
+		/\b(?:sk-[A-Za-z0-9_-]{8,}|gh[pousr]_[A-Za-z0-9]{8,}|AKIA[A-Z0-9]{16})\b/gu,
+		REDACTED,
+	);
+}
 
 /** Monitor activity is returned to the parent model and rendered in the terminal,
  * so treat every live string as untrusted before it reaches store state. */
@@ -363,19 +366,22 @@ export class MonitorStore {
 	private subscribers = new Set<() => void>();
 
 	beginTurn(): void {
-		// Clear finished runs from a previous turn, but keep any still-active
-		// (queued/running) ones so a concurrent sub-agent call is not wiped.
-		// Retained runs (e.g. an auto-fix chain parent whose chain is still
-		// running) are also preserved — their status is "done" but they must
-		// stay visible until the chain resolves.
+		// Clear finished runs from a previous turn, but keep active and parked
+		// threads so concurrent work is not wiped between parent turns.
 		this.runs = this.runs.filter(
-			(r) => isRunActiveStatus(r.status) || r.status === "parked" || r.retained,
+			(r) => isRunActiveStatus(r.status) || r.status === "parked",
 		);
 		this.notify();
 	}
 
+	/** Reserve a stable id for a durable result that must remain independently
+	 * addressable without appearing as a live monitor row. */
+	reserveRunId(): number {
+		return this.nextId++;
+	}
+
 	addRun(agent: string, task: string, model?: string, thinking?: string, meta?: RunChainMeta): number {
-		const id = this.nextId++;
+		const id = this.reserveRunId();
 		this.runs.push({
 			id,
 			agent,
@@ -384,7 +390,7 @@ export class MonitorStore {
 			model,
 			thinking,
 			status: "queued",
-			usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, cost: 0, contextTokens: 0, turns: 0 },
+			usage: emptyUsage(),
 			...(meta?.groupId ? { groupId: meta.groupId } : {}),
 			...(meta?.relationLabel ? { relationLabel: meta.relationLabel } : {}),
 			...(meta?.isolation ? { isolation: meta.isolation, integrationStatus: meta.isolation === "worktree" ? "pending" : undefined } : {}),
@@ -403,7 +409,6 @@ export class MonitorStore {
 			// A model-fallback retry or resumed generation restarts the clock; a
 			// stale endedAt would freeze the elapsed display at the first attempt.
 			if (run.endedAt !== undefined) run.endedAt = undefined;
-			run.lastActivityAt = Date.now();
 		} else if ((status === "parked" || status === "done" || status === "failed") && run.endedAt === undefined) {
 			run.endedAt = Date.now();
 		}
@@ -414,7 +419,6 @@ export class MonitorStore {
 		if (!run) return;
 		run.usage = { ...usage };
 		if (model) run.model = model;
-		run.lastActivityAt = Date.now();
 		this.notify();
 	}
 
@@ -432,56 +436,24 @@ export class MonitorStore {
 		const run = this.find(id);
 		if (!run) return;
 		run.activity = sanitizeActivityText(text) || undefined;
-		run.lastActivityAt = Date.now();
 		this.notify();
 	}
 
-	/** Record a tool starting: counts it, marks it current, and updates activity.
-	 * A running tool means the run is NOT idle, so needs-attention is suppressed
-	 * while it stays current. */
+	/** Record a tool starting and update the run's visible activity. */
 	recordToolStart(id: number, toolName: string, activity: string): void {
 		const run = this.find(id);
 		if (!run) return;
 		const safeToolName = sanitizeActivityText(toolName) || "tool";
-		run.toolCount = (run.toolCount ?? 0) + 1;
-		run.currentTool = safeToolName;
 		run.activity = sanitizeActivityText(activity) || safeToolName;
-		run.lastActivityAt = Date.now();
 		this.notify();
 	}
 
-	/** Record a tool ending: clears the current-tool marker (so the run becomes
-	 * eligible for needs-attention again) and notes the failure in activity. */
+	/** Record a failed tool; successful completions keep their last activity
+	 * until the next model event supplies a more useful description. */
 	recordToolEnd(id: number, toolName: string, isError: boolean): void {
 		const run = this.find(id);
 		if (!run) return;
-		run.currentTool = undefined;
-		run.lastActivityAt = Date.now();
 		if (isError) run.activity = `✗ ${sanitizeActivityText(toolName) || "tool"} failed`;
-		this.notify();
-	}
-
-	/** Set an orchestration note on the run (e.g. auto-fix chain running). */
-	setAnnotation(id: number, text: string): void {
-		const run = this.find(id);
-		if (!run) return;
-		run.annotation = text;
-		this.notify();
-	}
-
-	/** Set the run's one-line outcome summary (what a finished chain round did). */
-	setSummary(id: number, text: string | undefined): void {
-		const run = this.find(id);
-		if (!run) return;
-		run.summary = text;
-		this.notify();
-	}
-
-	/** Keep a finished chain step in status state until its group settles. */
-	setRetained(id: number, retained: boolean): void {
-		const run = this.find(id);
-		if (!run) return;
-		run.retained = retained;
 		this.notify();
 	}
 
@@ -526,7 +498,7 @@ export class MonitorStore {
 				thinking,
 				...(isolation ? { isolation, integrationStatus: isolation === "worktree" ? "pending" as const : undefined } : {}),
 				status: "queued",
-				usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, cost: 0, contextTokens: 0, turns: 0 },
+				usage: emptyUsage(),
 			});
 			this.notify();
 			return;
@@ -539,16 +511,10 @@ export class MonitorStore {
 		if (isolation) run.isolation = isolation;
 		run.integrationStatus = isolation === "worktree" ? "pending" : undefined;
 		run.status = "queued";
-		run.usage = { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, cost: 0, contextTokens: 0, turns: 0 };
+		run.usage = emptyUsage();
 		run.activity = undefined;
-		run.toolCount = undefined;
-		run.currentTool = undefined;
-		run.lastActivityAt = undefined;
 		run.startedAt = undefined;
 		run.endedAt = undefined;
-		run.annotation = undefined;
-		run.summary = undefined;
-		run.retained = undefined;
 		this.notify();
 	}
 
@@ -589,7 +555,6 @@ export class MonitorStore {
 		const usage = formatUsageCompact(run.usage);
 		const parts = [run.agent];
 		if (run.relationLabel) parts.push(run.relationLabel);
-		if (run.summary) parts.push(run.summary);
 		if (run.model) parts.push(run.model);
 		if (run.thinking) parts.push(`thinking ${run.thinking}`);
 		if (run.isolation === "worktree") parts.push(`worktree ${run.integrationStatus ?? "active"}`);
@@ -656,22 +621,5 @@ export function statusLabel(status: RunStatus): string {
 			return "done";
 		case "failed":
 			return "stopped";
-	}
-}
-
-/** Theme color matching the status label. */
-export function statusColor(status: RunStatus): "accent" | "success" | "error" | "warning" | "dim" {
-	switch (status) {
-		case "running":
-		case "steering":
-			return "accent";
-		case "interrupting":
-			return "warning";
-		case "done":
-			return "success";
-		case "failed":
-			return "error";
-		default:
-			return "dim";
 	}
 }

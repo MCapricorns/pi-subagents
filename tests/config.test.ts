@@ -37,19 +37,6 @@ describe("normalizeConfig", () => {
 		expect(config.enabledAgents).toEqual(["explore", "worker"]);
 	});
 
-	it("strips removed agents from upgraded configs", () => {
-		const config = normalizeConfig({
-			enabledAgents: ["explore", "plan", "worker"],
-			agentModels: { plan: "anthropic/claude-haiku-4-5", worker: "openai/gpt-5" },
-			agentBackupModels: { plan: "openai/old", worker: "anthropic/backup" },
-			agentThinkingLevels: { plan: "high", worker: "medium" },
-		});
-		expect(config.enabledAgents).toEqual(["explore", "worker"]);
-		expect(config.agentModels).toEqual({ worker: "openai/gpt-5" });
-		expect(config.agentBackupModels).toEqual({ worker: "anthropic/backup" });
-		expect(config.agentThinkingLevels).toEqual({ worker: "medium" });
-	});
-
 	it("honors an explicitly empty enabledAgents array", () => {
 		expect(normalizeConfig({ enabledAgents: [] }).enabledAgents).toEqual([]);
 	});
@@ -123,20 +110,6 @@ describe("normalizeConfig", () => {
 
 		const invalid = normalizeConfig({ maxConcurrency: "many" });
 		expect(invalid.maxConcurrency).toBe(DEFAULT_MAX_CONCURRENCY);
-	});
-
-	it("merges a legacy maxParallelTasks into maxConcurrency (larger wins)", () => {
-		// Old config: concurrency 2, parallel cap 8 → merged to 8.
-		const merged = normalizeConfig({ maxConcurrency: 2, maxParallelTasks: 8 });
-		expect(merged.maxConcurrency).toBe(8);
-
-		// The old key alone also folds in, clamped to the new limit.
-		const alone = normalizeConfig({ maxParallelTasks: 999 });
-		expect(alone.maxConcurrency).toBe(MAX_CONCURRENCY_LIMIT);
-
-		// Invalid legacy values are ignored; concurrency stays as configured.
-		const invalid = normalizeConfig({ maxConcurrency: 3, maxParallelTasks: "many" });
-		expect(invalid.maxConcurrency).toBe(3);
 	});
 
 	it("defaults maxFixRounds to 2 and clamps to [0, 5]", () => {
@@ -222,12 +195,12 @@ describe("loadConfig", () => {
 		expect(saved.maxConcurrency).toBe(DEFAULT_MAX_CONCURRENCY);
 	});
 
-	it("cleans removed agents out of an old config and saves the result", async () => {
+	it("normalizes an upgraded config and saves the result", async () => {
 		const dir = mkdtempSync(join(tmpdir(), "pi-subagents-test-"));
 		const path = join(dir, "pi-subagents.json");
 		writeFileSync(
 			path,
-			JSON.stringify({ enabledAgents: ["explore", "plan"], agentModels: { plan: "a/b" } }),
+			JSON.stringify({ enabledAgents: ["explore", 42], agentModels: { bad: "noslash" } }),
 			"utf8",
 		);
 

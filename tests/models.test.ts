@@ -2,64 +2,10 @@ import { describe, expect, it } from "vitest";
 import {
 	CURRENT_MAIN_MODEL,
 	applyModelPoolChoice,
-	availableModelRefs,
 	buildAgentModelPoolRows,
 	buildModelPickerItems,
 	resolveAgentModelPool,
-	type ModelContext,
 } from "../src/models.ts";
-
-function context(current?: string, available: string[] = []): ModelContext {
-	const model = current ? (toModel(current) as unknown as ModelContext["model"]) : undefined;
-	return {
-		model,
-		scopedModels: [],
-		modelRegistry: {
-			getAvailable: () => available.map(toModel),
-		} as ModelContext["modelRegistry"],
-	};
-}
-
-function toModel(ref: string): { provider: string; id: string } {
-	const slash = ref.indexOf("/");
-	return { provider: ref.slice(0, slash), id: ref.slice(slash + 1) };
-}
-
-describe("availableModelRefs", () => {
-	it("puts the current main-window model first", () => {
-		expect(availableModelRefs(context("openai/current", ["anthropic/other", "openai/current"]))).toEqual([
-			"openai/current",
-			"anthropic/other",
-		]);
-	});
-
-	it("falls back to the registry when older Pi does not expose scopedModels", () => {
-		const ctx = context(undefined, ["openai/registry"]);
-		delete ctx.scopedModels;
-		expect(availableModelRefs(ctx)).toEqual(["openai/registry"]);
-	});
-
-	it("intersects scoped models with current registry availability", () => {
-		const ctx = context(undefined, ["openai/registry", "anthropic/scoped"]);
-		ctx.scopedModels = [
-			{ model: toModel("anthropic/scoped") },
-			{ model: toModel("removed/stale") },
-		] as unknown as ModelContext["scopedModels"];
-		expect(availableModelRefs(ctx)).toEqual(["anthropic/scoped"]);
-	});
-
-	it("hides scoped snapshot refs that are no longer available", () => {
-		const ctx = context(undefined, ["openai/registry"]);
-		ctx.scopedModels = [{ model: toModel("anthropic/stale") }] as unknown as ModelContext["scopedModels"];
-		expect(availableModelRefs(ctx)).toEqual([]);
-	});
-
-	it("does not re-add an unavailable current main model", () => {
-		expect(availableModelRefs(context("removed/current", ["openai/available"]))).toEqual([
-			"openai/available",
-		]);
-	});
-});
 
 describe("resolveAgentModelPool", () => {
 	it("uses the current main model as the implicit backup", () => {

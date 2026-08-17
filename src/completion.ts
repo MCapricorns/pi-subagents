@@ -2,8 +2,7 @@
  * Smart batching for successful background completions.
  *
  * A short debounce coalesces sibling runs while a max-wait timer, measured from
- * the first item in the open group, bounds delivery latency. Runs that finish
- * shortly after an emitted group use a smaller straggler window. Failures are
+ * the first item in the open group, bounds delivery latency. Failures are
  * intentionally handled by the caller: flush held successes, then emit the
  * failure directly so it is never delayed.
  */
@@ -13,30 +12,14 @@ import { getResultOutput, isFailedResult, reviewVerdict, type SingleResult } fro
 export interface CompletionBatchTimings {
 	debounceMs: number;
 	maxWaitMs: number;
-	stragglerDebounceMs: number;
-	stragglerMaxWaitMs: number;
-	stragglerWindowMs: number;
 }
 
 export const DEFAULT_COMPLETION_BATCH_TIMINGS: CompletionBatchTimings = {
 	debounceMs: 150,
 	maxWaitMs: 1_000,
-	stragglerDebounceMs: 75,
-	stragglerMaxWaitMs: 400,
-	stragglerWindowMs: 2_000,
 };
 
-type TimerHandle = unknown;
-
-export interface TimerApi {
-	setTimeout(handler: () => void, delayMs: number): TimerHandle;
-	clearTimeout(handle: TimerHandle): void;
-}
-
-const defaultTimers: TimerApi = {
-	setTimeout: (handler, delayMs) => setTimeout(handler, delayMs),
-	clearTimeout: (handle) => clearTimeout(handle as ReturnType<typeof setTimeout>),
-};
+type TimerHandle = ReturnType<typeof setTimeout>;
 
 function unrefHandle(handle: TimerHandle): void {
 	if (
@@ -52,8 +35,6 @@ function unrefHandle(handle: TimerHandle): void {
 export interface CompletionBatcherOptions<T> {
 	emit: (items: T[]) => void;
 	timings?: Partial<CompletionBatchTimings>;
-	timers?: TimerApi;
-	now?: () => number;
 }
 
 export interface CompletionBatcher<T> {
@@ -66,22 +47,18 @@ export interface CompletionBatcher<T> {
 }
 
 export function createCompletionBatcher<T>(options: CompletionBatcherOptions<T>): CompletionBatcher<T> {
-	const timers = options.timers ?? defaultTimers;
-	const now = options.now ?? Date.now;
 	const timings = { ...DEFAULT_COMPLETION_BATCH_TIMINGS, ...options.timings };
 	let pending: T[] = [];
 	let debounceTimer: TimerHandle | null = null;
 	let maxWaitTimer: TimerHandle | null = null;
-	let straggler = false;
-	let lastEmitAt: number | null = null;
 
 	const clearTimers = (): void => {
 		if (debounceTimer !== null) {
-			timers.clearTimeout(debounceTimer);
+			clearTimeout(debounceTimer);
 			debounceTimer = null;
 		}
 		if (maxWaitTimer !== null) {
-			timers.clearTimeout(maxWaitTimer);
+			clearTimeout(maxWaitTimer);
 			maxWaitTimer = null;
 		}
 	};
@@ -91,25 +68,19 @@ export function createCompletionBatcher<T>(options: CompletionBatcherOptions<T>)
 		if (pending.length === 0) return;
 		const items = pending;
 		pending = [];
-		lastEmitAt = now();
 		options.emit(items);
 	};
 
 	return {
 		push(item: T): void {
-			if (pending.length === 0) {
-				straggler = lastEmitAt !== null && now() - lastEmitAt < timings.stragglerWindowMs;
-			}
 			pending.push(item);
 
-			if (debounceTimer !== null) timers.clearTimeout(debounceTimer);
-			const debounceDelay = straggler ? timings.stragglerDebounceMs : timings.debounceMs;
-			debounceTimer = timers.setTimeout(emitGroup, debounceDelay);
+			if (debounceTimer !== null) clearTimeout(debounceTimer);
+			debounceTimer = setTimeout(emitGroup, timings.debounceMs);
 			unrefHandle(debounceTimer);
 
 			if (maxWaitTimer === null) {
-				const maxWaitDelay = straggler ? timings.stragglerMaxWaitMs : timings.maxWaitMs;
-				maxWaitTimer = timers.setTimeout(emitGroup, maxWaitDelay);
+				maxWaitTimer = setTimeout(emitGroup, timings.maxWaitMs);
 				unrefHandle(maxWaitTimer);
 			}
 		},

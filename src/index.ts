@@ -5,7 +5,8 @@
  * The heavy lifting lives in focused modules:
  *   - dispatch.ts  — the `subagent` tool (spawn, auto-fix chain, vision model)
  *   - tools.ts     — subagent_control / subagent_wait / status / stop
- *   - announcements.ts — session-start recovery and feature notices
+ *   - announcements.ts — session-start recovery, notices, and widget install
+ *   - widget.ts        — active-only TUI run status
  *   - runtime.ts       — shared per-session state
  *
  * Also registers the `/subagents-setup` command and a `before_agent_start` hook
@@ -28,6 +29,7 @@ import { createRuntime } from "./runtime.ts";
 import { runSetup } from "./setup.ts";
 import { currentSubagentDepth } from "./spawn.ts";
 import { registerLookupTools } from "./tools.ts";
+import { clearActiveRunsWidget } from "./widget.ts";
 
 export { matchRunIds };
 
@@ -57,7 +59,8 @@ export default function (pi: ExtensionAPI): void {
 		),
 	);
 
-	pi.on("session_shutdown", async () => {
+	pi.on("session_shutdown", async (_event, ctx) => {
+		clearActiveRunsWidget(ctx);
 		await runtime.shutdown();
 	});
 

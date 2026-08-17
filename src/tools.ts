@@ -9,7 +9,8 @@ import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { Text } from "@earendil-works/pi-tui";
 import { Type } from "typebox";
 import { DEFAULT_MAX_RESULT_LINES, loadConfig } from "./config.ts";
-import { emptyUsage, formatCompletionBlock, formatUsage, matchRunIds } from "./format.ts";
+import { formatCompletionBlock, formatUsage, matchRunIds } from "./format.ts";
+import { emptyUsage } from "./rpc-run.ts";
 import {
 	formatElapsed,
 	formatUsageCompact,
@@ -21,7 +22,6 @@ import {
 } from "./monitor.ts";
 import type { SubagentRuntime, SubagentThread } from "./runtime.ts";
 import { getResultOutput, isFailedResult, type SingleResult } from "./spawn.ts";
-import { trajectoryStore } from "./trajectory.ts";
 
 /** In-turn result lookup. Dispatch already ended the turn and results arrive as
  * wake-up messages, so the default must NOT block: a settled run returns its
@@ -97,7 +97,6 @@ export function registerLookupTools(pi: ExtensionAPI, runtime: SubagentRuntime):
 							return { content: [{ type: "text", text: `Run #${thread.id} is ${thread.control.getPhase()}; only a running thread can be steered.` }], details: {} };
 						}
 						await thread.control.steer(instruction);
-						trajectoryStore.get(thread.id).trajectory.append({ kind: "steer", instruction });
 						return { content: [{ type: "text", text: `Queued steering instruction for run #${thread.id} after its current tool batch.` }], details: {} };
 					}
 					case "retarget": {
@@ -110,7 +109,6 @@ export function registerLookupTools(pi: ExtensionAPI, runtime: SubagentRuntime):
 							thread.task = objective;
 							thread.control.retargetPending(objective);
 							monitor.setTask(thread.id, objective);
-							trajectoryStore.get(thread.id).trajectory.append({ kind: "retarget", objective });
 							return { content: [{ type: "text", text: `Updated queued run #${thread.id} to the new objective; no child was spawned by this control action.` }], details: {} };
 						}
 						if (!(["starting", "running", "steering", "interrupting", "retrying"] as const).includes(phase as any)) {
@@ -119,7 +117,6 @@ export function registerLookupTools(pi: ExtensionAPI, runtime: SubagentRuntime):
 						thread.task = objective;
 						monitor.setTask(thread.id, objective);
 						await thread.control.retarget(objective);
-						trajectoryStore.get(thread.id).trajectory.append({ kind: "retarget", objective });
 						return { content: [{ type: "text", text: `Retargeted run #${thread.id} in the same session; the aborted objective will not be delivered as a completion.` }], details: {} };
 					}
 					case "park": {
@@ -229,8 +226,7 @@ export function registerLookupTools(pi: ExtensionAPI, runtime: SubagentRuntime):
 				typeof params.timeoutMs === "number" && Number.isFinite(params.timeoutMs) && params.timeoutMs >= 0
 					? params.timeoutMs
 					: SUBAGENT_WAIT_DEFAULT_TIMEOUT_MS;
-			const isActive = (run: { status: RunStatus; retained?: boolean }): boolean =>
-				isRunActiveStatus(run.status) || run.retained === true;
+			const isActive = (run: { status: RunStatus }): boolean => isRunActiveStatus(run.status);
 
 			const requested = params.id?.trim();
 			// A run that already settled resolves immediately with its result.
@@ -420,7 +416,7 @@ export function registerLookupTools(pi: ExtensionAPI, runtime: SubagentRuntime):
 
 			const now = Date.now();
 			const activeRuns = monitor.getRuns().filter(
-				(run) => isRunActiveStatus(run.status) || run.retained,
+				(run) => isRunActiveStatus(run.status),
 			);
 			const activeLines = activeRuns.map((run) => {
 				const thread = runtime.threads.get(run.id);
@@ -651,7 +647,6 @@ export function registerLookupTools(pi: ExtensionAPI, runtime: SubagentRuntime):
 						}
 						: {
 							agent: thread.agentName,
-							agentSource: "builtin",
 							task: thread.task,
 							exitCode: 1,
 							messages: [],
@@ -663,8 +658,6 @@ export function registerLookupTools(pi: ExtensionAPI, runtime: SubagentRuntime):
 							errorMessage: stopMessage,
 							runId,
 							isolation: thread.isolation,
-							originalCwd: thread.cwd,
-							isolationCwd: thread.executionCwd,
 						};
 					const finalization = await thread.finalizeIsolation(generation, stoppedResult);
 					if (finalization?.status === "retained") retainedIntegration.push(`#${runId}`);
@@ -672,24 +665,7 @@ export function registerLookupTools(pi: ExtensionAPI, runtime: SubagentRuntime):
 					thread.lastResult = stoppedResult;
 				}
 				monitor.setStatus(runId, "failed");
-				if (stoppedResult) {
-					const trajectoryState = trajectoryStore.get(runId);
-					const alreadyStampedStopped = trajectoryState.trajectory.getGenerationEvents().some(
-						(event) => event.kind === "settled" && event.status === "stopped",
-					);
-					if (!alreadyStampedStopped) {
-						trajectoryState.trajectory.append({
-							kind: "settled",
-							status: "stopped",
-							model: stoppedResult.model ?? run?.model,
-							isolation: thread.isolation,
-							...(stoppedResult.integrationStatus && stoppedResult.integrationStatus !== "pending"
-								? { integrationStatus: stoppedResult.integrationStatus }
-								: {}),
-						});
-					}
-					completionResults.push(stoppedResult);
-				}
+				if (stoppedResult) completionResults.push(stoppedResult);
 				monitor.removeRun(runId);
 				runtime.retireThreadSession(thread);
 				if (thread.lifecycleVersion === stopVersion && thread.lifecycleOperation === "stop") {

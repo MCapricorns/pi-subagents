@@ -124,10 +124,12 @@ describe("extension registration", () => {
 		const stub = makeStub();
 		register(stub.api);
 		const notify = vi.fn();
-		const context = { mode: "tui", hasUI: true, ui: { notify } };
+		const setWidget = vi.fn();
+		const context = { mode: "tui", hasUI: true, ui: { notify, setWidget } };
 		expect(typeof stub.hooks["session_start"]).toBe("function");
 		await stub.hooks["session_start"]({}, context);
 
+		expect(setWidget).toHaveBeenCalledWith("pi-subagents", expect.any(Function), { placement: "aboveEditor" });
 		expect(notify).toHaveBeenCalledWith(expect.stringContaining("recovery for run #41"), "error");
 		expect(notify).toHaveBeenCalledWith(expect.stringContaining("vision-capable model"), "info");
 		expect(JSON.parse(readFileSync(configPath, "utf8")).announcedFeatures).toContain("visionModel");
@@ -1025,13 +1027,14 @@ send({ type: "message_end", message: { role: "assistant", content: [{ type: "tex
 
 			register(stub.api);
 			const tool = stub.tools.find((candidate) => candidate.name === "subagent");
-			await tool.execute(
+			const dispatched = await tool.execute(
 				"call-chain",
 				{ agent: "reviewer", task: "Review the change" },
 				new AbortController().signal,
 				() => {},
 				executionContext({ uiNotify }),
 			);
+			const parentRunId = dispatched.details.results[0].runId as number;
 
 			expect(capturedTasks).toHaveLength(1);
 			await capturedTasks[0](controllers[0].signal);
@@ -1041,9 +1044,11 @@ send({ type: "message_end", message: { role: "assistant", content: [{ type: "tex
 			expect(capturedTasks).toHaveLength(2);
 			expect(stub.messages).toHaveLength(0);
 			expect(uiNotify).not.toHaveBeenCalled();
-			const parent = monitor.getRuns().find((run) => run.annotation === "auto-fix chain running");
+			const parent = monitor.getRuns().find((run) => run.activity === "auto-fix chain running");
 			expect(parent).toBeDefined();
 			expect(parent?.agent).toBe("reviewer");
+			expect(parent?.status).toBe("running");
+			expect(parent?.endedAt).toBeUndefined();
 
 			await capturedTasks[1](controllers[1].signal);
 
@@ -1062,10 +1067,40 @@ send({ type: "message_end", message: { role: "assistant", content: [{ type: "tex
 			expect(content).not.toContain("Task: Review the change");
 			// The initial review is not delivered or notified yet (still held by the chain).
 			expect(stub.messages[0].options).toEqual({ deliverAs: "steer", triggerTurn: true });
-			// Chain-internal runs notify individually as they finish; the whole chain
-			// group (parent + retained round rows) is dropped once the chain resolves.
-			expect(uiNotify).toHaveBeenCalledTimes(2);
+			// Internal rounds stay silent; the parent is the chain's only live row.
+			expect(uiNotify).not.toHaveBeenCalled();
 			expect(monitor.getRuns()).toHaveLength(0);
+
+			// Every step id in the summary resolves to that exact report. The stable
+			// parent id is separate and resolves to a copy of the final logical result
+			// whose embedded run id is still the parent, not the internal re-review.
+			const stepIds = [...content.matchAll(/^- #(\d+) /gmu)].map((match) => Number(match[1]));
+			expect(stepIds).toHaveLength(3);
+			expect(new Set(stepIds).size).toBe(3);
+			expect(stepIds).not.toContain(parentRunId);
+			const statusTool = stub.tools.find((candidate) => candidate.name === "subagent_status");
+			const lookup = async (id: number): Promise<string> => {
+				const result = await statusTool.execute(
+					`status-${id}`,
+					{ id: String(id) },
+					new AbortController().signal,
+					() => {},
+					executionContext(),
+				);
+				return result.content[0].text;
+			};
+			const initialReport = await lookup(stepIds[0]);
+			const workerReport = await lookup(stepIds[1]);
+			const reReviewReport = await lookup(stepIds[2]);
+			const parentReport = await lookup(parentRunId);
+			expect(initialReport).toContain(`run #${stepIds[0]}`);
+			expect(initialReport).toContain("REQUEST_CHANGES");
+			expect(workerReport).toContain(`run #${stepIds[1]}`);
+			expect(workerReport).toContain("all blockers fixed");
+			expect(reReviewReport).toContain(`run #${stepIds[2]}`);
+			expect(reReviewReport).toContain("VERDICT: REVIEW_PASS");
+			expect(parentReport).toContain(`run #${parentRunId}`);
+			expect(parentReport).toContain("VERDICT: REVIEW_PASS");
 		} finally {
 			for (const controller of controllers) controller.abort();
 			await stub.hooks["session_shutdown"]?.({}, {});
@@ -1089,7 +1124,6 @@ send({ type: "message_end", message: { role: "assistant", content: [{ type: "tex
 		const targetRepo = mkdtempSync(join(tmpdir(), "pi-subagents-chain-target-"));
 		const makeResult = (agent: string, task: string, text: string): any => ({
 			agent,
-			agentSource: "builtin",
 			task,
 			exitCode: 0,
 			messages: [{ role: "assistant", content: [{ type: "text", text }], stopReason: "stop" }],
@@ -1145,7 +1179,6 @@ send({ type: "message_end", message: { role: "assistant", content: [{ type: "tex
 		const repo = mkdtempSync(join(tmpdir(), "pi-subagents-chain-serialized-"));
 		const makeResult = (agent: string, task: string, text: string): any => ({
 			agent,
-			agentSource: "builtin",
 			task,
 			exitCode: 0,
 			messages: [{ role: "assistant", content: [{ type: "text", text }], stopReason: "stop" }],
@@ -1215,7 +1248,6 @@ send({ type: "message_end", message: { role: "assistant", content: [{ type: "tex
 		vi.spyOn(spawn, "runSingleAgentWithModelFallback")
 			.mockResolvedValueOnce({
 				agent: "reviewer",
-				agentSource: "builtin",
 				task: "Review the change",
 				exitCode: 0,
 				messages: [{ role: "assistant", content: [{ type: "text", text: "OLD INITIAL REVIEW\nVERDICT: REVIEW_FAIL" }], stopReason: "stop" }],
@@ -1227,7 +1259,6 @@ send({ type: "message_end", message: { role: "assistant", content: [{ type: "tex
 				return new Promise((resolve) => {
 					const finish = () => resolve({
 						agent: "worker",
-						agentSource: "builtin",
 						task: options.task,
 						exitCode: 1,
 						messages: [{ role: "assistant", content: [{ type: "text", text: "CURRENT FIX PARTIAL" }], stopReason: "aborted" }],
@@ -1378,7 +1409,7 @@ send({ type: "message_end", message: { role: "assistant", content: [{ type: "tex
 			vi.advanceTimersByTime(150);
 			expect(stub.messages).toHaveLength(1);
 			expect(stub.messages[0].message.content).toContain("### [reviewer] completed");
-			expect(monitor.getRuns().find((run) => run.annotation)).toBeUndefined();
+			expect(monitor.getRuns().find((run) => run.activity === "auto-fix chain running")).toBeUndefined();
 		} finally {
 			for (const controller of controllers) controller.abort();
 			await stub.hooks["session_shutdown"]?.({}, {});
@@ -1432,7 +1463,7 @@ send({ type: "message_end", message: { role: "assistant", content: [{ type: "tex
 			// The dispatch layer throws (spawn infra, fs, ...): the crash result must
 			// be delivered as a failure and never fed into the auto-fix gate — a
 			// crashed reviewer's output is not a review verdict, so no chain may
-			// start and no "auto-fix chain running" annotation may appear.
+			// start and no "auto-fix chain running" activity may appear.
 			const spy = vi.spyOn(spawn, "runSingleAgentWithModelFallback").mockRejectedValueOnce(new Error("spawn infra exploded"));
 			await capturedTasks[0](controllers[0].signal);
 			spy.mockRestore();
@@ -1445,7 +1476,7 @@ send({ type: "message_end", message: { role: "assistant", content: [{ type: "tex
 			expect(content).toContain("spawn infra exploded");
 			expect(stub.messages[0].options).toEqual({ deliverAs: "steer", triggerTurn: true });
 			expect(uiNotify).toHaveBeenCalledWith("✗ reviewer dispatch failed: spawn infra exploded", "error");
-			expect(monitor.getRuns().find((run) => run.annotation === "auto-fix chain running")).toBeUndefined();
+			expect(monitor.getRuns().find((run) => run.activity === "auto-fix chain running")).toBeUndefined();
 		} finally {
 			for (const controller of controllers) controller.abort();
 			await stub.hooks["session_shutdown"]?.({}, {});
@@ -1506,7 +1537,7 @@ send({ type: "message_end", message: { role: "assistant", content: [{ type: "tex
 			expect(content).toContain("VERDICT: REVIEW_FAIL");
 			expect(stub.messages[0].options).toEqual({ deliverAs: "steer", triggerTurn: true });
 			expect(uiNotify).toHaveBeenCalledTimes(1);
-			expect(monitor.getRuns().find((run) => run.annotation === "auto-fix chain running")).toBeUndefined();
+			expect(monitor.getRuns().find((run) => run.activity === "auto-fix chain running")).toBeUndefined();
 		} finally {
 			for (const controller of controllers) controller.abort();
 			await stub.hooks["session_shutdown"]?.({}, {});
@@ -1558,7 +1589,6 @@ describe("before_agent_start injection", () => {
 		});
 		const run = vi.spyOn(spawn, "runSingleAgentWithModelFallback").mockResolvedValue({
 			agent: "worker",
-			agentSource: "builtin",
 			task: "safe task",
 			exitCode: 0,
 			messages: [],
@@ -1636,7 +1666,6 @@ describe("vision-flagged dispatch", () => {
 			.spyOn(spawn, "runSingleAgentWithModelFallback")
 			.mockResolvedValue({
 				agent: "reviewer",
-				agentSource: "builtin",
 				task: "Compare screenshots",
 				exitCode: 0,
 				messages: [],

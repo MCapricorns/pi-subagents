@@ -27,7 +27,6 @@ import {
 	type RecoveryRecord,
 } from "./recovery.ts";
 import type { RpcRunControl } from "./rpc-run.ts";
-import { trajectoryStore } from "./trajectory.ts";
 import type { SingleResult } from "./spawn.ts";
 import type { IsolationMode, WorktreeFinalization, WorktreeIsolation } from "./worktree.ts";
 
@@ -118,9 +117,6 @@ export interface SubagentRuntime {
 	sessionDirs: Set<string>;
 	retainSession: (result: Pick<SingleResult, "sessionDir">) => void;
 	retireThreadSession: (thread: SubagentThread) => void;
-	/** Worktree/patch paths intentionally retained after a failed integration. */
-	retainedArtifactPaths: Set<string>;
-	retainWorktreeArtifacts: (finalization: WorktreeFinalization) => void;
 	/** Flip sessionActive off and release all session-scoped resources. */
 	shutdown: () => Promise<void>;
 }
@@ -141,9 +137,11 @@ export function createRuntime(pi: ExtensionAPI, configPath: string): SubagentRun
 			// Computing this at delivery (emit) time — not when the item was
 			// pushed — reflects the current monitor state, since finishing runs
 			// are removed from the monitor before their completion is pushed.
+			// Auto-fix parents are flipped back to "running" while their chain
+			// owns the logical run, so they are included without a special case.
 			const active = monitor
 				.getRuns()
-				.filter((run) => isRunActiveStatus(run.status) || run.retained)
+				.filter((run) => isRunActiveStatus(run.status))
 				.map((run) => ({ id: run.id, agent: run.agent, label: run.label }));
 			const message = {
 				customType: "subagent-result",
@@ -171,11 +169,6 @@ export function createRuntime(pi: ExtensionAPI, configPath: string): SubagentRun
 		threads: new Map<number, SubagentThread>(),
 		preflightOperations: new Set<Promise<void>>(),
 		sessionDirs: new Set<string>(),
-		retainedArtifactPaths: new Set<string>(),
-		retainWorktreeArtifacts: (finalization) => {
-			if (finalization.worktreePath) runtime.retainedArtifactPaths.add(finalization.worktreePath);
-			if (finalization.patchPath) runtime.retainedArtifactPaths.add(finalization.patchPath);
-		},
 		retainSession: (result) => {
 			if (result.sessionDir) runtime.sessionDirs.add(result.sessionDir);
 		},
@@ -241,7 +234,6 @@ export function createRuntime(pi: ExtensionAPI, configPath: string): SubagentRun
 			for (const thread of runtime.threads.values()) {
 				const finalization = await thread.finalizeIsolation(thread.generation).catch(() => undefined);
 				if (finalization?.status === "retained") {
-					runtime.retainWorktreeArtifacts(finalization);
 					recoveryRecords.push(recoveryRecordFromFinalization(thread.id, finalization));
 					if (!thread.isolationFailureNotified) {
 						thread.isolationFailureNotified = true;
@@ -268,12 +260,8 @@ export function createRuntime(pi: ExtensionAPI, configPath: string): SubagentRun
 			}
 			runtime.sessionDirs.clear();
 			runtime.preflightOperations.clear();
-			// Deliberately do not remove retainedArtifactPaths: they are the recovery
-			// path after a failed patch apply/cleanup.
 			runtime.threads.clear();
 			monitor.clear();
-			// Lifecycle trajectories are parent-session scoped.
-			trajectoryStore.clearAll();
 		},
 	};
 

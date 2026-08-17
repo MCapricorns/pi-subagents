@@ -59,20 +59,6 @@ describe("MonitorStore", () => {
 		expect(store.getRuns()[0].status).toBe("parked");
 	});
 
-	it("beginTurn preserves retained runs (auto-fix chain parent)", () => {
-		const store = new MonitorStore();
-		const parent = store.addRun("reviewer", "Review the change");
-		store.setStatus(parent, "done");
-		store.setRetained(parent, true);
-		const active = store.addRun("worker", "Fix the findings");
-		store.setStatus(active, "running");
-		store.beginTurn();
-		const runs = store.getRuns();
-		expect(runs).toHaveLength(2);
-		expect(runs.map((r) => r.id)).toContain(parent);
-		expect(runs.map((r) => r.id)).toContain(active);
-	});
-
 	it("setUsage updates usage and model; setStatus updates status", () => {
 		const store = new MonitorStore();
 		const id = store.addRun("worker", "Implement the change");
@@ -91,28 +77,6 @@ describe("MonitorStore", () => {
 		store.setModel(id, "openai/backup", "anthropic/primary");
 		expect(store.getRuns()[0].model).toBe("openai/backup");
 		expect(store.getRuns()[0].modelFallbackFrom).toBe("anthropic/primary");
-	});
-
-	it("setAnnotation records an orchestration note without touching status", () => {
-		const store = new MonitorStore();
-		const id = store.addRun("reviewer", "Review the change");
-		store.setStatus(id, "done");
-		store.setAnnotation(id, "auto-fix chain running");
-		expect(store.getRuns()[0].annotation).toBe("auto-fix chain running");
-		expect(store.getRuns()[0].status).toBe("done");
-	});
-
-	it("setRetained marks a run so beginTurn keeps it", () => {
-		const store = new MonitorStore();
-		const id = store.addRun("reviewer", "Review the change");
-		store.setStatus(id, "done");
-		store.setRetained(id, true);
-		expect(store.findRun(id)?.retained).toBe(true);
-		store.beginTurn();
-		expect(store.getRuns()).toHaveLength(1);
-		store.setRetained(id, false);
-		store.beginTurn();
-		expect(store.getRuns()).toHaveLength(0);
 	});
 
 	it("clear removes all runs without resetting the id counter", () => {
@@ -135,7 +99,7 @@ describe("MonitorStore", () => {
 		expect(store.removeRun(id)).toBeUndefined();
 	});
 
-	it("addRun carries chain metadata (groupId, relationLabel) and an empty annotation", () => {
+	it("addRun carries chain metadata (groupId and relationLabel)", () => {
 		const store = new MonitorStore();
 		const id = store.addRun("worker", "Fix the findings", undefined, undefined, {
 			groupId: "fix-3",
@@ -144,7 +108,6 @@ describe("MonitorStore", () => {
 		const run = store.findRun(id);
 		expect(run?.groupId).toBe("fix-3");
 		expect(run?.relationLabel).toBe("fix round 1");
-		expect(run?.annotation).toBeUndefined();
 	});
 });
 
@@ -419,19 +382,14 @@ describe("MonitorStore.subscribe", () => {
 });
 
 describe("MonitorStore tool tracking", () => {
-	it("recordToolStart counts tools, marks the tool current, and sets activity", () => {
+	it("recordToolStart updates visible activity", () => {
 		const store = new MonitorStore();
 		const id = store.addRun("worker", "Implement the change");
 		store.setStatus(id, "running");
 		store.recordToolStart(id, "read", "read src/index.ts");
-		const run = store.getRuns()[0];
-		expect(run.toolCount).toBe(1);
-		expect(run.currentTool).toBe("read");
-		expect(run.activity).toBe("read src/index.ts");
-		expect(run.lastActivityAt).toBeTypeOf("number");
+		expect(store.getRuns()[0].activity).toBe("read src/index.ts");
 		store.recordToolStart(id, "bash", "bash npm test");
-		expect(store.getRuns()[0].toolCount).toBe(2);
-		expect(store.getRuns()[0].currentTool).toBe("bash");
+		expect(store.getRuns()[0].activity).toBe("bash npm test");
 	});
 
 	it("sanitizes activity again at the monitor storage boundary", () => {
@@ -443,20 +401,18 @@ describe("MonitorStore tool tracking", () => {
 			"bash curl -H 'Authorization: Bearer DO_NOT_LEAK_TEST_TOKEN' x?token=DO_NOT_LEAK_QUERY \x1b[2K",
 		);
 		const run = store.findRun(id);
-		expect(run?.currentTool).toBe("bash");
 		expect(run?.activity).toContain("Authorization: Bearer <redacted>");
 		expect(run?.activity).not.toContain("DO_NOT_LEAK");
 		expect(run?.activity).not.toContain("\x1b");
 	});
 
-	it("recordToolEnd clears the current tool and notes failures", () => {
+	it("recordToolEnd keeps successful activity and notes failures", () => {
 		const store = new MonitorStore();
 		const id = store.addRun("worker", "Implement the change");
 		store.setStatus(id, "running");
 		store.recordToolStart(id, "bash", "bash npm test");
 		store.recordToolEnd(id, "bash", false);
 		const run = store.getRuns()[0];
-		expect(run.currentTool).toBeUndefined();
 		// A successful end keeps the last activity; a failed end overwrites it.
 		expect(run.activity).toBe("bash npm test");
 		store.recordToolEnd(id, "bash", true);

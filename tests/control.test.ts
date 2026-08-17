@@ -334,7 +334,7 @@ send({ type: "agent_settled" });`,
 		const { stub, subagent, control } = registerWithScript(script);
 		const dispatched = await execute(subagent, { agent: "reviewer", task: "Review the change" });
 		const runId = dispatched.details.results[0].runId;
-		await waitFor(() => monitor.findRun(runId)?.annotation === "auto-fix chain running");
+		await waitFor(() => monitor.findRun(runId)?.activity === "auto-fix chain running");
 		await waitFor(() => commandLog(log).some((entry) => entry.message?.includes("Auto-fix round")));
 
 		const parked = await execute(control, { action: "park", id: runId });
@@ -419,7 +419,6 @@ describe("queued controls and stale generations", () => {
 			if (options.task === "Completed objective") {
 				return {
 					agent: "worker",
-					agentSource: "builtin",
 					task: options.task,
 					exitCode: 0,
 					messages: [{ role: "assistant", content: [{ type: "text", text: "OLD COMPLETED OUTPUT" }], stopReason: "stop" }],
@@ -437,7 +436,6 @@ describe("queued controls and stale generations", () => {
 				});
 				return {
 					agent: "worker",
-					agentSource: "builtin",
 					task: options.task,
 					exitCode: 1,
 					messages: [],
@@ -496,7 +494,6 @@ describe("queued controls and stale generations", () => {
 			})
 			.mockResolvedValueOnce({
 				agent: "worker",
-				agentSource: "builtin",
 				task: "retrying",
 				exitCode: 0,
 				messages: [{ role: "assistant", content: [{ type: "text", text: "resumed" }], stopReason: "stop" }],
@@ -521,7 +518,6 @@ describe("queued controls and stale generations", () => {
 		expect(parkResolved).toBe(false);
 		releaseFirst({
 			agent: "worker",
-			agentSource: "builtin",
 			task: "retrying",
 			exitCode: 0,
 			messages: [],
@@ -556,7 +552,6 @@ describe("queued controls and stale generations", () => {
 		writeFileSync(join(sessionDir, "now_resume-race.jsonl"), "", "utf8");
 		const runSpy = vi.spyOn(spawn, "runSingleAgentWithModelFallback").mockResolvedValue({
 			agent: "worker",
-			agentSource: "builtin",
 			task: "race",
 			exitCode: 0,
 			messages: [{ role: "assistant", content: [{ type: "text", text: "done" }], stopReason: "stop" }],
@@ -601,7 +596,6 @@ describe("queued controls and stale generations", () => {
 				staleLive = options.onLive;
 				return {
 					agent: "worker",
-					agentSource: "builtin",
 					task: "first",
 					exitCode: 0,
 					messages: [{ role: "assistant", content: [{ type: "text", text: "first" }], stopReason: "stop" }],
@@ -613,7 +607,6 @@ describe("queued controls and stale generations", () => {
 			})
 			.mockResolvedValueOnce({
 				agent: "worker",
-				agentSource: "builtin",
 				task: "second",
 				exitCode: 0,
 				messages: [{ role: "assistant", content: [{ type: "text", text: "second" }], stopReason: "stop" }],

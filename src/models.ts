@@ -22,8 +22,6 @@ export interface ModelPickerItem {
 	value: string;
 	label: string;
 	description?: string;
-	/** Visible for diagnosis/search, but cannot be selected. */
-	disabled?: boolean;
 }
 
 export type ModelListEntry = Pick<
@@ -84,14 +82,6 @@ export function availableModelsInScope(ctx: ModelContext): readonly Model<Api>[]
 	if (scopedModels.length === 0) return models;
 	const scopedRefs = new Set(scopedModels.map((entry) => modelRef(entry.model)));
 	return models.filter((model) => scopedRefs.has(modelRef(model)));
-}
-
-/** Model refs usable by setup, with an available current main model first. */
-export function availableModelRefs(ctx: ModelContext): string[] {
-	const refs = [...new Set(availableModelsInScope(ctx).map(modelRef))];
-	const currentRef = currentModelRef(ctx);
-	if (!currentRef || !refs.includes(currentRef)) return refs;
-	return [currentRef, ...refs.filter((ref) => ref !== currentRef)];
 }
 
 /**

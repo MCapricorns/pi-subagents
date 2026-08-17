@@ -60,5 +60,7 @@ Understand the context first, then verify: the fix addresses the root cause, cha
 One of: APPROVE / APPROVE_WITH_NITS / REQUEST_CHANGES, plus a 2-3 sentence rationale.
 End with exactly one machine-readable line: `VERDICT: REVIEW_PASS` for APPROVE or APPROVE_WITH_NITS; `VERDICT: REVIEW_FAIL` for REQUEST_CHANGES.
 
+REQUEST_CHANGES (or review-blocking concern) on this extension automatically starts an auto-fix loop: a worker is briefed with your findings, then you re-review, up to the configured round limit. Choose REVIEW_PASS when nothing objectively blocks the change (style preferences, optional refactors, or items the caller can knowingly accept are not blockers) — do not force a verdict that would trigger another loop just to hedge.
+
 ## Quality standards
 Specific file paths and line numbers. No vague feedback. A clean report means you looked hard, not that you found nothing to say.

@@ -31,11 +31,6 @@ export interface AgentConfig {
 	filePath: string;
 }
 
-export interface AgentDiscoveryResult {
-	agents: AgentConfig[];
-	projectAgentsDir: string | null;
-}
-
 const here = dirname(fileURLToPath(import.meta.url));
 /** <package>/agents — the agents shipped with this extension. */
 export const BUILTIN_AGENTS_DIR = join(here, "..", "agents");
@@ -135,7 +130,7 @@ export interface DiscoverOptions {
  * Discover agents across scopes and apply the enabled-name filter.
  * Override priority for the same name: project > user > builtin.
  */
-export function discoverAgents(cwd: string, options: DiscoverOptions = {}): AgentDiscoveryResult {
+export function discoverAgents(cwd: string, options: DiscoverOptions = {}): { agents: AgentConfig[] } {
 	const scope = options.scope ?? "user";
 	const builtinDir = options.builtinDir ?? BUILTIN_AGENTS_DIR;
 	const projectAgentsDir = findNearestProjectAgentsDir(cwd);
@@ -160,7 +155,7 @@ export function discoverAgents(cwd: string, options: DiscoverOptions = {}): Agen
 		agents = agents.filter((agent) => enabled.has(agent.name));
 	}
 
-	return { agents, projectAgentsDir };
+	return { agents };
 }
 
 /** One-line catalog entry for system-prompt injection and error messages. */

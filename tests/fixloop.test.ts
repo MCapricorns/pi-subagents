@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { buildFixTaskBrief, buildReReviewBrief, formatChainSummary, shouldTriggerFixLoop, summarizeChainResult, type ChainStep } from "../src/fixloop.ts";
+import { buildFixTaskBrief, buildReReviewBrief, formatChainSummary, shouldTriggerFixLoop, type ChainStep } from "../src/fixloop.ts";
 import { DEFAULT_CONFIG, type SubagentsConfig } from "../src/config.ts";
 import type { SingleResult } from "../src/spawn.ts";
 
@@ -10,7 +10,6 @@ function assistant(text: string): any {
 function reviewResult(text: string, overrides: Partial<SingleResult> = {}): SingleResult {
 	return {
 		agent: "reviewer",
-		agentSource: "builtin",
 		task: "Review the change",
 		exitCode: 0,
 		messages: [assistant(text)],
@@ -73,27 +72,6 @@ describe("buildReReviewBrief", () => {
 		expect(brief).toContain("round 1");
 		expect(brief).toContain("file.ts:42 bug");
 		expect(brief).toContain("VERDICT: REVIEW_PASS / REVIEW_FAIL");
-	});
-});
-
-describe("summarizeChainResult", () => {
-	it("reports a passing re-review as pass", () => {
-		expect(summarizeChainResult(reviewResult("APPROVE\nVERDICT: REVIEW_PASS"))).toBe("pass");
-	});
-
-	it("reports a failing review with the fragments of what it found", () => {
-		expect(summarizeChainResult(reviewResult("issues:\n- src/index.ts render()\nVERDICT: REVIEW_FAIL"))).toContain("fail");
-		expect(summarizeChainResult(reviewResult("issues:\n- src/index.ts render()\nVERDICT: REVIEW_FAIL"))).toContain("src/index.ts");
-	});
-
-	it("reports a worker's changed paths", () => {
-		expect(
-			summarizeChainResult(reviewResult("Changed src/index.ts and tests/monitor.test.ts", { agent: "worker" })),
-		).toContain("src/index.ts");
-	});
-
-	it("omits the summary for failed runs", () => {
-		expect(summarizeChainResult(reviewResult("crashed", { exitCode: 1 }))).toBeUndefined();
 	});
 });
 

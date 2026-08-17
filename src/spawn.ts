@@ -19,6 +19,7 @@ import { DEFAULT_THINKING_LEVEL, type ThinkingLevel } from "./config.ts";
 import {
 	currentSubagentDepth,
 	DEPTH_ENV_VAR,
+	emptyUsage,
 	extractToolErrorText,
 	getPiInvocation,
 	RpcRunControl,
@@ -257,7 +258,7 @@ export function buildFallbackResumeReason(fromModel?: string): string {
 
 export interface RunSingleOptions {
 	defaultCwd: string;
-	agent: AgentConfig | undefined;
+	agent: AgentConfig;
 	agentName: string;
 	task: string;
 	cwd?: string;
@@ -282,13 +283,12 @@ function controlledDisposition(options: RunSingleOptions, base?: SingleResult): 
 	if (!control?.isParkRequested() && !control?.isStopRequested()) return undefined;
 	const result: SingleResult = base ?? {
 		agent: options.agentName,
-		agentSource: options.agent?.source ?? "unknown",
 		task: control.getObjective(),
 		exitCode: 0,
 		messages: [],
 		stderr: "",
-		usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, cost: 0, contextTokens: 0, turns: 0 },
-		model: options.agent?.model,
+		usage: emptyUsage(),
+		model: options.agent.model,
 		thinking: options.thinkingLevel,
 		sessionId: options.sessionId,
 		sessionDir: options.sessionDir,
@@ -317,18 +317,6 @@ export async function runSingleAgent(options: RunSingleOptions): Promise<SingleR
 		idleTimeoutMs = SUBAGENT_DEFAULT_IDLE_TIMEOUT_MS,
 		control,
 	} = options;
-	if (!agent) {
-		return {
-			agent: agentName,
-			agentSource: "unknown",
-			task: options.task,
-			exitCode: 1,
-			messages: [],
-			stderr: `Unknown agent: "${agentName}".`,
-			usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, cost: 0, contextTokens: 0, turns: 0 },
-		};
-	}
-
 	const disposition = controlledDisposition(options);
 	if (disposition) return disposition;
 	const objective = control?.getObjective() ?? options.task;
@@ -385,13 +373,12 @@ export async function runSingleAgentWithModelFallback(
 		}
 		return {
 			agent: options.agentName,
-			agentSource: options.agent?.source ?? "unknown",
 			task: options.control?.getObjective() ?? options.task,
 			exitCode: 1,
 			messages: [],
 			stderr: errorMessage,
-			usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, cost: 0, contextTokens: 0, turns: 0 },
-			model: options.agent?.model,
+			usage: emptyUsage(),
+			model: options.agent.model,
 			thinking: options.thinkingLevel,
 			stopReason: "error",
 			errorMessage,
@@ -431,7 +418,7 @@ export async function runSingleAgentWithModelFallback(
 			const delay = startupDelays[attempt];
 			if (delay === undefined) {
 				lastResult.errorMessage = formatStartupRetryExhaustedError(
-					lastResult.model ?? opts.agent?.model ?? "default",
+					lastResult.model ?? opts.agent.model ?? "default",
 					attempt + 1,
 				);
 				lastResult.stopReason ??= "error";
@@ -461,12 +448,10 @@ export async function runSingleAgentWithModelFallback(
 		fallbackRefs.push(ref);
 	}
 
-	const candidates: Array<{ agent: AgentConfig | undefined; ref?: string }> = [
+	const candidates: Array<{ agent: AgentConfig; ref?: string }> = [
 		{ agent, ref: launchedRef?.trim() || undefined },
 	];
-	if (agent) {
-		for (const ref of fallbackRefs) candidates.push({ agent: { ...agent, model: ref }, ref });
-	}
+	for (const ref of fallbackRefs) candidates.push({ agent: { ...agent, model: ref }, ref });
 
 	let modelRetries = 0;
 	let fallbackUsed = false;
@@ -553,5 +538,5 @@ export async function runSingleAgentWithModelFallback(
 		// to the next configured candidate. Ordinary task/tool failures returned above.
 	}
 
-	return finish(result ?? (await dispatchFailure("No model candidate was attempted.")));
+	return finish(result!);
 }

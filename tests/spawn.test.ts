@@ -52,7 +52,6 @@ function assistant(text: string): any {
 function result(overrides: Partial<SingleResult>): SingleResult {
 	return {
 		agent: "worker",
-		agentSource: "builtin",
 		task: "t",
 		exitCode: 0,
 		messages: [],
@@ -821,8 +820,7 @@ describe("runSingleAgentWithModelFallback session resume", () => {
 			expect(result.exitCode).toBe(0);
 			expect(result.model).toBe("deepseek/deepseek-v4-flash");
 			expect(result.modelFallbackFrom).toBe("openai-codex/gpt-5.6-sol");
-			// The fallback attempt resumed the prior session, inheriting its context.
-			expect(result.resumed).toBe(true);
+			// The fallback attempt reused the prior session, inheriting its context.
 			const invocations = readFileSync(log, "utf8")
 				.split("\n")
 				.filter(Boolean)
@@ -880,7 +878,6 @@ describe("runSingleAgentWithModelFallback session resume", () => {
 describe("isTerminalModelError (unit)", () => {
 	const base = (overrides: Partial<SingleResult>): SingleResult => ({
 		agent: "worker",
-		agentSource: "builtin",
 		task: "t",
 		exitCode: 1,
 		messages: [],
@@ -1105,7 +1102,6 @@ process.exit(1);`,
 describe("isRetryableStartupFailure (unit)", () => {
 	const base = (overrides: Partial<SingleResult>): SingleResult => ({
 		agent: "worker",
-		agentSource: "builtin",
 		task: "t",
 		exitCode: 1,
 		messages: [],

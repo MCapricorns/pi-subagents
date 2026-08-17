@@ -23,7 +23,6 @@ function result(
 ): SingleResult {
 	return {
 		agent,
-		agentSource: "builtin",
 		task: "Review the change",
 		exitCode: 0,
 		messages: [{ role: "assistant", content: [{ type: "text", text: output }] } as any],
@@ -114,73 +113,6 @@ describe("createCompletionBatcher", () => {
 		expect(batcher.dispose()).toEqual([]);
 		vi.advanceTimersByTime(1_000);
 		expect(emitted).toEqual([]);
-	});
-
-	it("uses the shorter debounce for a straggler group", () => {
-		useFakeClock();
-		const emitted: string[][] = [];
-		const batcher = createCompletionBatcher<string>({ emit: (items) => emitted.push(items) });
-
-		batcher.push("first");
-		vi.advanceTimersByTime(150);
-		expect(emitted).toEqual([["first"]]);
-
-		vi.advanceTimersByTime(100);
-		batcher.push("straggler-1");
-		vi.advanceTimersByTime(50);
-		batcher.push("straggler-2");
-		vi.advanceTimersByTime(74);
-		expect(emitted).toEqual([["first"]]);
-		vi.advanceTimersByTime(1);
-		expect(emitted).toEqual([["first"], ["straggler-1", "straggler-2"]]);
-		batcher.dispose();
-	});
-
-	it("caps a straggler group at the shorter max-wait", () => {
-		useFakeClock();
-		const emitted: string[][] = [];
-		const batcher = createCompletionBatcher<string>({
-			emit: (items) => emitted.push(items),
-			timings: {
-				debounceMs: 2_000,
-				maxWaitMs: 1_000,
-				stragglerDebounceMs: 2_000,
-				stragglerMaxWaitMs: 400,
-				stragglerWindowMs: 2_000,
-			},
-		});
-
-		batcher.push("first");
-		vi.advanceTimersByTime(1_000);
-		expect(emitted).toEqual([["first"]]);
-
-		batcher.push("straggler");
-		vi.advanceTimersByTime(399);
-		expect(emitted).toEqual([["first"]]);
-		vi.advanceTimersByTime(1);
-		expect(emitted).toEqual([["first"], ["straggler"]]);
-		batcher.dispose();
-	});
-
-	it("treats an item at the exact straggler window edge as a fresh group", () => {
-		useFakeClock();
-		const emitted: string[][] = [];
-		const batcher = createCompletionBatcher<string>({ emit: (items) => emitted.push(items) });
-
-		batcher.push("first");
-		vi.advanceTimersByTime(150);
-		expect(emitted).toEqual([["first"]]);
-
-		// Exactly 2000ms after the emit: not a straggler → normal 150ms debounce.
-		vi.advanceTimersByTime(2_000);
-		batcher.push("fresh");
-		vi.advanceTimersByTime(74);
-		expect(emitted).toEqual([["first"]]);
-		vi.advanceTimersByTime(1);
-		expect(emitted).toEqual([["first"]]); // 75 < 150 → still pending
-		vi.advanceTimersByTime(75);
-		expect(emitted).toEqual([["first"], ["fresh"]]);
-		batcher.dispose();
 	});
 
 	it("handles a push made from inside the emit callback", () => {

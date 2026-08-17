@@ -6,6 +6,7 @@
 
 import type { AgentConfig } from "./agents.ts";
 import { formatTaskSummary } from "./monitor.ts";
+import { emptyUsage } from "./rpc-run.ts";
 import {
 	getResultOutput,
 	isFailedResult,
@@ -15,14 +16,9 @@ import {
 	type UsageStats,
 } from "./spawn.ts";
 
-export function emptyUsage(): UsageStats {
-	return { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, cost: 0, contextTokens: 0, turns: 0 };
-}
-
 export function queuedResult(agent: AgentConfig, task: string, thinking?: string): SingleResult {
 	return {
 		agent: agent.name,
-		agentSource: agent.source,
 		task,
 		exitCode: -1,
 		messages: [],
@@ -36,7 +32,6 @@ export function queuedResult(agent: AgentConfig, task: string, thinking?: string
 export function failedStartResult(agentName: string, task: string, errorMessage: string): SingleResult {
 	return {
 		agent: agentName,
-		agentSource: "unknown",
 		task,
 		exitCode: 1,
 		messages: [],
@@ -61,7 +56,7 @@ export function dispatchFailedResult(agent: AgentConfig, task: string, error: un
 	};
 }
 
-export function formatTokens(count: number): string {
+function formatTokens(count: number): string {
 	if (count >= 1_000_000) return `${(count / 1_000_000).toFixed(1)}M`;
 	if (count >= 1_000) return `${(count / 1_000).toFixed(1)}k`;
 	return String(count);

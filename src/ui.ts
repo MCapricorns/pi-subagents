@@ -45,9 +45,7 @@ export interface PickerStyles {
 	filterEcho: (t: string) => string;
 }
 
-export interface PickerItem extends SelectItem {
-	disabled?: boolean;
-}
+export type PickerItem = SelectItem;
 
 export function pickerItemSearchText(item: PickerItem): string {
 	return `${item.value} ${item.label} ${item.description ?? ""}`;
@@ -118,9 +116,7 @@ export class Picker implements Component, Focusable {
 				const item = visible[i];
 				const isCursor = start + i === this.cursor;
 				const mark = isCursor ? s.cursorMark("❯ ") : "  ";
-				const label = item.disabled
-					? s.dim(item.label)
-					: isCursor ? s.selectedLabel(item.label) : s.label(item.label);
+				const label = isCursor ? s.selectedLabel(item.label) : s.label(item.label);
 				const description = item.description ? s.dim(` — ${item.description}`) : "";
 				const line = this.multi
 					? mark + (this.selected.has(item.value) ? s.checked("[x] ") : s.unchecked("[ ] ")) + label + description
@@ -149,7 +145,7 @@ export class Picker implements Component, Focusable {
 			if (this.multi) this.cb.onConfirm?.([...this.selected]);
 			else {
 				const item = this.filtered[this.cursor];
-				if (item && !item.disabled) this.cb.onSelect?.(item.value);
+				if (item) this.cb.onSelect?.(item.value);
 			}
 			return;
 		} else if (kb.matches(data, "tui.select.cancel")) {

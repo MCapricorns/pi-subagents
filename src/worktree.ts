@@ -238,7 +238,7 @@ export interface WorktreeIsolation {
 	 * attempting to apply the same patch twice. */
 	snapshotCheckpoint(): Promise<WorktreeCheckpoint>;
 	/** Remove a newly-created continuation that failed before it was dispatched. */
-	discard?(): Promise<void>;
+	discard(): Promise<void>;
 	/** Idempotent across stale generations and repeated stop/shutdown paths. */
 	finalize(): Promise<WorktreeFinalization>;
 }

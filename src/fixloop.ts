@@ -87,22 +87,6 @@ export function chainKeyFragments(result: SingleResult): string[] {
 }
 
 /**
- * Compact one-line outcome for a finished chain run, retained so
- * each round reads as what it did: a reviewer reports its verdict plus the
- * key fragments of what it found ("fail · src/index.ts · render()"), a worker
- * the fragments of what it changed. Failed runs and runs with nothing
- * distinctive get no summary.
- */
-export function summarizeChainResult(result: SingleResult): string | undefined {
-	if (isFailedResult(result)) return undefined;
-	const verdict = result.agent === "reviewer" ? reviewVerdict(getResultOutput(result)) : undefined;
-	if (verdict === "pass") return "pass";
-	const fragments = chainKeyFragments(result);
-	if (verdict === "fail") return fragments.length > 0 ? `fail · ${fragments.join(" · ")}` : "fail";
-	return fragments.length > 0 ? fragments.join(" · ") : undefined;
-}
-
-/**
  * Condensed, readable summary of a completed auto-fix chain: one line per step
  * (run id, role, verdict / what changed) plus aggregate usage. Full per-step
  * reports stay addressable via `subagent_status <id>`; the caller appends the
