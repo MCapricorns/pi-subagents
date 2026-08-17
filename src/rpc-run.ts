@@ -96,15 +96,6 @@ export type SubagentLiveEvent =
 	| { kind: "thinking" }
 	| { kind: "text" };
 
-/** Carries the actual streamed payload (dropped by the plain text/thinking
- * live events). Emitted in addition to the aliveness events so monitor
- * observers stay unchanged while the inspector can apply its rolling budget
- * without silently losing part of a transport delta. */
-export interface SubagentRecordEvent {
-	kind: "thinking" | "text";
-	delta: string;
-}
-
 export type RpcControlPhase =
 	| "queued"
 	| "starting"
@@ -413,15 +404,13 @@ export interface RunRpcAttemptOptions {
 	prompt: string;
 	signal?: AbortSignal;
 	onLive?: (event: SubagentLiveEvent) => void;
-	/** Receives the raw streamed deltas; observer errors are swallowed. */
-	onRecord?: (event: SubagentRecordEvent) => void;
 	env?: NodeJS.ProcessEnv;
 	control?: RpcRunControl;
 }
 
 /** Run one persistent RPC child until a stable `agent_settled` or control action. */
 export async function runRpcAgentAttempt(options: RunRpcAttemptOptions): Promise<RpcSingleResult> {
-	const { agent, agentName, task, thinkingLevel, idleTimeoutMs, signal, onLive, onRecord, control } = options;
+	const { agent, agentName, task, thinkingLevel, idleTimeoutMs, signal, onLive, control } = options;
 	const args: string[] = ["--mode", "rpc", "--exclude-tools", "subagent,subagent_control"];
 	if (options.sessionDir && options.sessionId) {
 		args.push("--session-dir", options.sessionDir);
@@ -503,14 +492,6 @@ export async function runRpcAgentAttempt(options: RunRpcAttemptOptions): Promise
 			onLive?.(event);
 		} catch {
 			/* live observers must never break protocol handling */
-		}
-	};
-
-	const emitRecord = (event: SubagentRecordEvent): void => {
-		try {
-			onRecord?.(event);
-		} catch {
-			/* record observers must never break protocol handling */
 		}
 	};
 
@@ -806,12 +787,6 @@ export async function runRpcAgentAttempt(options: RunRpcAttemptOptions): Promise
 			const type = event.assistantMessageEvent?.type;
 			if (type === "thinking_delta" || type === "text_delta") {
 				emit({ kind: type === "thinking_delta" ? "thinking" : "text" });
-				const delta = event.assistantMessageEvent?.delta;
-				if (typeof delta === "string" && delta) {
-					// TranscriptBuffer owns the complete rolling-budget decision. Truncating
-					// one RPC delta here would silently lose text without setting its flag.
-					emitRecord({ kind: type === "thinking_delta" ? "thinking" : "text", delta });
-				}
 			}
 		}
 

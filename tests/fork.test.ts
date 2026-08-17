@@ -6,13 +6,19 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { BackgroundTaskQueue, type BackgroundTask } from "../src/background.ts";
 import { FORK_CONTINUATION_PROMPT } from "../src/dispatch.ts";
 import register from "../src/index.ts";
-import { buildInspectorSnapshot } from "../src/inspector.ts";
 import { monitor } from "../src/monitor.ts";
 import { findRetainedSessionFile, forkRetainedSession } from "../src/session-fork.ts";
 import * as spawnModule from "../src/spawn.ts";
-import { inspectorStore } from "../src/trajectory.ts";
+import { trajectoryStore } from "../src/trajectory.ts";
 import * as worktreeModule from "../src/worktree.ts";
 import type { WorktreeIsolation } from "../src/worktree.ts";
+
+function settledStatus(runId: number): string | undefined {
+	const event = [...trajectoryStore.get(runId).trajectory.getEvents()]
+		.reverse()
+		.find((candidate) => candidate.kind === "settled");
+	return event?.kind === "settled" ? event.status : undefined;
+}
 
 function assistant(text: string): any {
 	return {
@@ -222,7 +228,7 @@ afterEach(async () => {
 	for (const stub of activeStubs) await stub.hooks["session_shutdown"]?.({}, {});
 	vi.restoreAllMocks();
 	monitor.clear();
-	inspectorStore.clearAll();
+	trajectoryStore.clearAll();
 	rmSync(agentDir, { recursive: true, force: true });
 	if (savedDepth === undefined) delete process.env.PI_SUBAGENT_DEPTH;
 	else process.env.PI_SUBAGENT_DEPTH = savedDepth;
@@ -329,7 +335,7 @@ describe("subagent_control fork", () => {
 		const dispatched = await execute(subagent, { agent: "worker", task: "source task" }, cwd);
 		const sourceRunId = dispatched.details.results[0].runId;
 		await queued[0].task(queued[0].controller.signal);
-		expect(buildInspectorSnapshot({ runtime: { threads: new Map() }, selectedId: sourceRunId }).detail?.status).toBe("done");
+		expect(settledStatus(sourceRunId)).toBe("done");
 
 		const forked = await execute(control, {
 			action: "fork",
@@ -347,11 +353,11 @@ describe("subagent_control fork", () => {
 		});
 		expect(readFileSync(source.file)).toEqual(sourceBytes);
 		expect(queued).toHaveLength(2);
-		expect(inspectorStore.get(childRunId).generation).toBe(1);
-		expect(inspectorStore.get(sourceRunId).trajectory.getEvents()).toContainEqual(
+		expect(trajectoryStore.get(childRunId).generation).toBe(1);
+		expect(trajectoryStore.get(sourceRunId).trajectory.getEvents()).toContainEqual(
 			expect.objectContaining({ kind: "fork", sourceRunId, childRunId, objective: "independent objective" }),
 		);
-		expect(inspectorStore.get(childRunId).trajectory.getEvents()).toContainEqual(
+		expect(trajectoryStore.get(childRunId).trajectory.getEvents()).toContainEqual(
 			expect.objectContaining({ kind: "fork", sourceRunId, childRunId, objective: "independent objective" }),
 		);
 
@@ -442,12 +448,12 @@ describe("subagent_control fork", () => {
 		const dispatched = await execute(subagent, { agent: "worker", task: "failed task" }, cwd);
 		const sourceRunId = dispatched.details.results[0].runId;
 		await queued[0].task(queued[0].controller.signal);
-		expect(buildInspectorSnapshot({ runtime: { threads: new Map() }, selectedId: sourceRunId }).detail?.status).toBe("failed");
+		expect(settledStatus(sourceRunId)).toBe("failed");
 
 		const forked = await execute(control, { action: "fork", id: sourceRunId }, cwd);
 		expect(forked.isError).not.toBe(true);
 		expect(forked.details.childRunId).not.toBe(sourceRunId);
-		expect(buildInspectorSnapshot({ runtime: { threads: new Map() }, selectedId: sourceRunId }).detail?.status).toBe("failed");
+		expect(settledStatus(sourceRunId)).toBe("failed");
 	});
 
 	it("rejects queued/active sources and blank objectives, but forks settled worktrees", async () => {
@@ -539,7 +545,7 @@ describe("subagent_control fork", () => {
 		}, cwd);
 		expect(resumed.content[0].text).toContain(`Resumed run #${childRunId}`);
 		expect(monitor.findRun(childRunId)?.id).toBe(childRunId);
-		expect(inspectorStore.get(childRunId).generation).toBe(2);
+		expect(trajectoryStore.get(childRunId).generation).toBe(2);
 		const retainedFile = await findRetainedSessionFile(cwd, childSessionDir, childSessionId);
 		expect(existsSync(retainedFile)).toBe(true);
 

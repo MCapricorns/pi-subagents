@@ -1,34 +1,11 @@
 /**
- * Append-only inspector backing stores for sub-agent threads.
+ * Append-only lifecycle trajectories for logical sub-agent threads.
  *
- * Two structures, both owned by a single thread record ({@link TrajectoryLog} or
- * {@link InspectRunState}):
- *
- * - {@link TrajectoryLog} — a typed, append-only event log covering
- *   orchestration (dispatch, model-candidate switches, retries, control actions
- *   steer/retarget/park/resume/stop) and live child activity (status transitions,
- *   tool starts/ends, usage). Events keep their generation and source timestamps
- *   forever: resume/restart clears the mutable summary fields but NEVER the
- *   event history, so the inspector can show the full story of a thread across
- *   generations. Fork and worktree events carry typed relationship/lifecycle
- *   payloads so retained source/child state remains inspectable.
- *
- * - {@link TranscriptBuffer} — a bounded rolling window of streamed assistant
- *   text/thinking for the CURRENT generation, dropped on restart and cleared on
- *   parent-session teardown. Render-performance aid only; it trends toward
- *   dropping old output while the trajectory log is the durable record.
- *
- * Aliveness back-compat: the widget's "thinking"/"responding" activity comes from
- * forwarded {@link SubagentLiveEvent}s, which carry no delta payload. The
- * trajectory needs the delta text itself. Rather than widening the live event
- * union (which would silently drop interpreter results from widget consumers),
- * the monitor fan-out handler extracts the delta text alongside forwarding and
- * appends it here — additive, zero churn for the widget path.
- *
- * Secret hygiene: tool arguments are summarized verbatim by key, but obvious
- * credential-bearing fields (token/password/authorization/apiKey/secret/...)
- * are redacted, and values are truncated to a compact length. Arbitrary deep
- * payloads never enter the transcript or the trajectory.
+ * Events cover dispatch, model candidates, retries, controls, tool activity,
+ * usage, worktrees, forks, and settlement. Each event keeps its generation and
+ * timestamp across resume/restart; mutable summary fields reset per generation.
+ * Tool arguments are reduced to a short terminal-safe summary with obvious
+ * credential fields and embedded secrets redacted.
  */
 
 import { stripVTControlCharacters } from "node:util";
@@ -154,75 +131,6 @@ export function summarizeToolArgs(args: unknown): string {
 function truncateSummary(text: string): string {
 	const chars = [...text];
 	return chars.length > TOOL_ARG_SUMMARY_MAX ? `${chars.slice(0, TOOL_ARG_SUMMARY_MAX - 1).join("")}…` : text;
-}
-
-// ---------------------------------------------------------------------------
-// Bounded transcript buffer (per-generation streaming output)
-// ---------------------------------------------------------------------------
-
-export interface TranscriptBudget {
-	/** Max Unicode code points kept per section (not UTF-16 units/display cells). */
-	maxTextChars: number;
-	maxThinkingChars: number;
-}
-
-export const DEFAULT_TRANSCRIPT_BUDGET: TranscriptBudget = {
-	maxTextChars: 8_000,
-	maxThinkingChars: 2_000,
-};
-
-export class TranscriptBuffer {
-	private text = "";
-	private thinking = "";
-	private textDropped = 0;
-	private thinkingDropped = 0;
-
-	constructor(private readonly budget: TranscriptBudget = DEFAULT_TRANSCRIPT_BUDGET) {}
-
-	appendText(delta: string): void {
-		if (!delta) return;
-		const next = cap(
-			(this.text + stripVTControlCharacters(delta)).replace(/\r\n?/g, "\n"),
-			this.budget.maxTextChars,
-		);
-		this.text = next.value;
-		this.textDropped += next.dropped;
-	}
-
-	appendThinking(delta: string): void {
-		if (!delta) return;
-		const next = cap(
-			(this.thinking + stripVTControlCharacters(delta)).replace(/\r\n?/g, "\n"),
-			this.budget.maxThinkingChars,
-		);
-		this.thinking = next.value;
-		this.thinkingDropped += next.dropped;
-	}
-
-	/** Current-generation streams; structured so the renderer can flow-wrap. */
-	snapshot(): { text: string; textTruncated: boolean; thinking: string; thinkingTruncated: boolean } {
-		return {
-			text: this.text,
-			textTruncated: this.textDropped > 0,
-			thinking: this.thinking,
-			thinkingTruncated: this.thinkingDropped > 0,
-		};
-	}
-
-	clear(): void {
-		this.text = "";
-		this.thinking = "";
-		this.textDropped = 0;
-		this.thinkingDropped = 0;
-	}
-}
-
-function cap(value: string, max: number): { value: string; dropped: number } {
-	const points = [...value];
-	const limit = Math.max(0, max);
-	if (points.length <= limit) return { value, dropped: 0 };
-	const dropped = points.length - limit;
-	return { value: points.slice(dropped).join(""), dropped };
 }
 
 // ---------------------------------------------------------------------------
@@ -370,134 +278,35 @@ export class TrajectoryLog {
 	}
 }
 
-// ---------------------------------------------------------------------------
-// Inspector run-state projection (trajectory + transcript + retained run info)
-// ---------------------------------------------------------------------------
-
-/**
- * Per-thread projection the inspector reads: live trajectory + bounded
- * transcript + retained snapshot for completed/failed/parked threads so the
- * detail pane survives monitor-row removal. Render code must treat this as
- * read-only.
- */
-export class InspectRunState {
+export class ThreadTrajectoryState {
 	readonly trajectory: TrajectoryLog;
-	readonly transcript = new TranscriptBuffer();
 
-	agent = "";
-	task = "";
-	label = "";
-	model?: string;
-	thinking?: string;
-	status = "queued";
-	startedAt?: number;
-	endedAt?: number;
-
-	/** Present for the monitor-row lifetime and beyond (via retained snapshot). */
-	runInfo?: {
-		usage?: UsageStats;
-		toolCount?: number;
-		activity?: string;
-		currentTool?: string;
-	};
-
-	constructor(
-		readonly runId: number,
-		notify: () => void,
-	) {
-		this.trajectory = new TrajectoryLog(runId, notify);
+	constructor(readonly runId: number) {
+		this.trajectory = new TrajectoryLog(runId, () => {});
 	}
 
 	get generation(): number {
 		return this.trajectory.generation;
 	}
-
-	/** Preserve run metadata before the monitor row goes away (beginTurn sweep,
-	 * finishRun removal). Only fillsAnnounce fields; the inspector's detail pane
-	 * stays truthful even for finished, swept threads. */
-	retainFrom(run: {
-		agent: string;
-		task: string;
-		label?: string;
-		model?: string;
-		thinking?: string;
-		status: string;
-		startedAt?: number;
-		endedAt?: number;
-		usage?: UsageStats;
-		toolCount?: number;
-		activity?: string;
-		currentTool?: string;
-	}): void {
-		this.agent = run.agent;
-		this.task = run.task;
-		this.label = run.label ?? "";
-		this.model = run.model ?? this.model;
-		this.thinking = run.thinking ?? this.thinking;
-		this.status = run.status;
-		this.startedAt = run.startedAt;
-		this.endedAt = run.endedAt;
-		this.runInfo = {
-			usage: run.usage,
-			toolCount: run.toolCount,
-			activity: run.activity,
-			currentTool: run.currentTool,
-		};
-	}
 }
 
-/**
- * Registry of inspector projections for the parent session. Survives monitor
- * row removal so completed/failed/parked threads stay inspectable.
- */
-export class InspectorStore {
-	private readonly states = new Map<number, InspectRunState>();
-	private readonly listeners = new Set<() => void>();
+/** Session-scoped registry of logical-thread trajectories. */
+export class TrajectoryStore {
+	private readonly states = new Map<number, ThreadTrajectoryState>();
 
-	/** Get (creating on demand) the projection for a thread id. */
-	get(runId: number): InspectRunState {
+	get(runId: number): ThreadTrajectoryState {
 		let state = this.states.get(runId);
 		if (!state) {
-			state = new InspectRunState(runId, () => this.emit());
+			state = new ThreadTrajectoryState(runId);
 			this.states.set(runId, state);
 		}
 		return state;
 	}
 
-	find(runId: number): InspectRunState | undefined {
-		return this.states.get(runId);
-	}
-
-	all(): InspectRunState[] {
-		return [...this.states.values()].sort((a, b) => a.runId - b.runId);
-	}
-
-	subscribe(listener: () => void): () => void {
-		this.listeners.add(listener);
-		return () => {
-			this.listeners.delete(listener);
-		};
-	}
-
-	private emit(): void {
-		for (const listener of this.listeners) {
-			try {
-				listener();
-			} catch {
-				/* subscriber errors must not break the store */
-			}
-		}
-	}
-
-	/** Parent-session teardown only: drop every projection and its history. */
 	clearAll(): void {
-		for (const state of this.states.values()) {
-			state.trajectory.clearAll();
-			state.transcript.clear();
-		}
+		for (const state of this.states.values()) state.trajectory.clearAll();
 		this.states.clear();
-		this.emit();
 	}
 }
 
-export const inspectorStore = new InspectorStore();
+export const trajectoryStore = new TrajectoryStore();

@@ -27,7 +27,6 @@ import {
 	SUBAGENT_KILL_GRACE_MS,
 	type RpcSingleResult,
 	type SubagentLiveEvent,
-	type SubagentRecordEvent,
 	type UsageStats,
 } from "./rpc-run.ts";
 
@@ -40,7 +39,7 @@ export {
 	sessionExists,
 	SUBAGENT_KILL_GRACE_MS,
 };
-export type { SubagentLiveEvent, SubagentRecordEvent, UsageStats };
+export type { SubagentLiveEvent, UsageStats };
 
 export const SUBAGENT_THINKING_LEVEL: ThinkingLevel = DEFAULT_THINKING_LEVEL;
 /** 0 disables the watchdog; dispatch supplies the configured timeout. */
@@ -272,9 +271,6 @@ export interface RunSingleOptions {
 	stdinText?: string;
 	signal?: AbortSignal;
 	onLive?: (event: SubagentLiveEvent) => void;
-	/** Receives the raw streamed text/thinking deltas for the inspector
-	 * transcript; forwarded to the transport alongside onLive. */
-	onRecord?: (event: SubagentRecordEvent) => void;
 	makeDetails: (results: SingleResult[]) => SubagentDetails;
 	env?: NodeJS.ProcessEnv;
 	/** Stable logical-generation controller shared across retry attempts. */
@@ -355,7 +351,6 @@ export async function runSingleAgent(options: RunSingleOptions): Promise<SingleR
 		prompt,
 		signal: options.signal,
 		onLive: options.onLive,
-		onRecord: options.onRecord,
 		env: options.env,
 		control,
 	});

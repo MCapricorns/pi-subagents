@@ -10,7 +10,7 @@ import register from "../src/index.ts";
 import { monitor } from "../src/monitor.ts";
 import { readRecoveryRecords } from "../src/recovery.ts";
 import * as spawnModule from "../src/spawn.ts";
-import { inspectorStore } from "../src/trajectory.ts";
+import { trajectoryStore } from "../src/trajectory.ts";
 import * as worktreeModule from "../src/worktree.ts";
 import type { WorktreeFinalization, WorktreeIsolation } from "../src/worktree.ts";
 
@@ -162,7 +162,7 @@ afterEach(async () => {
 	for (const stub of activeStubs) await stub.hooks["session_shutdown"]?.({}, {});
 	vi.restoreAllMocks();
 	monitor.clear();
-	inspectorStore.clearAll();
+	trajectoryStore.clearAll();
 	rmSync(agentDir, { recursive: true, force: true });
 	if (savedDepth === undefined) delete process.env.PI_SUBAGENT_DEPTH;
 	else process.env.PI_SUBAGENT_DEPTH = savedDepth;
@@ -707,7 +707,7 @@ describe("logical worktree reuse and guarded finalization", () => {
 		expect(text).toContain("Integration error: patch does not apply");
 		expect(text).not.toContain("diff --git");
 		expect(stub.messages[0].message.content).toContain("recovery artifacts retained");
-		const worktreeEvent = inspectorStore.get(runId).trajectory.getEvents().find((event) => event.kind === "worktree" && event.status === "retained");
+		const worktreeEvent = trajectoryStore.get(runId).trajectory.getEvents().find((event) => event.kind === "worktree" && event.status === "retained");
 		expect(worktreeEvent).toMatchObject({ patchPath: retainedResult.patchPath, error: retainedResult.error });
 		rmSync(root, { recursive: true, force: true });
 	});

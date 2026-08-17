@@ -21,7 +21,7 @@ import {
 } from "./monitor.ts";
 import type { SubagentRuntime, SubagentThread } from "./runtime.ts";
 import { getResultOutput, isFailedResult, type SingleResult } from "./spawn.ts";
-import { inspectorStore } from "./trajectory.ts";
+import { trajectoryStore } from "./trajectory.ts";
 
 /** In-turn result lookup. Dispatch already ended the turn and results arrive as
  * wake-up messages, so the default must NOT block: a settled run returns its
@@ -46,7 +46,7 @@ export function registerLookupTools(pi: ExtensionAPI, runtime: SubagentRuntime):
 		action: StringEnum(["steer", "retarget", "park", "resume", "fork"] as const, {
 			description: "Control operation for the logical sub-agent thread.",
 		}),
-		id: Type.Integer({ minimum: 1, description: "Stable run id shown in the subagent widget/status output." }),
+		id: Type.Integer({ minimum: 1, description: "Stable run id shown by subagent dispatch/status output." }),
 		instruction: Type.Optional(
 			Type.String({ description: "Instruction queued by steer after the current child tool batch." }),
 		),
@@ -97,7 +97,7 @@ export function registerLookupTools(pi: ExtensionAPI, runtime: SubagentRuntime):
 							return { content: [{ type: "text", text: `Run #${thread.id} is ${thread.control.getPhase()}; only a running thread can be steered.` }], details: {} };
 						}
 						await thread.control.steer(instruction);
-						inspectorStore.get(thread.id).trajectory.append({ kind: "steer", instruction });
+						trajectoryStore.get(thread.id).trajectory.append({ kind: "steer", instruction });
 						return { content: [{ type: "text", text: `Queued steering instruction for run #${thread.id} after its current tool batch.` }], details: {} };
 					}
 					case "retarget": {
@@ -110,7 +110,7 @@ export function registerLookupTools(pi: ExtensionAPI, runtime: SubagentRuntime):
 							thread.task = objective;
 							thread.control.retargetPending(objective);
 							monitor.setTask(thread.id, objective);
-							inspectorStore.get(thread.id).trajectory.append({ kind: "retarget", objective });
+							trajectoryStore.get(thread.id).trajectory.append({ kind: "retarget", objective });
 							return { content: [{ type: "text", text: `Updated queued run #${thread.id} to the new objective; no child was spawned by this control action.` }], details: {} };
 						}
 						if (!(["starting", "running", "steering", "interrupting", "retrying"] as const).includes(phase as any)) {
@@ -119,7 +119,7 @@ export function registerLookupTools(pi: ExtensionAPI, runtime: SubagentRuntime):
 						thread.task = objective;
 						monitor.setTask(thread.id, objective);
 						await thread.control.retarget(objective);
-						inspectorStore.get(thread.id).trajectory.append({ kind: "retarget", objective });
+						trajectoryStore.get(thread.id).trajectory.append({ kind: "retarget", objective });
 						return { content: [{ type: "text", text: `Retargeted run #${thread.id} in the same session; the aborted objective will not be delivered as a completion.` }], details: {} };
 					}
 					case "park": {
@@ -189,7 +189,7 @@ export function registerLookupTools(pi: ExtensionAPI, runtime: SubagentRuntime):
 	const SubagentWaitParams = Type.Object({
 		id: Type.Optional(
 			Type.String({
-				description: "Run id or prefix shown in the subagent widget (#id). Omit to wait for all active runs in this session.",
+				description: "Run id or prefix shown by subagent dispatch/status output. Omit to wait for all active runs in this session.",
 			}),
 		),
 		timeoutMs: Type.Optional(
@@ -210,7 +210,7 @@ export function registerLookupTools(pi: ExtensionAPI, runtime: SubagentRuntime):
 			"NEVER sleep, poll, or wait with bash to get a sub-agent result: end the turn, or call this tool.",
 			"The same result is also delivered as a completion message that resumes the main agent, so you may see it twice (once here, once as a wake-up) — that is expected, not a duplicate.",
 		].join(" "),
-		promptSnippet: "Look up a background subagent result in-turn (id: run id from the widget; omit for all). Non-blocking by default; pass timeoutMs to block.",
+		promptSnippet: "Look up a background subagent result in-turn (id: run id from dispatch/status output; omit for all). Non-blocking by default; pass timeoutMs to block.",
 		promptGuidelines: [
 			"Do NOT call subagent_wait to hold the turn: results arrive as wake-up messages automatically. The default call is a non-blocking lookup — settled results return immediately, active runs return a note telling you to end your turn.",
 			"Pass an explicit timeoutMs only when you must keep the turn AND the next step depends on the result right now — e.g. the user asked you to wait for it.",
@@ -372,7 +372,7 @@ export function registerLookupTools(pi: ExtensionAPI, runtime: SubagentRuntime):
 		].join(" "),
 		promptSnippet: "Inspect background subagents: active runs, finished results, full result by id.",
 		promptGuidelines: [
-			"Call subagent_status to see what is running and what already finished; the widget shows the same live state.",
+			"Call subagent_status to see what is running and what already finished.",
 			"Never poll subagent_status in a loop to wait for a run: end the turn (you will be woken) or call subagent_wait.",
 			"A finished run's id stays available for the session; its full result is one subagent_status call away.",
 		],
@@ -495,7 +495,7 @@ export function registerLookupTools(pi: ExtensionAPI, runtime: SubagentRuntime):
 	const SubagentStopParams = Type.Object({
 		id: Type.Optional(
 			Type.String({
-				description: "Run id or prefix to stop (see the widget or subagent_status).",
+				description: "Run id or prefix to stop (see subagent dispatch output or subagent_status).",
 			}),
 		),
 		all: Type.Optional(Type.Boolean({ description: "Stop every active run (default false)." })),
@@ -508,7 +508,7 @@ export function registerLookupTools(pi: ExtensionAPI, runtime: SubagentRuntime):
 			"Destructively stop a sub-agent thread: terminate active work, deliver its aborted partial result, and retire any retained session so it cannot be resumed.",
 			"Pass id (run id or prefix) to stop one active, parked, or completed thread; all: true stops every active run.",
 		].join(" "),
-		promptSnippet: "Stop a running background subagent (id from the widget/subagent_status; or all: true).",
+		promptSnippet: "Stop a running background subagent (id from dispatch output/subagent_status; or all: true).",
 		promptGuidelines: [
 			"Stop a run when its task is obsolete, stuck, or superseded — do not leave it burning tokens.",
 			"A stopped run reports as failed with 'aborted' and its partial output, so the next step knows it did not complete.",
@@ -673,12 +673,12 @@ export function registerLookupTools(pi: ExtensionAPI, runtime: SubagentRuntime):
 				}
 				monitor.setStatus(runId, "failed");
 				if (stoppedResult) {
-					const inspectState = inspectorStore.get(runId);
-					const alreadyStampedStopped = inspectState.trajectory.getGenerationEvents().some(
+					const trajectoryState = trajectoryStore.get(runId);
+					const alreadyStampedStopped = trajectoryState.trajectory.getGenerationEvents().some(
 						(event) => event.kind === "settled" && event.status === "stopped",
 					);
 					if (!alreadyStampedStopped) {
-						inspectState.trajectory.append({
+						trajectoryState.trajectory.append({
 							kind: "settled",
 							status: "stopped",
 							model: stoppedResult.model ?? run?.model,
@@ -688,24 +688,6 @@ export function registerLookupTools(pi: ExtensionAPI, runtime: SubagentRuntime):
 								: {}),
 						});
 					}
-					const stoppedRun = monitor.findRun(runId);
-					inspectState.retainFrom(stoppedRun
-						? {
-							...stoppedRun,
-							agent: stoppedResult.agent,
-							task: stoppedResult.task,
-							model: stoppedResult.model ?? stoppedRun.model,
-							usage: stoppedResult.usage,
-						}
-						: {
-							agent: stoppedResult.agent,
-							task: stoppedResult.task,
-							model: stoppedResult.model,
-							thinking: stoppedResult.thinking,
-							status: "failed",
-							endedAt: inspectState.trajectory.summary().endedAt,
-							usage: stoppedResult.usage,
-						});
 					completionResults.push(stoppedResult);
 				}
 				monitor.removeRun(runId);

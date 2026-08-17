@@ -87,7 +87,7 @@ export function chainKeyFragments(result: SingleResult): string[] {
 }
 
 /**
- * Compact one-line outcome for a finished chain run, shown in the widget so
+ * Compact one-line outcome for a finished chain run, retained so
  * each round reads as what it did: a reviewer reports its verdict plus the
  * key fragments of what it found ("fail · src/index.ts · render()"), a worker
  * the fragments of what it changed. Failed runs and runs with nothing

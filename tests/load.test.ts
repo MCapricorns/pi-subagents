@@ -5,6 +5,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { BackgroundTaskQueue, type BackgroundTask } from "../src/background.ts";
 import register, { matchRunIds } from "../src/index.ts";
 import { monitor } from "../src/monitor.ts";
+import { persistRecoveryRecords } from "../src/recovery.ts";
 import * as spawn from "../src/spawn.ts";
 import { fakeRpcScript } from "./fake-rpc.ts";
 
@@ -13,7 +14,6 @@ interface StubPi {
 	commands: string[];
 	hooks: Record<string, (event: any, ctx: any) => any>;
 	messages: Array<{ message: any; options: any }>;
-	setWidget: ReturnType<typeof vi.fn>;
 	api: any;
 }
 
@@ -23,7 +23,6 @@ function makeStub(): StubPi {
 		commands: [],
 		hooks: {},
 		messages: [],
-		setWidget: vi.fn(),
 		api: null,
 	};
 	stub.api = {
@@ -47,6 +46,14 @@ function executionContext(overrides: { uiNotify?: ReturnType<typeof vi.fn> } = {
 		modelRegistry: { getAvailable: () => [] },
 		ui: { notify: overrides.uiNotify ?? vi.fn() },
 	};
+}
+
+function renderToolResult(tool: any, result: any): string {
+	const theme = {
+		fg: (_color: string, text: string) => text,
+		bold: (text: string) => text,
+	};
+	return tool.renderResult(result, {}, theme).render(240).join("\n");
 }
 
 let savedDepth: string | undefined;
@@ -85,7 +92,7 @@ describe("extension registration", () => {
 		expect(stub.tools.map((t) => t.name)).toContain("subagent");
 		expect(stub.tools.map((t) => t.name)).toContain("subagent_control");
 		expect(stub.commands).toContain("subagents-setup");
-		expect(stub.commands).toContain("subagents-inspect");
+		expect(stub.commands).not.toContain("subagents-inspect");
 		expect(typeof stub.hooks["before_agent_start"]).toBe("function");
 
 		const tool = stub.tools.find((t) => t.name === "subagent");
@@ -98,6 +105,62 @@ describe("extension registration", () => {
 		const control = stub.tools.find((t) => t.name === "subagent_control");
 		expect(control.description).toContain("fork copies");
 		expect(JSON.stringify(control.parameters.properties.action)).toContain("fork");
+	});
+
+	it("wires recovery and one-time feature notices through session_start", async () => {
+		if (!testAgentDir) throw new Error("test agent directory was not initialized");
+		const configPath = join(testAgentDir, "pi-subagents.json");
+		const patchPath = join(testAgentDir, "retained.patch");
+		writeFileSync(configPath, JSON.stringify({ announcedFeatures: [] }), "utf8");
+		writeFileSync(patchPath, "patch", "utf8");
+		await persistRecoveryRecords(configPath, [{
+			runId: 41,
+			createdAt: 1,
+			integrated: false,
+			patchPath,
+			error: "integration conflict",
+		}]);
+
+		const stub = makeStub();
+		register(stub.api);
+		const notify = vi.fn();
+		const context = { mode: "tui", hasUI: true, ui: { notify } };
+		expect(typeof stub.hooks["session_start"]).toBe("function");
+		await stub.hooks["session_start"]({}, context);
+
+		expect(notify).toHaveBeenCalledWith(expect.stringContaining("recovery for run #41"), "error");
+		expect(notify).toHaveBeenCalledWith(expect.stringContaining("vision-capable model"), "info");
+		expect(JSON.parse(readFileSync(configPath, "utf8")).announcedFeatures).toContain("visionModel");
+
+		// Recovery remains visible while its artifact exists, but the feature marker
+		// prevents a repeated informational notice on later session starts.
+		notify.mockClear();
+		await stub.hooks["session_start"]({}, context);
+		expect(notify).toHaveBeenCalledWith(expect.stringContaining("recovery for run #41"), "error");
+		expect(notify.mock.calls.some((call) => call[1] === "info")).toBe(false);
+	});
+
+	it("runs recovery but skips feature notices outside TUI mode", async () => {
+		if (!testAgentDir) throw new Error("test agent directory was not initialized");
+		const configPath = join(testAgentDir, "pi-subagents.json");
+		const patchPath = join(testAgentDir, "non-tui-retained.patch");
+		writeFileSync(configPath, JSON.stringify({ announcedFeatures: [] }), "utf8");
+		writeFileSync(patchPath, "patch", "utf8");
+		await persistRecoveryRecords(configPath, [{
+			runId: 42,
+			createdAt: 1,
+			integrated: false,
+			patchPath,
+		}]);
+
+		const stub = makeStub();
+		register(stub.api);
+		const notify = vi.fn();
+		await stub.hooks["session_start"]({}, { mode: "rpc", hasUI: true, ui: { notify } });
+
+		expect(notify).toHaveBeenCalledWith(expect.stringContaining("recovery for run #42"), "error");
+		expect(notify.mock.calls.some((call) => call[1] === "info")).toBe(false);
+		expect(JSON.parse(readFileSync(configPath, "utf8")).announcedFeatures).toEqual([]);
 	});
 
 	it("does not register the tool inside any child sub-agent process", () => {
@@ -201,7 +264,7 @@ describe("subagent control lookup", () => {
 });
 
 describe("registered tool background dispatch", () => {
-	it("shows the task in the widget and reports its summary with cache reads on completion", async () => {
+	it("reports its summary with cache reads on completion", async () => {
 		vi.useFakeTimers();
 		vi.setSystemTime(0);
 		const stub = makeStub();
@@ -212,7 +275,6 @@ describe("registered tool background dispatch", () => {
 			return backgroundController;
 		});
 
-		let component: { render: (width: number) => string[]; dispose: () => void } | undefined;
 		let childDir: string | undefined;
 		const previousScript = process.argv[1];
 		try {
@@ -236,17 +298,6 @@ describe("registered tool background dispatch", () => {
 			process.argv[1] = childScript;
 
 			register(stub.api);
-			await stub.hooks["session_start"]({}, { mode: "tui", ui: { setWidget: stub.setWidget } });
-			expect(stub.setWidget).toHaveBeenCalledOnce();
-			const widgetRegistration = stub.setWidget.mock.calls[0];
-			expect(widgetRegistration[0]).toBe("pi-subagents");
-			expect(widgetRegistration[2]).toEqual({ placement: "aboveEditor" });
-			const widgetComponent = widgetRegistration[1](
-				{ requestRender: vi.fn() },
-				{ fg: (_color: string, text: string) => text, bold: (text: string) => text },
-			) as { render: (width: number) => string[]; dispose: () => void };
-			component = widgetComponent;
-
 			const tool = stub.tools.find((candidate) => candidate.name === "subagent");
 			const task = "\x1b[31mInspect\x1b[0m\n  cache-read metrics";
 			const summary = "Inspect cache-read metrics";
@@ -260,12 +311,10 @@ describe("registered tool background dispatch", () => {
 
 			expect(dispatch.terminate).toBe(true);
 			expect(capturedTasks).toHaveLength(1);
-			// Two lines per run by design: the header row (icon + run id + agent)
-			// and the live activity row; the task summary has no line of its own.
-			const widgetText = widgetComponent.render(160).join("\n");
-			expect(widgetText).toContain("○ #1 worker");
-			expect(widgetText).not.toContain("title:");
-
+			const runId = dispatch.details.results[0].runId;
+			expect(runId).toBeTypeOf("number");
+			expect(dispatch.content[0].text).toContain(`#${runId} worker`);
+			expect(renderToolResult(tool, dispatch)).toContain(`#${runId} worker`);
 			await capturedTasks[0](backgroundController.signal);
 
 			expect(stub.messages).toHaveLength(0);
@@ -273,10 +322,10 @@ describe("registered tool background dispatch", () => {
 			expect(stub.messages).toHaveLength(1);
 			const completion = stub.messages[0];
 			expect(completion.message.content).toContain(`Task: ${summary}`);
+			expect(completion.message.content).toContain(`run #${runId}`);
 			expect(completion.message.content).toMatch(/\bR321\b/);
 			expect(completion.options).toEqual({ deliverAs: "steer", triggerTurn: true });
 		} finally {
-			component?.dispose();
 			backgroundController.abort();
 			await stub.hooks["session_shutdown"]?.({}, {});
 			for (const run of [...monitor.getRuns()]) monitor.removeRun(run.id);
@@ -600,14 +649,25 @@ send({
 			// Queued run shows in the overview with its id.
 			const runId = monitor.getRuns().find((run) => run.task === "Inspect the build")?.id;
 			expect(runId).toBeDefined();
+			monitor.recordToolStart(
+				runId!,
+				"bash",
+				"bash curl -H 'Authorization: Bearer DO_NOT_LEAK_TEST_TOKEN' x?token=DO_NOT_LEAK_QUERY \x1b]0;unsafe\x07",
+			);
 			const overview = await statusTool.execute("st-1", {}, new AbortController().signal, () => {}, executionContext());
 			expect(overview.content[0].text).toContain("Active subagent runs (1)");
 			expect(overview.content[0].text).toContain(`#${runId} worker`);
+			expect(overview.content[0].text).toContain("Authorization: Bearer <redacted>");
+			expect(overview.content[0].text).not.toContain("DO_NOT_LEAK");
+			expect(overview.content[0].text).not.toContain("\x1b");
 			expect(overview.content[0].text).toContain("Finished this session (0)");
 
-			// While active, an id lookup reports the run is still running.
+			// While active, an id lookup reports the run is still running without
+			// exposing the raw tool arguments stored by the live monitor.
 			const stillActive = await statusTool.execute("st-2", { id: String(runId) }, new AbortController().signal, () => {}, executionContext());
 			expect(stillActive.content[0].text).toContain("still active");
+			expect(stillActive.content[0].text).not.toContain("DO_NOT_LEAK");
+			expect(stillActive.content[0].text).not.toContain("\x1b");
 
 			// After the run settles, the same id returns the full result.
 			await capturedTasks[0](backgroundController.signal);
@@ -724,6 +784,13 @@ send({
 
 			expect(dispatch.terminate).toBe(true);
 			expect(capturedTasks).toHaveLength(2);
+			const runIds = dispatch.details.results.map((result: any) => result.runId as number);
+			const renderedDispatch = renderToolResult(tool, dispatch);
+			for (const [index, runId] of runIds.entries()) {
+				const agent = index === 0 ? "worker" : "reviewer";
+				expect(dispatch.content[0].text).toContain(`#${runId} ${agent}`);
+				expect(renderedDispatch).toContain(`#${runId} ${agent}`);
+			}
 			for (let index = 0; index < capturedTasks.length; index++) {
 				await capturedTasks[index](controllers[index].signal);
 			}
@@ -735,6 +802,7 @@ send({
 			expect(completion.message.content).toContain("### Subagents completed (2): worker, reviewer");
 			expect(completion.message.content).toContain("### [worker] completed");
 			expect(completion.message.content).toContain("### [reviewer] completed");
+			for (const runId of runIds) expect(completion.message.content).toContain(`run #${runId}`);
 			expect(completion.options).toEqual({ deliverAs: "steer", triggerTurn: true });
 		} finally {
 			for (const controller of controllers) controller.abort();

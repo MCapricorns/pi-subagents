@@ -103,7 +103,8 @@ export function formatCompletionBlock(result: SingleResult, maxResultLines: numb
 		(result.forkChildRunIds?.length ?? 0) > 0 ? `fork children ${result.forkChildRunIds!.map((id) => `#${id}`).join(", ")}` : undefined,
 	].filter((value): value is string => Boolean(value));
 	const relationNote = relations.length > 0 ? ` · ${relations.join(" · ")}` : "";
-	const lines = [`### [${result.agent}] ${status}${usage ? ` (${usage})` : ""}${fallbackNote}${startupRetryNote}${modelRetryNote}`, "", `Task: ${formatTaskSummary(result.task, 80, false)}`, ""];
+	const runNote = result.runId !== undefined ? ` · run #${result.runId}` : "";
+	const lines = [`### [${result.agent}] ${status}${usage ? ` (${usage})` : ""}${fallbackNote}${startupRetryNote}${modelRetryNote}${runNote}`, "", `Task: ${formatTaskSummary(result.task, 80, false)}`, ""];
 	if (result.isolation === "worktree") {
 		const isolation =
 			result.integrationStatus === "integrated"

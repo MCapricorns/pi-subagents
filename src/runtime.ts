@@ -1,9 +1,9 @@
 /**
  * Shared per-session runtime state for pi-subagents.
  *
- * The extension registers several tools (subagent, subagent_wait/status/stop) and
- * a widget that all talk to one set of live structures: the background queue, the
- * completion batcher, abort controllers per run, and the settled-results store.
+ * The extension registers several tools (subagent, subagent_wait/status/stop)
+ * that share the background queue, completion batcher, abort controllers per
+ * run, and settled-results store.
  * `createRuntime` builds those once per extension load and hands the same object
  * to every registration site, so state stays in one place without globals.
  */
@@ -27,7 +27,7 @@ import {
 	type RecoveryRecord,
 } from "./recovery.ts";
 import type { RpcRunControl } from "./rpc-run.ts";
-import { inspectorStore } from "./trajectory.ts";
+import { trajectoryStore } from "./trajectory.ts";
 import type { SingleResult } from "./spawn.ts";
 import type { IsolationMode, WorktreeFinalization, WorktreeIsolation } from "./worktree.ts";
 
@@ -272,9 +272,8 @@ export function createRuntime(pi: ExtensionAPI, configPath: string): SubagentRun
 			// path after a failed patch apply/cleanup.
 			runtime.threads.clear();
 			monitor.clear();
-			// The append-only inspector history (trajectory + transcript) is
-			// parent-session scoped: it must never leak into the next session.
-			inspectorStore.clearAll();
+			// Lifecycle trajectories are parent-session scoped.
+			trajectoryStore.clearAll();
 		},
 	};
 

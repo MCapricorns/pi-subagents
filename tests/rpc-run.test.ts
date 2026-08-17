@@ -103,7 +103,7 @@ for (let index = 0; index < record.length; index++) process.stdout.write(record.
 		}
 	});
 
-	it("forwards complete large deltas and toolCallId values to inspector observers", async () => {
+	it("forwards text activity and toolCallId values to live observers", async () => {
 		const dir = mkdtempSync(join(tmpdir(), "pi-subagents-rpc-records-"));
 		const script = join(dir, "records-child.mjs");
 		writeFileSync(
@@ -119,7 +119,6 @@ send({ type: "message_end", message: { role: "assistant", content: [{ type: "tex
 		);
 		const previous = process.argv[1];
 		process.argv[1] = script;
-		const records: Array<{ kind: string; delta: string }> = [];
 		const live: any[] = [];
 		try {
 			await runSingleAgent({
@@ -127,11 +126,10 @@ send({ type: "message_end", message: { role: "assistant", content: [{ type: "tex
 				agent,
 				agentName: agent.name,
 				task: "record",
-				onRecord: (event) => records.push(event),
 				onLive: (event) => live.push(event),
 				makeDetails: (results) => ({ mode: "single", results }),
 			});
-			expect(records).toEqual([{ kind: "text", delta: "x".repeat(5000) }]);
+			expect(live).toContainEqual({ kind: "text" });
 			expect(live).toContainEqual(expect.objectContaining({ kind: "tool_start", toolCallId: "read-a" }));
 			expect(live).toContainEqual(expect.objectContaining({ kind: "tool_end", toolCallId: "read-a" }));
 			expect(live.filter((event) => event.kind === "status").map((event) => event.status))

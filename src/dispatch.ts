@@ -1,7 +1,7 @@
 /**
  * The `subagent` tool: dispatches explore/worker/reviewer agents as isolated pi
  * child processes, single or parallel. Owns the dispatch pipeline: config load,
- * per-agent model-pool resolution, per-run widget tracking, the auto-fix chain
+ * per-agent model-pool resolution, per-run status tracking, the auto-fix chain
  * (REVIEW_FAIL → worker → re-review), and completion delivery.
  *
  * Vision: a task flagged `vision: true` uses the configured vision model as an
@@ -61,9 +61,8 @@ import {
 	type SingleResult,
 	type SubagentDetails,
 	type SubagentLiveEvent,
-	type SubagentRecordEvent,
 } from "./spawn.ts";
-import { inspectorStore, summarizeToolArgs } from "./trajectory.ts";
+import { trajectoryStore, summarizeToolArgs } from "./trajectory.ts";
 import {
 	createWorktreeIsolation,
 	resolveWorktreeTarget,
@@ -238,8 +237,8 @@ export function registerSubagentTool(pi: ExtensionAPI, runtime: SubagentRuntime)
 			// Pick up concurrency changes from /subagents-setup without a restart.
 			runtime.backgroundQueue.setConcurrency(config.maxConcurrency);
 
-			// Finished runs leave the widget immediately. Their final findings are sent
-			// back as a custom message that automatically starts a follow-up turn.
+			// Finished runs leave the active monitor immediately. Their final findings
+			// are sent as a custom message that starts a follow-up turn.
 			const finishRun = (
 				runId: number,
 				status: "done" | "failed",
@@ -258,8 +257,8 @@ export function registerSubagentTool(pi: ExtensionAPI, runtime: SubagentRuntime)
 			// "read src/index.ts", ...), never a raw args blob. In parallel, every
 			// live event is appended to the thread's append-only trajectory (status,
 			// model-candidate changes, usage, tool starts/ends with a redacted
-			// args summary) so /subagents-inspect can replay what happened. The live
-			// handler only updates widget status; finishing (removeRun + notify) is
+			// args summary). The live handler only updates monitor state; finishing
+			// (removeRun + notify) is
 			// owned by the queue task / launchInLoop. That keeps a startup retry —
 			// which fires a transient "failed" status before relaunching — from
 			// ripping the row out early, and lets the queue task decide between
@@ -270,7 +269,7 @@ export function registerSubagentTool(pi: ExtensionAPI, runtime: SubagentRuntime)
 					if (generation !== undefined && runtime.threads.get(runId)?.generation !== generation) return;
 					switch (e.kind) {
 						case "status":
-							// Only update the widget status here. Finishing (removeRun + notify) is
+							// Only update monitor status here. Finishing (removeRun + notify) is
 							// owned by the queue task / launchInLoop so that a startup retry — which
 							// fires a transient "failed" status before relaunching the child — never
 							// rips the row out from under the retry or emits a premature "✗" toast.
@@ -297,7 +296,7 @@ export function registerSubagentTool(pi: ExtensionAPI, runtime: SubagentRuntime)
 							break;
 					}
 					if (threadId !== undefined) {
-						const trajectory = inspectorStore.get(threadId).trajectory;
+						const trajectory = trajectoryStore.get(threadId).trajectory;
 						switch (e.kind) {
 								case "status":
 									trajectory.append({ kind: "status", status: e.status });
@@ -319,21 +318,10 @@ export function registerSubagentTool(pi: ExtensionAPI, runtime: SubagentRuntime)
 								case "tool_end":
 									trajectory.append({ kind: "tool_end", tool: e.toolName, toolCallId: e.toolCallId, isError: e.isError });
 									break;
-								// Text/thinking deltas arrive via onRecord below.
 							}
 					}
 				};
 
-			/** Raw streamed output (text/thinking deltas) → the thread's bounded
-			 * transcript buffer; dropped on restart, never carried across generations. */
-			const makeRecordHandler =
-				(threadId: number, generation?: number) =>
-				(e: SubagentRecordEvent): void => {
-					if (generation !== undefined && runtime.threads.get(threadId)?.generation !== generation) return;
-					const transcript = inspectorStore.get(threadId).transcript;
-					if (e.kind === "thinking") transcript.appendThinking(e.delta);
-					else transcript.appendText(e.delta);
-				};
 			const discovery = discoverAgents(ctx.cwd, {
 				scope: config.agentScope,
 				enabledNames: config.enabledAgents,
@@ -389,7 +377,7 @@ export function registerSubagentTool(pi: ExtensionAPI, runtime: SubagentRuntime)
 			}
 
 			/**
-			 * Dispatch one agent inside an auto-fix chain: tracked in the widget with a
+			 * Dispatch one agent inside an auto-fix chain: tracked in monitor state with a
 			 * groupId/relationLabel, but NOT delivered through the completion flow — the
 			 * chain owner assembles and delivers the whole group at the end.
 			 */
@@ -408,10 +396,8 @@ export function registerSubagentTool(pi: ExtensionAPI, runtime: SubagentRuntime)
 				const pool = resolveDispatchModelPool(agent, config, sessionRef, vision);
 				const thinkingLevel = config.agentThinkingLevels[agent.name] ?? agent.thinking ?? config.thinkingLevel;
 				const runId = monitor.addRun(agent.name, task, pool.agent.model, thinkingLevel, meta);
-				// Chain rounds are real threads: they get their own trajectory so the
-				// inspector can show each fix/re-review round's full story.
-				const chainState = inspectorStore.get(runId);
-				chainState.retainFrom({ agent: agent.name, task, status: "queued", model: pool.agent.model, thinking: thinkingLevel });
+				// Chain rounds keep their own lifecycle trajectory.
+				const chainState = trajectoryStore.get(runId);
 				chainState.trajectory.append({
 					kind: "dispatch",
 					agent: agent.name,
@@ -425,7 +411,6 @@ export function registerSubagentTool(pi: ExtensionAPI, runtime: SubagentRuntime)
 					isolationCwd: executionCwd,
 				});
 				const onLive = makeLiveHandler(runId, runId);
-				const onRecord = makeRecordHandler(runId);
 				try {
 					const result = await runSingleAgentWithModelFallback(
 						{
@@ -437,7 +422,6 @@ export function registerSubagentTool(pi: ExtensionAPI, runtime: SubagentRuntime)
 							thinkingLevel,
 							signal,
 							onLive,
-							onRecord,
 							makeDetails: makeDetails("single", true),
 							idleTimeoutMs: config.idleTimeoutSec * 1000,
 						},
@@ -454,20 +438,16 @@ export function registerSubagentTool(pi: ExtensionAPI, runtime: SubagentRuntime)
 						status: isFailedResult(result) ? "failed" : "done",
 						model: result.model,
 					});
-					// Keep the finished round visible in the widget while the chain is
+					// Keep the finished round in status state while the chain is
 					// still running, with a one-line summary of what it did; the whole
 					// group is dropped when the chain resolves (see removeChainGroup).
 					monitor.setSummary(runId, summarizeChainResult(result));
 					finishRun(runId, isFailedResult(result) ? "failed" : "done", { retain: true });
-					const retainedRun = monitor.findRun(runId);
-					if (retainedRun) chainState.retainFrom(retainedRun);
 					runtime.registerRunResult(runId, result);
 					return { runId, result };
 				} catch (error) {
 					finishRun(runId, "failed", { retain: true });
 					chainState.trajectory.append({ kind: "settled", status: "failed", model: pool.agent.model });
-					const retainedRun = monitor.findRun(runId);
-					if (retainedRun) chainState.retainFrom(retainedRun);
 					const errorMessage = error instanceof Error ? error.message : String(error);
 					const crashed: SingleResult = {
 						...queuedResult(pool.agent, task, thinkingLevel),
@@ -491,11 +471,10 @@ export function registerSubagentTool(pi: ExtensionAPI, runtime: SubagentRuntime)
 			 * findings) → reviewer re-review, up to maxFixRounds times. The main agent is
 			 * not woken mid-loop; the full chain is delivered as one group at the end.
 			 * Failures short-circuit: a crashed worker skips its re-review and delivers.
-			 * The triggering reviewer's run stays visible in the widget (annotated) until
-			 * the chain resolves, so the ↳ rows have an obvious parent.
+			 * The triggering reviewer stays in monitor state until the chain resolves.
 			 */
-			/** Drop every widget row belonging to an auto-fix chain; the retained
-			 * parent row is removed separately (it does not carry the groupId). */
+			/** Drop every monitor row belonging to an auto-fix chain; the retained
+			 * parent is removed separately (it does not carry the groupId). */
 			const removeChainGroup = (groupId: string): void => {
 				for (const run of [...monitor.getRuns()]) {
 					if (run.groupId === groupId) monitor.removeRun(run.id);
@@ -625,18 +604,11 @@ export function registerSubagentTool(pi: ExtensionAPI, runtime: SubagentRuntime)
 						parentThread.state = isFailedResult(last.result) ? "failed" : "completed";
 						// The chain outcome settles the parent thread's trajectory: the
 						// last chain step is its final state.
-						const parentInspection = inspectorStore.get(parentRunId);
-						parentInspection.trajectory.append({
+						const parentTrajectory = trajectoryStore.get(parentRunId);
+						parentTrajectory.trajectory.append({
 							kind: "settled",
 							status: parentThread.state === "failed" ? "failed" : "done",
 							model: last.result.model,
-						});
-						parentInspection.retainFrom({
-							agent: last.result.agent,
-							task: last.result.task,
-							model: last.result.model,
-							status: parentThread.state === "failed" ? "failed" : "done",
-							usage: last.result.usage,
 						});
 						if (!runtime.sessionActive) {
 							clearOwnedController();
@@ -870,7 +842,7 @@ export function registerSubagentTool(pi: ExtensionAPI, runtime: SubagentRuntime)
 					if (runtime.threads.get(runId)?.generation !== generation || phase === "settled") return;
 					// Orchestration transitions are part of the trajectory (retrying →
 					// retry event, park/stop → terminal control events).
-					const trajectory = inspectorStore.get(runId).trajectory;
+					const trajectory = trajectoryStore.get(runId).trajectory;
 					if (phase === "retrying") trajectory.append({ kind: "retry", reason: "retrying" });
 					else if (phase === "parked") trajectory.append({ kind: "park" });
 					else if (phase === "stopped") trajectory.append({ kind: "stop", reason: control.getStopMessage() });
@@ -894,28 +866,24 @@ export function registerSubagentTool(pi: ExtensionAPI, runtime: SubagentRuntime)
 					else if (state === "running") monitor.setStatus(runId, "running");
 				});
 
-				// Inspector projection for this thread id: on restart the append-only
-				// event history is kept (bumped generation), while the bounded
-				// transcript starts fresh for the new generation.
-				const inspectState = inspectorStore.get(runId);
+				// Restart bumps the generation while preserving append-only history.
+				const trajectoryState = trajectoryStore.get(runId);
 				if (existingThread) {
-					inspectState.trajectory.restart();
-					inspectState.transcript.clear();
-					inspectState.trajectory.append({
+					trajectoryState.trajectory.restart();
+					trajectoryState.trajectory.append({
 						kind: "resume",
 						objective: newObjectiveOnResume ? task : undefined,
 					});
 				}
-				inspectState.retainFrom({ agent: agent.name, task, status: "queued", model: pool.agent.model, thinking: thinkingLevel });
 				if (seed?.forkedFromRunId !== undefined) {
-					inspectState.trajectory.append({
+					trajectoryState.trajectory.append({
 						kind: "fork",
 						sourceRunId: seed.forkedFromRunId,
 						childRunId: runId,
 						objective: seed.forkObjective,
 					});
 				}
-				inspectState.trajectory.append({
+				trajectoryState.trajectory.append({
 					kind: "dispatch",
 					agent: agent.name,
 					task,
@@ -929,7 +897,7 @@ export function registerSubagentTool(pi: ExtensionAPI, runtime: SubagentRuntime)
 					isolationCwd: executionCwd,
 				});
 				if (worktree && worktree !== previousWorktree) {
-					inspectState.trajectory.append({
+					trajectoryState.trajectory.append({
 						kind: "worktree",
 						status: "created",
 						originalCwd,
@@ -954,7 +922,7 @@ export function registerSubagentTool(pi: ExtensionAPI, runtime: SubagentRuntime)
 					thread.control = control;
 					// A newly admitted generation owns no output yet. Keeping the prior
 					// generation here would make a queued stop publish stale task,
-					// transcript, and session metadata as this generation's partial.
+					// session metadata as this generation's partial.
 					thread.lastResult = undefined;
 					if (seed?.sessionId && seed.sessionDir) {
 						thread.sessionId = seed.sessionId;
@@ -1007,7 +975,7 @@ export function registerSubagentTool(pi: ExtensionAPI, runtime: SubagentRuntime)
 					if (thread.generation !== expectedGeneration) return undefined;
 					const finalization = await thread.worktree.finalize();
 					monitor.setIsolation(runId, "worktree", finalization.status);
-					inspectState.trajectory.append({
+					trajectoryState.trajectory.append({
 						kind: "worktree",
 						status: finalization.status,
 						originalCwd: thread.cwd,
@@ -1471,7 +1439,7 @@ export function registerSubagentTool(pi: ExtensionAPI, runtime: SubagentRuntime)
 						const childThread = runtime.threads.get(childRunId);
 						if (childThread) childThread.forkedFromRunId = runId;
 						monitor.setForkRelation(runId, childRunId);
-						inspectorStore.get(runId).trajectory.append({
+						trajectoryStore.get(runId).trajectory.append({
 							kind: "fork",
 							sourceRunId: runId,
 							childRunId,
@@ -1502,7 +1470,6 @@ export function registerSubagentTool(pi: ExtensionAPI, runtime: SubagentRuntime)
 				};
 
 				const onLive = makeLiveHandler(runId, runId, generation);
-				const onRecord = makeRecordHandler(runId, generation);
 				const queueController = runtime.backgroundQueue.enqueue(
 					async (backgroundSignal) => {
 						if (runtime.threads.get(runId)?.generation !== generation) return;
@@ -1518,7 +1485,6 @@ export function registerSubagentTool(pi: ExtensionAPI, runtime: SubagentRuntime)
 									thinkingLevel,
 									signal: backgroundSignal,
 									onLive,
-									onRecord,
 									control,
 									makeDetails: makeDetails("single", true),
 									idleTimeoutMs: runConfig.idleTimeoutSec * 1000,
@@ -1574,8 +1540,6 @@ export function registerSubagentTool(pi: ExtensionAPI, runtime: SubagentRuntime)
 						if (result.parked) {
 							thread.state = "parked";
 							monitor.setStatus(runId, "parked");
-							const parkedRun = monitor.findRun(runId);
-							if (parkedRun) inspectState.retainFrom({ ...parkedRun, task: result.task, usage: result.usage });
 							runtime.settledRuns.delete(runId);
 							return;
 						}
@@ -1614,7 +1578,7 @@ export function registerSubagentTool(pi: ExtensionAPI, runtime: SubagentRuntime)
 							// Stamp the terminal monitor state before projecting it. This gives every
 							// path a fixed endedAt even when the row is removed immediately.
 							monitor.setStatus(runId, failed ? "failed" : "done");
-							inspectState.trajectory.append({
+							trajectoryState.trajectory.append({
 								kind: "settled",
 								status: failed ? "failed" : "done",
 								model: result.model,
@@ -1623,18 +1587,6 @@ export function registerSubagentTool(pi: ExtensionAPI, runtime: SubagentRuntime)
 									? { integrationStatus: result.integrationStatus }
 									: {}),
 							});
-							const terminalRun = monitor.findRun(runId);
-							inspectState.retainFrom(terminalRun
-								? { ...terminalRun, task: result.task, model: result.model ?? terminalRun.model, usage: result.usage }
-								: {
-									agent: pool.agent.name,
-									task: result.task,
-									model: result.model,
-									thinking: thinkingLevel,
-									status: failed ? "failed" : "done",
-									endedAt: inspectState.trajectory.summary().endedAt,
-									usage: result.usage,
-								});
 							if (!runtime.sessionActive || !ownsSettlement()) return;
 
 							const modelLevel = failed && isModelLevelFailure(result);
@@ -1677,9 +1629,7 @@ export function registerSubagentTool(pi: ExtensionAPI, runtime: SubagentRuntime)
 						}
 						thread.state = "stopped";
 						monitor.setStatus(runId, "failed");
-						inspectState.trajectory.append({ kind: "settled", status: "stopped", model: monitor.findRun(runId)?.model, isolation });
-						const stoppedRun = monitor.findRun(runId);
-						if (stoppedRun) inspectState.retainFrom(stoppedRun);
+						trajectoryState.trajectory.append({ kind: "settled", status: "stopped", model: monitor.findRun(runId)?.model, isolation });
 						if (!runtime.sessionActive) {
 							monitor.removeRun(runId);
 							return;
@@ -1713,7 +1663,7 @@ export function registerSubagentTool(pi: ExtensionAPI, runtime: SubagentRuntime)
 							if (!ownsSettlement()) return;
 							thread.state = "failed";
 							monitor.setStatus(runId, "failed");
-							inspectState.trajectory.append({
+							trajectoryState.trajectory.append({
 								kind: "settled",
 								status: "failed",
 								model: crashed.model,
@@ -1722,8 +1672,6 @@ export function registerSubagentTool(pi: ExtensionAPI, runtime: SubagentRuntime)
 									? { integrationStatus: crashed.integrationStatus }
 									: {}),
 							});
-							const crashedRun = monitor.findRun(runId);
-							if (crashedRun) inspectState.retainFrom({ ...crashedRun, usage: crashed.usage });
 							finishRun(runId, "failed", { silent: true });
 							runtime.registerRunResult(runId, crashed);
 							runtime.runControllers.delete(runId);
@@ -1780,7 +1728,11 @@ export function registerSubagentTool(pi: ExtensionAPI, runtime: SubagentRuntime)
 						defaultIsolationMode("parallel", item.agent, item.isolation as IsolationMode | undefined),
 					));
 				}
-				const started = results.filter((result) => result.exitCode === -1).length;
+				const startedRuns = results.filter((result) => result.exitCode === -1);
+				const started = startedRuns.length;
+				const startedRefs = startedRuns.map((result) =>
+					result.runId === undefined ? result.agent : `#${result.runId} ${result.agent}`,
+				);
 				const failureLines = results.flatMap((result, index) => {
 					if (result.exitCode === -1) return [];
 					const reason = getResultOutput(result).trim() || "unknown startup failure";
@@ -1794,7 +1746,7 @@ export function registerSubagentTool(pi: ExtensionAPI, runtime: SubagentRuntime)
 					throw new Error(`No background subagents were started.\n${failureLines.join("\n")}`);
 				}
 				const text = [
-					`Started ${started} background subagent${started === 1 ? "" : "s"}. Results will automatically resume the main agent when ready.`,
+					`Started ${started} background subagent${started === 1 ? "" : "s"}: ${startedRefs.join(", ")}. Results will automatically resume the main agent when ready.`,
 					...(failureLines.length > 0
 						? [`${failureLines.length} task${failureLines.length === 1 ? "" : "s"} failed before launch:`, ...failureLines]
 						: []),
@@ -1816,8 +1768,9 @@ export function registerSubagentTool(pi: ExtensionAPI, runtime: SubagentRuntime)
 			if (result.exitCode !== -1) {
 				throw new Error(getResultOutput(result));
 			}
+			const runRef = result.runId === undefined ? result.agent : `#${result.runId} ${result.agent}`;
 			return {
-				content: [{ type: "text", text: `Started ${result.agent} in the background. Its result will automatically resume the main agent when ready.` }],
+				content: [{ type: "text", text: `Started ${runRef} in the background. Its result will automatically resume the main agent when ready.` }],
 				details: makeDetails("single", true)([result]),
 				terminate: true,
 			};
@@ -1856,7 +1809,8 @@ export function registerSubagentTool(pi: ExtensionAPI, runtime: SubagentRuntime)
 				const usage = formatUsage(r.usage);
 				const model = `${r.model ?? "?"}${r.modelFallbackFrom ? ` (pool fallback from ${r.modelFallbackFrom})` : ""}`;
 				const isolation = r.isolation === "worktree" ? ` · worktree ${r.integrationStatus ?? "active"}` : "";
-				const line = `${theme.fg("toolTitle", theme.bold("subagent "))}${icon} ${theme.fg("accent", r.agent)} ${theme.fg("dim", `· ${model}${r.thinking ? ` · thinking ${r.thinking}` : ""}${isolation}${pending ? " · background" : ""}${usage ? ` · ${usage}` : ""}`)}`;
+				const runId = r.runId === undefined ? "" : `${theme.fg("dim", `#${r.runId}`)} `;
+				const line = `${theme.fg("toolTitle", theme.bold("subagent "))}${icon} ${runId}${theme.fg("accent", r.agent)} ${theme.fg("dim", `· ${model}${r.thinking ? ` · thinking ${r.thinking}` : ""}${isolation}${pending ? " · background" : ""}${usage ? ` · ${usage}` : ""}`)}`;
 				return new Text(line, 0, 0);
 			}
 
@@ -1870,7 +1824,8 @@ export function registerSubagentTool(pi: ExtensionAPI, runtime: SubagentRuntime)
 				const usage = formatUsage(r.usage);
 				const model = `${r.model ?? "?"}${r.modelFallbackFrom ? ` (pool fallback from ${r.modelFallbackFrom})` : ""}`;
 				const isolation = r.isolation === "worktree" ? ` · worktree ${r.integrationStatus ?? "active"}` : "";
-				lines.push(`  ${icon} ${theme.fg("accent", r.agent)} ${theme.fg("dim", `· ${model}${r.thinking ? ` · thinking ${r.thinking}` : ""}${isolation}${pending ? " · background" : ""}${usage ? ` · ${usage}` : ""}`)}`);
+				const runId = r.runId === undefined ? "" : `${theme.fg("dim", `#${r.runId}`)} `;
+				lines.push(`  ${icon} ${runId}${theme.fg("accent", r.agent)} ${theme.fg("dim", `· ${model}${r.thinking ? ` · thinking ${r.thinking}` : ""}${isolation}${pending ? " · background" : ""}${usage ? ` · ${usage}` : ""}`)}`);
 			}
 			return new Text(lines.join("\n"), 0, 0);
 		},

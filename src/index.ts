@@ -5,8 +5,8 @@
  * The heavy lifting lives in focused modules:
  *   - dispatch.ts  — the `subagent` tool (spawn, auto-fix chain, vision model)
  *   - tools.ts     — subagent_control / subagent_wait / status / stop
- *   - widget.ts    — session_start widget + one-time feature announcements
- *   - runtime.ts   — shared per-session state
+ *   - announcements.ts — session-start recovery and feature notices
+ *   - runtime.ts       — shared per-session state
  *
  * Also registers the `/subagents-setup` command and a `before_agent_start` hook
  * that injects a delegation directive into the parent system prompt so the main
@@ -19,16 +19,15 @@
 import { getAgentDir, type ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { Text } from "@earendil-works/pi-tui";
 import { discoverAgents } from "./agents.ts";
+import { registerAnnouncements } from "./announcements.ts";
 import { getConfigPath, loadConfig } from "./config.ts";
 import { registerSubagentTool } from "./dispatch.ts";
 import { matchRunIds } from "./format.ts";
-import { registerInspectorCommand } from "./inspector-panel.ts";
 import { buildDelegationDirective } from "./prompt.ts";
 import { createRuntime } from "./runtime.ts";
 import { runSetup } from "./setup.ts";
 import { currentSubagentDepth } from "./spawn.ts";
 import { registerLookupTools } from "./tools.ts";
-import { registerWidget } from "./widget.ts";
 
 export { matchRunIds };
 
@@ -64,7 +63,6 @@ export default function (pi: ExtensionAPI): void {
 
 	registerSubagentTool(pi, runtime);
 	registerLookupTools(pi, runtime);
-	registerInspectorCommand(pi, runtime);
 
 	pi.registerCommand("subagents-setup", {
 		description: "Configure pi-subagents: enabled agents, primary/backup model pools, and runtime settings",
@@ -73,9 +71,7 @@ export default function (pi: ExtensionAPI): void {
 		},
 	});
 
-	// Persistent widget above the editor showing live sub-agent status, plus
-	// one-time feature announcements after updates.
-	registerWidget(pi, runtime);
+	registerAnnouncements(pi, runtime);
 
 	// Proactive dispatch: inject the delegation directive into the parent system prompt.
 	pi.on("before_agent_start", async (event, ctx) => {

@@ -11,6 +11,28 @@ Focused background delegation for [pi](https://pi.dev): `explore` / `worker` /
 to the main agent automatically. Install it, and the main model starts using it
 on its own — no prompt engineering, no babysitting.
 
+## 1.0 — controllable agent threads
+
+Version 1.0 turns pi-subagents from a one-shot background runner into a small
+thread runtime. Every dispatch has a stable run id and retained Pi session, so
+work can be steered while it runs, parked without losing context, resumed after
+settlement, retargeted, or forked into another path. An internal append-only
+lifecycle trajectory keeps retries and stale generations from corrupting the
+logical thread.
+
+The common quality loop now runs end to end without waking the main agent between
+steps:
+
+```text
+reviewer (find blockers) → worker (fix) → reviewer (verify) → final PASS/FAIL
+```
+
+Each chain is delivered as one concise completion group, while full per-run
+reports remain available through `subagent_status`. Ordered model pools keep the
+same retained context across provider fallback, and isolated parallel workers
+use detached Git worktrees whose changes are applied back without touching the
+parent index.
+
 ## Highlights
 
 - **Zero-setup proactive dispatch** — the extension injects a delegation directive
@@ -52,12 +74,6 @@ on its own — no prompt engineering, no babysitting.
   configurable limit (default 4). Parallel workers default to detached Git
   worktrees; tracked, deleted, untracked, and binary changes are applied back
   without touching the parent index. Failed integration keeps recovery artifacts.
-- **Live inspector** — `/subagents-inspect` opens a master/detail
-  overlay with thread state, model chain, usage, transcript, recent tools,
-  worktree/fork relations, and the append-only control trajectory.
-- **Live progress widget** — each run's status, current activity, model, token
-  usage, and elapsed time; auto-fix chain rounds hang under their triggering
-  review as a tree, each finished round keeping a one-line outcome.
 - **Recursion is structurally impossible** — children are leaf processes; the
   `subagent` tool is excluded from their toolset.
 - **Zero runtime dependencies** — agents are plain Markdown files; overriding or
@@ -134,7 +150,10 @@ once, then skipped as a permanent candidate error; it is not rewritten. A
 vision-flagged auto-fix chain keeps the flag for worker/re-review rounds because
 they may need to inspect the same images.
 
-### Controlling, inspecting, and stopping
+### Controlling and stopping
+
+Dispatch confirmations, tool result rows, and completion blocks all show the
+stable `#id`, so a thread remains directly controllable after its live UI is gone.
 
 - `subagent_control` — `steer`, `retarget`, `park`, `resume`, or `fork` a logical
   thread by stable run id. Resume accepts an optional replacement objective;
@@ -144,8 +163,6 @@ they may need to inspect the same images.
   run returns immediately; an active run tells the model to end its turn. Pass
   `timeoutMs` only when you must stay in the turn.
 - `subagent_status` — active/parked/finished runs and full result by run id.
-- `/subagents-inspect` — interactive live thread/transcript/tool/trajectory
-  overlay; press `p` to park or resume the selected thread.
 - `subagent_stop` — destructive cancellation. It retires that thread's retained
   session (independent forks survive) and delivers exactly one aborted partial
   result after the run and any worktree integration have quiesced.
@@ -299,6 +316,7 @@ after an update via a toast (marker persisted in `announcedFeatures`).
 - **Dispatch failures surface** — partial parallel startup reports every failed
   item and reason; if none start, the tool throws so Pi records a real tool error.
   Dispatch crashes likewise produce a failed result instead of a silent hang.
+- **Safe live status** — tool activity is credential-redacted and stripped of terminal control sequences before `subagent_status` can return it.
 - **Leaf children** — no nested delegation, no runaway trees.
 
 ## Development
@@ -312,9 +330,9 @@ npm test
 The source is modular: `dispatch.ts` (dispatch, controls, isolation, auto-fix),
 `rpc-run.ts` / `spawn.ts` (persistent child transport + model pools),
 `worktree.ts` / `session-fork.ts` (filesystem/session branching),
-`trajectory.ts` / `inspector*.ts` (safe live inspection), `tools.ts`
-(wait/status/control/stop), `widget.ts` (widget + recovery announcements), and
-`runtime.ts` (session-scoped ownership). No runtime dependencies beyond pi peer
+`trajectory.ts` (internal lifecycle history), `tools.ts`
+(wait/status/control/stop), `announcements.ts` (recovery and feature notices),
+and `runtime.ts` (session-scoped ownership). No runtime dependencies beyond pi peer
 dependencies.
 
 ## License

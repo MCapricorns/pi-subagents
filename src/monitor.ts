@@ -2,18 +2,17 @@
  * Sub-agent monitor: a module-level singleton store that tracks subagent runs
  * for the current turn.
  *
- * The store notifies subscribers on every mutation so the persistent widget
- * above the editor can re-render. Each run carries timing information
- * (started/ended) plus a concise activity string describing what the run is
- * doing right now ("thinking", "read src/index.ts", ...). Runs are removed
- * as soon as they finish: the tool result is the durable record in the main
- * conversation, so a stale "done" row must not linger in the widget.
+ * The store notifies wait/status consumers on every mutation. Each run carries
+ * timing information plus a concise activity string ("thinking",
+ * "read src/index.ts", ...). Runs are removed after publication; tool results
+ * and the finished-run registry are the durable user-facing records.
  */
 
 import { stripVTControlCharacters } from "node:util";
 import type { Theme } from "@earendil-works/pi-coding-agent";
-import { truncateToWidth, visibleWidth } from "@earendil-works/pi-tui";
+import { visibleWidth } from "@earendil-works/pi-tui";
 import type { UsageStats } from "./spawn.ts";
+import { redactSensitiveText } from "./trajectory.ts";
 import type { IsolationMode, WorktreeFinalizationStatus } from "./worktree.ts";
 
 // ---------------------------------------------------------------------------
@@ -25,20 +24,6 @@ export type RunStatus = "queued" | "running" | "steering" | "interrupting" | "pa
 export function isRunActiveStatus(status: RunStatus): boolean {
 	return status === "queued" || status === "running" || status === "steering" || status === "interrupting";
 }
-
-/** Soft state-awareness signals, complementary to the hard idle-kill: a run may
- * be alive (stdout streaming) yet "stuck thinking" (no tool running for a while),
- * or simply taking a long time. Both are surfaced as widget annotations so the
- * user can tell a healthy busy run from one that needs a nudge. */
-export type ActivityState = "needs_attention" | "active_long_running";
-
-/** A run with no tool running and no activity for this long is "needs attention"
- * (the model may be stuck between turns). Below the idle-kill threshold so the
- * soft signal always fires before the hard kill. */
-export const NEEDS_ATTENTION_AFTER_MS = 60_000;
-/** A run whose total elapsed time exceeds this is "long-running": still active
- * but worth flagging so the user can decide whether to wait or steer. */
-export const ACTIVE_LONG_RUNNING_AFTER_MS = 240_000;
 
 export interface RunView {
 	id: number;
@@ -77,15 +62,14 @@ export interface RunView {
 	groupId?: string;
 	/** Human-readable role within a chain, e.g. "fix round 1" or "re-review round 1". */
 	relationLabel?: string;
-	/** Free-form note shown in the widget next to the status label (e.g. "auto-fix chain running"). */
+	/** Free-form orchestration note (e.g. "auto-fix chain running"). */
 	annotation?: string;
-	/** One-line outcome summary of a finished chain run, shown in the widget so
-	 * each auto-fix round reads as what it did: a reviewer reports its verdict
+	/** One-line outcome summary of a finished chain run: a reviewer reports its verdict
 	 * plus key fragments of what it found ("fail · src/index.ts · render()"), a
 	 * worker the fragments of what it changed. Unset for non-chain runs. */
 	summary?: string;
-	/** True when a finished run is intentionally kept in the widget (e.g. an
-	 * auto-fix chain parent whose chain is still running). beginTurn preserves
+	/** True when a finished run remains in monitor state (e.g. an auto-fix
+	 * parent whose chain is still running). beginTurn preserves
 	 * retained runs so they are not swept between turns. */
 	retained?: boolean;
 }
@@ -107,7 +91,7 @@ const TASK_SUMMARY_ELLIPSIS = "…";
 /** Columns reserved at the END of a truncated summary so the distinguishing
  * keywords (paths, symbols, ...) survive; the head gets the rest. */
 const TASK_SUMMARY_TAIL_MAX = 28;
-/** Tail share of a non-default maxWidth (narrow widgets keep a usable tail). */
+/** Tail share of a non-default maxWidth (narrow summaries keep a usable tail). */
 const TASK_SUMMARY_TAIL_SHARE = 0.35;
 const TASK_SUMMARY_TAIL_MIN = 8;
 const TASK_SUMMARY_KEY_SEP = " · ";
@@ -305,63 +289,18 @@ export function formatElapsed(run: RunView, now: number = Date.now()): string {
 	return formatDuration(end - run.startedAt);
 }
 
-/** Strip the provider prefix from a "provider/model-id" reference for compact
- * widget display ("anthropic/claude-sonnet-4" → "claude-sonnet-4"). A bare id is
- * left unchanged. */
-export function compactModelRef(model: string | undefined): string {
-	if (!model) return "";
-	const slash = model.lastIndexOf("/");
-	return slash >= 0 ? model.slice(slash + 1) : model;
-}
-
-/** Human-readable label for a soft activity-state annotation. */
-export function activityStateLabel(state: ActivityState): string {
-	return state === "needs_attention" ? "idle" : "long-running";
-}
-
-/** Derive the soft activity state of a run at render time: needs_attention
- * (no tool running, idle past the threshold) takes priority over
- * active_long_running (total elapsed past its threshold). Both are suppressed
- * for non-running runs. */
-export function deriveActivityState(run: RunView, now: number = Date.now()): ActivityState | undefined {
-	if (run.status !== "running" && run.status !== "steering") return undefined;
-	if (!run.currentTool) {
-		const since = run.lastActivityAt ?? run.startedAt ?? now;
-		if (now - since >= NEEDS_ATTENTION_AFTER_MS) return "needs_attention";
-	}
-	if (run.startedAt !== undefined && now - run.startedAt >= ACTIVE_LONG_RUNNING_AFTER_MS) {
-		return "active_long_running";
-	}
-	return undefined;
-}
-
-/** Left/right split a widget line so the right side (status, elapsed) is always
- * visible and the left side (title) clips on overflow instead of pushing it off.
- * `left`/`right` may carry ANSI styling; widths are measured display-column-wise. */
-export function rightAlign(left: string, right: string, width: number): string {
-	const rightWidth = visibleWidth(right);
-	const leftMax = Math.max(0, width - rightWidth - 1);
-	const leftClipped = truncateToWidth(left, leftMax);
-	const gap = Math.max(1, width - visibleWidth(leftClipped) - rightWidth);
-	return truncateToWidth(`${leftClipped}${" ".repeat(gap)}${right}`, width);
-}
-
-/** Concatenate `left` and `right` (no center padding) and clip the combined line
- * to `width`. Unlike {@link rightAlign}, the right side trails the left side
- * instead of being pinned to the far edge, so a short header leaves no gap in
- * the middle. `right` should carry its own leading separator (e.g. ` \u00b7 `);
- * pass an empty string when there is nothing to append. Styled strings are
- * measured by display width. */
-export function compactLine(left: string, right: string, width: number): string {
-	return truncateToWidth(`${left}${right}`, width);
-}
-
 /** Max length of the argument target inside a formatted activity line. */
 export const ACTIVITY_TARGET_MAX = 60;
 
+/** Monitor activity is returned to the parent model and rendered in the terminal,
+ * so treat every live string as untrusted before it reaches store state. */
+function sanitizeActivityText(value: string): string {
+	return redactSensitiveText(value).replace(/\s+/g, " ").trim();
+}
+
 function shortTarget(value: unknown): string {
 	if (typeof value !== "string") return "";
-	const oneLine = value.replace(/\s+/g, " ").trim();
+	const oneLine = sanitizeActivityText(value);
 	// Slice by code point so emoji / CJK-ext never leave a lone surrogate.
 	const chars = [...oneLine];
 	return chars.length > ACTIVITY_TARGET_MAX ? `${chars.slice(0, ACTIVITY_TARGET_MAX - 1).join("")}…` : oneLine;
@@ -410,7 +349,8 @@ export function formatToolActivity(toolName: string, args: unknown): string {
 		default:
 			target = pick("path", "command", "query", "pattern", "url", "file", "task");
 	}
-	return target ? `${toolName} ${target}` : toolName;
+	const safeToolName = sanitizeActivityText(toolName) || "tool";
+	return target ? `${safeToolName} ${target}` : safeToolName;
 }
 
 // ---------------------------------------------------------------------------
@@ -491,7 +431,7 @@ export class MonitorStore {
 	setActivity(id: number, text: string): void {
 		const run = this.find(id);
 		if (!run) return;
-		run.activity = text;
+		run.activity = sanitizeActivityText(text) || undefined;
 		run.lastActivityAt = Date.now();
 		this.notify();
 	}
@@ -502,9 +442,10 @@ export class MonitorStore {
 	recordToolStart(id: number, toolName: string, activity: string): void {
 		const run = this.find(id);
 		if (!run) return;
+		const safeToolName = sanitizeActivityText(toolName) || "tool";
 		run.toolCount = (run.toolCount ?? 0) + 1;
-		run.currentTool = toolName;
-		run.activity = activity;
+		run.currentTool = safeToolName;
+		run.activity = sanitizeActivityText(activity) || safeToolName;
 		run.lastActivityAt = Date.now();
 		this.notify();
 	}
@@ -516,11 +457,11 @@ export class MonitorStore {
 		if (!run) return;
 		run.currentTool = undefined;
 		run.lastActivityAt = Date.now();
-		if (isError) run.activity = `✗ ${toolName} failed`;
+		if (isError) run.activity = `✗ ${sanitizeActivityText(toolName) || "tool"} failed`;
 		this.notify();
 	}
 
-	/** Set a widget note on the run (e.g. that its auto-fix chain is still running). */
+	/** Set an orchestration note on the run (e.g. auto-fix chain running). */
 	setAnnotation(id: number, text: string): void {
 		const run = this.find(id);
 		if (!run) return;
@@ -536,7 +477,7 @@ export class MonitorStore {
 		this.notify();
 	}
 
-	/** Mark a run as retained (kept in the widget despite being finished). */
+	/** Keep a finished chain step in status state until its group settles. */
 	setRetained(id: number, retained: boolean): void {
 		const run = this.find(id);
 		if (!run) return;
@@ -624,7 +565,7 @@ export class MonitorStore {
 		this.notify();
 	}
 
-	/** Remove a run (finished runs leave the widget). Returns the removed run. */
+	/** Remove a run after publication. Returns the removed run. */
 	removeRun(id: number): RunView | undefined {
 		const index = this.runs.findIndex((r) => r.id === id);
 		if (index === -1) return undefined;
@@ -698,7 +639,7 @@ export function statusIcon(status: RunStatus, theme: Theme): string {
 	}
 }
 
-/** User-facing status label shown in the widget. */
+/** User-facing status label used by tool/status rendering. */
 export function statusLabel(status: RunStatus): string {
 	switch (status) {
 		case "queued":

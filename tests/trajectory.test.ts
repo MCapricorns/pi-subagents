@@ -1,11 +1,9 @@
 import { describe, expect, it, vi } from "vitest";
 import {
-	DEFAULT_TRANSCRIPT_BUDGET,
-	InspectorStore,
+	TrajectoryStore,
 	TOOL_ARG_SUMMARY_MAX,
 	TOOL_ARG_VALUE_MAX,
 	TrajectoryLog,
-	TranscriptBuffer,
 	summarizeToolArgs,
 	TRAJECTORY_VERSION,
 } from "../src/trajectory.ts";
@@ -153,79 +151,16 @@ describe("summarizeToolArgs", () => {
 	});
 });
 
-describe("TranscriptBuffer", () => {
-	it("keeps only the most recent budget and reports truncation", () => {
-		const buffer = new TranscriptBuffer({ maxTextChars: 20, maxThinkingChars: 10 });
-		buffer.appendText("a".repeat(30));
-		let snapshot = buffer.snapshot();
-		expect(snapshot.textTruncated).toBe(true);
-		expect(snapshot.text.length).toBe(20);
-		expect(snapshot.text).toBe("a".repeat(20));
-
-		buffer.appendThinking("t".repeat(15));
-		snapshot = buffer.snapshot();
-		expect(snapshot.thinkingTruncated).toBe(true);
-		expect(snapshot.thinking.length).toBe(10);
-	});
-
-	it("normalizes CRLF and clears per generation", () => {
-		const buffer = new TranscriptBuffer();
-		buffer.appendText("hello\r\nworld\r");
-		expect(buffer.snapshot().text).toBe("hello\nworld\n");
-		buffer.clear();
-		const snapshot = buffer.snapshot();
-		expect(snapshot.text).toBe("");
-		expect(snapshot.textTruncated).toBe(false);
-	});
-
-	it("never splits a surrogate pair at the truncation boundary", () => {
-		const buffer = new TranscriptBuffer({ maxTextChars: 2, maxThinkingChars: 2 });
-		buffer.appendText("x🙂");
-		let snapshot = buffer.snapshot();
-		expect(snapshot.text).toBe("x🙂");
-		expect([...snapshot.text]).toHaveLength(2);
-		expect(snapshot.textTruncated).toBe(false);
-
-		buffer.appendText("yz");
-		snapshot = buffer.snapshot();
-		expect(snapshot.text).toBe("yz");
-		expect(snapshot.textTruncated).toBe(true);
-		expect(snapshot.text).not.toMatch(/[\uD800-\uDBFF](?![\uDC00-\uDFFF])|(?<![\uD800-\uDBFF])[\uDC00-\uDFFF]/u);
-	});
-
-	it("strips terminal controls and lets the buffer own large-delta truncation", () => {
-		const buffer = new TranscriptBuffer({ maxTextChars: 5_000, maxThinkingChars: 10 });
-		buffer.appendText(`safe\u001b]52;c;ZXZpbA==\u0007${"x".repeat(4_500)}`);
-		const snapshot = buffer.snapshot();
-		expect(snapshot.text).not.toContain("\u001b]52");
-		expect(snapshot.text).toContain("safe");
-		expect(snapshot.text.endsWith("x".repeat(4_500))).toBe(true);
-		expect(snapshot.textTruncated).toBe(false);
-	});
-});
-
-describe("InspectorStore", () => {
-	it("keeps projections per thread id and clears everything on parent-session teardown", () => {
-		const store = new InspectorStore();
+describe("TrajectoryStore", () => {
+	it("keeps one trajectory per thread id and clears on parent-session teardown", () => {
+		const store = new TrajectoryStore();
 		const state = store.get(1);
 		state.trajectory.append({ kind: "dispatch", agent: "worker", task: "x" });
-		state.transcript.appendText("streamed text");
-		state.retainFrom({ agent: "worker", task: "x", status: "done" });
-		expect(store.all()).toHaveLength(1);
 		expect(store.get(1)).toBe(state);
 		expect(state.trajectory.getEvents()).toHaveLength(1);
 
 		store.clearAll();
-		expect(store.all()).toHaveLength(0);
 		expect(state.trajectory.getEvents()).toHaveLength(0);
-		expect(state.transcript.snapshot().text).toBe("");
-	});
-
-	it("survives a throwing subscriber", () => {
-		const store = new InspectorStore();
-		store.subscribe(() => {
-			throw new Error("render exploded");
-		});
-		expect(() => store.get(5).trajectory.append({ kind: "status", status: "running" })).not.toThrow();
+		expect(store.get(1)).not.toBe(state);
 	});
 });

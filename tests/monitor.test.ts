@@ -1,12 +1,7 @@
 import { visibleWidth } from "@earendil-works/pi-tui";
 import { describe, expect, it } from "vitest";
 import {
-	ACTIVE_LONG_RUNNING_AFTER_MS,
-	NEEDS_ATTENTION_AFTER_MS,
 	MonitorStore,
-	activityStateLabel,
-	compactModelRef,
-	deriveActivityState,
 	extractKeyFragments,
 	formatDuration,
 	formatElapsed,
@@ -14,8 +9,6 @@ import {
 	formatToolActivity,
 	formatUsageCompact,
 	runLabel,
-	rightAlign,
-	compactLine,
 	statusLabel,
 } from "../src/monitor.ts";
 
@@ -100,7 +93,7 @@ describe("MonitorStore", () => {
 		expect(store.getRuns()[0].modelFallbackFrom).toBe("anthropic/primary");
 	});
 
-	it("setAnnotation records a widget note without touching status", () => {
+	it("setAnnotation records an orchestration note without touching status", () => {
 		const store = new MonitorStore();
 		const id = store.addRun("reviewer", "Review the change");
 		store.setStatus(id, "done");
@@ -330,6 +323,19 @@ describe("formatToolActivity", () => {
 		expect(formatToolActivity("bash", { command: "npm test" })).toBe("bash npm test");
 	});
 
+	it("redacts credentials and strips terminal controls from commands", () => {
+		const activity = formatToolActivity("bash", {
+			command: "\x1b]8;;https://attacker.test\x07curl\x1b]8;;\x07 -H 'Authorization: Bearer DO_NOT_LEAK_TEST_TOKEN' x?token=DO_NOT_LEAK_QUERY",
+		});
+		expect(activity).toContain("Authorization: Bearer <redacted>");
+		expect(activity).not.toContain("DO_NOT_LEAK");
+		expect(activity).not.toContain("\x1b");
+		expect(activity).not.toContain("\x07");
+		expect(formatToolActivity("bash", { command: "echo token=DO_NOT_LEAK_TEST_TOKEN" })).toBe(
+			"bash echo token=<redacted>",
+		);
+	});
+
 	it("shows grep patterns and search queries", () => {
 		expect(formatToolActivity("grep", { pattern: "finishRun", path: "src/" })).toBe("grep finishRun");
 		expect(formatToolActivity("web_search", { query: "pi thinking levels" })).toBe("web_search pi thinking levels");
@@ -428,6 +434,21 @@ describe("MonitorStore tool tracking", () => {
 		expect(store.getRuns()[0].currentTool).toBe("bash");
 	});
 
+	it("sanitizes activity again at the monitor storage boundary", () => {
+		const store = new MonitorStore();
+		const id = store.addRun("worker", "Implement the change");
+		store.recordToolStart(
+			id,
+			"\x1b[31mbash\x1b[0m",
+			"bash curl -H 'Authorization: Bearer DO_NOT_LEAK_TEST_TOKEN' x?token=DO_NOT_LEAK_QUERY \x1b[2K",
+		);
+		const run = store.findRun(id);
+		expect(run?.currentTool).toBe("bash");
+		expect(run?.activity).toContain("Authorization: Bearer <redacted>");
+		expect(run?.activity).not.toContain("DO_NOT_LEAK");
+		expect(run?.activity).not.toContain("\x1b");
+	});
+
 	it("recordToolEnd clears the current tool and notes failures", () => {
 		const store = new MonitorStore();
 		const id = store.addRun("worker", "Implement the change");
@@ -447,129 +468,6 @@ describe("MonitorStore tool tracking", () => {
 		store.recordToolStart(999, "read", "read x");
 		store.recordToolEnd(999, "read", false);
 		expect(store.getRuns()).toHaveLength(0);
-	});
-});
-
-describe("deriveActivityState", () => {
-	it("returns undefined for non-running runs", () => {
-		const store = new MonitorStore();
-		const id = store.addRun("worker", "Implement the change");
-		store.setStatus(id, "done");
-		expect(deriveActivityState(store.getRuns()[0], Date.now())).toBeUndefined();
-	});
-
-	it("returns needs_attention when idle (no tool) past the threshold", () => {
-		const store = new MonitorStore();
-		const id = store.addRun("worker", "Implement the change");
-		store.setStatus(id, "running");
-		const startedAt = store.getRuns()[0].startedAt as number;
-		expect(deriveActivityState(store.getRuns()[0], startedAt + NEEDS_ATTENTION_AFTER_MS + 1)).toBe("needs_attention");
-	});
-
-	it("does not flag needs_attention while a tool is running", () => {
-		const store = new MonitorStore();
-		const id = store.addRun("worker", "Implement the change");
-		store.setStatus(id, "running");
-		store.recordToolStart(id, "bash", "bash npm test");
-		const startedAt = store.getRuns()[0].startedAt as number;
-		expect(deriveActivityState(store.getRuns()[0], startedAt + NEEDS_ATTENTION_AFTER_MS + 1)).toBeUndefined();
-	});
-
-	it("resets the idle clock on activity after a tool ends", () => {
-		const store = new MonitorStore();
-		const id = store.addRun("worker", "Implement the change");
-		store.setStatus(id, "running");
-		const startedAt = store.getRuns()[0].startedAt as number;
-		// Far past the threshold while idle.
-		expect(deriveActivityState(store.getRuns()[0], startedAt + NEEDS_ATTENTION_AFTER_MS + 5)).toBe("needs_attention");
-		// A tool start refreshes lastActivityAt; just under the threshold after it.
-		store.recordToolStart(id, "read", "read src/index.ts");
-		const afterTool = store.getRuns()[0].lastActivityAt as number;
-		store.recordToolEnd(id, "read", false);
-		expect(deriveActivityState(store.getRuns()[0], afterTool + 100)).toBeUndefined();
-	});
-
-	it("returns active_long_running when total elapsed passes its threshold", () => {
-		const store = new MonitorStore();
-		const id = store.addRun("worker", "Implement the change");
-		store.setStatus(id, "running");
-		// Keep it "busy" with a tool so needs_attention cannot fire.
-		store.recordToolStart(id, "bash", "bash long-test");
-		const startedAt = store.getRuns()[0].startedAt as number;
-		expect(deriveActivityState(store.getRuns()[0], startedAt + ACTIVE_LONG_RUNNING_AFTER_MS + 1)).toBe("active_long_running");
-	});
-
-	it("needs_attention takes priority over active_long_running", () => {
-		const store = new MonitorStore();
-		const id = store.addRun("worker", "Implement the change");
-		store.setStatus(id, "running");
-		const startedAt = store.getRuns()[0].startedAt as number;
-		// Both thresholds exceeded, but no tool running → needs_attention wins.
-		expect(deriveActivityState(store.getRuns()[0], startedAt + ACTIVE_LONG_RUNNING_AFTER_MS + 1)).toBe("needs_attention");
-	});
-});
-
-describe("compactModelRef", () => {
-	it("strips the provider prefix", () => {
-		expect(compactModelRef("anthropic/claude-sonnet-4-5")).toBe("claude-sonnet-4-5");
-		expect(compactModelRef("openai-codex/gpt-5.6-sol")).toBe("gpt-5.6-sol");
-	});
-	it("returns empty for undefined and leaves a bare id unchanged", () => {
-		expect(compactModelRef(undefined)).toBe("");
-		expect(compactModelRef("claude-sonnet-4-5")).toBe("claude-sonnet-4-5");
-	});
-	it("only drops the last slash segment", () => {
-		expect(compactModelRef("org/provider/model-x")).toBe("model-x");
-	});
-});
-
-describe("activityStateLabel", () => {
-	it("maps states to short labels", () => {
-		expect(activityStateLabel("needs_attention")).toBe("idle");
-		expect(activityStateLabel("active_long_running")).toBe("long-running");
-	});
-});
-
-describe("rightAlign", () => {
-	it("places right at the far edge and pads the gap", () => {
-		const line = rightAlign("left side", "right", 20);
-		expect(line.endsWith("right")).toBe(true);
-		expect(visibleWidth(line)).toBeLessThanOrEqual(20);
-		expect(line.startsWith("left side")).toBe(true);
-	});
-	it("clips the left when it overflows, keeping the right fully visible", () => {
-		const line = rightAlign("a very long left side that does not fit", "RIGHT", 20);
-		expect(line.endsWith("RIGHT")).toBe(true);
-		expect(line).toContain("RIGHT");
-		expect(visibleWidth(line)).toBeLessThanOrEqual(20);
-	});
-	it("handles ANSI-styled strings by display width", () => {
-		// styled left/right must still align by visible columns, not byte length.
-		const line = rightAlign("\x1b[31mred\x1b[0m left", "\x1b[32mgreen\x1b[0m", 20);
-		expect(visibleWidth(line)).toBeLessThanOrEqual(20);
-		expect(line).toContain("green");
-	});
-});
-
-describe("compactLine", () => {
-	it("places the right side directly after the left with no center gap", () => {
-		const line = compactLine("left", " · right", 20);
-		expect(line.startsWith("left")).toBe(true);
-		expect(line).toContain("left · right");
-		expect(visibleWidth(line)).toBeLessThanOrEqual(20);
-	});
-	it("clips the combined line to width on overflow", () => {
-		const line = compactLine("a very long left side", " · RIGHT", 20);
-		expect(visibleWidth(line)).toBeLessThanOrEqual(20);
-	});
-	it("returns just the left when the right is empty", () => {
-		const line = compactLine("left", "", 20);
-		expect(line).toBe("left");
-	});
-	it("handles ANSI-styled strings by display width", () => {
-		const line = compactLine("\x1b[31mred\x1b[0m left", " \x1b[32mgreen\x1b[0m", 20);
-		expect(visibleWidth(line)).toBeLessThanOrEqual(20);
-		expect(line).toContain("green");
 	});
 });
 
