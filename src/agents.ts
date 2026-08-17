@@ -123,8 +123,10 @@ function findNearestProjectAgentsDir(cwd: string): string | null {
 export interface DiscoverOptions {
 	/** Which directories to read from. Default: "user". */
 	scope?: AgentScope;
-	/** If provided and non-empty, only agents whose name is listed are returned. */
+	/** If provided, only agents whose name is listed are returned. */
 	enabledNames?: readonly string[];
+	/** Project-controlled prompts are loaded only after Pi trusts the project. */
+	projectTrusted?: boolean;
 	/** Override the built-in agents directory (used by tests). */
 	builtinDir?: string;
 }
@@ -141,7 +143,9 @@ export function discoverAgents(cwd: string, options: DiscoverOptions = {}): Agen
 	const builtin = loadAgentsFromDir(builtinDir, "builtin");
 	const user = scope === "project" ? [] : loadAgentsFromDir(join(getAgentDir(), "agents"), "user");
 	const project =
-		scope === "user" || !projectAgentsDir ? [] : loadAgentsFromDir(projectAgentsDir, "project");
+		scope === "user" || !projectAgentsDir || options.projectTrusted !== true
+			? []
+			: loadAgentsFromDir(projectAgentsDir, "project");
 
 	// Merge with override priority builtin < user < project.
 	const byName = new Map<string, AgentConfig>();
@@ -151,7 +155,7 @@ export function discoverAgents(cwd: string, options: DiscoverOptions = {}): Agen
 
 	let agents = Array.from(byName.values());
 
-	if (options.enabledNames && options.enabledNames.length > 0) {
+	if (options.enabledNames !== undefined) {
 		const enabled = new Set(options.enabledNames);
 		agents = agents.filter((agent) => enabled.has(agent.name));
 	}

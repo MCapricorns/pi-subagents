@@ -411,6 +411,77 @@ describe("queued controls and stale generations", () => {
 		expect(monitor.findRun(runId!)?.status).toBe("parked");
 	});
 
+	it("stops a queued resumed generation without publishing the completed generation's result", async () => {
+		writeFileSync(join(testDir, "pi-subagents.json"), JSON.stringify({ maxConcurrency: 1 }), "utf8");
+		const oldSessionDir = mkdtempSync(join(testDir, "completed-session-"));
+		writeFileSync(join(oldSessionDir, "retained.txt"), "old retained context", "utf8");
+		vi.spyOn(spawn, "runSingleAgentWithModelFallback").mockImplementation(async (options: any) => {
+			if (options.task === "Completed objective") {
+				return {
+					agent: "worker",
+					agentSource: "builtin",
+					task: options.task,
+					exitCode: 0,
+					messages: [{ role: "assistant", content: [{ type: "text", text: "OLD COMPLETED OUTPUT" }], stopReason: "stop" }],
+					stderr: "",
+					usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, cost: 0, contextTokens: 0, turns: 1 },
+					sessionId: "completed-session",
+					sessionDir: oldSessionDir,
+				} as any;
+			}
+			if (options.task === "Occupy the only slot") {
+				options.onLive?.({ kind: "status", status: "running" });
+				await new Promise<void>((resolveBlocked) => {
+					if (options.signal.aborted) resolveBlocked();
+					else options.signal.addEventListener("abort", () => resolveBlocked(), { once: true });
+				});
+				return {
+					agent: "worker",
+					agentSource: "builtin",
+					task: options.task,
+					exitCode: 1,
+					messages: [],
+					stderr: "stopped",
+					usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, cost: 0, contextTokens: 0, turns: 0 },
+					stopReason: "aborted",
+					errorMessage: "stopped",
+				} as any;
+			}
+			throw new Error(`Queued resumed generation unexpectedly launched: ${options.task}`);
+		});
+		const script = join(testDir, "unused-queued-resume.mjs");
+		writeFileSync(script, "", "utf8");
+		const { stub, subagent, control, stop, status } = registerWithScript(script);
+		const completed = await execute(subagent, { agent: "worker", task: "Completed objective" });
+		const runId = completed.details.results[0].runId;
+		await waitFor(() => stub.messages.length === 1);
+		stub.messages.length = 0;
+
+		const occupying = await execute(subagent, { agent: "worker", task: "Occupy the only slot" });
+		const occupyingId = occupying.details.results[0].runId;
+		await waitFor(() => monitor.findRun(occupyingId)?.status === "running");
+		const resumed = await execute(control, {
+			action: "resume",
+			id: runId,
+			objective: "Queued follow-on objective",
+		});
+		expect(resumed.content[0].text).toContain(`Resumed run #${runId}`);
+		expect(monitor.findRun(runId)?.status).toBe("queued");
+
+		await execute(stop, { id: String(runId) });
+		expect(stub.messages).toHaveLength(1);
+		const stoppedContent = stub.messages[0].message.content as string;
+		expect(stoppedContent).toContain("Task: Queued follow-on objective");
+		expect(stoppedContent).toContain("Stopped by subagent_stop before the run started");
+		expect(stoppedContent).not.toContain("OLD COMPLETED OUTPUT");
+		const full = await execute(status, { id: String(runId) });
+		expect(full.content[0].text).toContain("Task: Queued follow-on objective");
+		expect(full.content[0].text).not.toContain("OLD COMPLETED OUTPUT");
+		expect(existsSync(oldSessionDir)).toBe(false);
+
+		await execute(stop, { id: String(occupyingId) });
+	});
+
 	it("does not return from park until a retrying generation publishes its session and releases the slot", async () => {
 		let releaseFirst!: (result: any) => void;
 		const firstResult = new Promise<any>((resolve) => {

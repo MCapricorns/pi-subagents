@@ -15,6 +15,7 @@ import {
 	createWorktreeIsolation,
 	resolveWorktreeTarget,
 	runCommand,
+	type CommandRunner,
 	type WorktreeIsolation,
 } from "../src/worktree.ts";
 
@@ -176,6 +177,36 @@ describe("Git worktree isolation lifecycle", () => {
 		expect(readFileSync(join(repo, "fork-two.txt"), "utf8")).toBe("two\n");
 	});
 
+	it("serializes concurrent overlapping fork integration per source worktree", async () => {
+		const repo = createRepo();
+		repos.push(repo);
+		let activeApplies = 0;
+		let maxConcurrentApplies = 0;
+		const delayedRunner: CommandRunner = async (command, args, options) => {
+			if (command !== "git" || args[0] !== "apply") return runCommand(command, args, options);
+			activeApplies++;
+			maxConcurrentApplies = Math.max(maxConcurrentApplies, activeApplies);
+			try {
+				await new Promise((resolveDelay) => setTimeout(resolveDelay, 40));
+				return await runCommand(command, args, options);
+			} finally {
+				activeApplies--;
+			}
+		};
+		const firstFork = await createWorktreeIsolation(repo, { runner: delayedRunner });
+		const secondFork = await createWorktreeIsolation(repo, { runner: delayedRunner });
+		retained.push({ repo, handle: firstFork }, { repo, handle: secondFork });
+		writeFileSync(join(firstFork.worktreePath, "tracked.txt"), "fork one\n", "utf8");
+		writeFileSync(join(secondFork.worktreePath, "tracked.txt"), "fork two\n", "utf8");
+
+		const results = await Promise.all([firstFork.finalize(), secondFork.finalize()]);
+
+		expect(maxConcurrentApplies).toBe(1);
+		expect(results.map((result) => result.status).sort()).toEqual(["integrated", "retained"]);
+		expect(results.filter((result) => result.integrated)).toHaveLength(1);
+		expect(["fork one\n", "fork two\n"]).toContain(readFileSync(join(repo, "tracked.txt"), "utf8"));
+	});
+
 	it("recognizes an integrated seed after the parent commits it", async () => {
 		const repo = createRepo();
 		repos.push(repo);
@@ -194,6 +225,30 @@ describe("Git worktree isolation lifecycle", () => {
 		writeFileSync(join(continuation.worktreePath, "tracked.txt"), "generation two\n", "utf8");
 		expect(await continuation.finalize()).toMatchObject({ status: "integrated", integrated: true });
 		expect(readFileSync(join(repo, "tracked.txt"), "utf8")).toBe("generation two\n");
+	});
+
+	it("preserves an integrated seed through a no-op continuation before later edits", async () => {
+		const repo = createRepo();
+		repos.push(repo);
+		const first = await createWorktreeIsolation(repo);
+		writeFileSync(join(first.worktreePath, "tracked.txt"), "generation one\n", "utf8");
+		expect(await first.finalize()).toMatchObject({ status: "integrated", integrated: true });
+
+		const second = await createWorktreeIsolation(repo, {
+			seedCheckpoint: await first.snapshotCheckpoint(),
+			seedIsIntegrated: true,
+		});
+		expect(await second.finalize()).toMatchObject({ status: "no_changes", integrated: false });
+
+		const third = await createWorktreeIsolation(repo, {
+			seedCheckpoint: await second.snapshotCheckpoint(),
+			// Dispatch treats a no-op continuation as an already-integrated seed.
+			seedIsIntegrated: true,
+		});
+		writeFileSync(join(third.worktreePath, "generation-three.txt"), "three\n", "utf8");
+		expect(await third.finalize()).toMatchObject({ status: "integrated", integrated: true });
+		expect(readFileSync(join(repo, "tracked.txt"), "utf8")).toBe("generation one\n");
+		expect(readFileSync(join(repo, "generation-three.txt"), "utf8")).toBe("three\n");
 	});
 
 	it("retains the worktree and binary patch when parent changes conflict", async () => {

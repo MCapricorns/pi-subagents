@@ -48,6 +48,40 @@ describe("discoverAgents", () => {
 		expect(agents.map((a) => a.name)).toEqual(["worker"]);
 	});
 
+	it("treats an explicit empty enabledNames list as disabling every agent", () => {
+		writeAgent(builtinDir, "explore", "---\nname: explore\ndescription: d\n---\nb");
+		writeAgent(builtinDir, "worker", "---\nname: worker\ndescription: d\n---\nb");
+		const { agents } = discoverAgents(cwd, { scope: "user", builtinDir, enabledNames: [] });
+		expect(agents).toEqual([]);
+	});
+
+	it("loads project agent prompts only when Pi has trusted the project", () => {
+		writeAgent(builtinDir, "worker", "---\nname: worker\ndescription: builtin\n---\nbuiltin prompt");
+		writeAgent(
+			join(cwd, ".pi", "agents"),
+			"worker",
+			"---\nname: worker\ndescription: project\n---\nproject-controlled prompt",
+		);
+
+		const untrusted = discoverAgents(cwd, {
+			scope: "both",
+			builtinDir,
+			projectTrusted: false,
+		}).agents;
+		expect(untrusted).toHaveLength(1);
+		expect(untrusted[0]).toMatchObject({ name: "worker", source: "builtin" });
+		expect(untrusted[0].systemPrompt).not.toContain("project-controlled");
+
+		const trusted = discoverAgents(cwd, {
+			scope: "both",
+			builtinDir,
+			projectTrusted: true,
+		}).agents;
+		expect(trusted).toHaveLength(1);
+		expect(trusted[0]).toMatchObject({ name: "worker", source: "project" });
+		expect(trusted[0].systemPrompt).toContain("project-controlled");
+	});
+
 	it("parses a valid thinking level and ignores invalid ones", () => {
 		writeAgent(builtinDir, "explore", "---\nname: explore\ndescription: d\nthinking: low\n---\nb");
 		writeAgent(builtinDir, "worker", "---\nname: worker\ndescription: d\nthinking: ultra\n---\nb");

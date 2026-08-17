@@ -84,6 +84,7 @@ export default function (pi: ExtensionAPI): void {
 		const { agents } = discoverAgents(ctx.cwd, {
 			scope: config.agentScope,
 			enabledNames: config.enabledAgents,
+			projectTrusted: ctx.isProjectTrusted?.() === true,
 		});
 		const directive = buildDelegationDirective(agents);
 		if (!directive) return undefined;

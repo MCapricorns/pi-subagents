@@ -42,6 +42,33 @@ export const GIT_COMMAND_KILL_GRACE_MS = 2_000;
 export const GIT_OUTPUT_MAX_BYTES = 64 * 1024 * 1024;
 export const WORKTREE_PATCH_MAX_BYTES = GIT_OUTPUT_MAX_BYTES;
 
+/** Git apply validates and writes in one process, but two apply processes can
+ * validate the same old bytes concurrently before either writes. Chain applies
+ * per canonical source worktree so an overlapping later patch conflicts instead
+ * of silently winning a last-writer race. */
+const originalRootApplyTails = new Map<string, Promise<void>>();
+
+async function withSerializedOriginalRootApply<T>(
+	originalRoot: string,
+	operation: () => Promise<T>,
+): Promise<T> {
+	const key = process.platform === "win32" ? originalRoot.toLowerCase() : originalRoot;
+	const previous = originalRootApplyTails.get(key) ?? Promise.resolve();
+	let release!: () => void;
+	const gate = new Promise<void>((resolveGate) => {
+		release = resolveGate;
+	});
+	const tail = previous.catch(() => undefined).then(() => gate);
+	originalRootApplyTails.set(key, tail);
+	await previous.catch(() => undefined);
+	try {
+		return await operation();
+	} finally {
+		release();
+		if (originalRootApplyTails.get(key) === tail) originalRootApplyTails.delete(key);
+	}
+}
+
 function terminateCommandTree(child: ChildProcess, force: boolean, processGroup: boolean): void {
 	if (process.platform === "win32" && child.pid !== undefined) {
 		const fallback = (): void => {
@@ -458,11 +485,13 @@ class GitWorktreeIsolation implements WorktreeIsolation {
 			if (hadChanges) {
 				await writeFile(this.patchPath, diff.stdout, { flag: "wx" });
 				patchWritten = true;
-				await runGit(
-					this.runner,
-					this.originalRoot,
-					["apply", "--binary", "--whitespace=nowarn", this.patchPath],
-					`Applying isolated patch to ${this.originalRoot}`,
+				await withSerializedOriginalRootApply(this.originalRoot, () =>
+					runGit(
+						this.runner,
+						this.originalRoot,
+						["apply", "--binary", "--whitespace=nowarn", this.patchPath],
+						`Applying isolated patch to ${this.originalRoot}`,
+					),
 				);
 				integrated = true;
 			}

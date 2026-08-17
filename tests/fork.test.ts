@@ -1,4 +1,4 @@
-import { existsSync, readFileSync, mkdtempSync, rmSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { SessionManager } from "@earendil-works/pi-coding-agent";
@@ -158,6 +158,7 @@ function ctx(cwd: string): any {
 		model: { provider: "test", id: "main" },
 		scopedModels: [],
 		modelRegistry: { getAvailable: () => [] },
+		isProjectTrusted: () => false,
 		ui: { notify: vi.fn() },
 	};
 }
@@ -261,6 +262,55 @@ async function waitFor(predicate: () => boolean, timeoutMs = 5_000): Promise<voi
 }
 
 describe("subagent_control fork", () => {
+	it("keeps untrusted project agent prompts out of initial, resume, and fork generations", async () => {
+		const cwd = mkdtempSync(join(tmpdir(), "pi-subagents-fork-untrusted-cwd-"));
+		tempPaths.push(cwd);
+		mkdirSync(join(cwd, ".pi", "agents"), { recursive: true });
+		writeFileSync(join(cwd, ".pi", "agents", "worker.md"), [
+			"---",
+			"name: worker",
+			"description: malicious override",
+			"---",
+			"MALICIOUS PROJECT SYSTEM PROMPT",
+		].join("\n"), "utf8");
+		writeFileSync(join(agentDir, "pi-subagents.json"), JSON.stringify({ agentScope: "both" }), "utf8");
+		const source = createSession(cwd);
+		tempPaths.push(source.dir);
+		const queued = captureQueue();
+		const run = vi.spyOn(spawnModule, "runSingleAgentWithModelFallback").mockImplementation(async (options: any) =>
+			result(options.task, {
+				id: options.sessionId ?? source.id,
+				dir: options.sessionDir ?? source.dir,
+			}),
+		);
+		const { subagent, control } = registered();
+		const dispatched = await execute(subagent, { agent: "worker", task: "source" }, cwd);
+		const sourceRunId = dispatched.details.results[0].runId;
+		await queued[0].task(queued[0].controller.signal);
+
+		const forked = await execute(control, {
+			action: "fork",
+			id: sourceRunId,
+			objective: "fork objective",
+		}, cwd);
+		expect(forked.details.childRunId).toBeDefined();
+		const resumed = await execute(control, {
+			action: "resume",
+			id: sourceRunId,
+			objective: "resume objective",
+		}, cwd);
+		expect(resumed.content[0].text).toContain(`Resumed run #${sourceRunId}`);
+		expect(queued).toHaveLength(3);
+		await queued[1].task(queued[1].controller.signal);
+		await queued[2].task(queued[2].controller.signal);
+
+		expect(run).toHaveBeenCalledTimes(3);
+		for (const [options] of run.mock.calls) {
+			expect(options!.agent!.source).toBe("builtin");
+			expect(options!.agent!.systemPrompt).not.toContain("MALICIOUS PROJECT");
+		}
+	});
+
 	it("forks a completed session into generation 1 with optional objective and linked trajectories", async () => {
 		const cwd = mkdtempSync(join(tmpdir(), "pi-subagents-fork-control-cwd-"));
 		tempPaths.push(cwd);

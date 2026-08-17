@@ -1,4 +1,4 @@
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
@@ -1007,6 +1007,140 @@ send({ type: "message_end", message: { role: "assistant", content: [{ type: "tex
 		}
 	});
 
+	it("runs every auto-fix round in the triggering reviewer's explicit cwd", async () => {
+		const stub = makeStub();
+		const capturedTasks: BackgroundTask[] = [];
+		const controllers: AbortController[] = [];
+		vi.spyOn(BackgroundTaskQueue.prototype, "enqueue").mockImplementation((task) => {
+			capturedTasks.push(task);
+			const controller = new AbortController();
+			controllers.push(controller);
+			return controller;
+		});
+		const outerRepo = mkdtempSync(join(tmpdir(), "pi-subagents-chain-outer-"));
+		const targetRepo = mkdtempSync(join(tmpdir(), "pi-subagents-chain-target-"));
+		const makeResult = (agent: string, task: string, text: string): any => ({
+			agent,
+			agentSource: "builtin",
+			task,
+			exitCode: 0,
+			messages: [{ role: "assistant", content: [{ type: "text", text }], stopReason: "stop" }],
+			stderr: "",
+			usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, cost: 0, contextTokens: 0, turns: 1 },
+		});
+		const run = vi.spyOn(spawn, "runSingleAgentWithModelFallback").mockImplementation(async (options: any) => {
+			if (options.task === "Review target repo") {
+				return makeResult("reviewer", options.task, "REQUEST_CHANGES\nVERDICT: REVIEW_FAIL");
+			}
+			if (options.agentName === "worker") return makeResult("worker", options.task, "fixed target repo");
+			return makeResult("reviewer", options.task, "APPROVE\nVERDICT: REVIEW_PASS");
+		});
+
+		try {
+			register(stub.api);
+			const tool = stub.tools.find((candidate) => candidate.name === "subagent");
+			await tool.execute(
+				"call-chain-cwd",
+				{ agent: "reviewer", task: "Review target repo", cwd: targetRepo },
+				new AbortController().signal,
+				() => {},
+				{ ...executionContext(), cwd: outerRepo },
+			);
+			await capturedTasks[0](controllers[0].signal);
+			await capturedTasks[1](controllers[1].signal);
+
+			expect(run).toHaveBeenCalledTimes(3);
+			for (const [options] of run.mock.calls) {
+				expect(options.defaultCwd).toBe(targetRepo);
+				expect(options.cwd).toBe(targetRepo);
+			}
+			expect(stub.messages).toHaveLength(1);
+			expect(stub.messages[0].message.content).toContain("final PASS");
+		} finally {
+			for (const controller of controllers) controller.abort();
+			await stub.hooks["session_shutdown"]?.({}, {});
+			rmSync(outerRepo, { recursive: true, force: true });
+			rmSync(targetRepo, { recursive: true, force: true });
+		}
+	});
+
+	it("serializes concurrent auto-fix chains that share a repository", async () => {
+		const stub = makeStub();
+		const capturedTasks: BackgroundTask[] = [];
+		const controllers: AbortController[] = [];
+		vi.spyOn(BackgroundTaskQueue.prototype, "enqueue").mockImplementation((task) => {
+			capturedTasks.push(task);
+			const controller = new AbortController();
+			controllers.push(controller);
+			return controller;
+		});
+		const repo = mkdtempSync(join(tmpdir(), "pi-subagents-chain-serialized-"));
+		const makeResult = (agent: string, task: string, text: string): any => ({
+			agent,
+			agentSource: "builtin",
+			task,
+			exitCode: 0,
+			messages: [{ role: "assistant", content: [{ type: "text", text }], stopReason: "stop" }],
+			stderr: "",
+			usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, cost: 0, contextTokens: 0, turns: 1 },
+		});
+		let activeWorkers = 0;
+		let maxActiveWorkers = 0;
+		let workerStarts = 0;
+		const workerReleases: Array<() => void> = [];
+		vi.spyOn(spawn, "runSingleAgentWithModelFallback").mockImplementation(async (options: any) => {
+			if (options.task === "Review A" || options.task === "Review B") {
+				return makeResult("reviewer", options.task, "REQUEST_CHANGES\nVERDICT: REVIEW_FAIL");
+			}
+			if (options.agentName === "worker") {
+				workerStarts++;
+				activeWorkers++;
+				maxActiveWorkers = Math.max(maxActiveWorkers, activeWorkers);
+				try {
+					await new Promise<void>((resolveWorker) => workerReleases.push(resolveWorker));
+					return makeResult("worker", options.task, "fixed");
+				} finally {
+					activeWorkers--;
+				}
+			}
+			return makeResult("reviewer", options.task, "APPROVE\nVERDICT: REVIEW_PASS");
+		});
+
+		try {
+			register(stub.api);
+			const tool = stub.tools.find((candidate) => candidate.name === "subagent");
+			await Promise.all([
+				tool.execute("chain-a", { agent: "reviewer", task: "Review A", cwd: repo }, new AbortController().signal, () => {}, executionContext()),
+				tool.execute("chain-b", { agent: "reviewer", task: "Review B", cwd: repo }, new AbortController().signal, () => {}, executionContext()),
+			]);
+			await Promise.all([
+				capturedTasks[0](controllers[0].signal),
+				capturedTasks[1](controllers[1].signal),
+			]);
+			expect(capturedTasks).toHaveLength(4);
+			const chains = [
+				capturedTasks[2](controllers[2].signal),
+				capturedTasks[3](controllers[3].signal),
+			];
+			await vi.waitFor(() => expect(workerStarts).toBe(1));
+			await new Promise((resolveDelay) => setTimeout(resolveDelay, 30));
+			expect(workerStarts).toBe(1);
+			expect(maxActiveWorkers).toBe(1);
+
+			workerReleases[0]!();
+			await vi.waitFor(() => expect(workerStarts).toBe(2));
+			expect(maxActiveWorkers).toBe(1);
+			workerReleases[1]!();
+			await Promise.all(chains);
+			expect(stub.messages).toHaveLength(2);
+		} finally {
+			for (const release of workerReleases) release();
+			for (const controller of controllers) controller.abort();
+			await stub.hooks["session_shutdown"]?.({}, {});
+			rmSync(repo, { recursive: true, force: true });
+		}
+	});
+
 	it("publishes the interrupted auto-fix sub-step partial instead of the old review", async () => {
 		const stub = makeStub();
 		let activeWorkerOptions: any;
@@ -1329,6 +1463,73 @@ describe("before_agent_start injection", () => {
 		expect(result.systemPrompt).toContain("- worker:");
 		expect(result.systemPrompt).toContain("- reviewer:");
 		expect(result.systemPrompt).not.toContain("- plan:");
+	});
+
+	it("excludes untrusted project agent overrides from injection and dispatch", async () => {
+		if (!testAgentDir) throw new Error("test agent directory was not initialized");
+		writeFileSync(join(testAgentDir, "pi-subagents.json"), JSON.stringify({
+			agentScope: "both",
+			enabledAgents: ["worker"],
+		}), "utf8");
+		const project = mkdtempSync(join(tmpdir(), "pi-subagents-untrusted-project-"));
+		const projectAgents = join(project, ".pi", "agents");
+		mkdirSync(projectAgents, { recursive: true });
+		writeFileSync(join(projectAgents, "worker.md"), [
+			"---",
+			"name: worker",
+			"description: MALICIOUS PROJECT OVERRIDE",
+			"---",
+			"MALICIOUS PROJECT SYSTEM PROMPT",
+		].join("\n"), "utf8");
+		const stub = makeStub();
+		let queued!: BackgroundTask;
+		const controller = new AbortController();
+		vi.spyOn(BackgroundTaskQueue.prototype, "enqueue").mockImplementation((task) => {
+			queued = task;
+			return controller;
+		});
+		const run = vi.spyOn(spawn, "runSingleAgentWithModelFallback").mockResolvedValue({
+			agent: "worker",
+			agentSource: "builtin",
+			task: "safe task",
+			exitCode: 0,
+			messages: [],
+			stderr: "",
+			usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, cost: 0, contextTokens: 0, turns: 0 },
+		} as any);
+		const untrustedCtx = {
+			...executionContext(),
+			cwd: project,
+			isProjectTrusted: () => false,
+		};
+
+		try {
+			register(stub.api);
+			const injection = await stub.hooks["before_agent_start"](
+				{ systemPrompt: "BASE PROMPT" },
+				untrustedCtx,
+			);
+			expect(injection.systemPrompt).toContain("- worker:");
+			expect(injection.systemPrompt).not.toContain("MALICIOUS PROJECT");
+
+			const tool = stub.tools.find((candidate) => candidate.name === "subagent");
+			await tool.execute(
+				"untrusted-dispatch",
+				{ agent: "worker", task: "safe task" },
+				new AbortController().signal,
+				() => {},
+				untrustedCtx,
+			);
+			await queued(controller.signal);
+			expect(run).toHaveBeenCalledTimes(1);
+			const options = run.mock.calls[0]![0]!;
+			expect(options.agent!.source).toBe("builtin");
+			expect(options.agent!.systemPrompt).not.toContain("MALICIOUS PROJECT");
+		} finally {
+			controller.abort();
+			await stub.hooks["session_shutdown"]?.({}, {});
+			rmSync(project, { recursive: true, force: true });
+		}
 	});
 });
 

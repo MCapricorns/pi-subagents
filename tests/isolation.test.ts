@@ -1,4 +1,4 @@
-import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { Agent } from "@earendil-works/pi-agent-core";
@@ -8,6 +8,7 @@ import { BackgroundTaskQueue, type BackgroundTask } from "../src/background.ts";
 import { isWorktreeCapableAgent } from "../src/dispatch.ts";
 import register from "../src/index.ts";
 import { monitor } from "../src/monitor.ts";
+import { readRecoveryRecords } from "../src/recovery.ts";
 import * as spawnModule from "../src/spawn.ts";
 import { inspectorStore } from "../src/trajectory.ts";
 import * as worktreeModule from "../src/worktree.ts";
@@ -480,6 +481,59 @@ describe("logical worktree reuse and guarded finalization", () => {
 		rmSync(root, { recursive: true, force: true });
 	});
 
+	it("marks a no-op continuation seed as integrated for the next resume", async () => {
+		const root = mkdtempSync(join(tmpdir(), "pi-subagents-isolation-noop-seed-"));
+		const firstHandle = fakeWorktree(root, {
+			status: "integrated",
+			integrated: true,
+			hadChanges: true,
+		}, "generation-one");
+		const secondHandle = fakeWorktree(root, {
+			status: "no_changes",
+			integrated: false,
+			hadChanges: false,
+		}, "generation-two");
+		const thirdHandle = fakeWorktree(root, undefined, "generation-three");
+		const create = vi.spyOn(worktreeModule, "createWorktreeIsolation")
+			.mockResolvedValueOnce(firstHandle)
+			.mockResolvedValueOnce(secondHandle)
+			.mockResolvedValueOnce(thirdHandle);
+		const queued: Array<{ task: BackgroundTask; controller: AbortController }> = [];
+		vi.spyOn(BackgroundTaskQueue.prototype, "enqueue").mockImplementation((task) => {
+			const controller = new AbortController();
+			queued.push({ task, controller });
+			return controller;
+		});
+		const retained = createRetainedSession(firstHandle.cwd);
+		vi.spyOn(spawnModule, "runSingleAgentWithModelFallback")
+			.mockResolvedValueOnce(emptyResult("generation one", {
+				sessionId: retained.id,
+				sessionDir: retained.dir,
+			}))
+			.mockImplementation(async (options: any) => emptyResult(options.task, {
+				sessionId: options.sessionId,
+				sessionDir: options.sessionDir,
+			}));
+		const { subagent, control } = registered();
+		const dispatched = await execute(subagent, {
+			agent: "worker",
+			task: "generation one",
+			isolation: "worktree",
+		}, root);
+		const runId = dispatched.details.results[0].runId;
+		await queued[0].task(queued[0].controller.signal);
+
+		await execute(control, { action: "resume", id: runId, objective: "generation two" }, root);
+		await queued[1].task(queued[1].controller.signal);
+		expect(secondHandle.state).toBe("no_changes");
+		await execute(control, { action: "resume", id: runId, objective: "generation three" }, root);
+
+		expect(create).toHaveBeenCalledTimes(3);
+		expect(create.mock.calls[2]![1]).toMatchObject({ seedIsIntegrated: true });
+		await queued[2].task(queued[2].controller.signal);
+		rmSync(root, { recursive: true, force: true });
+	});
+
 	it("retargets without creating or finalizing another worktree", async () => {
 		const root = mkdtempSync(join(tmpdir(), "pi-subagents-isolation-retarget-"));
 		const handle = fakeWorktree(root);
@@ -660,6 +714,56 @@ describe("logical worktree reuse and guarded finalization", () => {
 });
 
 describe("shutdown and destructive-stop integration", () => {
+	it("keeps a queued isolated stop active until worktree cleanup and result publication finish", async () => {
+		const root = mkdtempSync(join(tmpdir(), "pi-subagents-isolation-queued-stop-"));
+		writeFileSync(join(agentDir, "pi-subagents.json"), JSON.stringify({ maxConcurrency: 1 }), "utf8");
+		const finalization = deferred<WorktreeFinalization>();
+		const handle = fakeWorktree(root);
+		handle.finalizeMock.mockImplementation(() => finalization.promise);
+		vi.spyOn(worktreeModule, "createWorktreeIsolation").mockResolvedValue(handle);
+		vi.spyOn(spawnModule, "runSingleAgentWithModelFallback").mockImplementation(async (options: any) => {
+			options.onLive?.({ kind: "status", status: "running" });
+			await new Promise<void>((resolve) => {
+				if (options.signal.aborted) resolve();
+				else options.signal.addEventListener("abort", () => resolve(), { once: true });
+			});
+			return emptyResult(options.task, {
+				exitCode: 1,
+				stopReason: "aborted",
+				errorMessage: "stopped",
+			});
+		});
+		const { stub, subagent, stop, status } = registered();
+		await execute(subagent, { agent: "worker", task: "occupy slot" }, root);
+		await waitFor(() => monitor.getRuns().some((run) => run.task === "occupy slot" && run.status === "running"));
+		const queued = await execute(subagent, {
+			agent: "worker",
+			task: "queued isolated",
+			isolation: "worktree",
+		}, root);
+		const runId = queued.details.results[0].runId;
+		expect(monitor.findRun(runId)?.status).toBe("queued");
+
+		let stopResolved = false;
+		const stopping = execute(stop, { id: String(runId) }, root).then((value) => {
+			stopResolved = true;
+			return value;
+		});
+		await new Promise((resolve) => setTimeout(resolve, 20));
+		expect(stopResolved).toBe(false);
+		expect(monitor.findRun(runId)?.status).toBe("queued");
+		const duringCleanup = await execute(status, { id: String(runId) }, root);
+		expect(duringCleanup.content[0].text).toContain("still active");
+		expect(stub.messages).toHaveLength(0);
+
+		finalization.resolve({ status: "no_changes", integrated: false, hadChanges: false });
+		await stopping;
+		expect(monitor.findRun(runId)).toBeUndefined();
+		expect(stub.messages).toHaveLength(1);
+		expect(stub.messages[0].message.content).toContain("Stopped by subagent_stop before the run started");
+		rmSync(root, { recursive: true, force: true });
+	});
+
 	it.each(["resume", "fork"] as const)(
 		"invalidates and rolls back an isolated %s preflight before clearing the runtime",
 		async (action) => {
@@ -703,6 +807,51 @@ describe("shutdown and destructive-stop integration", () => {
 			rmSync(root, { recursive: true, force: true });
 		},
 	);
+
+	it("persists recovery metadata when shutdown cannot discard a preflight continuation", async () => {
+		const root = mkdtempSync(join(tmpdir(), "pi-subagents-isolation-shutdown-discard-"));
+		const firstHandle = fakeWorktree(root, undefined, "source");
+		const childHandle = fakeWorktree(root, undefined, "continuation");
+		mkdirSync(childHandle.worktreePath, { recursive: true });
+		childHandle.discardMock.mockRejectedValue(new Error("worktree prune failed"));
+		const childCreation = deferred<WorktreeIsolation>();
+		const create = vi.spyOn(worktreeModule, "createWorktreeIsolation")
+			.mockResolvedValueOnce(firstHandle)
+			.mockImplementationOnce(async () => childCreation.promise);
+		const queued: Array<{ task: BackgroundTask; controller: AbortController }> = [];
+		vi.spyOn(BackgroundTaskQueue.prototype, "enqueue").mockImplementation((task) => {
+			const controller = new AbortController();
+			queued.push({ task, controller });
+			return controller;
+		});
+		const retained = createRetainedSession(firstHandle.cwd);
+		vi.spyOn(spawnModule, "runSingleAgentWithModelFallback").mockResolvedValue(
+			emptyResult("source", { sessionId: retained.id, sessionDir: retained.dir }),
+		);
+		const { stub, subagent, control } = registered();
+		const dispatched = await execute(subagent, {
+			agent: "worker",
+			task: "source",
+			isolation: "worktree",
+		}, root);
+		const runId = dispatched.details.results[0].runId;
+		await queued[0].task(queued[0].controller.signal);
+
+		const resuming = execute(control, { action: "resume", id: runId }, root);
+		await waitFor(() => create.mock.calls.length === 2);
+		const shuttingDown = stub.hooks["session_shutdown"]?.({}, {});
+		childCreation.resolve(childHandle);
+		await resuming;
+		await shuttingDown;
+
+		const records = await readRecoveryRecords(join(agentDir, "pi-subagents.json"));
+		expect(records).toContainEqual(expect.objectContaining({
+			runId,
+			worktreePath: childHandle.worktreePath,
+			error: expect.stringContaining("worktree prune failed"),
+		}));
+		rmSync(root, { recursive: true, force: true });
+	});
 
 	it("best-effort integrates a parked worktree during parent session shutdown", async () => {
 		const root = mkdtempSync(join(tmpdir(), "pi-subagents-isolation-shutdown-parent-"));

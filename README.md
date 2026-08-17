@@ -34,6 +34,8 @@ on its own — no prompt engineering, no babysitting.
 - **A quality gate that closes the loop** — when a reviewer returns `REVIEW_FAIL`,
   the extension dispatches a worker briefed with the concrete findings, then a
   re-review, up to `maxFixRounds` times — and only then wakes the main agent.
+  Every round stays in the triggering reviewer's cwd, and chains that target the
+  same repository are serialized so shared-checkout edits cannot race.
 - **Ordered model pools without config churn** — each agent can have a primary
   and backup; the current main-window model is the final candidate. Transient
   provider failures retry the same candidate with backoff, while permanent stale
@@ -275,7 +277,8 @@ after an update via a toast (marker persisted in `announcedFeatures`).
 ## Agent discovery and overrides
 
 - Built-in agents ship with the package; user agents live in `~/.pi/agent/agents/`;
-  project agents in the nearest `.pi/agents/` directory.
+  project agents in the nearest `.pi/agents/` directory are loaded only when Pi
+  trusts that project.
 - For duplicate names: project overrides user overrides built-in. Keep the
   matching filename and `name` field to replace a built-in agent.
 - Optional frontmatter: `model` (default model reference), `thinking` (default

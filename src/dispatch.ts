@@ -12,7 +12,8 @@
 import { StringEnum } from "@earendil-works/pi-ai";
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { Text } from "@earendil-works/pi-tui";
-import { rm } from "node:fs/promises";
+import { existsSync } from "node:fs";
+import { realpath, rm } from "node:fs/promises";
 import { resolve } from "node:path";
 import { Type } from "typebox";
 import { discoverAgents, type AgentConfig } from "./agents.ts";
@@ -46,6 +47,7 @@ import {
 	type RunChainMeta,
 } from "./monitor.ts";
 import type { SubagentRuntime, SubagentThread, ThreadState } from "./runtime.ts";
+import { persistRecoveryRecords, recoveryRecordFromFinalization } from "./recovery.ts";
 import { forkRetainedSession } from "./session-fork.ts";
 import {
 	buildFallbackResumeReason,
@@ -64,6 +66,7 @@ import {
 import { inspectorStore, summarizeToolArgs } from "./trajectory.ts";
 import {
 	createWorktreeIsolation,
+	resolveWorktreeTarget,
 	type IsolationMode,
 	type WorktreeFinalization,
 	type WorktreeIsolation,
@@ -135,6 +138,48 @@ export function isWorktreeCapableAgent(agent: AgentConfig): boolean {
 	if (agent.name === "worker") return true;
 	if (!agent.tools) return true;
 	return agent.tools.includes("edit") || agent.tools.includes("write");
+}
+
+const autoFixRootTails = new Map<string, Promise<void>>();
+
+async function canonicalAutoFixRoot(cwd: string): Promise<string> {
+	try {
+		return (await resolveWorktreeTarget(cwd)).originalRoot;
+	} catch {
+		try {
+			return await realpath(resolve(cwd));
+		} catch {
+			return resolve(cwd);
+		}
+	}
+}
+
+/** Keep the complete worker→review loop exclusive for one canonical repository.
+ * Child processes have independent file-mutation queues, so queue concurrency
+ * alone cannot make shared-checkout edits safe. */
+function serializeAutoFixChain(
+	cwd: string,
+	task: (signal: AbortSignal) => Promise<void>,
+): (signal: AbortSignal) => Promise<void> {
+	return async (signal) => {
+		if (signal.aborted) return;
+		const root = await canonicalAutoFixRoot(cwd);
+		const key = process.platform === "win32" ? root.toLowerCase() : root;
+		const previous = autoFixRootTails.get(key) ?? Promise.resolve();
+		let release!: () => void;
+		const gate = new Promise<void>((resolveGate) => {
+			release = resolveGate;
+		});
+		const tail = previous.catch(() => undefined).then(() => gate);
+		autoFixRootTails.set(key, tail);
+		await previous.catch(() => undefined);
+		try {
+			if (!signal.aborted) await task(signal);
+		} finally {
+			release();
+			if (autoFixRootTails.get(key) === tail) autoFixRootTails.delete(key);
+		}
+	};
 }
 
 function resolveDispatchModelPool(
@@ -292,6 +337,7 @@ export function registerSubagentTool(pi: ExtensionAPI, runtime: SubagentRuntime)
 			const discovery = discoverAgents(ctx.cwd, {
 				scope: config.agentScope,
 				enabledNames: config.enabledAgents,
+				projectTrusted: ctx.isProjectTrusted?.() === true,
 			});
 			const sessionRef = currentModelRef(ctx);
 			const agents = discovery.agents;
@@ -350,6 +396,7 @@ export function registerSubagentTool(pi: ExtensionAPI, runtime: SubagentRuntime)
 			const launchInLoop = async (
 				agentName: string,
 				task: string,
+				executionCwd: string,
 				signal: AbortSignal,
 				meta: RunChainMeta,
 				vision = false,
@@ -374,15 +421,16 @@ export function registerSubagentTool(pi: ExtensionAPI, runtime: SubagentRuntime)
 					pool: pool.fallbackModelRefs,
 					vision,
 					isolation: "shared",
-					originalCwd: ctx.cwd,
-					isolationCwd: ctx.cwd,
+					originalCwd: executionCwd,
+					isolationCwd: executionCwd,
 				});
 				const onLive = makeLiveHandler(runId, runId);
 				const onRecord = makeRecordHandler(runId);
 				try {
 					const result = await runSingleAgentWithModelFallback(
 						{
-							defaultCwd: ctx.cwd,
+							defaultCwd: executionCwd,
+							cwd: executionCwd,
 							agent: pool.agent,
 							agentName,
 							task,
@@ -397,8 +445,8 @@ export function registerSubagentTool(pi: ExtensionAPI, runtime: SubagentRuntime)
 					);
 					result.runId = runId;
 					result.isolation = "shared";
-					result.originalCwd = ctx.cwd;
-					result.isolationCwd = ctx.cwd;
+					result.originalCwd = executionCwd;
+					result.isolationCwd = executionCwd;
 					runtime.retainSession(result);
 					monitor.setModel(runId, result.model, result.modelFallbackFrom);
 					chainState.trajectory.append({
@@ -425,8 +473,8 @@ export function registerSubagentTool(pi: ExtensionAPI, runtime: SubagentRuntime)
 						...queuedResult(pool.agent, task, thinkingLevel),
 						runId,
 						isolation: "shared",
-						originalCwd: ctx.cwd,
-						isolationCwd: ctx.cwd,
+						originalCwd: executionCwd,
+						isolationCwd: executionCwd,
 						exitCode: 1,
 						stderr: errorMessage,
 						stopReason: signal.aborted ? "aborted" : "error",
@@ -458,6 +506,7 @@ export function registerSubagentTool(pi: ExtensionAPI, runtime: SubagentRuntime)
 				initialReviewerResult: SingleResult,
 				parentGroupId: string,
 				parentRunId: number,
+				executionCwd: string,
 				vision = false,
 			): void => {
 				const parentThreadAtStart = runtime.threads.get(parentRunId);
@@ -485,7 +534,7 @@ export function registerSubagentTool(pi: ExtensionAPI, runtime: SubagentRuntime)
 					}
 				};
 				fixController = runtime.backgroundQueue.enqueue(
-					async (signal) => {
+					serializeAutoFixChain(executionCwd, async (signal) => {
 						const chain: ChainStep[] = [
 							{ runId: parentRunId, result: initialReviewerResult, relation: "initial review" },
 						];
@@ -493,7 +542,7 @@ export function registerSubagentTool(pi: ExtensionAPI, runtime: SubagentRuntime)
 						for (let round = 1; round <= config.maxFixRounds; round++) {
 							if (!runtime.sessionActive) break;
 							const fixBrief = buildFixTaskBrief(lastReviewer, round, config.maxFixRounds);
-							const workerStep = await launchInLoop("worker", fixBrief, signal, {
+							const workerStep = await launchInLoop("worker", fixBrief, executionCwd, signal, {
 								groupId: parentGroupId,
 								relationLabel: `fix round ${round}`,
 							}, vision);
@@ -516,7 +565,7 @@ export function registerSubagentTool(pi: ExtensionAPI, runtime: SubagentRuntime)
 							chain.push({ ...workerStep, relation: `fix round ${round}` });
 							if (!runtime.sessionActive || isFailedResult(workerStep.result)) break;
 							const reReviewBrief = buildReReviewBrief(lastReviewer, round);
-							const reviewStep = await launchInLoop("reviewer", reReviewBrief, signal, {
+							const reviewStep = await launchInLoop("reviewer", reReviewBrief, executionCwd, signal, {
 								groupId: parentGroupId,
 								relationLabel: `re-review round ${round}`,
 							}, vision);
@@ -601,9 +650,9 @@ export function registerSubagentTool(pi: ExtensionAPI, runtime: SubagentRuntime)
 						// call away.
 						let block = formatChainSummary(chain);
 						if (isFailedResult(last.result) && isModelLevelFailure(last.result)) {
-							block = `${block}\n\n${formatCompletionBlock(last.result, config.maxResultLines, ctx.cwd)}\n\n${modelLevelTakeoverNote(last.result, { runId: parentRunId })}`;
+							block = `${block}\n\n${formatCompletionBlock(last.result, config.maxResultLines, executionCwd)}\n\n${modelLevelTakeoverNote(last.result, { runId: parentRunId })}`;
 						} else if (isFailedResult(last.result) || reviewVerdict(getResultOutput(last.result)) === "fail") {
-							block = `${block}\n\n${formatCompletionBlock(last.result, config.maxResultLines, ctx.cwd)}`;
+							block = `${block}\n\n${formatCompletionBlock(last.result, config.maxResultLines, executionCwd)}`;
 						}
 						runtime.sendCompletionGroup([
 							{
@@ -614,7 +663,7 @@ export function registerSubagentTool(pi: ExtensionAPI, runtime: SubagentRuntime)
 						]);
 						runtime.completionBatcher.flush();
 						clearOwnedController();
-					},
+					}),
 					() => {
 						if (!ownsParent()) return;
 						const controlledParent = parentThreadAtStart;
@@ -652,7 +701,7 @@ export function registerSubagentTool(pi: ExtensionAPI, runtime: SubagentRuntime)
 							runtime.sendCompletionGroup([
 								{
 									agent: initialReviewerResult.agent,
-									block: `${formatCompletionBlock(initialReviewerResult, config.maxResultLines, ctx.cwd)}\n\nAuto-fix chain crashed before completion: ${errorMessage}. The planned fix rounds did not run; the review above is the triggering reviewer's full output.`,
+									block: `${formatCompletionBlock(initialReviewerResult, config.maxResultLines, executionCwd)}\n\nAuto-fix chain crashed before completion: ${errorMessage}. The planned fix rounds did not run; the review above is the triggering reviewer's full output.`,
 									triggerTurn: true,
 								},
 							]);
@@ -903,6 +952,10 @@ export function registerSubagentTool(pi: ExtensionAPI, runtime: SubagentRuntime)
 					thread.worktree = worktree;
 					thread.state = "queued";
 					thread.control = control;
+					// A newly admitted generation owns no output yet. Keeping the prior
+					// generation here would make a queued stop publish stale task,
+					// transcript, and session metadata as this generation's partial.
+					thread.lastResult = undefined;
 					if (seed?.sessionId && seed.sessionDir) {
 						thread.sessionId = seed.sessionId;
 						thread.sessionDir = seed.sessionDir;
@@ -1006,15 +1059,58 @@ export function registerSubagentTool(pi: ExtensionAPI, runtime: SubagentRuntime)
 					return finalization;
 				};
 
+				const cleanupTrackedSessionDir = async (sessionDir: string, action: string): Promise<void> => {
+					try {
+						await rm(sessionDir, { recursive: true, force: true });
+						runtime.sessionDirs.delete(sessionDir);
+					} catch (error) {
+						// Keep ownership so shutdown can retry; losing the path here leaks a
+						// cloned session containing retained model context on Windows locks.
+						try {
+							runCtx.ui.notify(
+								`✗ ${action}; retained ${sessionDir} for shutdown cleanup: ${error instanceof Error ? error.message : String(error)}`,
+								"error",
+							);
+						} catch {
+							/* cleanup ownership remains tracked even if the UI is unavailable */
+						}
+					}
+				};
+
 				const discardUnusedWorktree = async (candidate: WorktreeIsolation | undefined): Promise<void> => {
 					if (!candidate) return;
-					if (candidate.discard) {
-						await candidate.discard().catch(() => undefined);
-						return;
+					try {
+						if (candidate.discard) {
+							await candidate.discard();
+							return;
+						}
+						// Compatibility for externally supplied/test handles. Production handles
+						// expose discard(), so this fallback never integrates a seeded worktree.
+						if (candidate.state === "active") await candidate.finalize();
+					} catch (error) {
+						const retainedPath = existsSync(candidate.worktreePath)
+							? candidate.worktreePath
+							: existsSync(candidate.tempDir)
+								? candidate.tempDir
+								: undefined;
+						const finalization: WorktreeFinalization = {
+							status: "retained",
+							integrated: false,
+							hadChanges: false,
+							...(retainedPath ? { worktreePath: retainedPath } : {}),
+							...(existsSync(candidate.patchPath) ? { patchPath: candidate.patchPath } : {}),
+							error: `Discarding unused continuation failed: ${error instanceof Error ? error.message : String(error)}`,
+						};
+						runtime.retainWorktreeArtifacts(finalization);
+						await persistRecoveryRecords(runtime.configPath, [
+							recoveryRecordFromFinalization(runId, finalization),
+						]).catch(() => undefined);
+						try {
+							thread.notifyIsolationFailure?.(finalization);
+						} catch {
+							/* parent UI may already be shutting down */
+						}
 					}
-					// Compatibility for externally supplied/test handles. Production handles
-					// expose discard(), so this fallback never integrates a seeded worktree.
-					if (candidate.state === "active") await candidate.finalize().catch(() => undefined);
 				};
 
 				const createContinuationWorktree = async (
@@ -1134,7 +1230,10 @@ export function registerSubagentTool(pi: ExtensionAPI, runtime: SubagentRuntime)
 						let seed: SessionSeed | undefined;
 						if (thread.isolation === "worktree" && thread.worktree?.state !== "active") {
 							if (!thread.worktree) throw new Error(`Run #${runId} has no isolated worktree checkpoint.`);
-							const seedAlreadyIntegrated = thread.worktree.state === "integrated" || thread.lastResult?.integrationApplied === true;
+							const seedAlreadyIntegrated =
+								thread.worktree.state === "integrated" ||
+								thread.worktree.state === "no_changes" ||
+								thread.lastResult?.integrationApplied === true;
 							continuationWorktree = await createContinuationWorktree(thread.worktree, seedAlreadyIntegrated);
 							if (!ownsResumeReservation(thread, reservation)) {
 								throw new Error(`Run #${runId} changed while its continuation worktree was being created.`);
@@ -1164,6 +1263,7 @@ export function registerSubagentTool(pi: ExtensionAPI, runtime: SubagentRuntime)
 						const currentAgents = discoverAgents(currentCtx.cwd, {
 							scope: currentConfig.agentScope,
 							enabledNames: currentConfig.enabledAgents,
+							projectTrusted: currentCtx.isProjectTrusted?.() === true,
 						}).agents;
 						const nextTask = requestedObjective ?? thread.task;
 						const pending = await startBackground(
@@ -1185,8 +1285,10 @@ export function registerSubagentTool(pi: ExtensionAPI, runtime: SubagentRuntime)
 						);
 						if (pending.exitCode !== -1) {
 							if (clonedSession) {
-								runtime.sessionDirs.delete(clonedSession.sessionDir);
-								await rm(clonedSession.sessionDir, { recursive: true, force: true }).catch(() => undefined);
+								await cleanupTrackedSessionDir(
+									clonedSession.sessionDir,
+									`Could not discard failed resume session clone for run #${runId}`,
+								);
 							}
 							await discardUnusedWorktree(continuationWorktree);
 							if (ownsResumeReservation(thread, reservation)) thread.state = previousState;
@@ -1206,8 +1308,10 @@ export function registerSubagentTool(pi: ExtensionAPI, runtime: SubagentRuntime)
 						return pending;
 					} catch (error) {
 						if (clonedSession) {
-							runtime.sessionDirs.delete(clonedSession.sessionDir);
-							await rm(clonedSession.sessionDir, { recursive: true, force: true }).catch(() => undefined);
+							await cleanupTrackedSessionDir(
+								clonedSession.sessionDir,
+								`Could not discard interrupted resume session clone for run #${runId}`,
+							);
 						}
 						await discardUnusedWorktree(continuationWorktree);
 						if (ownsResumeReservation(thread, reservation)) {
@@ -1300,7 +1404,10 @@ export function registerSubagentTool(pi: ExtensionAPI, runtime: SubagentRuntime)
 						const currentCtx = forkCtx ?? runCtx;
 						if (thread.isolation === "worktree") {
 							if (!thread.worktree) throw new Error(`Run #${runId} has no isolated worktree checkpoint.`);
-							const seedAlreadyIntegrated = thread.worktree.state === "integrated" || thread.lastResult?.integrationApplied === true;
+							const seedAlreadyIntegrated =
+								thread.worktree.state === "integrated" ||
+								thread.worktree.state === "no_changes" ||
+								thread.lastResult?.integrationApplied === true;
 							childWorktree = await createContinuationWorktree(thread.worktree, seedAlreadyIntegrated);
 							if (!ownsFork()) throw new Error(`Run #${runId} changed while its fork worktree was being created.`);
 						}
@@ -1315,9 +1422,10 @@ export function registerSubagentTool(pi: ExtensionAPI, runtime: SubagentRuntime)
 						const currentConfig = await loadConfig(runtime.configPath);
 						if (!ownsFork()) throw new Error(`Run #${runId} changed while fork configuration was loading.`);
 						runtime.backgroundQueue.setConcurrency(currentConfig.maxConcurrency);
-						const currentAgents = discoverAgents(thread.cwd, {
+						const currentAgents = discoverAgents(currentCtx.cwd, {
 							scope: currentConfig.agentScope,
 							enabledNames: currentConfig.enabledAgents,
+							projectTrusted: currentCtx.isProjectTrusted?.() === true,
 						}).agents;
 						if (!ownsFork()) throw new Error(`Run #${runId} changed while fork was preparing; no child was started.`);
 						const childTask = forkObjective ?? thread.task;
@@ -1347,8 +1455,10 @@ export function registerSubagentTool(pi: ExtensionAPI, runtime: SubagentRuntime)
 							},
 						);
 						if (child.exitCode !== -1 || child.runId === undefined) {
-							runtime.sessionDirs.delete(forkedSession.sessionDir);
-							await rm(forkedSession.sessionDir, { recursive: true, force: true }).catch(() => undefined);
+							await cleanupTrackedSessionDir(
+								forkedSession.sessionDir,
+								`Could not discard failed fork session clone for run #${runId}`,
+							);
 							await discardUnusedWorktree(childWorktree);
 							return child;
 						}
@@ -1372,8 +1482,10 @@ export function registerSubagentTool(pi: ExtensionAPI, runtime: SubagentRuntime)
 						return child;
 					} catch (error) {
 						if (forkedSession) {
-							runtime.sessionDirs.delete(forkedSession.sessionDir);
-							await rm(forkedSession.sessionDir, { recursive: true, force: true }).catch(() => undefined);
+							await cleanupTrackedSessionDir(
+								forkedSession.sessionDir,
+								`Could not discard interrupted fork session clone for run #${runId}`,
+							);
 						}
 						await discardUnusedWorktree(childWorktree);
 						return failedStartResult(
@@ -1474,7 +1586,7 @@ export function registerSubagentTool(pi: ExtensionAPI, runtime: SubagentRuntime)
 							thread.state = "running";
 							finishRun(runId, "done", { silent: true, retain: true });
 							monitor.setAnnotation(runId, "auto-fix chain running");
-							startFixLoop(result, `fix-${runId}`, runId, vision);
+							startFixLoop(result, `fix-${runId}`, runId, thread.executionCwd, vision);
 							return;
 						}
 						// Claim terminal settlement synchronously before the first slow await.
@@ -1553,6 +1665,10 @@ export function registerSubagentTool(pi: ExtensionAPI, runtime: SubagentRuntime)
 					},
 					() => {
 						if (runtime.threads.get(runId)?.generation !== generation) return;
+						// Queued park/stop owns publication and may still be finalizing an
+						// isolated worktree. Do not expose a terminal monitor/trajectory state
+						// before that owner records the checkpoint or aborted result.
+						if (thread.lifecycleOperation === "park" || thread.lifecycleOperation === "stop") return;
 						runtime.runControllers.delete(runId);
 						thread.queueController = undefined;
 						if (thread.state === "parked") {
