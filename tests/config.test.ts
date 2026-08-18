@@ -3,6 +3,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 import {
+	BUILTIN_AGENT_NAMES,
 	DEFAULT_ENABLED_AGENTS,
 	DEFAULT_IDLE_TIMEOUT_SEC,
 	DEFAULT_MAX_CONCURRENCY,
@@ -19,8 +20,10 @@ import {
 } from "../src/config.ts";
 
 describe("normalizeConfig", () => {
-	it("returns defaults for non-object input", () => {
+	it("returns all four built-ins for a fresh config", () => {
 		const config = normalizeConfig(undefined);
+		expect(BUILTIN_AGENT_NAMES).toEqual(["explore", "worker", "cleaner", "reviewer"]);
+		expect(DEFAULT_ENABLED_AGENTS).toEqual(["explore", "worker", "cleaner", "reviewer"]);
 		expect(config.enabledAgents).toEqual([...DEFAULT_ENABLED_AGENTS]);
 		expect(config.proactiveInjection).toBe(true);
 		expect(config.agentScope).toBe("user");
@@ -35,6 +38,11 @@ describe("normalizeConfig", () => {
 	it("keeps valid enabledAgents and drops non-strings", () => {
 		const config = normalizeConfig({ enabledAgents: ["explore", "worker", 42, null, "explore"] });
 		expect(config.enabledAgents).toEqual(["explore", "worker"]);
+	});
+
+	it("preserves an existing explicit agent list without injecting cleaner", () => {
+		const existing = ["explore", "worker", "reviewer"];
+		expect(normalizeConfig({ enabledAgents: existing }).enabledAgents).toEqual(existing);
 	});
 
 	it("honors an explicitly empty enabledAgents array", () => {

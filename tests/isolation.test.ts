@@ -4,6 +4,7 @@ import { join } from "node:path";
 import { Agent } from "@earendil-works/pi-agent-core";
 import { SessionManager } from "@earendil-works/pi-coding-agent";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { loadBuiltinAgents } from "../src/agents.ts";
 import { BackgroundTaskQueue, type BackgroundTask } from "../src/background.ts";
 import { isWorktreeCapableAgent } from "../src/dispatch.ts";
 import register from "../src/index.ts";
@@ -345,7 +346,11 @@ describe("dispatch isolation selection", () => {
 		rmSync(nonGit, { recursive: true, force: true });
 	});
 
-	it("recognizes custom write-capable agents but not explicit read-only agents", () => {
+	it("recognizes cleaner and custom write-capable agents but not explicit read-only agents", () => {
+		const cleaner = loadBuiltinAgents().find((agent) => agent.name === "cleaner");
+		expect(cleaner?.tools).toBeUndefined();
+		expect(cleaner && isWorktreeCapableAgent(cleaner)).toBe(true);
+
 		const base = {
 			description: "test",
 			systemPrompt: "test",

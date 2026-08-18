@@ -2,7 +2,7 @@ import { mkdtempSync, mkdirSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import { discoverAgents } from "../src/agents.ts";
+import { discoverAgents, loadBuiltinAgents } from "../src/agents.ts";
 
 let builtinDir: string;
 let agentDir: string;
@@ -26,6 +26,24 @@ beforeEach(() => {
 afterEach(() => {
 	if (savedEnv === undefined) delete process.env.PI_CODING_AGENT_DIR;
 	else process.env.PI_CODING_AGENT_DIR = savedEnv;
+});
+
+describe("shipped cleaner agent", () => {
+	it("is full/write-capable while leaving the pre-commit gate to reviewer", () => {
+		const cleaner = loadBuiltinAgents().find((agent) => agent.name === "cleaner");
+		expect(cleaner).toBeDefined();
+		expect(cleaner).toMatchObject({
+			model: "claude-sonnet-4-5",
+			thinking: "high",
+			source: "builtin",
+		});
+		expect(cleaner?.tools).toBeUndefined();
+		expect(cleaner?.description).toContain("code cleanup");
+		expect(cleaner?.description).toContain("in any language");
+		expect(cleaner?.description).toMatch(/Never .*pre-commit gate; reviewer remains the gate/);
+		expect(cleaner?.systemPrompt).toContain("Audit mode");
+		expect(cleaner?.systemPrompt).toContain("Apply mode");
+	});
 });
 
 describe("discoverAgents", () => {

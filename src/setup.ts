@@ -58,6 +58,7 @@ function builtinThinkingDefaults(): Map<string, ThinkingLevel> {
 const MODULE_HINTS: Record<string, string> = {
 	explore: "read-only codebase recon (fast model)",
 	worker: "implement / fix / refactor / test (full tools)",
+	cleaner: "evidence-first cleanup: audit or verified cuts (full tools)",
 	reviewer: "adversarial pre-commit review (read-only)",
 };
 

@@ -1,5 +1,5 @@
 /**
- * The `subagent` tool: dispatches explore/worker/reviewer agents as isolated pi
+ * The `subagent` tool: dispatches explore/worker/cleaner/reviewer agents as isolated pi
  * child processes, single or parallel. Owns the dispatch pipeline: config load,
  * per-agent model-pool resolution, per-run status tracking, the auto-fix chain
  * (REVIEW_FAIL → worker → re-review), and completion delivery.
@@ -93,7 +93,7 @@ const VISION_DESCRIPTION =
 	"Set true when the task may require viewing images (screenshots, mockups, designs) — the configured vision model becomes primary, followed by the agent backup and current main-window model";
 
 const ISOLATION_DESCRIPTION =
-	"Filesystem isolation: shared uses the caller's working tree; worktree creates a detached temporary Git worktree (write-capable agents only)";
+	"Filesystem isolation: shared uses the caller's working tree; worktree creates a detached temporary Git worktree (write-capable agents, including worker and cleaner, only)";
 
 const IsolationSchema = Type.Optional(
 	StringEnum(["shared", "worktree"] as const, { description: ISOLATION_DESCRIPTION }),
@@ -199,9 +199,10 @@ export function registerSubagentTool(pi: ExtensionAPI, runtime: SubagentRuntime)
 		label: "Subagent",
 		description: [
 			"Delegate a discrete, self-contained task to a specialized sub-agent running in an ISOLATED context window.",
-			"Agents: explore (read-only codebase recon), worker (implement/fix/refactor/test, full tools), reviewer (adversarial pre-commit review, read-only).",
+			"Built-in roles (only configured enabled agents can dispatch): explore (read-only codebase recon), worker (implement/fix/refactor/test, full tools), cleaner (explicit evidence-first cleanup, full/write tools), reviewer (adversarial pre-commit gate, read-only).",
+			"When cleaner is enabled, route explicit cleanup intent in any language (for example dead code, redundancy, simplification, or over-engineering), including a requested periodic cleanup pass. Audit/find/inspect/report is read-only evidence, while explicit remove/clean/simplify/refactor permits verified edits. Generic code review goes to reviewer. Never route cleaner by PR count or as the pre-commit gate; reviewer reviews its edits.",
 			"Modes: single ({agent, task}) or parallel ({tasks: [{agent, task}, ...]}).",
-			"Isolation: single tasks default to shared; parallel worker tasks default to detached Git worktrees unless isolation: shared is explicit. explore/reviewer cannot use worktree isolation.",
+			"Isolation: single tasks default to shared; parallel worker tasks default to detached Git worktrees unless isolation: shared is explicit. Cleaner is write-capable and can opt into worktree isolation; explore/reviewer cannot use it.",
 			"Use subagent_control to steer, retarget, park, resume, or fork a thread by its stable run id.",
 			"It starts agents in the background and immediately returns control to the main window; completion messages automatically wake the main agent to continue.",
 			"Each agent has no memory of this conversation — brief it fully (goal, exact paths, constraints, expected output).",
@@ -209,15 +210,16 @@ export function registerSubagentTool(pi: ExtensionAPI, runtime: SubagentRuntime)
 			"Vision: set vision: true when the task may require viewing images (screenshots, mockups, design files — e.g. frontend work) — the configured vision model is primary, followed by that agent's backup and the current main-window model.",
 		].join(" "),
 		promptSnippet:
-			"Start background subagents: explore (read-only search), worker (implement), reviewer (adversarial review); completion automatically resumes the main agent. Simple tasks: use direct tools, not subagents.",
+			"Start background subagents: explore (read-only search), worker (implement), cleaner (explicit evidence-first cleanup), reviewer (pre-commit review); completion automatically resumes the main agent. Simple tasks: use direct tools, not subagents.",
 		promptGuidelines: [
-			"Delegate only when an isolated context genuinely pays: broad exploration, a self-contained implementation, or a review gate. Handle simple lookups and one-line edits inline with direct tools — never spawn a sub-agent for them.",
+			"Delegate only when an isolated context genuinely pays: broad exploration, a self-contained implementation, explicit evidence-first cleanup, or a review gate. Handle simple lookups and one-line edits inline with direct tools — never spawn a sub-agent for them.",
 			"Use subagent with agent 'explore' for broad or open-ended code search before large changes; a targeted 'where is X' is a direct grep/read.",
 			"Use subagent with agent 'worker' for a self-contained implementation task worth a separate context; it plans internally.",
-			"Use subagent with agent 'reviewer' for a fresh read-only review before reporting work done or committing.",
+			"When cleaner is enabled, use subagent with agent 'cleaner' only for explicit cleanup intent in any language (for example dead code, redundancy, simplification, or over-engineering) or a requested periodic cleanup pass. Audit/find/inspect/report means read-only ranked evidence; apply only for explicit remove/clean/simplify/refactor wording. Generic code review goes to reviewer. Never trigger cleaner from PR count or as a pre-commit gate; send non-trivial cleaner edits to reviewer.",
+			"Use subagent with agent 'reviewer' for the fresh read-only gate before reporting non-trivial work done or committing, including after cleaner edits.",
 			"subagent launches work in the background and ends the current turn; when a result arrives, the main agent is automatically resumed with it.",
 			"Run independent tasks in parallel by passing a tasks array to subagent; parallel worker items default to isolation: worktree so their edits are integrated independently. Pass isolation: shared only when workers intentionally need the caller's live uncommitted tree.",
-			"Use isolation: worktree only for worker/write-capable agents and only inside a Git repository with a committed HEAD; setup or integration failures never silently fall back to shared.",
+			"Use isolation: worktree only for worker, cleaner, or another write-capable agent and only inside a Git repository with a committed HEAD; parallel worker tasks default to worktree, while cleaner must opt in. Setup or integration failures never silently fall back to shared.",
 			"NEVER sleep or poll, and do NOT call subagent_wait to hold the turn — subagent ends the turn immediately and the result arrives as a message that wakes you automatically (even mid-turn). Ending your turn is the default and the only correct way to wait.",
 			"If you must keep the turn for a result, call subagent_wait with an explicit timeoutMs (non-blocking by default) — never bash sleep/timeout to wait for a sub-agent.",
 			"When a delegated task may require viewing images (frontend screenshots, mockups, design comparisons), pass vision: true and give the sub-agent the exact image paths — it reads them with its read tool. The configured vision model becomes primary; model-level failures continue through the agent's backup pool and current main-window model.",
@@ -708,7 +710,7 @@ export function registerSubagentTool(pi: ExtensionAPI, runtime: SubagentRuntime)
 				if (!agent) return failedStartResult(agentName, task, `Unknown agent: "${agentName}".`);
 				if (isolation === "worktree" && !isWorktreeCapableAgent(agent)) {
 					return {
-						...failedStartResult(agentName, task, `Agent "${agentName}" is read-only; worktree isolation is available only to worker/write-capable agents.`),
+						...failedStartResult(agentName, task, `Agent "${agentName}" is read-only; worktree isolation is available only to write-capable agents such as worker or cleaner.`),
 						isolation,
 					};
 				}
@@ -859,7 +861,7 @@ export function registerSubagentTool(pi: ExtensionAPI, runtime: SubagentRuntime)
 				thread.notifyIsolationFailure = (finalization) => {
 					const paths = [finalization.worktreePath, finalization.patchPath].filter(Boolean).join(" · ");
 					runCtx.ui.notify(
-						`✗ worker worktree ${finalization.integrated ? "cleanup" : "integration"} failed${paths ? ` · retained ${paths}` : ""}: ${finalization.error ?? "unknown Git integration error"}`,
+						`✗ ${agent.name} worktree ${finalization.integrated ? "cleanup" : "integration"} failed${paths ? ` · retained ${paths}` : ""}: ${finalization.error ?? "unknown Git integration error"}`,
 						"error",
 					);
 				};

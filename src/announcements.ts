@@ -18,6 +18,12 @@ const ANNOUNCEMENTS: Array<{
 		message:
 			"pi-subagents: new — a vision-capable model can now handle image tasks (screenshots, mockups, designs). Run /subagents-setup to configure it; until set, vision tasks use the main session's current model.",
 	},
+	{
+		key: "cleanerAgent",
+		condition: (config) => !config.enabledAgents.includes("cleaner"),
+		message:
+			"pi-subagents: new built-in cleaner agent is available for evidence-first code cleanup. Run /subagents-setup to enable it; your existing enabledAgents selection was left unchanged.",
+	},
 ];
 
 async function announceNewFeatures(

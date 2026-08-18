@@ -1,7 +1,7 @@
 {
   "name": "@ferris1225/pi-subagents",
-  "version": "1.0.1",
-  "description": "Controllable background sub-agent threads for pi: explore, worker, reviewer, auto-fix chains, model pools, and Git worktree isolation.",
+  "version": "1.1.0",
+  "description": "Controllable background sub-agent threads for pi: explore, worker, evidence-first cleaner, reviewer, auto-fix chains, model pools, and Git worktree isolation.",
   "type": "module",
   "license": "MIT",
   "publishConfig": {
@@ -12,7 +12,9 @@
     "pi-extension",
     "subagent",
     "sub-agent",
-    "delegation"
+    "delegation",
+    "code-cleanup",
+    "dead-code"
   ],
   "files": [
     "src",

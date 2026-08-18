@@ -18,6 +18,7 @@ import { formatCatalogEntry } from "./agents.ts";
 const ROLE_ROUTING: Record<string, string> = {
 	explore: "explore — codebase reconnaissance: broad/open-ended search, multi-file lookups, mapping unfamiliar code, tracing symbols/dependencies (read-only, cheap fast model); NOT for one-line lookups.",
 	worker: "worker — implement/fix/refactor/test a self-contained task worth a separate context (full tools; plans internally).",
+	cleaner: "cleaner — evidence-first cleanup for explicit cleanup intent in any language (for example dead code, redundancy, simplification, or over-engineering) or a requested periodic cleanup pass; audit/find/inspect/report is read-only, while explicit remove/clean/simplify/refactor wording permits verified edits; never PR-count or pre-commit driven (reviewer remains the gate).",
 	reviewer: "reviewer — adversarial pre-commit review of a diff (read-only; independent context).",
 };
 
@@ -30,6 +31,7 @@ export function buildDelegationDirective(agents: AgentConfig[]): string {
 		.filter((line): line is string => Boolean(line))
 		.map((line) => `- ${line}`)
 		.join("\n");
+	const hasCleaner = agents.some((a) => a.name === "cleaner");
 	const hasReviewer = agents.some((a) => a.name === "reviewer");
 	const hasMultiple = agents.length > 1;
 
@@ -55,10 +57,10 @@ ${catalog}
 ${routing ? `Routing:\n${routing}\n` : ""}Dispatch discipline:
 - Handle SIMPLE work INLINE with direct tools: a one-line lookup, single edit, or quick question is a grep/read/edit in the main context — never a sub-agent. Sub-agents cost startup time, tokens, and a context switch.
 - Use \`explore\` PROACTIVELY for codebase reconnaissance: mapping an unfamiliar area, multi-file lookups, tracing symbols across modules, or any "where is X / which files reference Y" question that would take several greps or reading multiple files. It runs on a fast cheap model and returns compressed findings, so delegating recon costs little.
-- Delegate only when isolation genuinely pays: a self-contained implementation/fix with its own validation (worker), or a fresh-context review gate (reviewer).
-- When in doubt, start with a direct tool call in the main context; escalate to \`explore\` as soon as the search turns broad or crosses multiple files.
+- Delegate only when isolation genuinely pays: a self-contained implementation/fix with its own validation (worker)${hasCleaner ? ", explicit evidence-first cleanup (cleaner)" : ""}, or a fresh-context review gate (reviewer).
+${hasCleaner ? "- Route explicit cleanup intent in any language to `cleaner` (for example dead code, redundancy, simplification, or over-engineering), including a requested periodic maintenance pass. Audit/find/inspect/report wording means read-only evidence; apply only for explicit remove/clean/simplify/refactor wording. Generic code review without cleanup intent goes to `reviewer`. Never dispatch cleaner by PR count or automatically as the pre-commit gate; `reviewer` separately reviews cleaner edits.\n" : ""}- When in doubt, start with a direct tool call in the main context; escalate to \`explore\` as soon as the search turns broad or crosses multiple files.
 - For an already-known or trivial target, use a direct search/read tool (e.g. grep/find/read) — do not over-delegate a one-line lookup.
-${hasMultiple ? "- Run INDEPENDENT tasks in parallel: one subagent call with a `tasks` array, and track them with your todo list. Parallel worker items default to detached Git worktree isolation; pass `isolation: \"shared\"` only when a worker intentionally needs the caller's live uncommitted tree. Let the automatically resumed main agent launch dependent work only after its prerequisite result arrives (e.g. explore, then worker, then reviewer).\n" : ""}- Single dispatch stays in the shared working tree by default. Use \`isolation: "worktree"\` only for worker/write-capable agents in a Git repository; never request it for explore/reviewer, and never silently retry shared after setup fails.
+${hasMultiple ? `- Run INDEPENDENT tasks in parallel: one subagent call with a \`tasks\` array, and track them with your todo list. Parallel worker items default to detached Git worktree isolation; pass \`isolation: "shared"\` only when a worker intentionally needs the caller's live uncommitted tree.${hasCleaner ? " Cleaner is also write-capable and may use explicit worktree isolation." : ""} Let the automatically resumed main agent launch dependent work only after its prerequisite result arrives (e.g. explore, then ${hasCleaner ? "worker/cleaner" : "worker"}, then reviewer).\n` : ""}- Single dispatch stays in the shared working tree by default. Use \`isolation: "worktree"\` only for ${hasCleaner ? "worker, cleaner, or another" : "worker or another"} write-capable agent in a Git repository; never request it for explore/reviewer, and never silently retry shared after setup fails.
 - Brief each sub-agent as self-contained: goal, exact paths, constraints, expected output. It has NO memory of this conversation.
 - Treat delegated agents as leaf workers: do not ask a sub-agent to dispatch another sub-agent; child processes do not have this tool. Use \`subagent_control fork\` on a parked/settled retained thread when you need an independent continuation with preserved context and a new run id.
 - Trust but verify: a sub-agent's summary describes intent, not outcome. Check the actual changes/results before reporting work done.
@@ -75,5 +77,7 @@ Result handoff (do not re-state):
 
 Review & verification:
 - Never report an unrun check as passed; report it as unavailable or as a pre-existing failure.
-${hasReviewer ? "- For non-trivial diffs, run one fresh read-only `reviewer` sub-agent before reporting done. Fix only concrete blockers and re-review at most once.\n- Use multi-model cross-review only when explicitly requested or for genuinely high-risk changes (security, unsafe/FFI, persistence-migration, concurrency). Reviewers are read-only; only the main agent edits.\n" : ""}- Commit or push only when explicitly requested, applicable checks pass, and no accepted blockers remain.`;
+${hasReviewer ? `- For non-trivial diffs${hasCleaner ? " (including cleaner edits)" : ""}, run one fresh read-only \`reviewer\` sub-agent before reporting done. Fix only concrete blockers and re-review at most once.
+- Use multi-model cross-review only when explicitly requested or for genuinely high-risk changes (security, unsafe/FFI, persistence-migration, concurrency). Reviewers are read-only; only the main agent edits.
+` : ""}- Commit or push only when explicitly requested, applicable checks pass, and no accepted blockers remain.`;
 }

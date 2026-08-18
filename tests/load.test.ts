@@ -98,6 +98,10 @@ describe("extension registration", () => {
 		const tool = stub.tools.find((t) => t.name === "subagent");
 		expect(tool.promptGuidelines.length).toBeGreaterThan(0);
 		expect(tool.description).toContain("explore");
+		expect(tool.description).toContain("cleaner (explicit evidence-first cleanup, full/write tools)");
+		expect(tool.description).toContain("Never route cleaner by PR count or as the pre-commit gate");
+		expect(tool.description).toContain("Cleaner is write-capable and can opt into worktree isolation");
+		expect(tool.promptGuidelines.join("\n")).toContain("send non-trivial cleaner edits to reviewer");
 		expect(tool.parameters.properties.task).toMatchObject({ minLength: 1, pattern: "\\S" });
 		expect(tool.parameters.properties.tasks.items.properties.task).toMatchObject({ minLength: 1, pattern: "\\S" });
 		expect(tool.parameters.properties.isolation).toBeDefined();
@@ -111,7 +115,10 @@ describe("extension registration", () => {
 		if (!testAgentDir) throw new Error("test agent directory was not initialized");
 		const configPath = join(testAgentDir, "pi-subagents.json");
 		const patchPath = join(testAgentDir, "retained.patch");
-		writeFileSync(configPath, JSON.stringify({ announcedFeatures: [] }), "utf8");
+		writeFileSync(configPath, JSON.stringify({
+			enabledAgents: ["explore", "worker", "reviewer"],
+			announcedFeatures: [],
+		}), "utf8");
 		writeFileSync(patchPath, "patch", "utf8");
 		await persistRecoveryRecords(configPath, [{
 			runId: 41,
@@ -132,10 +139,13 @@ describe("extension registration", () => {
 		expect(setWidget).toHaveBeenCalledWith("pi-subagents", expect.any(Function), { placement: "aboveEditor" });
 		expect(notify).toHaveBeenCalledWith(expect.stringContaining("recovery for run #41"), "error");
 		expect(notify).toHaveBeenCalledWith(expect.stringContaining("vision-capable model"), "info");
-		expect(JSON.parse(readFileSync(configPath, "utf8")).announcedFeatures).toContain("visionModel");
+		expect(notify).toHaveBeenCalledWith(expect.stringMatching(/cleaner agent.*\/subagents-setup/), "info");
+		const savedConfig = JSON.parse(readFileSync(configPath, "utf8"));
+		expect(savedConfig.enabledAgents).toEqual(["explore", "worker", "reviewer"]);
+		expect(savedConfig.announcedFeatures).toEqual(expect.arrayContaining(["visionModel", "cleanerAgent"]));
 
-		// Recovery remains visible while its artifact exists, but the feature marker
-		// prevents a repeated informational notice on later session starts.
+		// Recovery remains visible while its artifact exists, but the feature markers
+		// prevent repeated informational notices on later session starts.
 		notify.mockClear();
 		await stub.hooks["session_start"]({}, context);
 		expect(notify).toHaveBeenCalledWith(expect.stringContaining("recovery for run #41"), "error");
@@ -1557,9 +1567,10 @@ describe("before_agent_start injection", () => {
 		expect(result).toBeDefined();
 		expect(result.systemPrompt.startsWith("BASE PROMPT")).toBe(true);
 		expect(result.systemPrompt).toContain("Sub-agent delegation");
-		// Default enabled set: explore, worker, reviewer.
+		// Fresh-install default enabled set: explore, worker, cleaner, reviewer.
 		expect(result.systemPrompt).toContain("- explore:");
 		expect(result.systemPrompt).toContain("- worker:");
+		expect(result.systemPrompt).toContain("- cleaner:");
 		expect(result.systemPrompt).toContain("- reviewer:");
 		expect(result.systemPrompt).not.toContain("- plan:");
 	});

@@ -46,6 +46,26 @@ describe("buildDelegationDirective", () => {
 		expect(directive).not.toContain("When in doubt, delegate");
 	});
 
+	it("routes cleanup intent in any language to cleaner with safe audit/apply semantics", () => {
+		const directive = buildDelegationDirective([agent("cleaner"), agent("reviewer")]);
+		expect(directive).toContain("explicit cleanup intent in any language");
+		for (const example of ["dead code", "redundancy", "simplification", "over-engineering"]) {
+			expect(directive).toContain(example);
+		}
+		expect(directive).toContain("Audit/find/inspect/report wording means read-only evidence");
+		expect(directive).toContain("apply only for explicit remove/clean/simplify/refactor wording");
+		expect(directive).toContain("Generic code review without cleanup intent goes to `reviewer`");
+		expect(directive).toContain("Never dispatch cleaner by PR count or automatically as the pre-commit gate");
+		expect(directive).toContain("`reviewer` separately reviews cleaner edits");
+		expect(directive).toContain("Cleaner is also write-capable and may use explicit worktree isolation");
+		expect(directive).not.toContain("after every PR");
+	});
+
+	it("does not advertise cleaner routing when cleaner is not enabled", () => {
+		const directive = buildDelegationDirective([agent("explore"), agent("worker"), agent("reviewer")]);
+		expect(directive).not.toContain("cleaner");
+	});
+
 	it("includes reviewer-only rules only when a reviewer is enabled", () => {
 		const withoutReviewer = buildDelegationDirective([agent("explore"), agent("worker")]);
 		expect(withoutReviewer).not.toContain("multi-model cross-review");

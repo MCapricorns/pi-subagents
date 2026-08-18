@@ -4,10 +4,10 @@ import type { ExtensionContext, Theme } from "@earendil-works/pi-coding-agent";
 import { truncateToWidth, visibleWidth } from "@earendil-works/pi-tui";
 import {
 	formatElapsed,
+	formatTaskSummary,
 	isRunActiveStatus,
 	monitor,
 	statusIcon,
-	statusLabel,
 	type RunView,
 } from "./monitor.ts";
 
@@ -25,8 +25,10 @@ function compactLine(left: string, right: string, width: number): string {
 	return `${truncateToWidth(left, leftWidth, "…")}${separator}${right}`;
 }
 
-/** One compact line per genuinely active run. Settled and parked threads never
- * appear, so elapsed time cannot keep ticking beside a terminal status. */
+/** One compact primary line per genuinely active run, plus an optional indented
+ * activity line. The primary line reserves effective model/thinking and elapsed
+ * width before truncating the task. Settled and parked threads never appear, so
+ * elapsed time cannot keep ticking beside a terminal status. */
 export function formatActiveRunLines(
 	runs: readonly RunView[],
 	theme: Theme,
@@ -36,20 +38,55 @@ export function formatActiveRunLines(
 	const dim = (text: string): string => theme.fg("dim", text);
 	return runs
 		.filter((run) => isRunActiveStatus(run.status))
-		.map((run) => {
+		.flatMap((run) => {
 			const icon = statusIcon(run.status, theme);
 			const name = theme.fg("accent", theme.bold(run.agent));
-			const context = run.relationLabel ?? run.label;
-			const activity = run.status === "running"
-				? (run.activity ?? statusLabel(run.status))
-				: statusLabel(run.status);
-			const parts = [
-				`${icon} ${dim(`#${run.id}`)} ${name}`,
-				context ? dim(`· ${context}`) : undefined,
-				activity ? dim(`· ${activity}`) : undefined,
-			].filter((part): part is string => Boolean(part));
+			const identity = `${icon} ${dim(`#${run.id}`)} ${name}`;
 			const elapsed = formatElapsed(run, now);
-			return compactLine(parts.join(" "), elapsed ? dim(elapsed) : "", width);
+			// Render only the resolved model id plus thinking level. Provider auth and
+			// other configuration never enter monitor state or this line.
+			const modelId = run.model?.split("/").at(-1);
+			const modelSource = formatTaskSummary(
+				modelId ? `${modelId}${run.thinking ? `/${run.thinking}` : ""}` : run.thinking ? `thinking:${run.thinking}` : "",
+				64,
+				false,
+			);
+			const taskSource = formatTaskSummary(run.task, 64);
+			const primaryPartCount = 2 + (modelSource ? 1 : 0) + (elapsed ? 1 : 0);
+			const contentWidth = Math.max(
+				0,
+				width -
+					visibleWidth(identity) -
+					visibleWidth(elapsed) -
+					(primaryPartCount - 1) * visibleWidth(" · "),
+			);
+			const modelDesired = visibleWidth(modelSource);
+			const modelFloor = Math.min(modelDesired, Math.min(12, contentWidth));
+			let modelWidth = modelSource
+				? Math.min(modelDesired, Math.max(modelFloor, contentWidth - 8))
+				: 0;
+			let taskWidth = contentWidth - modelWidth;
+			if (visibleWidth(taskSource) < taskWidth) {
+				modelWidth = Math.min(modelDesired, modelWidth + taskWidth - visibleWidth(taskSource));
+				taskWidth = contentWidth - modelWidth;
+			}
+			const task = taskWidth > 0 ? formatTaskSummary(taskSource, taskWidth) : "";
+			const modelThinking = modelWidth > 0 ? formatTaskSummary(modelSource, modelWidth, false) : "";
+			const primaryLeft = [
+				identity,
+				task ? dim(task) : undefined,
+				modelThinking ? dim(modelThinking) : undefined,
+			].filter((part): part is string => Boolean(part)).join(" · ");
+			const primary = compactLine(primaryLeft, elapsed ? dim(`· ${elapsed}`) : "", width);
+
+			const activity = run.activity?.trim();
+			if (!activity) return [primary];
+			const activityIndent = "  ";
+			const activityWidth = width - visibleWidth(activityIndent);
+			if (activityWidth <= 0) return [primary];
+			const activitySummary = formatTaskSummary(activity, activityWidth);
+			if (!activitySummary) return [primary];
+			return [primary, truncateToWidth(`${activityIndent}${dim(activitySummary)}`, width, "")];
 		});
 }
 

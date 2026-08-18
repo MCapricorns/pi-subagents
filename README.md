@@ -7,18 +7,19 @@
 ![pi](https://img.shields.io/badge/pi-extension-orange)
 
 Focused background delegation for [pi](https://pi.dev): `explore` / `worker` /
-`reviewer` agents run in **isolated child processes** and hand their results back
-to the main agent automatically. Install it, and the main model starts using it
-on its own — no prompt engineering, no babysitting.
+`cleaner` / `reviewer` agents run in **isolated child processes** and hand their
+results back to the main agent automatically. Install it, and the main model
+starts using it on its own — no prompt engineering, no babysitting.
 
-## 1.0 — controllable agent threads
+## 1.1.0 — evidence-first cleanup and richer live status
 
-Version 1.0 turns pi-subagents from a one-shot background runner into a small
-thread runtime. Every dispatch has a stable run id and retained Pi session, so
-work can be steered while it runs, parked without losing context, resumed after
-settlement, retargeted, or forked into another path. Generation ownership keeps
-retries and stale child processes from corrupting the logical thread without
-retaining a duplicate event history.
+Version 1.1.0 adds semantic routing to a dedicated evidence-first `cleaner` and
+makes the active widget show each run's task, effective model/thinking, activity,
+and elapsed time. It builds on the retained thread runtime from 1.0: every
+dispatch has a stable run id, so work can be steered while it runs, parked
+without losing context, resumed after settlement, retargeted, or forked into
+another path. Generation ownership keeps retries and stale child processes from
+corrupting the logical thread without retaining a duplicate event history.
 
 The common quality loop now runs end to end without waking the main agent between
 steps:
@@ -26,6 +27,10 @@ steps:
 ```text
 reviewer (find blockers) → worker (fix) → reviewer (verify) → final PASS/FAIL
 ```
+
+Cleanup stays a separate lifecycle: explicit cleanup intent can dispatch the
+evidence-first `cleaner`; any edits still go through the independent `reviewer`
+gate.
 
 Each chain is delivered as one concise completion group, while full per-run
 reports remain available through `subagent_status`. Its parent stays `running`
@@ -38,9 +43,9 @@ parent index.
 ## Highlights
 
 - **Zero-setup proactive dispatch** — the extension injects a delegation directive
-  into the main system prompt, so the main model automatically sends broad searches
-  to `explore`, self-contained implementations to `worker`, and pre-commit reviews
-  to `reviewer`. You just use pi; delegation happens by itself.
+  into the main system prompt, so the main model sends broad searches to `explore`,
+  self-contained implementations to `worker`, explicit cleanup intent to `cleaner`,
+  and pre-commit reviews to `reviewer`. You just use pi; delegation happens by itself.
 - **Vision-capable image tasks** — flag screenshot/mockup/design work with
   `vision: true`. The configured vision primary is followed by that agent's
   backup and the current main-window model. Setup lists only in-scope,
@@ -51,13 +56,23 @@ parent index.
   "go check" step. `subagent_wait` is a **non-blocking** in-turn lookup by default
   (pass `timeoutMs` to block); `subagent_status` inspects runs; `subagent_stop`
   cancels one and delivers its partial output.
-- **Active-only live widget** — the TUI shows queued and running sub-agents above
-  the editor with live activity and elapsed time. Settled and parked rows disappear
-  immediately; an auto-fix parent remains `running` until its whole chain settles.
+- **Active-only live widget** — each queued or running sub-agent gets one compact
+  width-aware primary line with task, effective model/thinking, and elapsed time;
+  current activity appears only when present on an indented second line:
+  ```text
+  #7 cleaner · remove dead code in src/cache.ts · claude-sonnet-4-5/high · 42s
+    grep cacheKey
+  ```
+  Long tasks and activity paths truncate first (preserving a useful path tail when
+  possible), groups have no blank rows, and settled/parked runs disappear immediately.
 - **Results are not re-narrated** — a sub-agent's completion is shown to you
   verbatim, and the main agent is told not to paraphrase it back. It replies with
   only its own conclusion or next step, so the same findings are never paid for
   twice in tokens.
+- **Evidence-first cleanup, not deletion by guesswork** — `cleaner` distinguishes
+  read-only audit wording from explicit apply wording, proves consumers and dynamic
+  entrypoints before cutting, and treats finding nothing safe as a valid outcome.
+  It is periodic/intent-driven, never PR-count-driven or an automatic commit gate.
 - **A quality gate that closes the loop** — when a reviewer returns `REVIEW_FAIL`,
   the extension dispatches a worker briefed with the concrete findings, then a
   re-review, up to `maxFixRounds` times — and only then wakes the main agent.
@@ -86,6 +101,22 @@ parent index.
 - **Update announcements** — when a new configurable feature ships, you are told
   about it once (a persisted marker stops the notice from nagging).
 
+## What this adds beyond generic subagent dispatch
+
+This package combines several concrete runtime behaviors rather than only exposing
+an undifferentiated child-agent launcher:
+
+- language-agnostic semantic role guidance for cleanup intent;
+- a dedicated evidence-first cleaner, with cleanup kept separate from the
+  independent reviewer gate;
+- isolated, retained threads that can be steered, parked, resumed, retargeted, or
+  forked under stable run ids;
+- the reviewer → worker auto-fix → reviewer loop;
+- explicit reporting of failed tool calls, even when final prose sounds successful;
+- ordered per-agent model fallback without silently rewriting saved configuration;
+- detached Git worktree isolation for parallel workers and opt-in write-capable
+  cleaner runs.
+
 ## Install
 
 ```bash
@@ -99,8 +130,10 @@ interactive TUI session:
 /subagents-setup
 ```
 
-The default configuration enables `explore`, `worker`, and `reviewer` — you can
-start delegating immediately.
+Fresh installs enable `explore`, `worker`, `cleaner`, and `reviewer` — you can
+start delegating immediately. Existing explicit `enabledAgents` lists are never
+silently extended; users upgrading with an existing explicit list get a one-time
+notice to opt into `cleaner` with `/subagents-setup`.
 
 ## The agents
 
@@ -108,7 +141,8 @@ start delegating immediately.
 | --- | --- | --- |
 | `explore` | Read-only | Fast codebase reconnaissance: broad/open-ended search, multi-file lookups, mapping unfamiliar code. Returns compressed, structured findings. |
 | `worker` | Full | Implements, fixes, refactors, and tests a self-contained task end to end, then reports honest verification. |
-| `reviewer` | Read-only | Adversarial pre-commit quality gate: diff review, plus plans, proposed solutions, codebase health, and PR/issue validation. |
+| `cleaner` | Full | Evidence-first cleanup. Audits and ranks candidates read-only, or applies the smallest proven cuts when removal is explicit; supports worktree isolation. |
+| `reviewer` | Read-only | Adversarial pre-commit quality gate: independently reviews worker and cleaner edits, plus plans, proposed solutions, codebase health, and PR/issue validation. |
 
 Each agent runs in its own isolated `pi` process with a clean context window; it
 has no memory of your conversation, so briefs must be self-contained (goal, exact
@@ -121,6 +155,8 @@ paths, constraints, expected output).
 ```ts
 subagent({ agent: "explore", task: "Map the test setup: which files run what, and how is CI wired? Report exact paths." });
 subagent({ agent: "worker", task: "Implement X in src/foo.ts, add tests, run npm test." });
+subagent({ agent: "cleaner", task: "Audit src/cache for dead code and redundant state; report ranked evidence only." });
+subagent({ agent: "cleaner", task: "Remove the proven dead cache adapter, update its tests/docs, and verify the smallest then broad checks." });
 subagent({ agent: "reviewer", task: "Review the diff of src/index.ts and tests/load.test.ts for correctness and edge cases." });
 ```
 
@@ -134,6 +170,27 @@ subagent({
   ],
 });
 ```
+
+### Cleanup routing and lifecycle
+
+The injected guidance routes `cleaner` by explicit semantic intent: **code cleanup**,
+**dead code**, **代码清理**, **精简**, **清理冗余**, **简化**, or **去除过度设计**.
+Requested periodic maintenance passes also qualify; PR counts do not, and cleaner is
+never run automatically as the pre-commit gate.
+
+- **Audit mode:** audit/find/report/review or 审计/查找/检查/报告 wording produces
+  read-only ranked evidence.
+- **Apply mode:** explicit remove/clean/simplify/refactor or 清理/删除/移除/精简/简化/重构
+  wording permits the smallest proven edits plus narrow-then-broad verification.
+
+```text
+explicit cleanup intent → cleaner (audit or apply)
+cleaner apply → reviewer gate → worker auto-fix (on REVIEW_FAIL) → reviewer
+```
+
+`reviewer` remains the independent gate for non-trivial cleaner edits. The auto-fix
+portion runs only when enabled by `maxFixRounds`; cleaner itself is not a pre-commit
+hook or a PR-count scheduler.
 
 ### Vision tasks (screenshots / mockups / designs)
 
@@ -185,8 +242,10 @@ subagent_control({ action: "fork", id: 7, objective: "Try the smaller alternativ
 
 Single tasks default to `isolation: "shared"`. Parallel `worker` tasks default
 to `isolation: "worktree"`; opt into shared mode only when a worker must see the
-caller's live uncommitted tree. Worktree mode requires a Git repository with a
-committed `HEAD` and is rejected for read-only agents.
+caller's live uncommitted tree. `cleaner` is also write-capable and supports
+worktree mode when explicitly requested (its default remains shared). Worktree
+mode requires a Git repository with a committed `HEAD` and is rejected for the
+read-only `explore` and `reviewer` agents.
 
 A parked isolated thread keeps its current worktree. Resume it there; fork is
 available after that isolated checkpoint settles and its seed is integrated.
@@ -215,7 +274,7 @@ session. `notifyOnReviewPass` and `maxResultLines` are edited directly in the fi
 
 ```json
 {
-  "enabledAgents": ["explore", "worker", "reviewer"],
+  "enabledAgents": ["explore", "worker", "cleaner", "reviewer"],
   "agentModels": {
     "explore": "anthropic/claude-haiku-4-5"
   },
@@ -291,11 +350,14 @@ sessions live until the parent Pi session shuts down.
 
 ### Configuration migration
 
-The config file normalizes itself on load — no manual steps after an upgrade:
-configured non-empty agent names are preserved, invalid values and unsupported
+The config file normalizes itself on load — no manual steps after an upgrade.
+Configured non-empty agent names are preserved, invalid values and unsupported
 keys (including `maxParallelTasks` and `maxSubagentDepth`) are dropped, and
-missing current fields are filled with defaults. New features are announced to
-you once after an update via a toast (marker persisted in `announcedFeatures`).
+missing current fields are filled with defaults. In particular, a pre-existing
+explicit `enabledAgents` array is preserved without appending `cleaner`; the new
+agent is added only to fresh-install defaults. Existing configs without it
+receive a one-time toast pointing to `/subagents-setup`, with the marker persisted
+in `announcedFeatures`.
 
 ## Agent discovery and overrides
 

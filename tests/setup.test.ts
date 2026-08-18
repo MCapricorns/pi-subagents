@@ -78,9 +78,7 @@ describe("full setup flow", () => {
 					const rendered = component.render(160).join("\n");
 					screens.push(rendered);
 					if (rendered.includes("Agent model pools")) {
-						component.handleInput("down");
-						component.handleInput("down");
-						component.handleInput("down");
+						for (let index = 0; index < 4; index++) component.handleInput("down");
 					}
 					component.handleInput("enter");
 				}),
@@ -89,10 +87,12 @@ describe("full setup flow", () => {
 		try {
 			await runSetup(ctx, configPath);
 			const config = JSON.parse(readFileSync(configPath, "utf8"));
-			expect(config.enabledAgents).toEqual(["explore", "worker", "reviewer"]);
+			expect(config.enabledAgents).toEqual(["explore", "worker", "cleaner", "reviewer"]);
 			expect(config.agentThinkingLevels).toEqual({});
+			expect(screens.some((screen) => screen.includes("cleaner — evidence-first cleanup"))).toBe(true);
 			expect(screens.some((screen) => screen.includes('Thinking strength for "explore"?'))).toBe(true);
 			expect(screens.some((screen) => screen.includes('Thinking strength for "worker"?'))).toBe(true);
+			expect(screens.some((screen) => screen.includes('Thinking strength for "cleaner"?'))).toBe(true);
 			expect(screens.some((screen) => screen.includes('Thinking strength for "reviewer"?'))).toBe(true);
 		} finally {
 			rmSync(dir, { recursive: true, force: true });
