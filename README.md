@@ -11,15 +11,22 @@ Focused background delegation for [pi](https://pi.dev): `explore` / `worker` /
 results back to the main agent automatically. Install it, and the main model
 starts using it on its own — no prompt engineering, no babysitting.
 
-## 1.1.0 — evidence-first cleanup and richer live status
+## 2.0.0 — direct model handoff and capability-aware thinking
 
-Version 1.1.0 adds semantic routing to a dedicated evidence-first `cleaner` and
-makes the active widget show each run's task, effective model/thinking, activity,
-and elapsed time. It builds on the retained thread runtime from 1.0: every
-dispatch has a stable run id, so work can be steered while it runs, parked
-without losing context, resumed after settlement, retargeted, or forked into
-another path. Generation ownership keeps retries and stale child processes from
-corrupting the logical thread without retaining a duplicate event history.
+Version 2 removes backup pools and global thinking strength. Every agent now has
+one optional selected model; any model/provider failure hands its retained session
+directly to the current main model, while ordinary tool/task failures stay put.
+Thinking defaults to Auto and is clamped through Pi's real model capability map.
+The setup menu and normalized config drop the obsolete options instead of carrying
+compatibility aliases.
+
+This release also adds semantic routing to a dedicated evidence-first `cleaner`
+and makes the active widget show each run's task, effective model/thinking,
+activity, and elapsed time. Every dispatch has a stable run id, so work can be
+steered while it runs, parked without losing context, resumed after settlement,
+retargeted, or forked into another path. Generation ownership keeps startup-race
+retries and stale child processes from corrupting the logical thread without
+retaining a duplicate event history.
 
 The common quality loop now runs end to end without waking the main agent between
 steps:
@@ -35,10 +42,10 @@ gate.
 Each chain is delivered as one concise completion group, while full per-run
 reports remain available through `subagent_status`. Its parent stays `running`
 until the whole chain settles; completed internal rounds leave active status
-immediately, so no `done` row keeps accumulating elapsed time. Ordered model
-pools keep the same retained context across provider fallback, and isolated parallel workers
-use detached Git worktrees whose changes are applied back without touching the
-parent index.
+immediately, so no `done` row keeps accumulating elapsed time. Selected-to-main
+model handoffs keep the same retained context, and isolated parallel workers use
+detached Git worktrees whose changes are applied back without touching the parent
+index.
 
 ## Highlights
 
@@ -47,10 +54,10 @@ parent index.
   self-contained implementations to `worker`, explicit cleanup intent to `cleaner`,
   and pre-commit reviews to `reviewer`. You just use pi; delegation happens by itself.
 - **Vision-capable image tasks** — flag screenshot/mockup/design work with
-  `vision: true`. The configured vision primary is followed by that agent's
-  backup and the current main-window model. Setup lists only in-scope,
-  image-capable models from providers with a configured API key or OAuth session,
-  and runtime failures never silently rewrite your configuration.
+  `vision: true`. The configured vision model hands directly to the current main
+  model on model/provider failure. Setup lists only in-scope, image-capable models
+  from providers with configured authentication, and failures never silently
+  rewrite your configuration.
 - **Results come back on their own** — completions are delivered as messages that
   wake the main agent automatically, even mid-turn. No polling, no `sleep`, no
   "go check" step. `subagent_wait` is a **non-blocking** in-turn lookup by default
@@ -78,18 +85,22 @@ parent index.
   re-review, up to `maxFixRounds` times — and only then wakes the main agent.
   Every round stays in the triggering reviewer's cwd, and chains that target the
   same repository are serialized so shared-checkout edits cannot race.
-- **Ordered model pools without config churn** — each agent can have a primary
-  and backup; the current main-window model is the final candidate. Transient
-  provider failures retry the same candidate with backoff, while permanent stale
-  model/config errors and quota/auth errors advance immediately. Saved refs are
-  never rewritten behind your back.
+- **Direct fallback with real thinking capabilities** — each agent has at most
+  one selected model. An unavailable selection, rate limit, invalid key, quota,
+  missing model, or provider failure hands directly to the current main model.
+  A child-only provider adapter forces request retries to zero, and the RPC
+  parent cancels Pi's outer turn retry before another call, without changing user
+  settings. Auto thinking clamps the agent preference to the
+  effective model's real `thinkingLevelMap`; manual setup shows only levels that
+  model supports.
 - **Resumes, retargets, and forks preserve context** — every run is session-backed.
   `subagent_control` can steer active work, retarget it after a stable abort,
   park/resume it under the same run id, or fork a parked/settled checkpoint into
   a new independent run. Concurrent resume calls are serialized.
-- **Honest completions** — a run that ended with failed tool calls (e.g. a broken
-  build) is reported as `completed with N failed tool call(s)` with the errors
-  attached — a cheerful final text can never hide a failure.
+- **Concise but honest completions** — a clean process that contained failed tool
+  calls adds one short warning with its run id; individual errors stay out of the
+  main context and remain available through `subagent_status`. Actual process,
+  model, and integration failures still surface as failures.
 - **Parallel fan-out with filesystem isolation** — independent tasks run up to a
   configurable limit (default 4). Parallel workers default to detached Git
   worktrees; tracked, deleted, untracked, and binary changes are applied back
@@ -112,8 +123,8 @@ an undifferentiated child-agent launcher:
 - isolated, retained threads that can be steered, parked, resumed, retargeted, or
   forked under stable run ids;
 - the reviewer → worker auto-fix → reviewer loop;
-- explicit reporting of failed tool calls, even when final prose sounds successful;
-- ordered per-agent model fallback without silently rewriting saved configuration;
+- compact failed-tool warnings with full diagnostics available by run id;
+- direct selected→main fallback plus capability-aware Auto thinking;
 - detached Git worktree isolation for parallel workers and opt-in write-capable
   cleaner runs.
 
@@ -123,7 +134,7 @@ an undifferentiated child-agent launcher:
 pi install npm:@ferris1225/pi-subagents
 ```
 
-Requires pi **>= 0.80.6**. After installation, open the setup wizard in an
+Requires pi **>= 0.83.0**. After installation, open the setup wizard in an
 interactive TUI session:
 
 ```text
@@ -165,7 +176,7 @@ subagent({ agent: "reviewer", task: "Review the diff of src/index.ts and tests/l
 ```ts
 subagent({
   tasks: [
-    { agent: "explore", task: "Where is the model fallback logic?" },
+    { agent: "explore", task: "Where is the selected-to-main handoff logic?" },
     { agent: "worker", task: "Add unit tests for models.ts." },
   ],
 });
@@ -206,11 +217,10 @@ subagent({
 ```
 
 The sub-agent reads images with its `read` tool. Runtime order for a
-vision-flagged run is configured `visionModel` → that agent's configured backup
-→ current main-window model (deduplicated). A stale configured ref is attempted
-once, then skipped as a permanent candidate error; it is not rewritten. A
-vision-flagged auto-fix chain keeps the flag for worker/re-review rounds because
-they may need to inspect the same images.
+vision-flagged run is `visionModel` → current main-window model. A stale or
+currently unavailable vision selection is skipped immediately without rewriting
+it. A vision-flagged auto-fix chain keeps the flag for worker/re-review rounds
+because they may need to inspect the same images.
 
 ### Controlling and stopping
 
@@ -265,12 +275,13 @@ sessions show the recovery paths again until the artifacts are removed.
 ## Configuration
 
 Stored at `~/.pi/agent/pi-subagents.json` (follows `PI_CODING_AGENT_DIR` when
-set). The `/subagents-setup` wizard drives every field interactively — models, the
-default plus each enabled agent's thinking level, the vision model, concurrency,
-fix rounds, idle timeout, scope, and injection — with a per-agent "configure
-one" menu when the config already exists. Model pickers show only models in the
-current session scope that are available through a configured API key or OAuth
-session. `notifyOnReviewPass` and `maxResultLines` are edited directly in the file.
+set). `/subagents-setup` has five top-level choices: enable agents, configure one
+agent's model/thinking, choose a vision model, runtime settings, or full setup.
+There is no backup pool or global thinking menu. Model pickers show only in-scope
+models with configured authentication and display their real supported thinking
+levels. Thinking defaults to **Auto**; manual overrides show only levels supported
+by that agent's effective model. `notifyOnReviewPass` and `maxResultLines` remain
+direct-file settings.
 
 ```json
 {
@@ -278,13 +289,9 @@ session. `notifyOnReviewPass` and `maxResultLines` are edited directly in the fi
   "agentModels": {
     "explore": "anthropic/claude-haiku-4-5"
   },
-  "agentBackupModels": {
-    "explore": "openai/gpt-5-mini"
-  },
   "agentThinkingLevels": {
-    "explore": "low"
+    "reviewer": "high"
   },
-  "thinkingLevel": "high",
   "visionModel": "anthropic/claude-sonnet-4-5",
   "notifyOnReviewPass": false,
   "maxResultLines": 80,
@@ -299,45 +306,64 @@ session. `notifyOnReviewPass` and `maxResultLines` are edited directly in the fi
 | Field | Description |
 | --- | --- |
 | `enabledAgents` | Agent names exposed to discovery and prompt injection. An empty array disables all agents. |
-| `agentModels` | Optional primary `provider/model-id` override per agent. |
-| `agentBackupModels` | Optional backup per agent, tried after its primary and before the current main-window model. |
-| `agentThinkingLevels` | Optional thinking level per agent; agents without an entry use the agent's frontmatter `thinking`, then `thinkingLevel`. |
-| `thinkingLevel` | Default thinking level: `off`, `minimal`, `low`, `medium`, `high`, `xhigh`, or `max` (default `high`). |
+| `agentModels` | Optional selected `provider/model-id` per agent. Missing = current main model. Model-level failure hands directly to current main. |
+| `agentThinkingLevels` | Optional manual preference per agent. Missing = Auto (agent frontmatter preference, or `high`, clamped to the effective model's supported levels). |
 | `visionModel` | Optional vision-capable model for `vision: true` tasks (screenshots/mockups/designs). Unset = falls back to the main session's current model. |
 | `notifyOnReviewPass` | When `true`, a passing reviewer result is delivered without waking the main agent (default `false`). |
-| `maxResultLines` | Max lines of a sub-agent result carried in the completion message (default `80`). Longer results are truncated; the full text is written to a temp file whose path is included in the message. |
+| `maxResultLines` | Max lines of a sub-agent result carried in the completion message (default `80`). Longer results are truncated; full text is written to an extension-named temporary `.md`. At session start and on each write, only recognized result files older than 7 days are removed; each canonical project path has its own newest-50 bucket. |
 | `proactiveInjection` | Whether to add the delegation directive to the main system prompt. |
 | `agentScope` | `user`, `project`, or `both`; controls which user/project agent directories are discovered. |
 | `maxConcurrency` | Max sub-agent processes running at once (1–16, default 4), and the max tasks one parallel `subagent` call accepts. Extra work waits in the queue. |
 | `maxFixRounds` | Auto-fix rounds when a reviewer returns `REVIEW_FAIL` (default 2; `0` disables the loop). |
-| `idleTimeoutSec` | Idle watchdog: a sub-agent whose stdout goes silent for this long is terminated and retried. `0` disables it. Default 90. |
+| `idleTimeoutSec` | Idle watchdog: a sub-agent whose stdout goes silent for this long is terminated; a selected model then hands to current main. `0` disables it. Default 90. |
 
-### Model precedence and fallback
-
-Normal run pool:
+### Model routing and thinking
 
 ```text
-configured agent primary → configured agent backup → current main-window model
+selected agent/vision model → current main-window model
 ```
 
-If no primary is configured, the current main-window model is primary; the
-agent frontmatter model is used only when no current main model exists. For
-vision runs, `visionModel` replaces the first slot while the selected agent's
-backup and current main model remain the fallbacks. Duplicate refs are removed.
+Without a selected model, current main runs immediately; agent frontmatter model
+is used only when no main model exists. A selection missing from Pi's live
+available catalog is skipped. Any model-level runtime failure — rate limit,
+quota, invalid key/auth, missing model, provider error, or idle model stream —
+hands directly to current main, including stream errors that retain partial text.
+A child-only Pi extension wraps the selected provider's registered API stream
+with `maxRetries: 0`; if Pi schedules its separate outer turn retry, the RPC parent
+immediately sends `abort_retry` before another provider call. This uses supported
+extension/RPC surfaces in Node and standalone/Bun builds, never rewrites global or
+project settings, and does not alter descendant tool environments. Tool/test
+failures stay on the same model because they are task failures, not model
+availability failures. Only a truly
+zero-activity process startup race can retry; an accepted prompt or any
+agent/turn/stream/tool activity forbids replay.
 
-Each candidate gets startup-race retries. Provider failures retry the same
-candidate up to five times only when transient (timeouts, network, 429, 5xx).
-Permanent model/config failures (`model not found`, unknown provider, 404) and
-quota/auth/billing failures skip that delay and advance immediately. No runtime
-outcome rewrites `pi-subagents.json`. If the whole pool fails, the result is
-handed to the main window with its retained run id and session.
+Auto thinking starts from the Agent's declared preference (`low` for `explore`,
+`high` for the other built-ins) and uses Pi's capability map to clamp it to the
+actual model. Non-reasoning models resolve to `off`; `xhigh`/`max` appear in setup
+only when that model explicitly supports them. A selected→main handoff re-clamps
+thinking for the main model.
+
+### Choosing an explore model
+
+Choose a competent fast code model for `explore`, not automatically the cheapest
+model. Cheap reconnaissance is useful for mechanical symbol/path discovery, but
+a missed dynamic entrypoint or ownership edge can cost more through downstream
+rework. Direct main-model handoff handles provider/runtime failure; it cannot
+detect a plausible but incomplete answer.
+
+`explore` therefore returns an index of exact paths, lines, symbols, and explicit
+uncertainty. The main agent, worker, or cleaner must re-read load-bearing files
+before editing or deciding deletion, security, compatibility, persistence, or
+dynamic reachability. Prefer a stronger model or direct specialist for complex
+dynamic loading, concurrency, migrations, and security-sensitive code.
 
 ### Resuming retained context
 
-Every run stores its Pi session in a private temp directory. Same-model retries
-and pool fallbacks resume that session, so searches, reads, reasoning, and edits
-remain in context. A parked, completed, or failed thread can later be resumed
-under its stable id:
+Every run stores its Pi session in a private temp directory. A selected→main
+handoff resumes that same session, so searches, reads, reasoning, and edits remain
+in context. A parked, completed, or failed thread can later be resumed under its
+stable id:
 
 ```ts
 subagent_control({ action: "resume", id: 7 });
@@ -351,12 +377,12 @@ sessions live until the parent Pi session shuts down.
 ### Configuration migration
 
 The config file normalizes itself on load — no manual steps after an upgrade.
-Configured non-empty agent names are preserved, invalid values and unsupported
-keys (including `maxParallelTasks` and `maxSubagentDepth`) are dropped, and
-missing current fields are filled with defaults. In particular, a pre-existing
-explicit `enabledAgents` array is preserved without appending `cleaner`; the new
-agent is added only to fresh-install defaults. Existing configs without it
-receive a one-time toast pointing to `/subagents-setup`, with the marker persisted
+Configured non-empty agent names are preserved, while invalid and obsolete keys
+are removed. This release deletes `agentBackupModels` and global `thinkingLevel`
+in addition to older `maxParallelTasks` / `maxSubagentDepth`; per-agent thinking
+preferences remain and are capability-clamped at runtime. A pre-existing explicit
+`enabledAgents` array is still preserved without appending `cleaner`. Existing
+configs without it receive a one-time `/subagents-setup` notice, tracked internally
 in `announcedFeatures`.
 
 ## Agent discovery and overrides
@@ -372,14 +398,15 @@ in `announcedFeatures`.
 
 ## How it stays reliable
 
-- **Ordered model resilience** — transient failures retry the same candidate,
-  then advance through configured backup and current-main candidates. Permanent
-  stale-model/config and quota/auth/billing errors skip same-model backoff.
+- **Direct model recovery** — unavailable selections skip immediately; any
+  selected-model provider/auth/quota/rate-limit failure hands directly to current
+  main with thinking re-clamped to the main model.
 - **Startup-race retries** — a silent zero-activity child exit (concurrent pi
   startup lock contention) is relaunched with backoff; only clean silent exits
   qualify, so real work is never duplicated.
-- **Idle watchdog** — a stalled provider stream (no output for `idleTimeoutSec`)
-  terminates the child and retries via the normal fallback path.
+- **Idle watchdog** — a stalled selected-model stream (no output for
+  `idleTimeoutSec`) terminates the child and hands the retained session to current
+  main.
 - **Dispatch failures surface** — partial parallel startup reports every failed
   item and reason; if none start, the tool throws so Pi records a real tool error.
   Dispatch crashes likewise produce a failed result instead of a silent hang.
@@ -395,7 +422,7 @@ npm test
 ```
 
 The source is modular: `dispatch.ts` (dispatch, controls, isolation, auto-fix),
-`rpc-run.ts` / `spawn.ts` (persistent child transport + model pools),
+`rpc-run.ts` / `spawn.ts` (persistent child transport + selected→main handoff),
 `worktree.ts` / `session-fork.ts` (filesystem/session branching), `tools.ts`
 (wait/status/control/stop), `widget.ts` (active-only TUI status), `announcements.ts`
 (recovery and feature notices), and `runtime.ts` (session-scoped ownership). No runtime dependencies beyond pi peer

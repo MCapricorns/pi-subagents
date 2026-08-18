@@ -6,6 +6,7 @@ export interface FakeRpcScriptOptions {
 	onPrompt: string;
 	onSteer?: string;
 	onAbort?: string;
+	onAbortRetry?: string;
 	onGetState?: string;
 	emitAgentStart?: boolean;
 	autoSettle?: boolean;
@@ -48,6 +49,11 @@ const handle = async (command) => {
 	if (command.type === "abort") {
 		respond(command);
 		${options.onAbort ?? 'send({ type: "message_end", message: { role: "assistant", content: [], stopReason: "aborted" } }); send({ type: "agent_settled" });'}
+		return;
+	}
+	if (command.type === "abort_retry") {
+		respond(command);
+		${options.onAbortRetry ?? ""}
 		return;
 	}
 	if (command.type === "get_state") {

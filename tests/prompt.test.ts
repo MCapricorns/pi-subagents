@@ -46,6 +46,16 @@ describe("buildDelegationDirective", () => {
 		expect(directive).not.toContain("When in doubt, delegate");
 	});
 
+	it("treats explore as a retrieval index rather than decision authority", () => {
+		const withExplore = buildDelegationDirective([agent("explore"), agent("worker")]);
+		expect(withExplore).toContain("`explore` findings as a retrieval index");
+		expect(withExplore).toContain("Re-read load-bearing files before acting");
+		expect(withExplore).toContain("underpowered model can be false economy");
+
+		const withoutExplore = buildDelegationDirective([agent("worker")]);
+		expect(withoutExplore).not.toContain("`explore` findings as a retrieval index");
+	});
+
 	it("routes cleanup intent in any language to cleaner with safe audit/apply semantics", () => {
 		const directive = buildDelegationDirective([agent("cleaner"), agent("reviewer")]);
 		expect(directive).toContain("explicit cleanup intent in any language");

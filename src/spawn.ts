@@ -3,16 +3,16 @@
  *
  * The process transport itself lives in rpc-run.ts. Each attempt starts pi in
  * persistent `--mode rpc`, sends commands over strict LF-delimited JSONL, and
- * settles only on `agent_settled`. This module preserves the existing startup
- * retry, same-model retry, model fallback, accounting, and result formatting
- * contracts around those attempts.
+ * settles only on `agent_settled`. This module owns startup-race recovery,
+ * selected-to-main model handoff, capability-clamped thinking, accounting, and
+ * result formatting around those attempts.
  */
 
-import { randomUUID } from "node:crypto";
-import { mkdirSync, writeFileSync } from "node:fs";
+import { createHash, randomUUID } from "node:crypto";
+import { type Dirent, mkdirSync, readdirSync, realpathSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { basename, join } from "node:path";
+import { basename, join, resolve } from "node:path";
 import type { Message } from "@earendil-works/pi-ai";
 import type { AgentConfig } from "./agents.ts";
 import { DEFAULT_THINKING_LEVEL, type ThinkingLevel } from "./config.ts";
@@ -25,6 +25,7 @@ import {
 	RpcRunControl,
 	runRpcAgentAttempt,
 	sessionExists,
+	writeChildRetryPolicyExtension,
 	SUBAGENT_KILL_GRACE_MS,
 	type RpcSingleResult,
 	type SubagentLiveEvent,
@@ -39,6 +40,7 @@ export {
 	RpcRunControl,
 	sessionExists,
 	SUBAGENT_KILL_GRACE_MS,
+	writeChildRetryPolicyExtension,
 };
 export type { SubagentLiveEvent, UsageStats };
 
@@ -47,7 +49,6 @@ export const SUBAGENT_THINKING_LEVEL: ThinkingLevel = DEFAULT_THINKING_LEVEL;
 export const SUBAGENT_DEFAULT_IDLE_TIMEOUT_MS = 0;
 export const SUBAGENT_STARTUP_RETRY_DELAYS_MS = [250, 750, 1500] as const;
 export const MAX_SUBAGENT_STARTUP_FAILURE_DURATION_MS = 2000;
-export const SUBAGENT_RUN_LEVEL_RETRY_DELAYS_MS = [2_000, 4_000, 8_000, 16_000, 30_000] as const;
 
 export interface SingleResult extends RpcSingleResult {}
 
@@ -97,14 +98,89 @@ export function truncateResultOutput(output: string, maxLines: number): Truncate
 	return { text: kept.join("\n"), truncated: true };
 }
 
+export const RESULT_ARTIFACT_MAX_AGE_MS = 7 * 24 * 60 * 60 * 1_000;
+export const RESULT_ARTIFACT_MAX_FILES_PER_PROJECT = 50;
+// Explicit current prefix plus the strict timestamp/token convention used by 1.1.0.
+const RESULT_ARTIFACT_NAME = /^(?:pi-subagent-\d{13,}-[0-9a-f]{12}|\d{13,}-[a-z0-9]{6})-[\w.-]+\.md$/;
+
+interface ResultArtifactRetentionOptions {
+	now?: number;
+	maxAgeMs?: number;
+	maxFilesPerProject?: number;
+}
+
+/** Remove only stale/overflow Markdown result artifacts. Unknown files and
+ * symlinks are never touched. Called on each artifact write, so storage stays
+ * bounded without deleting a result that the current completion just linked. */
+export function pruneResultArtifacts(
+	rootDir: string = join(tmpdir(), "pi-subagents-results"),
+	options: ResultArtifactRetentionOptions = {},
+): void {
+	const now = options.now ?? Date.now();
+	const maxAgeMs = Math.max(0, options.maxAgeMs ?? RESULT_ARTIFACT_MAX_AGE_MS);
+	const maxFiles = Math.max(0, Math.floor(options.maxFilesPerProject ?? RESULT_ARTIFACT_MAX_FILES_PER_PROJECT));
+	let projects: Dirent[];
+	try {
+		projects = readdirSync(rootDir, { withFileTypes: true });
+	} catch {
+		return;
+	}
+
+	for (const project of projects) {
+		if (!project.isDirectory() || project.isSymbolicLink()) continue;
+		const projectDir = join(rootDir, project.name);
+		let entries: Dirent[];
+		try {
+			entries = readdirSync(projectDir, { withFileTypes: true });
+		} catch {
+			continue;
+		}
+		const artifacts = entries
+			.filter((entry) => entry.isFile() && !entry.isSymbolicLink() && RESULT_ARTIFACT_NAME.test(entry.name))
+			.flatMap((entry) => {
+				const path = join(projectDir, entry.name);
+				try {
+					return [{ path, mtimeMs: statSync(path).mtimeMs }];
+				} catch {
+					return [];
+				}
+			})
+			.sort((left, right) => right.mtimeMs - left.mtimeMs);
+
+		for (const [index, artifact] of artifacts.entries()) {
+			if (index < maxFiles && now - artifact.mtimeMs <= maxAgeMs) continue;
+			try {
+				rmSync(artifact.path, { force: true });
+			} catch {
+				// Temp cleanup is best-effort; result delivery must still succeed.
+			}
+		}
+	}
+}
+
+export function resultArtifactProjectKey(cwd?: string): string {
+	if (!cwd) return "default";
+	let canonical: string;
+	try {
+		canonical = realpathSync.native(cwd);
+	} catch {
+		canonical = resolve(cwd);
+	}
+	if (process.platform === "win32") canonical = canonical.toLowerCase();
+	const slug = basename(canonical).replace(/[^\w.-]+/g, "_") || "project";
+	const digest = createHash("sha256").update(canonical).digest("hex").slice(0, 12);
+	return `${slug}-${digest}`;
+}
+
 export function writeResultArtifact(output: string, agentName: string, cwd?: string): string {
-	const projectSlug = cwd ? basename(cwd).replace(/[^\w.-]+/g, "_") || "default" : "default";
-	const dir = join(tmpdir(), "pi-subagents-results", projectSlug);
+	const rootDir = join(tmpdir(), "pi-subagents-results");
+	const dir = join(rootDir, resultArtifactProjectKey(cwd));
 	mkdirSync(dir, { recursive: true });
-	const safeName = agentName.replace(/[^\w.-]+/g, "_");
-	const unique = `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+	const safeName = agentName.replace(/[^\w.-]+/g, "_") || "agent";
+	const unique = `pi-subagent-${Date.now()}-${randomUUID().replaceAll("-", "").slice(0, 12)}`;
 	const filePath = join(dir, `${unique}-${safeName}.md`);
 	writeFileSync(filePath, output, "utf8");
+	pruneResultArtifacts(rootDir);
 	return filePath;
 }
 
@@ -121,13 +197,6 @@ function lastAssistantMessage(messages: Message[]): Extract<Message, { role: "as
 	return undefined;
 }
 
-function assistantText(message: Extract<Message, { role: "assistant" }>): string {
-	return message.content
-		.filter((part): part is Extract<(typeof message.content)[number], { type: "text" }> => part.type === "text")
-		.map((part) => part.text)
-		.join("");
-}
-
 export function isModelLevelFailure(result: SingleResult): boolean {
 	if (!isFailedResult(result)) return false;
 	if (result.stopReason === "aborted") return false;
@@ -141,46 +210,26 @@ export function isModelLevelFailure(result: SingleResult): boolean {
 	// must not hide a later provider error (for example a second-turn 503).
 	const finalAssistant = lastAssistantMessage(result.messages);
 	if (finalAssistant) {
-		if (finalAssistant.stopReason !== "error") return false;
-		if (assistantText(finalAssistant).trim()) return false;
-		return Boolean(
-			finalAssistant.errorMessage?.trim() ||
-			result.errorMessage?.trim() ||
-			result.stderr.trim() ||
-			finalAssistant.content.length === 0
-		);
+		// Provider streams may preserve partial text on a terminal error. The stop
+		// reason, not content emptiness, is the transport boundary; ordinary tool or
+		// task failures settle with a non-error assistant stop reason.
+		return finalAssistant.stopReason === "error";
 	}
 
 	if ((result.failedTools?.length ?? 0) > 0) return false;
-	return Boolean(result.errorMessage?.trim()) || result.stderr.trim().length > 0;
-}
-
-const TERMINAL_MODEL_ERROR_PATTERN =
-	/insufficient_quota|quota\s+exceeded|exceeded[^.\n]{0,40}quota|out\s+of\s+budget|billing|usage\s+limit|usage_limit|gousagelimiterror|freeusagelimiterror|monthly\s+usage\s+limit\s+reached|available\s+balance|invalid\s+(?:api\s+)?key|incorrect\s+api\s+key|unauthori[sz]ed|\b401\b|\b403\b|forbidden|permission\s+denied/i;
-const PERMANENT_MODEL_CANDIDATE_ERROR_PATTERN =
-	/model[_ -]?not[_ -]?found|no\s+models?\s+(?:found|matched)|(?:model|provider)[^.\n]{0,80}(?:not\s+found|unknown|does\s+not\s+exist|unsupported|invalid)|(?:not\s+found|unknown|unsupported|invalid)[^.\n]{0,40}(?:model|provider)|\b404\b/i;
-
-export function isTerminalModelError(result: SingleResult): boolean {
-	const message = result.errorMessage?.trim();
-	if (message) return TERMINAL_MODEL_ERROR_PATTERN.test(message);
-	const stderr = result.stderr.trim();
-	return stderr.length > 0 && TERMINAL_MODEL_ERROR_PATTERN.test(stderr);
-}
-
-/** A permanent failure of this model/provider reference (stale id, unknown
- * provider, 404 config route). Skip same-candidate backoff, but keep advancing
- * through backup and current-main candidates. */
-export function isPermanentModelCandidateError(result: SingleResult): boolean {
-	const message = result.errorMessage?.trim();
-	if (message) return PERMANENT_MODEL_CANDIDATE_ERROR_PATTERN.test(message);
-	const stderr = result.stderr.trim();
-	return stderr.length > 0 && PERMANENT_MODEL_CANDIDATE_ERROR_PATTERN.test(stderr);
+	return Boolean(
+		result.rpcPromptAccepted ||
+		result.rpcActivity ||
+		result.errorMessage?.trim() ||
+		result.stderr.trim(),
+	);
 }
 
 export function isRetryableStartupFailure(result: SingleResult, durationMs: number): boolean {
 	if (result.exitCode === 0) return false;
 	if (result.stopReason === "aborted") return false;
 	if (result.dispatchFailed) return false;
+	if (result.rpcPromptAccepted || result.rpcActivity) return false;
 	if (result.errorMessage?.includes("idle timeout")) return false;
 	if (getFinalOutput(result.messages)) return false;
 	if (result.messages.length > 0) return false;
@@ -252,8 +301,8 @@ export function buildResumePrompt(task: string, reason: string): string {
 
 export function buildFallbackResumeReason(fromModel?: string): string {
 	return fromModel
-		? `the previous model (${fromModel}) failed at the model/provider level, so the next model in its configured pool is continuing`
-		: "the previous model failed at the model/provider level, so the next model in its configured pool is continuing";
+		? `the selected model (${fromModel}) failed at the model/provider level, so the current main model is continuing`
+		: "the selected model failed at the model/provider level, so the current main model is continuing";
 }
 
 export interface RunSingleOptions {
@@ -263,9 +312,10 @@ export interface RunSingleOptions {
 	task: string;
 	cwd?: string;
 	thinkingLevel?: ThinkingLevel;
+	/** Resolve the effective level for each runtime model candidate. */
+	thinkingLevelForModel?: (modelRef?: string) => ThinkingLevel;
 	idleTimeoutMs?: number;
 	startupRetryDelaysMs?: readonly number[];
-	runLevelRetryDelaysMs?: readonly number[];
 	sessionDir?: string;
 	sessionId?: string;
 	/** Initial RPC prompt. Kept under the old name to limit caller churn. */
@@ -347,19 +397,18 @@ export async function runSingleAgent(options: RunSingleOptions): Promise<SingleR
 }
 
 /**
- * Run one logical generation across an ordered model pool. Every candidate gets
- * startup retries plus same-model retries for transient provider failures;
- * terminal model errors skip those retries and advance immediately. All
- * candidates resume the same retained pi session.
+ * Run one logical generation on the selected model, then hand directly to the
+ * current main model after any model/provider-level failure. Startup-race retries
+ * remain process-level recovery; provider/model retries and extra candidates do not.
+ * Both attempts resume the same retained Pi session.
  */
-export async function runSingleAgentWithModelFallback(
+export async function runSingleAgentWithMainFallback(
 	options: RunSingleOptions,
-	fallbackModelRefs: readonly string[] = [],
+	mainFallbackRef?: string,
 ): Promise<SingleResult> {
 	const agent = options.agent;
 	const launchedRef = agent?.model;
 	const startupDelays = options.startupRetryDelaysMs ?? SUBAGENT_STARTUP_RETRY_DELAYS_MS;
-	const runDelays = options.runLevelRetryDelaysMs ?? SUBAGENT_RUN_LEVEL_RETRY_DELAYS_MS;
 
 	const sessionId = options.sessionId ?? randomUUID();
 	const sessionDir = options.sessionDir ?? (await mkdtemp(join(tmpdir(), "pi-subagent-session-")));
@@ -438,26 +487,49 @@ export async function runSingleAgentWithModelFallback(
 		}
 	};
 
-	const fallbackRefs: string[] = [];
-	const seenRefs = new Set<string>();
-	if (launchedRef?.trim()) seenRefs.add(launchedRef.trim());
-	for (const candidate of fallbackModelRefs) {
-		const ref = candidate.trim();
-		if (!ref || seenRefs.has(ref)) continue;
-		seenRefs.add(ref);
-		fallbackRefs.push(ref);
+	const selectedRef = launchedRef?.trim() || undefined;
+	const normalizedMainRef = mainFallbackRef?.trim() || undefined;
+	const candidates: Array<{ agent: AgentConfig; ref?: string }> = [
+		{ agent, ref: selectedRef },
+	];
+	if (normalizedMainRef && normalizedMainRef !== selectedRef) {
+		candidates.push({ agent: { ...agent, model: normalizedMainRef }, ref: normalizedMainRef });
 	}
 
-	const candidates: Array<{ agent: AgentConfig; ref?: string }> = [
-		{ agent, ref: launchedRef?.trim() || undefined },
-	];
-	for (const ref of fallbackRefs) candidates.push({ agent: { ...agent, model: ref }, ref });
-
-	let modelRetries = 0;
 	let fallbackUsed = false;
 	let result: SingleResult | undefined;
+	const priorFailedTools: NonNullable<SingleResult["failedTools"]> = [];
+	const priorUsage = emptyUsage();
+
+	const retainAttemptDiagnostics = (attempt: SingleResult): void => {
+		priorFailedTools.push(...(attempt.failedTools ?? []));
+		priorUsage.input += attempt.usage.input;
+		priorUsage.output += attempt.usage.output;
+		priorUsage.cacheRead += attempt.usage.cacheRead;
+		priorUsage.cacheWrite += attempt.usage.cacheWrite;
+		priorUsage.cost += attempt.usage.cost;
+		priorUsage.turns += attempt.usage.turns;
+		priorUsage.contextTokens = attempt.usage.contextTokens || priorUsage.contextTokens;
+	};
 
 	const finish = async (settled: SingleResult): Promise<SingleResult> => {
+		if (priorFailedTools.length > 0) {
+			settled.failedTools = [...priorFailedTools, ...(settled.failedTools ?? [])];
+		}
+		if (
+			priorUsage.turns || priorUsage.input || priorUsage.output || priorUsage.cacheRead ||
+			priorUsage.cacheWrite || priorUsage.cost || priorUsage.contextTokens
+		) {
+			settled.usage = {
+				input: priorUsage.input + settled.usage.input,
+				output: priorUsage.output + settled.usage.output,
+				cacheRead: priorUsage.cacheRead + settled.usage.cacheRead,
+				cacheWrite: priorUsage.cacheWrite + settled.usage.cacheWrite,
+				cost: priorUsage.cost + settled.usage.cost,
+				turns: priorUsage.turns + settled.usage.turns,
+				contextTokens: settled.usage.contextTokens || priorUsage.contextTokens,
+			};
+		}
 		const persistedSession = sessionExists(sessionDir, sessionId);
 		if (!settled.dispatchFailed || persistedSession || options.sessionDir) {
 			settled.sessionId ??= sessionId;
@@ -469,7 +541,6 @@ export async function runSingleAgentWithModelFallback(
 		}
 		settled.task = options.control?.getObjective() ?? settled.task;
 		if (fallbackUsed && launchedRef) settled.modelFallbackFrom = launchedRef;
-		settled.modelRetries = modelRetries;
 		options.control?.markSettled();
 		return settled;
 	};
@@ -478,9 +549,11 @@ export async function runSingleAgentWithModelFallback(
 		const candidate = candidates[candidateIndex];
 		fallbackUsed ||= candidateIndex > 0;
 		const previousModel = result?.model ?? candidates[candidateIndex - 1]?.ref;
+		const candidateThinking = options.thinkingLevelForModel?.(candidate.ref) ?? options.thinkingLevel;
 		const candidateOptions: RunSingleOptions = {
 			...baseOptions,
 			agent: candidate.agent,
+			thinkingLevel: candidateThinking,
 			...(candidateIndex > 0
 				? {
 					stdinText: buildResumePrompt(
@@ -494,6 +567,7 @@ export async function runSingleAgentWithModelFallback(
 			options.onLive?.({
 				kind: "model",
 				model: candidate.ref,
+				thinking: candidateThinking,
 				...(candidateIndex > 0 && launchedRef ? { fallbackFrom: launchedRef } : {}),
 			});
 		} catch {
@@ -501,41 +575,12 @@ export async function runSingleAgentWithModelFallback(
 		}
 
 		result = await runWithStartupRetry(candidateOptions);
-		if (result.parked || result.stopReason === "aborted") return result;
+		if (result.parked || result.stopReason === "aborted") return finish(result);
 		if (!isModelLevelFailure(result)) return finish(result);
-
-		if (!isTerminalModelError(result) && !isPermanentModelCandidateError(result)) {
-			const retryOptions: RunSingleOptions = {
-				...candidateOptions,
-				stdinText: buildResumePrompt(
-					options.control?.getObjective() ?? options.task,
-					"a transient provider error on the same model",
-				),
-			};
-			for (const delay of runDelays) {
-				baseOptions.control?.markRetrying();
-				try {
-					options.onLive?.({ kind: "status", status: "running" });
-				} catch {
-					/* never throw from event handling */
-				}
-				if (!(await waitForControlledRetry(delay, options.signal, options.control))) {
-					return controlledDisposition(baseOptions, result) ?? result;
-				}
-				result = await runWithStartupRetry(retryOptions);
-				modelRetries++;
-				if (result.parked || result.stopReason === "aborted") return result;
-				if (
-					!isModelLevelFailure(result) ||
-					isTerminalModelError(result) ||
-					isPermanentModelCandidateError(result)
-				) break;
-			}
-		}
-
-		if (!isModelLevelFailure(result)) return finish(result);
-		// Transient exhaustion plus terminal/permanent candidate errors advance
-		// to the next configured candidate. Ordinary task/tool failures returned above.
+		// Any model-level failure advances immediately to the sole fallback (the
+		// current main model). Retain selected-attempt tool diagnostics and usage;
+		// ordinary task/tool failures returned above without a handoff.
+		if (candidateIndex < candidates.length - 1) retainAttemptDiagnostics(result);
 	}
 
 	return finish(result!);

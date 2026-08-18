@@ -102,6 +102,8 @@ describe("extension registration", () => {
 		expect(tool.description).toContain("Never route cleaner by PR count or as the pre-commit gate");
 		expect(tool.description).toContain("Cleaner is write-capable and can opt into worktree isolation");
 		expect(tool.promptGuidelines.join("\n")).toContain("send non-trivial cleaner edits to reviewer");
+		expect(tool.promptGuidelines.join("\n")).toContain("explore output as a retrieval index, not authority");
+		expect(`${tool.description}\n${tool.promptGuidelines.join("\n")}`).not.toMatch(/[\u4e00-\u9fff]/u);
 		expect(tool.parameters.properties.task).toMatchObject({ minLength: 1, pattern: "\\S" });
 		expect(tool.parameters.properties.tasks.items.properties.task).toMatchObject({ minLength: 1, pattern: "\\S" });
 		expect(tool.parameters.properties.isolation).toBeDefined();
@@ -367,13 +369,15 @@ describe("registered tool background dispatch", () => {
 			writeFileSync(
 				childScript,
 				fakeRpcScript({
-					onPrompt: `send({ type: "tool_execution_start", toolName: "bash", args: {} });
-send({
-	type: "tool_execution_end",
-	toolName: "bash",
-	isError: true,
-	result: { content: [{ type: "text", text: "MSBuild.exe failed\\nfatal error C3861: execute_wake_task: undeclared identifier" }] }
-});
+					onPrompt: `for (let i = 1; i <= 4; i++) {
+	send({ type: "tool_execution_start", toolName: "bash-" + i, args: {} });
+	send({
+		type: "tool_execution_end",
+		toolName: "bash-" + i,
+		isError: true,
+		result: { content: [{ type: "text", text: "MSBuild.exe failed " + i + "\\nfatal error C3861: execute_wake_task: undeclared identifier " + i }] }
+	});
+}
 send({
 	type: "message_end",
 	message: {
@@ -390,23 +394,38 @@ send({
 
 			register(stub.api);
 			const tool = stub.tools.find((candidate) => candidate.name === "subagent");
-			await tool.execute(
+			const dispatch = await tool.execute(
 				"call-f",
 				{ agent: "worker", task: "Fix the compile error" },
 				new AbortController().signal,
 				() => {},
 				executionContext(),
 			);
+			const runId = dispatch.details.results[0].runId;
 			await capturedTasks[0](backgroundController.signal);
 			vi.advanceTimersByTime(150);
 			expect(stub.messages).toHaveLength(1);
 			const content = stub.messages[0].message.content;
-			expect(content).toContain("completed with 1 failed tool call");
-			expect(content).toContain("⚠ 1 tool call failed during this run");
-			expect(content).toContain("- bash: MSBuild.exe failed");
-			expect(content).toContain("fatal error C3861: execute_wake_task: undeclared identifier");
-			expect(content).toContain("Verify the actual artifacts before relying on this report.");
+			expect(content).toContain("[worker] completed");
+			expect(content).toContain(`⚠ 4 failed tool calls · details: subagent_status #${runId}`);
+			expect(content).not.toContain("MSBuild.exe failed");
+			expect(content).not.toContain("fatal error C3861");
 			expect(stub.messages[0].options).toEqual({ deliverAs: "steer", triggerTurn: true });
+
+			const status = stub.tools.find((candidate) => candidate.name === "subagent_status");
+			const full = await status.execute(
+				"status-f",
+				{ id: String(runId) },
+				new AbortController().signal,
+				() => {},
+				executionContext(),
+			);
+			expect(full.content[0].text).toContain("completed with 4 failed tool calls");
+			for (let i = 1; i <= 4; i++) {
+				expect(full.content[0].text).toContain(`- bash-${i}: MSBuild.exe failed ${i}`);
+				expect(full.content[0].text).toContain(`fatal error C3861: execute_wake_task: undeclared identifier ${i}`);
+			}
+			expect(full.content[0].text).not.toContain("… and");
 		} finally {
 			backgroundController.abort();
 			await stub.hooks["session_shutdown"]?.({}, {});
@@ -1140,7 +1159,7 @@ send({ type: "message_end", message: { role: "assistant", content: [{ type: "tex
 			stderr: "",
 			usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, cost: 0, contextTokens: 0, turns: 1 },
 		});
-		const run = vi.spyOn(spawn, "runSingleAgentWithModelFallback").mockImplementation(async (options: any) => {
+		const run = vi.spyOn(spawn, "runSingleAgentWithMainFallback").mockImplementation(async (options: any) => {
 			if (options.task === "Review target repo") {
 				return makeResult("reviewer", options.task, "REQUEST_CHANGES\nVERDICT: REVIEW_FAIL");
 			}
@@ -1199,7 +1218,7 @@ send({ type: "message_end", message: { role: "assistant", content: [{ type: "tex
 		let maxActiveWorkers = 0;
 		let workerStarts = 0;
 		const workerReleases: Array<() => void> = [];
-		vi.spyOn(spawn, "runSingleAgentWithModelFallback").mockImplementation(async (options: any) => {
+		vi.spyOn(spawn, "runSingleAgentWithMainFallback").mockImplementation(async (options: any) => {
 			if (options.task === "Review A" || options.task === "Review B") {
 				return makeResult("reviewer", options.task, "REQUEST_CHANGES\nVERDICT: REVIEW_FAIL");
 			}
@@ -1255,7 +1274,7 @@ send({ type: "message_end", message: { role: "assistant", content: [{ type: "tex
 	it("publishes the interrupted auto-fix sub-step partial instead of the old review", async () => {
 		const stub = makeStub();
 		let activeWorkerOptions: any;
-		vi.spyOn(spawn, "runSingleAgentWithModelFallback")
+		vi.spyOn(spawn, "runSingleAgentWithMainFallback")
 			.mockResolvedValueOnce({
 				agent: "reviewer",
 				task: "Review the change",
@@ -1474,7 +1493,7 @@ send({ type: "message_end", message: { role: "assistant", content: [{ type: "tex
 			// be delivered as a failure and never fed into the auto-fix gate — a
 			// crashed reviewer's output is not a review verdict, so no chain may
 			// start and no "auto-fix chain running" activity may appear.
-			const spy = vi.spyOn(spawn, "runSingleAgentWithModelFallback").mockRejectedValueOnce(new Error("spawn infra exploded"));
+			const spy = vi.spyOn(spawn, "runSingleAgentWithMainFallback").mockRejectedValueOnce(new Error("spawn infra exploded"));
 			await capturedTasks[0](controllers[0].signal);
 			spy.mockRestore();
 
@@ -1598,7 +1617,7 @@ describe("before_agent_start injection", () => {
 			queued = task;
 			return controller;
 		});
-		const run = vi.spyOn(spawn, "runSingleAgentWithModelFallback").mockResolvedValue({
+		const run = vi.spyOn(spawn, "runSingleAgentWithMainFallback").mockResolvedValue({
 			agent: "worker",
 			task: "safe task",
 			exitCode: 0,
@@ -1644,15 +1663,15 @@ describe("before_agent_start injection", () => {
 
 describe("vision-flagged dispatch", () => {
 	const AVAILABLE = [
-		{ provider: "openai", id: "current" },
-		{ provider: "anthropic", id: "sonnet" },
-		{ provider: "anthropic", id: "vision" },
+		{ provider: "openai", id: "current", reasoning: false, input: ["text"] },
+		{ provider: "anthropic", id: "sonnet", reasoning: true, input: ["text"], thinkingLevelMap: { max: "max" } },
+		{ provider: "anthropic", id: "vision", reasoning: true, input: ["text", "image"], thinkingLevelMap: { medium: null, high: null, xhigh: null, max: null } },
 	];
 
 	function visionContext(uiNotify: ReturnType<typeof vi.fn>): any {
 		return {
 			...executionContext({ uiNotify }),
-			model: { provider: "openai", id: "current" },
+			model: AVAILABLE[0],
 			modelRegistry: { getAvailable: () => AVAILABLE },
 		};
 	}
@@ -1674,7 +1693,7 @@ describe("vision-flagged dispatch", () => {
 			return controller;
 		});
 		const runSpy = vi
-			.spyOn(spawn, "runSingleAgentWithModelFallback")
+			.spyOn(spawn, "runSingleAgentWithMainFallback")
 			.mockResolvedValue({
 				agent: "reviewer",
 				task: "Compare screenshots",
@@ -1698,72 +1717,69 @@ describe("vision-flagged dispatch", () => {
 		return { controller, runSpy };
 	}
 
-	it("uses vision as primary, then the agent backup and current main model", async () => {
+	it("uses vision first, then current main, with capability-clamped thinking", async () => {
 		const uiNotify = vi.fn();
 		const { controller, runSpy } = await dispatchWithVision(
 			true,
 			{
 				agentModels: { reviewer: "anthropic/sonnet" },
-				agentBackupModels: { reviewer: "google/backup" },
 				visionModel: "anthropic/vision",
 			},
 			uiNotify,
 		);
-		expect(runSpy.mock.calls[0][0].agent.model).toBe("anthropic/vision");
-		expect(runSpy.mock.calls[0][1]).toEqual(["google/backup", "openai/current"]);
+		const options = runSpy.mock.calls[0][0];
+		expect(options.agent.model).toBe("anthropic/vision");
+		expect(options.thinkingLevel).toBe("low");
+		expect(options.thinkingLevelForModel("openai/current")).toBe("off");
+		expect(runSpy.mock.calls[0][1]).toBe("openai/current");
 		controller.abort();
 	});
 
-	it("uses current main as the dynamic vision primary when no vision override is configured", async () => {
+	it("uses current main dynamically when no vision override is configured", async () => {
 		const uiNotify = vi.fn();
 		const { controller, runSpy } = await dispatchWithVision(
 			true,
-			{
-				agentModels: { reviewer: "anthropic/sonnet" },
-				agentBackupModels: { reviewer: "google/backup" },
-			},
+			{ agentModels: { reviewer: "anthropic/sonnet" } },
 			uiNotify,
 		);
 		expect(runSpy.mock.calls[0][0].agent.model).toBe("openai/current");
-		expect(runSpy.mock.calls[0][1]).toEqual(["google/backup"]);
+		expect(runSpy.mock.calls[0][0].thinkingLevel).toBe("off");
+		expect(runSpy.mock.calls[0][1]).toBeUndefined();
 		controller.abort();
 	});
 
-	it("attempts a stale per-agent primary before backup and main without rewriting config", async () => {
+	it("skips a stale selected agent model and preserves only the selection", async () => {
 		const uiNotify = vi.fn();
 		const { controller, runSpy } = await dispatchWithVision(
 			false,
 			{
 				agentModels: { reviewer: "removed/primary" },
-				agentBackupModels: { reviewer: "google/backup" },
+				agentBackupModels: { reviewer: "legacy/backup" },
 			},
 			uiNotify,
 		);
-		expect(runSpy.mock.calls[0][0].agent.model).toBe("removed/primary");
-		expect(runSpy.mock.calls[0][1]).toEqual(["google/backup", "openai/current"]);
+		expect(runSpy.mock.calls[0][0].agent.model).toBe("openai/current");
+		expect(runSpy.mock.calls[0][1]).toBeUndefined();
 		const saved = JSON.parse(readFileSync(join(testAgentDir!, "pi-subagents.json"), "utf8"));
 		expect(saved.agentModels.reviewer).toBe("removed/primary");
-		expect(saved.agentBackupModels.reviewer).toBe("google/backup");
+		expect(saved).not.toHaveProperty("agentBackupModels");
 		controller.abort();
 	});
 
-	it("keeps a stale vision primary in the chain instead of rewriting it", async () => {
+	it("skips a stale vision selection without rewriting it", async () => {
 		const uiNotify = vi.fn();
 		const { controller, runSpy } = await dispatchWithVision(
 			true,
 			{
 				agentModels: { reviewer: "anthropic/sonnet" },
-				agentBackupModels: { reviewer: "google/backup" },
 				visionModel: "anthropic/gone",
 			},
 			uiNotify,
 		);
-		expect(runSpy.mock.calls[0][0].agent.model).toBe("anthropic/gone");
-		expect(runSpy.mock.calls[0][1]).toEqual(["google/backup", "openai/current"]);
-		expect(uiNotify.mock.calls.some(([, level]) => level === "warning")).toBe(false);
+		expect(runSpy.mock.calls[0][0].agent.model).toBe("openai/current");
+		expect(runSpy.mock.calls[0][1]).toBeUndefined();
 		const saved = JSON.parse(readFileSync(join(testAgentDir!, "pi-subagents.json"), "utf8"));
 		expect(saved.visionModel).toBe("anthropic/gone");
-		expect(saved.agentBackupModels.reviewer).toBe("google/backup");
 		controller.abort();
 	});
 });

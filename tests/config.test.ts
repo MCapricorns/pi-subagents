@@ -28,9 +28,9 @@ describe("normalizeConfig", () => {
 		expect(config.proactiveInjection).toBe(true);
 		expect(config.agentScope).toBe("user");
 		expect(config.agentModels).toEqual({});
-		expect(config.agentBackupModels).toEqual({});
 		expect(config.agentThinkingLevels).toEqual({});
-		expect(config.thinkingLevel).toBe(DEFAULT_THINKING_LEVEL);
+		expect(config).not.toHaveProperty("agentBackupModels");
+		expect(config).not.toHaveProperty("thinkingLevel");
 		expect(config.notifyOnReviewPass).toBe(false);
 		expect(config.maxConcurrency).toBe(DEFAULT_MAX_CONCURRENCY);
 	});
@@ -56,17 +56,13 @@ describe("normalizeConfig", () => {
 		expect(config.agentModels).toEqual({ explore: "anthropic/claude-haiku-4-5" });
 	});
 
-	it("keeps valid backup model refs and defaults a missing key to an empty pool", () => {
+	it("drops legacy backup-pool and global-thinking keys", () => {
 		const config = normalizeConfig({
-			agentBackupModels: {
-				explore: " anthropic/claude-sonnet-4-5 ",
-				bad: "noslash",
-				empty: "  ",
-				spaced: "openai/model id",
-			},
+			agentBackupModels: { explore: "anthropic/claude-sonnet-4-5" },
+			thinkingLevel: "max",
 		});
-		expect(config.agentBackupModels).toEqual({ explore: "anthropic/claude-sonnet-4-5" });
-		expect(normalizeConfig({}).agentBackupModels).toEqual({});
+		expect(config).not.toHaveProperty("agentBackupModels");
+		expect(config).not.toHaveProperty("thinkingLevel");
 	});
 
 	it("defaults maxResultLines to 80 and clamps invalid values", () => {
@@ -76,7 +72,7 @@ describe("normalizeConfig", () => {
 		expect(normalizeConfig({ maxResultLines: "many" }).maxResultLines).toBe(DEFAULT_MAX_RESULT_LINES);
 	});
 
-	it("defaults the global thinking level to literal high", () => {
+	it("uses high as the fallback Auto preference for agents without a declaration", () => {
 		expect(DEFAULT_THINKING_LEVEL).toBe("high");
 	});
 
@@ -85,11 +81,6 @@ describe("normalizeConfig", () => {
 			agentThinkingLevels: { explore: "high", bad: "ultra", empty: "" },
 		});
 		expect(config.agentThinkingLevels).toEqual({ explore: "high" });
-	});
-
-	it("validates the configured thinking level", () => {
-		expect(normalizeConfig({ thinkingLevel: "high" }).thinkingLevel).toBe("high");
-		expect(normalizeConfig({ thinkingLevel: "invalid" }).thinkingLevel).toBe(DEFAULT_THINKING_LEVEL);
 	});
 
 	it("defaults notifyOnReviewPass to false and preserves an explicit true", () => {
@@ -158,18 +149,20 @@ describe("normalizeConfig", () => {
 });
 
 describe("loadConfig", () => {
-	it("round-trips configured backup model refs through save/load", async () => {
+	it("round-trips selected models and thinking preferences", async () => {
 		const dir = mkdtempSync(join(tmpdir(), "pi-subagents-test-"));
 		const path = join(dir, "pi-subagents.json");
 		const config = normalizeConfig({
 			agentModels: { worker: "anthropic/primary" },
-			agentBackupModels: { worker: "openai/backup" },
+			agentThinkingLevels: { worker: "high" },
 		});
 		await saveConfig(config, path);
 		const loaded = await loadConfig(path);
 		expect(loaded.agentModels).toEqual({ worker: "anthropic/primary" });
-		expect(loaded.agentBackupModels).toEqual({ worker: "openai/backup" });
-		expect(JSON.parse(readFileSync(path, "utf8")).agentBackupModels).toEqual({ worker: "openai/backup" });
+		expect(loaded.agentThinkingLevels).toEqual({ worker: "high" });
+		const saved = JSON.parse(readFileSync(path, "utf8"));
+		expect(saved.agentModels).toEqual({ worker: "anthropic/primary" });
+		expect(saved.agentThinkingLevels).toEqual({ worker: "high" });
 	});
 
 	it("returns defaults when the file is missing", async () => {
@@ -190,16 +183,20 @@ describe("loadConfig", () => {
 	it("persists schema upgrades: missing new fields are filled in and saved back", async () => {
 		const dir = mkdtempSync(join(tmpdir(), "pi-subagents-test-"));
 		const path = join(dir, "pi-subagents.json");
-		// A config written by an older version, without the numeric limits.
-		writeFileSync(path, JSON.stringify({ enabledAgents: ["explore"], thinkingLevel: "high" }), "utf8");
+		// A config written by the old pool/global-thinking schema.
+		writeFileSync(path, JSON.stringify({
+			enabledAgents: ["explore"],
+			thinkingLevel: "max",
+			agentBackupModels: { explore: "openai/backup" },
+		}), "utf8");
 
 		const config = await loadConfig(path);
 		expect(config.maxConcurrency).toBe(DEFAULT_MAX_CONCURRENCY);
 
 		const saved = JSON.parse(readFileSync(path, "utf8"));
 		expect(saved.enabledAgents).toEqual(["explore"]);
-		expect(saved.agentBackupModels).toEqual({});
-		expect(saved.thinkingLevel).toBe("high");
+		expect(saved).not.toHaveProperty("agentBackupModels");
+		expect(saved).not.toHaveProperty("thinkingLevel");
 		expect(saved.maxConcurrency).toBe(DEFAULT_MAX_CONCURRENCY);
 	});
 

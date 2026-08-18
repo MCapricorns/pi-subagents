@@ -33,7 +33,7 @@ export interface RunView {
 	 * are doing, not just their run id. */
 	label?: string;
 	model?: string;
-	/** Primary model ref when the run advanced to another candidate in its pool. */
+	/** Selected model ref when the run handed off to current main. */
 	modelFallbackFrom?: string;
 	/** Effective thinking strength this run was launched with (frontmatter/config/global). */
 	thinking?: string;
@@ -406,7 +406,7 @@ export class MonitorStore {
 		run.status = status;
 		if (status === "running" || status === "steering" || status === "interrupting") {
 			if (run.startedAt === undefined) run.startedAt = Date.now();
-			// A model-fallback retry or resumed generation restarts the clock; a
+			// A selected-to-main handoff or resumed generation restarts the clock; a
 			// stale endedAt would freeze the elapsed display at the first attempt.
 			if (run.endedAt !== undefined) run.endedAt = undefined;
 		} else if ((status === "parked" || status === "done" || status === "failed") && run.endedAt === undefined) {
@@ -422,12 +422,20 @@ export class MonitorStore {
 		this.notify();
 	}
 
-	/** Record the final actual model and primary-to-backup transition. */
+	/** Record the final actual model and selected-to-main transition. */
 	setModel(id: number, model?: string, fallbackFrom?: string): void {
 		const run = this.find(id);
 		if (!run) return;
 		if (model) run.model = model;
 		run.modelFallbackFrom = fallbackFrom;
+		this.notify();
+	}
+
+	/** Record the capability-clamped thinking level for the active model. */
+	setThinking(id: number, thinking?: string): void {
+		const run = this.find(id);
+		if (!run || !thinking) return;
+		run.thinking = thinking;
 		this.notify();
 	}
 

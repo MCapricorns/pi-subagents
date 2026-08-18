@@ -235,7 +235,10 @@ export function registerLookupTools(pi: ExtensionAPI, runtime: SubagentRuntime):
 				if (settledIds.length > 0) {
 					return {
 						content: [
-							{ type: "text", text: settledIds.map((id) => formatCompletionBlock(runtime.settledRuns.get(id)!, config.maxResultLines, ctx.cwd)).join("\n\n") },
+							{ type: "text", text: settledIds.map((id) => {
+								const result = runtime.settledRuns.get(id)!;
+								return formatCompletionBlock(result, config.maxResultLines, result.projectCwd ?? ctx.cwd);
+							}).join("\n\n") },
 						],
 						details: {},
 					};
@@ -330,7 +333,9 @@ export function registerLookupTools(pi: ExtensionAPI, runtime: SubagentRuntime):
 
 			const outcomes = await Promise.all(targets.map((run) => waitForRun(run.id)));
 			const blocks = outcomes.map((outcome) =>
-				outcome.result ? formatCompletionBlock(outcome.result, config.maxResultLines, ctx.cwd) : (outcome.note ?? "(no outcome)"),
+				outcome.result
+					? formatCompletionBlock(outcome.result, config.maxResultLines, outcome.result.projectCwd ?? ctx.cwd)
+					: (outcome.note ?? "(no outcome)"),
 			);
 			return { content: [{ type: "text", text: blocks.join("\n\n") }], details: {} };
 		},
@@ -383,7 +388,17 @@ export function registerLookupTools(pi: ExtensionAPI, runtime: SubagentRuntime):
 				if (settledIds.length > 0) {
 					return {
 						content: [
-							{ type: "text", text: settledIds.map((id) => formatCompletionBlock(runtime.settledRuns.get(id)!, config.maxResultLines, ctx.cwd)).join("\n\n") },
+							{
+								type: "text",
+								text: settledIds
+									.map((id) => formatCompletionBlock(
+										runtime.settledRuns.get(id)!,
+										config.maxResultLines,
+										runtime.settledRuns.get(id)!.projectCwd ?? ctx.cwd,
+										{ failedToolDetails: true },
+									))
+									.join("\n\n"),
+							},
 						],
 						details: {},
 					};
@@ -421,7 +436,7 @@ export function registerLookupTools(pi: ExtensionAPI, runtime: SubagentRuntime):
 			const activeLines = activeRuns.map((run) => {
 				const thread = runtime.threads.get(run.id);
 				const model = run.modelFallbackFrom
-					? `${run.model ?? "?"} (pool fallback from ${run.modelFallbackFrom})`
+					? `${run.model ?? "?"} (main after ${run.modelFallbackFrom} failed)`
 					: (run.model ?? "?");
 				const parts = [
 					`#${run.id} ${run.agent}`,
@@ -450,7 +465,7 @@ export function registerLookupTools(pi: ExtensionAPI, runtime: SubagentRuntime):
 				const usage = formatUsage(result.usage);
 				const label = runLabel(result.task);
 				const model = result.modelFallbackFrom
-					? `${result.model ?? "?"} (pool fallback from ${result.modelFallbackFrom})`
+					? `${result.model ?? "?"} (main after ${result.modelFallbackFrom} failed)`
 					: (result.model ?? "?");
 				const isolation = result.isolation === "worktree" ? ` · worktree ${result.integrationStatus ?? "unknown"}` : "";
 				const relations = [
@@ -654,6 +669,7 @@ export function registerLookupTools(pi: ExtensionAPI, runtime: SubagentRuntime):
 							usage: emptyUsage(),
 							model: run?.model,
 							thinking: run?.thinking,
+							projectCwd: thread.cwd,
 							stopReason: "aborted",
 							errorMessage: stopMessage,
 							runId,
@@ -677,7 +693,7 @@ export function registerLookupTools(pi: ExtensionAPI, runtime: SubagentRuntime):
 				const maxResultLines = (await configPromise)?.maxResultLines ?? DEFAULT_MAX_RESULT_LINES;
 				runtime.sendCompletionGroup(completionResults.map((result) => ({
 					agent: result.agent,
-					block: formatCompletionBlock(result, maxResultLines, ctx.cwd),
+					block: formatCompletionBlock(result, maxResultLines, result.projectCwd ?? ctx.cwd),
 					triggerTurn: true,
 				})));
 				runtime.completionBatcher.flush();

@@ -1,18 +1,13 @@
-import { mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it, vi } from "vitest";
-import {
-	CURRENT_MAIN_MODEL,
-	applyModelPoolChoice,
-	buildAgentModelPoolRows,
-	buildModelPickerItems,
-} from "../src/models.ts";
+import { CURRENT_MAIN_MODEL, buildModelPickerItems } from "../src/models.ts";
 import { runSetup } from "../src/setup.ts";
 import { pickerItemSearchText } from "../src/ui.ts";
 
 describe("setup model picker helpers", () => {
-	it("makes provider/model, capabilities, and availability searchable", () => {
+	it("makes model identity, capabilities, and supported thinking searchable", () => {
 		const [dynamic, model] = buildModelPickerItems({
 			models: [{
 				provider: "anthropic",
@@ -20,9 +15,9 @@ describe("setup model picker helpers", () => {
 				name: "Claude Sonnet",
 				input: ["text", "image"],
 				reasoning: true,
+				thinkingLevelMap: { xhigh: null, max: "max" },
 			}],
-			availableRefs: ["anthropic/claude-sonnet"],
-			slot: "primary",
+			slot: "agent",
 			mainRef: "anthropic/claude-sonnet",
 		});
 		expect(dynamic).toMatchObject({
@@ -30,42 +25,111 @@ describe("setup model picker helpers", () => {
 			label: "Current main model (dynamic)",
 		});
 		expect(model.label).toBe("anthropic/claude-sonnet");
-		expect(model.description).toBe("Claude Sonnet · vision + reasoning · available · current main");
-		expect(pickerItemSearchText(model)).toContain("vision + reasoning");
-		expect(pickerItemSearchText(model)).toContain("available");
+		expect(model.description).toContain("Claude Sonnet · vision");
+		expect(model.description).toContain("thinking: off/minimal/low/medium/high/max");
+		expect(model.description).toContain("current main");
+		expect(pickerItemSearchText(model)).toContain("thinking:");
 	});
 
-	it("uses a first-class clear/default option and hides unavailable saved backups", () => {
+	it("vision selection excludes text-only models", () => {
 		const items = buildModelPickerItems({
-			models: [],
-			availableRefs: [],
-			slot: "backup",
-			configuredRef: "removed/stale-backup",
+			models: [{
+				provider: "openai",
+				id: "text-only",
+				name: "text-only",
+				input: ["text"],
+				reasoning: false,
+			}],
+			slot: "vision",
 		});
-		expect(items).toEqual([expect.objectContaining({
-			value: CURRENT_MAIN_MODEL,
-			label: "Current main model (default)",
-		})]);
+		expect(items).toEqual([expect.objectContaining({ value: CURRENT_MAIN_MODEL })]);
+	});
+});
+
+describe("configured-agent flow", () => {
+	it("shows Auto plus only the effective model's supported thinking levels", async () => {
+		const dir = mkdtempSync(join(tmpdir(), "pi-subagents-setup-agent-"));
+		const configPath = join(dir, "pi-subagents.json");
+		const projectAgents = join(dir, ".pi", "agents");
+		mkdirSync(projectAgents, { recursive: true });
+		writeFileSync(
+			join(projectAgents, "explore.md"),
+			"---\nname: explore\ndescription: project override\nthinking: high\n---\nProject explore prompt.\n",
+			"utf8",
+		);
+		writeFileSync(configPath, JSON.stringify({ enabledAgents: ["explore"], agentScope: "project" }), "utf8");
+		const model = {
+			provider: "anthropic",
+			id: "selected",
+			name: "Selected",
+			input: ["text"],
+			reasoning: true,
+			thinkingLevelMap: { medium: null, xhigh: null, max: null },
+		};
+		const screens: string[] = [];
+		const keybindings = {
+			matches(data: string, action: string) {
+				return data === "enter" && action === "tui.select.confirm";
+			},
+		};
+		const ctx: any = {
+			mode: "tui",
+			cwd: dir,
+			isProjectTrusted: () => true,
+			model,
+			modelRegistry: { getAvailable: () => [model] },
+			ui: {
+				notify: vi.fn(),
+				select: vi.fn(async (_title: string, options: string[]) =>
+					options.find((option) => option.startsWith("Configure an agent"))),
+				custom: (factory: any) => new Promise((resolve) => {
+					const component = factory(
+						{ requestRender: () => {} },
+						{ fg: (_color: string, text: string) => text, bold: (text: string) => text },
+						keybindings,
+						resolve,
+					);
+					screens.push(component.render(160).join("\n"));
+					component.handleInput("enter");
+				}),
+			},
+		};
+		try {
+			await runSetup(ctx, configPath);
+			const thinkingScreen = screens.find((screen) => screen.includes('Thinking for "explore"?'));
+			expect(thinkingScreen).toContain("auto — high");
+			expect(thinkingScreen).toContain("off — no reasoning tokens");
+			expect(thinkingScreen).toContain("minimal — minimal reasoning");
+			expect(thinkingScreen).toContain("low — light reasoning");
+			expect(thinkingScreen).toContain("high — deep reasoning");
+			expect(thinkingScreen).not.toContain("medium —");
+			expect(thinkingScreen).not.toContain("xhigh —");
+			expect(thinkingScreen).not.toContain("max —");
+			const saved = JSON.parse(readFileSync(configPath, "utf8"));
+			expect(saved.agentThinkingLevels).toEqual({});
+		} finally {
+			rmSync(dir, { recursive: true, force: true });
+		}
 	});
 });
 
 describe("full setup flow", () => {
-	it("asks every enabled agent for an explicit thinking-strength choice", async () => {
+	it("uses one model choice per agent and Auto thinking without pool/strength menus", async () => {
 		const dir = mkdtempSync(join(tmpdir(), "pi-subagents-setup-full-"));
 		const configPath = join(dir, "pi-subagents.json");
 		const screens: string[] = [];
 		const keybindings = {
 			matches(data: string, action: string) {
-				return (data === "down" && action === "tui.select.down") ||
-					(data === "enter" && action === "tui.select.confirm");
+				return data === "enter" && action === "tui.select.confirm";
 			},
 		};
+		const notify = vi.fn();
 		const ctx: any = {
 			mode: "tui",
 			model: undefined,
 			modelRegistry: { getAvailable: () => [] },
 			ui: {
-				notify: vi.fn(),
+				notify,
 				select: vi.fn(async (_title: string, options: string[]) =>
 					options.find((option) => option.includes("(current)")) ?? options[0]),
 				custom: (factory: any) => new Promise((resolve) => {
@@ -75,11 +139,7 @@ describe("full setup flow", () => {
 						keybindings,
 						resolve,
 					);
-					const rendered = component.render(160).join("\n");
-					screens.push(rendered);
-					if (rendered.includes("Agent model pools")) {
-						for (let index = 0; index < 4; index++) component.handleInput("down");
-					}
+					screens.push(component.render(160).join("\n"));
 					component.handleInput("enter");
 				}),
 			},
@@ -88,29 +148,18 @@ describe("full setup flow", () => {
 			await runSetup(ctx, configPath);
 			const config = JSON.parse(readFileSync(configPath, "utf8"));
 			expect(config.enabledAgents).toEqual(["explore", "worker", "cleaner", "reviewer"]);
+			expect(config.agentModels).toEqual({});
 			expect(config.agentThinkingLevels).toEqual({});
-			expect(screens.some((screen) => screen.includes("cleaner — evidence-first cleanup"))).toBe(true);
-			expect(screens.some((screen) => screen.includes('Thinking strength for "explore"?'))).toBe(true);
-			expect(screens.some((screen) => screen.includes('Thinking strength for "worker"?'))).toBe(true);
-			expect(screens.some((screen) => screen.includes('Thinking strength for "cleaner"?'))).toBe(true);
-			expect(screens.some((screen) => screen.includes('Thinking strength for "reviewer"?'))).toBe(true);
+			expect(config).not.toHaveProperty("agentBackupModels");
+			expect(config).not.toHaveProperty("thinkingLevel");
+			for (const agent of ["explore", "worker", "cleaner", "reviewer"]) {
+				expect(screens.some((screen) => screen.includes(`Model for "${agent}"?`))).toBe(true);
+			}
+			expect(screens.some((screen) => screen.includes("Primary/Backup"))).toBe(false);
+			expect(screens.some((screen) => screen.includes("Thinking strength"))).toBe(false);
+			expect(notify).toHaveBeenCalledWith(expect.stringContaining("Auto thinking"), "info");
 		} finally {
 			rmSync(dir, { recursive: true, force: true });
 		}
-	});
-});
-
-describe("setup model-pool state helpers", () => {
-	it("shows Primary and Backup together and clears dynamic choices without placeholders", () => {
-		const initial = {
-			agentModels: { worker: "anthropic/primary" },
-			agentBackupModels: { worker: "openai/backup" },
-		};
-		expect(buildAgentModelPoolRows(["worker"], initial)).toEqual([
-			{ name: "worker", primary: "anthropic/primary", backup: "openai/backup" },
-		]);
-		const cleared = applyModelPoolChoice(initial, "worker", "backup", CURRENT_MAIN_MODEL);
-		expect(cleared.agentBackupModels).toEqual({});
-		expect(Object.values(cleared.agentBackupModels)).not.toContain(CURRENT_MAIN_MODEL);
 	});
 });

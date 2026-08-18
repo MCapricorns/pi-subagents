@@ -1,159 +1,146 @@
 import { describe, expect, it } from "vitest";
 import {
 	CURRENT_MAIN_MODEL,
-	applyModelPoolChoice,
-	buildAgentModelPoolRows,
+	applyAgentModelChoice,
 	buildModelPickerItems,
-	resolveAgentModelPool,
+	findModelByRef,
+	resolveAgentModelRoute,
+	resolveThinkingLevel,
+	supportedThinkingLevels,
 } from "../src/models.ts";
 
-describe("resolveAgentModelPool", () => {
-	it("uses the current main model as the implicit backup", () => {
-		expect(resolveAgentModelPool({ primaryRef: "anthropic/primary", mainRef: "openai/main" })).toEqual({
-			primaryRef: "anthropic/primary",
-			fallbackModelRefs: ["openai/main"],
-			candidateRefs: ["anthropic/primary", "openai/main"],
+const models = [
+	{
+		provider: "anthropic",
+		id: "claude-vision",
+		name: "Claude Vision",
+		input: ["text", "image"],
+		reasoning: true,
+		thinkingLevelMap: {
+			minimal: null,
+			low: "low",
+			medium: null,
+			high: "high",
+			xhigh: null,
+			max: "max",
+		},
+	},
+	{
+		provider: "openai",
+		id: "gpt-fast",
+		name: "gpt-fast",
+		input: ["text"],
+		reasoning: false,
+	},
+] as any[];
+
+describe("resolveAgentModelRoute", () => {
+	it("routes the selected model directly to current main", () => {
+		expect(resolveAgentModelRoute({
+			selectedRef: "anthropic/selected",
+			mainRef: "openai/main",
+		})).toEqual({
+			primaryRef: "anthropic/selected",
+			mainFallbackRef: "openai/main",
+			candidateRefs: ["anthropic/selected", "openai/main"],
 		});
 	});
 
-	it("orders configured backup before the current main model", () => {
-		expect(resolveAgentModelPool({
-			primaryRef: "anthropic/primary",
-			backupRef: "google/backup",
+	it("skips a selected model that Pi no longer reports available", () => {
+		expect(resolveAgentModelRoute({
+			selectedRef: "removed/model",
 			mainRef: "openai/main",
-		}).candidateRefs).toEqual(["anthropic/primary", "google/backup", "openai/main"]);
+			availableRefs: ["openai/main"],
+		})).toEqual({
+			primaryRef: "openai/main",
+			candidateRefs: ["openai/main"],
+			unavailableSelectedRef: "removed/model",
+		});
 	});
 
-	it("deduplicates equal refs without changing order", () => {
-		expect(resolveAgentModelPool({
-			primaryRef: "openai/main",
-			backupRef: "openai/main",
+	it("deduplicates a selection equal to main", () => {
+		expect(resolveAgentModelRoute({
+			selectedRef: "openai/main",
 			mainRef: "openai/main",
+		})).toEqual({
+			primaryRef: "openai/main",
+			candidateRefs: ["openai/main"],
+		});
+	});
+
+	it("uses main without an override and declared default only without main", () => {
+		expect(resolveAgentModelRoute({
+			mainRef: "openai/main",
+			declaredDefaultRef: "agent/default",
 		}).candidateRefs).toEqual(["openai/main"]);
-		expect(resolveAgentModelPool({
-			primaryRef: "anthropic/primary",
-			backupRef: "openai/main",
-			mainRef: "openai/main",
-		}).fallbackModelRefs).toEqual(["openai/main"]);
-	});
-
-	it("keeps stale or unavailable configured refs in the chain", () => {
-		expect(resolveAgentModelPool({
-			primaryRef: "removed/primary",
-			backupRef: "logged-out/backup",
-			mainRef: "openai/main",
-		}).candidateRefs).toEqual(["removed/primary", "logged-out/backup", "openai/main"]);
-	});
-
-	it("uses the main model when primary is unset, then the declared default only without a main model", () => {
-		expect(resolveAgentModelPool({ backupRef: "google/backup", mainRef: "openai/main", declaredDefaultRef: "agent/default" })).toEqual({
-			primaryRef: "openai/main",
-			fallbackModelRefs: ["google/backup"],
-			candidateRefs: ["openai/main", "google/backup"],
-		});
-		expect(resolveAgentModelPool({ declaredDefaultRef: "agent/default" }).candidateRefs).toEqual(["agent/default"]);
+		expect(resolveAgentModelRoute({ declaredDefaultRef: "agent/default" }).candidateRefs).toEqual([
+			"agent/default",
+		]);
 	});
 });
 
-describe("model-pool setup helpers", () => {
-	const models = [
-		{
-			provider: "anthropic",
-			id: "claude-vision",
-			name: "Claude Vision",
-			input: ["text", "image"] as ("text" | "image")[],
-			reasoning: true,
-		},
-		{
-			provider: "openai",
-			id: "gpt-fast",
-			name: "gpt-fast",
-			input: ["text"] as ("text" | "image")[],
-			reasoning: false,
-		},
-	];
-
-	it("shows only models backed by configured API keys or OAuth", () => {
-		const primary = buildModelPickerItems({
-			models,
-			availableRefs: ["openai/gpt-fast"],
-			slot: "primary",
-			mainRef: "openai/gpt-fast",
-		});
-		expect(primary[0]).toMatchObject({ value: CURRENT_MAIN_MODEL, label: "Current main model (dynamic)" });
-		expect(primary.map((item) => item.value)).toEqual([
-			CURRENT_MAIN_MODEL,
-			"openai/gpt-fast",
-		]);
-		expect(primary.find((item) => item.value === "openai/gpt-fast")?.description).toContain("available");
-		expect(primary.some((item) => item.description?.includes("unavailable"))).toBe(false);
-
-		const backup = buildModelPickerItems({ models, availableRefs: [], slot: "backup" });
-		expect(backup).toEqual([expect.objectContaining({ label: "Current main model (default)" })]);
+describe("capability-aware thinking", () => {
+	it("returns only the model's real supported levels", () => {
+		expect(supportedThinkingLevels(models[0])).toEqual(["off", "low", "high", "max"]);
+		expect(supportedThinkingLevels(models[1])).toEqual(["off"]);
 	});
 
-	it("offers only available image-capable vision models", () => {
-		const selectable = buildModelPickerItems({
-			models,
-			availableRefs: ["anthropic/claude-vision", "openai/gpt-fast"],
-			slot: "vision",
-		});
-		expect(selectable.map((item) => item.value)).toContain("anthropic/claude-vision");
-		expect(selectable.map((item) => item.value)).not.toContain("openai/gpt-fast");
-
-		const configuredTextOnly = buildModelPickerItems({
-			models,
-			availableRefs: ["anthropic/claude-vision", "openai/gpt-fast"],
-			slot: "vision",
-			configuredRef: "openai/gpt-fast",
-		});
-		expect(configuredTextOnly.map((item) => item.value)).not.toContain("openai/gpt-fast");
-
-		const stale = buildModelPickerItems({
-			models,
-			availableRefs: [],
-			slot: "vision",
-			configuredRef: "removed/stale-vision",
-		});
-		expect(stale.map((item) => item.value)).toEqual([CURRENT_MAIN_MODEL]);
+	it("clamps Auto/manual preferences to model capability", () => {
+		expect(resolveThinkingLevel(models[0], "medium")).toBe("high");
+		expect(resolveThinkingLevel(models[0], "xhigh")).toBe("max");
+		expect(resolveThinkingLevel(models[1], "high")).toBe("off");
+		expect(resolveThinkingLevel(undefined, "low")).toBe("low");
 	});
 
-	it("keeps stale refs in runtime config but hides them from setup choices", () => {
+	it("finds exact provider/model refs", () => {
+		expect(findModelByRef(models, "anthropic/claude-vision")?.id).toBe("claude-vision");
+		expect(findModelByRef(models, "missing/model")).toBeUndefined();
+	});
+});
+
+describe("model setup helpers", () => {
+	it("shows actual thinking levels and a dynamic-main choice", () => {
 		const items = buildModelPickerItems({
 			models,
-			availableRefs: ["openai/gpt-fast"],
-			slot: "primary",
-			configuredRef: "removed/stale",
+			slot: "agent",
+			configuredRef: "anthropic/claude-vision",
+			mainRef: "openai/gpt-fast",
 		});
+		expect(items[0]).toMatchObject({
+			value: CURRENT_MAIN_MODEL,
+			label: "Current main model (dynamic)",
+		});
+		expect(items.find((item) => item.value === "anthropic/claude-vision")?.description)
+			.toContain("thinking: off/low/high/max");
+		expect(items.find((item) => item.value === "openai/gpt-fast")?.description)
+			.toContain("thinking: off");
+	});
+
+	it("offers only image-capable models for vision", () => {
+		const items = buildModelPickerItems({ models, slot: "vision" });
 		expect(items.map((item) => item.value)).toEqual([
 			CURRENT_MAIN_MODEL,
-			"openai/gpt-fast",
+			"anthropic/claude-vision",
 		]);
 	});
 
-	it("applies primary and backup choices without persisting a dynamic placeholder", () => {
-		const initial = {
-			agentModels: { worker: "anthropic/primary", reviewer: "openai/reviewer" },
-			agentBackupModels: { worker: "google/backup" },
-		};
-		const cleared = applyModelPoolChoice(initial, "worker", "backup", CURRENT_MAIN_MODEL);
-		expect(cleared.agentBackupModels).toEqual({});
-		expect(initial.agentBackupModels).toEqual({ worker: "google/backup" });
-		const changed = applyModelPoolChoice(cleared, "worker", "primary", "openai/new-primary");
-		expect(changed.agentModels).toEqual({ worker: "openai/new-primary", reviewer: "openai/reviewer" });
+	it("does not reinsert stale configured refs", () => {
+		const items = buildModelPickerItems({
+			models: [models[1]],
+			slot: "agent",
+			configuredRef: "removed/stale",
+		});
+		expect(items.map((item) => item.value)).toEqual([CURRENT_MAIN_MODEL, "openai/gpt-fast"]);
 	});
 
-	it("builds overview rows with primary and backup values together", () => {
-		expect(buildAgentModelPoolRows(["explore", "worker"], {
-			agentModels: { explore: "anthropic/primary" },
-			agentBackupModels: { explore: "openai/backup" },
-		})).toEqual([
-			{ name: "explore", primary: "anthropic/primary", backup: "openai/backup" },
-			{
-				name: "worker",
-				primary: "Main (dynamic)",
-				backup: "Main (default)",
-			},
-		]);
+	it("applies or clears a single per-agent model override", () => {
+		const initial = { worker: "anthropic/primary", reviewer: "openai/reviewer" };
+		const cleared = applyAgentModelChoice(initial, "worker", CURRENT_MAIN_MODEL);
+		expect(cleared).toEqual({ reviewer: "openai/reviewer" });
+		expect(initial).toHaveProperty("worker", "anthropic/primary");
+		expect(applyAgentModelChoice(cleared, "worker", "openai/new-primary")).toEqual({
+			reviewer: "openai/reviewer",
+			worker: "openai/new-primary",
+		});
 	});
 });

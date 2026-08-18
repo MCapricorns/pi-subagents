@@ -28,8 +28,8 @@ afterEach(() => {
 	else process.env.PI_CODING_AGENT_DIR = savedEnv;
 });
 
-describe("shipped cleaner agent", () => {
-	it("is full/write-capable while leaving the pre-commit gate to reviewer", () => {
+describe("shipped specialist agents", () => {
+	it("makes cleaner full/write-capable while leaving the pre-commit gate to reviewer", () => {
 		const cleaner = loadBuiltinAgents().find((agent) => agent.name === "cleaner");
 		expect(cleaner).toBeDefined();
 		expect(cleaner).toMatchObject({
@@ -43,6 +43,15 @@ describe("shipped cleaner agent", () => {
 		expect(cleaner?.description).toMatch(/Never .*pre-commit gate; reviewer remains the gate/);
 		expect(cleaner?.systemPrompt).toContain("Audit mode");
 		expect(cleaner?.systemPrompt).toContain("Apply mode");
+		expect(cleaner?.systemPrompt).toContain("Never inherit deletion proof from an `explore` report");
+	});
+
+	it("keeps explore retrieval-only and requires critical re-reading", () => {
+		const explore = loadBuiltinAgents().find((agent) => agent.name === "explore");
+		expect(explore?.tools).toEqual(["read", "grep", "find", "ls", "bash"]);
+		expect(explore?.systemPrompt).toContain("retrieval lead");
+		expect(explore?.systemPrompt).toContain("re-read load-bearing files");
+		expect(explore?.systemPrompt).toContain("plausible guess is more expensive");
 	});
 });
 

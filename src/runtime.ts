@@ -53,8 +53,6 @@ export interface SubagentThread {
 	/** Actual child cwd (the equivalent path inside an isolated worktree). */
 	executionCwd: string;
 	vision: boolean;
-	/** Exact primary→fallback refs inherited by a session fork. */
-	modelPool: string[];
 	thinkingLevel?: ThinkingLevel;
 	isolation: IsolationMode;
 	worktree?: WorktreeIsolation;

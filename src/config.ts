@@ -52,8 +52,8 @@ export const MAX_FIX_ROUNDS_LIMIT = 5;
 
 /**
  * Default idle timeout in seconds: a sub-agent whose stdout (JSON event stream)
- * goes silent for this long is terminated and may be retried with the fallback
- * model. 0 disables the idle watchdog. Default: 90.
+ * goes silent for this long is terminated; a selected model then hands the
+ * retained session to current main. 0 disables the watchdog. Default: 90.
  */
 export const DEFAULT_IDLE_TIMEOUT_SEC = 90;
 /** Upper bound accepted for idleTimeoutSec (defensive clamp). 0 disables. */
@@ -62,14 +62,10 @@ export const IDLE_TIMEOUT_SEC_LIMIT = 600;
 export interface SubagentsConfig {
 	/** Agent names that are discoverable and injected. Fresh-install default: explore, worker, cleaner, reviewer. */
 	enabledAgents: string[];
-	/** Per-agent primary model override, keyed by agent name, as "provider/model-id". */
+	/** Per-agent model override, keyed by agent name, as "provider/model-id". */
 	agentModels: Record<string, string>;
-	/** Optional per-agent backup model, tried after the primary and before the current main-window model. */
-	agentBackupModels: Record<string, string>;
-	/** Per-agent thinking-level override, keyed by agent name. */
+	/** Optional per-agent thinking preference. Runtime clamps it to the effective model's supported levels. */
 	agentThinkingLevels: Record<string, ThinkingLevel>;
-	/** Thinking level for sub-agents without a per-agent override or frontmatter default. Default: "high". */
-	thinkingLevel: ThinkingLevel;
 	/**
 	 * When a review passes (REVIEW_PASS verdict), deliver it without waking the
 	 * main agent. Disabled by default so passing reviews still resume orchestration.
@@ -98,8 +94,8 @@ export interface SubagentsConfig {
 	maxFixRounds: number;
 	/**
 	 * Idle timeout in seconds: a sub-agent whose stdout (JSON event stream) goes
-	 * silent for this long is terminated and may be retried with the fallback
-	 * model. 0 disables the idle watchdog. Default: 90.
+	 * silent for this long is terminated; a configured agent model then hands
+	 * off to the current main model. 0 disables the idle watchdog. Default: 90.
 	 */
 	idleTimeoutSec: number;
 	/**
@@ -119,9 +115,7 @@ export interface SubagentsConfig {
 export const DEFAULT_CONFIG: SubagentsConfig = {
 	enabledAgents: [...DEFAULT_ENABLED_AGENTS],
 	agentModels: {},
-	agentBackupModels: {},
 	agentThinkingLevels: {},
-	thinkingLevel: DEFAULT_THINKING_LEVEL,
 	notifyOnReviewPass: false,
 	maxResultLines: DEFAULT_MAX_RESULT_LINES,
 	proactiveInjection: true,
@@ -179,12 +173,6 @@ export function normalizeConfig(raw: unknown): SubagentsConfig {
 		}
 	}
 
-	if (isRecord(raw.agentBackupModels)) {
-		for (const [key, value] of Object.entries(raw.agentBackupModels)) {
-			if (isModelReference(value)) config.agentBackupModels[key.trim()] = value.trim();
-		}
-	}
-
 	if (isRecord(raw.agentThinkingLevels)) {
 		for (const [key, value] of Object.entries(raw.agentThinkingLevels)) {
 			if (
@@ -194,10 +182,6 @@ export function normalizeConfig(raw: unknown): SubagentsConfig {
 				config.agentThinkingLevels[key.trim()] = value as ThinkingLevel;
 			}
 		}
-	}
-
-	if (typeof raw.thinkingLevel === "string" && (THINKING_LEVEL_VALUES as readonly string[]).includes(raw.thinkingLevel)) {
-		config.thinkingLevel = raw.thinkingLevel as ThinkingLevel;
 	}
 
 	if (typeof raw.notifyOnReviewPass === "boolean") {
@@ -246,7 +230,6 @@ function defaultConfig(): SubagentsConfig {
 		...DEFAULT_CONFIG,
 		enabledAgents: [...DEFAULT_CONFIG.enabledAgents],
 		agentModels: {},
-		agentBackupModels: {},
 		agentThinkingLevels: {},
 		announcedFeatures: [],
 	};

@@ -1,12 +1,11 @@
 /**
  * The `subagent` tool: dispatches explore/worker/cleaner/reviewer agents as isolated pi
  * child processes, single or parallel. Owns the dispatch pipeline: config load,
- * per-agent model-pool resolution, per-run status tracking, the auto-fix chain
+ * per-agent selected→main model routing, per-run status tracking, the auto-fix chain
  * (REVIEW_FAIL → worker → re-review), and completion delivery.
  *
- * Vision: a task flagged `vision: true` uses the configured vision model as an
- * explicit primary, then the agent's configured backup and the current
- * main-window model. Stale refs remain in the pool and fail normally at runtime.
+ * Vision: a task flagged `vision: true` uses the configured vision model, then
+ * hands directly to the current main-window model on model/provider failure.
  */
 
 import { StringEnum } from "@earendil-works/pi-ai";
@@ -21,7 +20,12 @@ import {
 	completionTriggersTurn,
 	type CompletionMessageItem,
 } from "./completion.ts";
-import { loadConfig, type SubagentsConfig } from "./config.ts";
+import {
+	DEFAULT_THINKING_LEVEL,
+	loadConfig,
+	type SubagentsConfig,
+	type ThinkingLevel,
+} from "./config.ts";
 import {
 	dispatchFailedResult,
 	failedStartResult,
@@ -37,7 +41,14 @@ import {
 	shouldTriggerFixLoop,
 	type ChainStep,
 } from "./fixloop.ts";
-import { currentModelRef, resolveAgentModelPool } from "./models.ts";
+import {
+	availableModelsInScope,
+	currentModelRef,
+	findModelByRef,
+	modelRef,
+	resolveAgentModelRoute,
+	resolveThinkingLevel,
+} from "./models.ts";
 import {
 	formatTaskSummary,
 	formatToolActivity,
@@ -49,14 +60,13 @@ import type { SubagentRuntime, SubagentThread, ThreadState } from "./runtime.ts"
 import { persistRecoveryRecords, recoveryRecordFromFinalization } from "./recovery.ts";
 import { forkRetainedSession } from "./session-fork.ts";
 import {
-	buildFallbackResumeReason,
 	buildResumePrompt,
 	RpcRunControl,
 	getResultOutput,
 	isFailedResult,
 	isModelLevelFailure,
 	reviewVerdict,
-	runSingleAgentWithModelFallback,
+	runSingleAgentWithMainFallback,
 	type SingleResult,
 	type SubagentDetails,
 	type SubagentLiveEvent,
@@ -86,11 +96,10 @@ interface DispatchEnvironment {
 	ctx: ExtensionContext;
 	config: SubagentsConfig;
 	agents: AgentConfig[];
-	sessionRef?: string;
 }
 
 const VISION_DESCRIPTION =
-	"Set true when the task may require viewing images (screenshots, mockups, designs) — the configured vision model becomes primary, followed by the agent backup and current main-window model";
+	"Set true when the task may require viewing images (screenshots, mockups, designs) — the configured vision model is used first, then model-level failures hand directly to the current main-window model";
 
 const ISOLATION_DESCRIPTION =
 	"Filesystem isolation: shared uses the caller's working tree; worktree creates a detached temporary Git worktree (write-capable agents, including worker and cleaner, only)";
@@ -175,21 +184,39 @@ function serializeAutoFixChain(
 	};
 }
 
-function resolveDispatchModelPool(
+interface DispatchModelRoute {
+	agent: AgentConfig;
+	mainFallbackRef?: string;
+	thinkingLevel: ThinkingLevel;
+	thinkingLevelForModel: (ref?: string) => ThinkingLevel;
+}
+
+function resolveDispatchModelRoute(
 	agent: AgentConfig,
 	config: SubagentsConfig,
-	mainRef: string | undefined,
+	ctx: ExtensionContext,
 	vision: boolean,
-): { agent: AgentConfig; fallbackModelRefs: string[] } {
-	const pool = resolveAgentModelPool({
-		primaryRef: vision ? config.visionModel : config.agentModels[agent.name],
-		backupRef: config.agentBackupModels[agent.name],
+): DispatchModelRoute {
+	const availableModels = availableModelsInScope(ctx);
+	const mainRef = currentModelRef(ctx);
+	const route = resolveAgentModelRoute({
+		selectedRef: vision ? config.visionModel : config.agentModels[agent.name],
 		mainRef,
 		declaredDefaultRef: agent.model,
+		availableRefs: availableModels.map(modelRef),
 	});
+	const preferred = config.agentThinkingLevels[agent.name] ?? agent.thinking ?? DEFAULT_THINKING_LEVEL;
+	const thinkingLevelForModel = (ref?: string): ThinkingLevel => {
+		const model = ref === mainRef && ctx.model
+			? ctx.model
+			: findModelByRef(availableModels, ref);
+		return resolveThinkingLevel(model, preferred);
+	};
 	return {
-		agent: { ...agent, model: pool.primaryRef },
-		fallbackModelRefs: pool.fallbackModelRefs,
+		agent: { ...agent, model: route.primaryRef },
+		mainFallbackRef: route.mainFallbackRef,
+		thinkingLevel: thinkingLevelForModel(route.primaryRef),
+		thinkingLevelForModel,
 	};
 }
 
@@ -207,13 +234,14 @@ export function registerSubagentTool(pi: ExtensionAPI, runtime: SubagentRuntime)
 			"It starts agents in the background and immediately returns control to the main window; completion messages automatically wake the main agent to continue.",
 			"Each agent has no memory of this conversation — brief it fully (goal, exact paths, constraints, expected output).",
 			"Results arrive as wake-up messages automatically — you do NOT need to wait. If you must get a result in-turn, subagent_wait is a non-blocking lookup by default (pass timeoutMs to block).",
-			"Vision: set vision: true when the task may require viewing images (screenshots, mockups, design files — e.g. frontend work) — the configured vision model is primary, followed by that agent's backup and the current main-window model.",
+			"Vision: set vision: true when the task may require viewing images (screenshots, mockups, design files — e.g. frontend work) — the configured vision model is used first, then model-level failures hand directly to the current main-window model.",
 		].join(" "),
 		promptSnippet:
 			"Start background subagents: explore (read-only search), worker (implement), cleaner (explicit evidence-first cleanup), reviewer (pre-commit review); completion automatically resumes the main agent. Simple tasks: use direct tools, not subagents.",
 		promptGuidelines: [
 			"Delegate only when an isolated context genuinely pays: broad exploration, a self-contained implementation, explicit evidence-first cleanup, or a review gate. Handle simple lookups and one-line edits inline with direct tools — never spawn a sub-agent for them.",
 			"Use subagent with agent 'explore' for broad or open-ended code search before large changes; a targeted 'where is X' is a direct grep/read.",
+			"Treat explore output as a retrieval index, not authority: re-read load-bearing files before editing or deciding deletion, security, compatibility, persistence, or dynamic reachability. The cheapest model can cost more through rework on complex dynamic, concurrent, migration, or security-sensitive code; choose a stronger model or specialist there.",
 			"Use subagent with agent 'worker' for a self-contained implementation task worth a separate context; it plans internally.",
 			"When cleaner is enabled, use subagent with agent 'cleaner' only for explicit cleanup intent in any language (for example dead code, redundancy, simplification, or over-engineering) or a requested periodic cleanup pass. Audit/find/inspect/report means read-only ranked evidence; apply only for explicit remove/clean/simplify/refactor wording. Generic code review goes to reviewer. Never trigger cleaner from PR count or as a pre-commit gate; send non-trivial cleaner edits to reviewer.",
 			"Use subagent with agent 'reviewer' for the fresh read-only gate before reporting non-trivial work done or committing, including after cleaner edits.",
@@ -222,7 +250,7 @@ export function registerSubagentTool(pi: ExtensionAPI, runtime: SubagentRuntime)
 			"Use isolation: worktree only for worker, cleaner, or another write-capable agent and only inside a Git repository with a committed HEAD; parallel worker tasks default to worktree, while cleaner must opt in. Setup or integration failures never silently fall back to shared.",
 			"NEVER sleep or poll, and do NOT call subagent_wait to hold the turn — subagent ends the turn immediately and the result arrives as a message that wakes you automatically (even mid-turn). Ending your turn is the default and the only correct way to wait.",
 			"If you must keep the turn for a result, call subagent_wait with an explicit timeoutMs (non-blocking by default) — never bash sleep/timeout to wait for a sub-agent.",
-			"When a delegated task may require viewing images (frontend screenshots, mockups, design comparisons), pass vision: true and give the sub-agent the exact image paths — it reads them with its read tool. The configured vision model becomes primary; model-level failures continue through the agent's backup pool and current main-window model.",
+			"When a delegated task may require viewing images (frontend screenshots, mockups, design comparisons), pass vision: true and give the sub-agent the exact image paths — it reads them with its read tool. The configured vision model is used first; model-level failures hand directly to the current main-window model.",
 			"When a sub-agent result arrives it is already shown to the user — do NOT restate, paraphrase, or summarize it; reply with only your own conclusion or next action (often just one line), since duplicating the result wastes tokens for nothing.",
 		],
 		parameters: SubagentParams,
@@ -269,6 +297,7 @@ export function registerSubagentTool(pi: ExtensionAPI, runtime: SubagentRuntime)
 							break;
 						case "model":
 							monitor.setModel(runId, e.model, e.fallbackFrom);
+							monitor.setThinking(runId, e.thinking);
 							break;
 						case "usage":
 							monitor.setUsage(runId, e.usage, e.model);
@@ -294,7 +323,6 @@ export function registerSubagentTool(pi: ExtensionAPI, runtime: SubagentRuntime)
 				enabledNames: config.enabledAgents,
 				projectTrusted: ctx.isProjectTrusted?.() === true,
 			});
-			const sessionRef = currentModelRef(ctx);
 			const agents = discovery.agents;
 
 			const hasTasks = (params.tasks?.length ?? 0) > 0;
@@ -358,32 +386,35 @@ export function registerSubagentTool(pi: ExtensionAPI, runtime: SubagentRuntime)
 			): Promise<{ runId?: number; result: SingleResult }> => {
 				const agent = agents.find((candidate) => candidate.name === agentName);
 				if (!agent) return { result: failedStartResult(agentName, task, `Unknown agent: "${agentName}".`) };
-				// Vision chains keep the vision override as each round's primary while
-				// retaining that worker/reviewer's own configured backup pool.
-				const pool = resolveDispatchModelPool(agent, config, sessionRef, vision);
-				const thinkingLevel = config.agentThinkingLevels[agent.name] ?? agent.thinking ?? config.thinkingLevel;
-				const runId = monitor.addRun(agent.name, task, pool.agent.model, thinkingLevel, meta);
+				// Vision chains use the vision override first; every model-level failure
+				// hands directly to the current main model with re-clamped thinking.
+				const route = resolveDispatchModelRoute(agent, config, ctx, vision);
+				const thinkingLevel = route.thinkingLevel;
+				const runId = monitor.addRun(agent.name, task, route.agent.model, thinkingLevel, meta);
 				const onLive = makeLiveHandler(runId);
 				try {
-					const result = await runSingleAgentWithModelFallback(
+					const result = await runSingleAgentWithMainFallback(
 						{
 							defaultCwd: executionCwd,
 							cwd: executionCwd,
-							agent: pool.agent,
+							agent: route.agent,
 							agentName,
 							task,
 							thinkingLevel,
+							thinkingLevelForModel: route.thinkingLevelForModel,
 							signal,
 							onLive,
 							makeDetails: makeDetails("single", true),
 							idleTimeoutMs: config.idleTimeoutSec * 1000,
 						},
-						pool.fallbackModelRefs,
+						route.mainFallbackRef,
 					);
 					result.runId = runId;
+					result.projectCwd = executionCwd;
 					result.isolation = "shared";
 					runtime.retainSession(result);
 					monitor.setModel(runId, result.model, result.modelFallbackFrom);
+					monitor.setThinking(runId, result.thinking);
 					// The parent row represents the chain. Internal rounds leave live
 					// status as soon as they settle; their reports remain addressable by id.
 					finishRun(runId, isFailedResult(result) ? "failed" : "done", { silent: true });
@@ -393,8 +424,9 @@ export function registerSubagentTool(pi: ExtensionAPI, runtime: SubagentRuntime)
 					finishRun(runId, "failed", { silent: true });
 					const errorMessage = error instanceof Error ? error.message : String(error);
 					const crashed: SingleResult = {
-						...queuedResult(pool.agent, task, thinkingLevel),
+						...queuedResult(route.agent, task, thinkingLevel),
 						runId,
+						projectCwd: executionCwd,
 						isolation: "shared",
 						exitCode: 1,
 						stderr: errorMessage,
@@ -648,8 +680,6 @@ export function registerSubagentTool(pi: ExtensionAPI, runtime: SubagentRuntime)
 				worktree?: WorktreeIsolation;
 				forkedFromRunId?: number;
 				forkObjective?: string;
-				modelPool?: string[];
-				thinkingLevel?: SubagentThread["thinkingLevel"];
 			}
 
 			interface ResumeReservation {
@@ -705,7 +735,6 @@ export function registerSubagentTool(pi: ExtensionAPI, runtime: SubagentRuntime)
 				const runCtx = environment?.ctx ?? ctx;
 				const runConfig = environment?.config ?? config;
 				const runAgents = environment?.agents ?? agents;
-				const runSessionRef = environment?.sessionRef ?? sessionRef;
 				const agent = runAgents.find((candidate) => candidate.name === agentName);
 				if (!agent) return failedStartResult(agentName, task, `Unknown agent: "${agentName}".`);
 				if (isolation === "worktree" && !isWorktreeCapableAgent(agent)) {
@@ -738,36 +767,29 @@ export function registerSubagentTool(pi: ExtensionAPI, runtime: SubagentRuntime)
 					}
 				}
 				const executionCwd = worktree?.cwd ?? originalCwd;
-				const resolvedPool = resolveDispatchModelPool(agent, runConfig, runSessionRef, vision);
-				const inheritedPool = seed?.modelPool?.filter((ref) => ref.trim().length > 0) ?? [];
-				const rawPool = inheritedPool.length > 0
-					? {
-						agent: { ...agent, model: inheritedPool[0] },
-						fallbackModelRefs: inheritedPool.slice(1),
-					}
-					: resolvedPool;
+				const resolvedRoute = resolveDispatchModelRoute(agent, runConfig, runCtx, vision);
 				// Isolation is a persistent system-level invariant, not a one-shot task
-				// prefix: queued retargets, live retargets, resumes, and model fallbacks
-				// all keep the same worktree boundary.
-				const pool = isolation === "worktree"
-					? { ...rawPool, agent: withWorktreeSystemPrompt(rawPool.agent) }
-					: rawPool;
-				const thinkingLevel = seed?.thinkingLevel ?? runConfig.agentThinkingLevels[agent.name] ?? agent.thinking ?? runConfig.thinkingLevel;
-				const modelPool = [pool.agent.model, ...pool.fallbackModelRefs].filter((ref): ref is string => Boolean(ref));
+				// prefix: queued retargets, live retargets, resumes, and main-model
+				// handoffs all keep the same worktree boundary.
+				const route = isolation === "worktree"
+					? { ...resolvedRoute, agent: withWorktreeSystemPrompt(resolvedRoute.agent) }
+					: resolvedRoute;
+				const thinkingLevel = route.thinkingLevel;
 				const priorTask = existingThread?.task;
 				const priorSessionId = seed?.sessionId ?? existingThread?.sessionId;
 				const priorSessionDir = seed?.sessionDir ?? existingThread?.sessionDir;
 				if (existingThread && resumeReservation && !ownsResumeReservation(existingThread, resumeReservation)) {
 					return failedStartResult(agentName, task, `Run #${existingThread.id} changed while resume was preparing; no new generation was started.`);
 				}
-				const runId = existingThread?.id ?? monitor.addRun(agent.name, task, pool.agent.model, thinkingLevel, {
+				const runId = existingThread?.id ?? monitor.addRun(agent.name, task, route.agent.model, thinkingLevel, {
 					isolation,
 					...(seed?.forkedFromRunId !== undefined ? { forkedFromRunId: seed.forkedFromRunId } : {}),
 				});
 				const generation = (existingThread?.generation ?? 0) + 1;
 				const pending: SingleResult = {
-					...queuedResult(pool.agent, task, thinkingLevel),
+					...queuedResult(route.agent, task, thinkingLevel),
 					runId,
+					projectCwd: originalCwd,
 					isolation,
 					...(isolation === "worktree" ? { integrationStatus: "pending" as const } : {}),
 					...(seed?.sessionId && seed.sessionDir
@@ -776,7 +798,7 @@ export function registerSubagentTool(pi: ExtensionAPI, runtime: SubagentRuntime)
 					...(seed?.forkedFromRunId !== undefined ? { forkedFromRunId: seed.forkedFromRunId } : {}),
 				};
 				if (existingThread) {
-					monitor.restartRun(runId, agent.name, task, pool.agent.model, thinkingLevel, isolation);
+					monitor.restartRun(runId, agent.name, task, route.agent.model, thinkingLevel, isolation);
 					runtime.settledRuns.delete(runId);
 				}
 
@@ -812,7 +834,6 @@ export function registerSubagentTool(pi: ExtensionAPI, runtime: SubagentRuntime)
 					thread.cwd = originalCwd;
 					thread.executionCwd = executionCwd;
 					thread.vision = vision;
-					thread.modelPool = modelPool;
 					thread.thinkingLevel = thinkingLevel;
 					thread.isolation = isolation;
 					thread.worktree = worktree;
@@ -837,7 +858,6 @@ export function registerSubagentTool(pi: ExtensionAPI, runtime: SubagentRuntime)
 						cwd: originalCwd,
 						executionCwd,
 						vision,
-						modelPool,
 						thinkingLevel,
 						isolation,
 						worktree,
@@ -1124,7 +1144,6 @@ export function registerSubagentTool(pi: ExtensionAPI, runtime: SubagentRuntime)
 								ctx: currentCtx,
 								config: currentConfig,
 								agents: currentAgents,
-								sessionRef: currentModelRef(currentCtx),
 							},
 							seed,
 							reservation,
@@ -1287,7 +1306,6 @@ export function registerSubagentTool(pi: ExtensionAPI, runtime: SubagentRuntime)
 								ctx: currentCtx,
 								config: currentConfig,
 								agents: currentAgents,
-								sessionRef: currentModelRef(currentCtx),
 							},
 							{
 								sessionId: forkedSession.sessionId,
@@ -1296,8 +1314,6 @@ export function registerSubagentTool(pi: ExtensionAPI, runtime: SubagentRuntime)
 								worktree: childWorktree,
 								forkedFromRunId: runId,
 								forkObjective,
-								modelPool: [...thread.modelPool],
-								thinkingLevel: thread.thinkingLevel,
 							},
 						);
 						if (child.exitCode !== -1 || child.runId === undefined) {
@@ -1347,14 +1363,15 @@ export function registerSubagentTool(pi: ExtensionAPI, runtime: SubagentRuntime)
 						if (runtime.threads.get(runId)?.generation !== generation) return;
 						let result: SingleResult;
 						try {
-							result = await runSingleAgentWithModelFallback(
+							result = await runSingleAgentWithMainFallback(
 								{
 									defaultCwd: executionCwd,
-									agent: pool.agent,
+									agent: route.agent,
 									agentName,
 									task,
 									cwd: executionCwd,
 									thinkingLevel,
+									thinkingLevelForModel: route.thinkingLevelForModel,
 									signal: backgroundSignal,
 									onLive,
 									control,
@@ -1366,11 +1383,11 @@ export function registerSubagentTool(pi: ExtensionAPI, runtime: SubagentRuntime)
 											sessionDir: priorSessionDir,
 											stdinText: seed?.prompt ?? (newObjectiveOnResume
 												? task
-												: buildResumePrompt(priorTask ?? task, buildFallbackResumeReason())),
+												: buildResumePrompt(priorTask ?? task, "the retained thread was resumed")),
 										}
 										: {}),
 								},
-								pool.fallbackModelRefs,
+								route.mainFallbackRef,
 							);
 						} catch (error) {
 							const errorMessage = error instanceof Error ? error.message : String(error);
@@ -1389,6 +1406,7 @@ export function registerSubagentTool(pi: ExtensionAPI, runtime: SubagentRuntime)
 						// no monitor mutation, result registration, or completion delivery.
 						if (runtime.threads.get(runId)?.generation !== generation) return;
 						result.runId = runId;
+						result.projectCwd = originalCwd;
 						result.isolation = isolation;
 						result.forkedFromRunId = thread.forkedFromRunId;
 						result.forkChildRunIds = [...thread.forkChildRunIds];
@@ -1400,6 +1418,7 @@ export function registerSubagentTool(pi: ExtensionAPI, runtime: SubagentRuntime)
 						thread.lastResult = result;
 						runtime.retainSession(result);
 						monitor.setModel(runId, result.model, result.modelFallbackFrom);
+						monitor.setThinking(runId, result.thinking);
 
 						// Destructive stop owns publication once it has synchronously claimed
 						// the lifecycle. Leave the partial result/session on the thread; the
@@ -1459,8 +1478,8 @@ export function registerSubagentTool(pi: ExtensionAPI, runtime: SubagentRuntime)
 							const completion: CompletionMessageItem = {
 								agent: result.agent,
 								block: modelLevel
-									? `${formatCompletionBlock(result, runConfig.maxResultLines, runCtx.cwd)}\n\n${modelLevelTakeoverNote(result, { runId })}`
-									: formatCompletionBlock(result, runConfig.maxResultLines, runCtx.cwd),
+									? `${formatCompletionBlock(result, runConfig.maxResultLines, result.projectCwd ?? originalCwd)}\n\n${modelLevelTakeoverNote(result, { runId })}`
+									: formatCompletionBlock(result, runConfig.maxResultLines, result.projectCwd ?? originalCwd),
 								triggerTurn: completionTriggersTurn(result, runConfig.notifyOnReviewPass),
 							};
 							if (modelLevel) {
@@ -1514,7 +1533,7 @@ export function registerSubagentTool(pi: ExtensionAPI, runtime: SubagentRuntime)
 							!thread.retired;
 						try {
 							const crashed: SingleResult = {
-								...dispatchFailedResult(pool.agent, control.getObjective(), error, thinkingLevel),
+								...dispatchFailedResult(route.agent, control.getObjective(), error, thinkingLevel),
 								runId,
 								isolation,
 								forkedFromRunId: thread.forkedFromRunId,
@@ -1533,7 +1552,7 @@ export function registerSubagentTool(pi: ExtensionAPI, runtime: SubagentRuntime)
 								runtime.sendCompletionGroup([
 									{
 										agent: agent.name,
-										block: formatCompletionBlock(crashed, runConfig.maxResultLines, runCtx.cwd),
+										block: formatCompletionBlock(crashed, runConfig.maxResultLines, crashed.projectCwd ?? originalCwd),
 										triggerTurn: true,
 									},
 								]);
@@ -1658,7 +1677,7 @@ export function registerSubagentTool(pi: ExtensionAPI, runtime: SubagentRuntime)
 				const pending = r.exitCode === -1;
 				const icon = statusIcon(pending ? "running" : isFailedResult(r) ? "failed" : "done", theme);
 				const usage = formatUsage(r.usage);
-				const model = `${r.model ?? "?"}${r.modelFallbackFrom ? ` (pool fallback from ${r.modelFallbackFrom})` : ""}`;
+				const model = `${r.model ?? "?"}${r.modelFallbackFrom ? ` (main after ${r.modelFallbackFrom} failed)` : ""}`;
 				const isolation = r.isolation === "worktree" ? ` · worktree ${r.integrationStatus ?? "active"}` : "";
 				const runId = r.runId === undefined ? "" : `${theme.fg("dim", `#${r.runId}`)} `;
 				const line = `${theme.fg("toolTitle", theme.bold("subagent "))}${icon} ${runId}${theme.fg("accent", r.agent)} ${theme.fg("dim", `· ${model}${r.thinking ? ` · thinking ${r.thinking}` : ""}${isolation}${pending ? " · background" : ""}${usage ? ` · ${usage}` : ""}`)}`;
@@ -1673,7 +1692,7 @@ export function registerSubagentTool(pi: ExtensionAPI, runtime: SubagentRuntime)
 				const pending = r.exitCode === -1;
 				const icon = statusIcon(pending ? "running" : isFailedResult(r) ? "failed" : "done", theme);
 				const usage = formatUsage(r.usage);
-				const model = `${r.model ?? "?"}${r.modelFallbackFrom ? ` (pool fallback from ${r.modelFallbackFrom})` : ""}`;
+				const model = `${r.model ?? "?"}${r.modelFallbackFrom ? ` (main after ${r.modelFallbackFrom} failed)` : ""}`;
 				const isolation = r.isolation === "worktree" ? ` · worktree ${r.integrationStatus ?? "active"}` : "";
 				const runId = r.runId === undefined ? "" : `${theme.fg("dim", `#${r.runId}`)} `;
 				lines.push(`  ${icon} ${runId}${theme.fg("accent", r.agent)} ${theme.fg("dim", `· ${model}${r.thinking ? ` · thinking ${r.thinking}` : ""}${isolation}${pending ? " · background" : ""}${usage ? ` · ${usage}` : ""}`)}`);

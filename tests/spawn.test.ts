@@ -1,7 +1,10 @@
-import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, utimesSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
+import { pathToFileURL } from "node:url";
+import { registerApiProvider, unregisterApiProviders } from "@earendil-works/pi-ai/compat";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
+import { formatCompletionBlock } from "../src/format.ts";
 import { fakeRpcScript } from "./fake-rpc.ts";
 import {
 	buildFallbackResumeReason,
@@ -12,15 +15,18 @@ import {
 	getResultOutput,
 	isFailedResult,
 	isModelLevelFailure,
-	isPermanentModelCandidateError,
 	isRetryableStartupFailure,
-	isTerminalModelError,
+	pruneResultArtifacts,
+	resultArtifactProjectKey,
+	RESULT_ARTIFACT_MAX_AGE_MS,
+	RESULT_ARTIFACT_MAX_FILES_PER_PROJECT,
 	RESULT_LINE_MAX,
 	reviewVerdict,
 	runSingleAgent,
-	runSingleAgentWithModelFallback,
+	runSingleAgentWithMainFallback,
 	sessionExists,
 	truncateResultOutput,
+	writeChildRetryPolicyExtension,
 	writeResultArtifact,
 	type SingleResult,
 } from "../src/spawn.ts";
@@ -115,6 +121,55 @@ describe("currentSubagentDepth", () => {
 	});
 });
 
+describe("child retry policy", () => {
+	it("uses a Pi extension provider adapter that forces maxRetries=0", async () => {
+		const policy = await writeChildRetryPolicyExtension("test-provider/selected");
+		const sourceId = `pi-subagents-test-${Date.now()}`;
+		try {
+			const source = readFileSync(policy.filePath, "utf8");
+			expect(source).not.toContain("SettingsManager");
+			expect(source).not.toContain("NODE_OPTIONS");
+			const loadablePath = join(policy.dir, "loadable-policy.mjs");
+			writeFileSync(
+				loadablePath,
+				source.replace(
+					'"@earendil-works/pi-ai/compat"',
+					JSON.stringify(import.meta.resolve("@earendil-works/pi-ai/compat")),
+				),
+				"utf8",
+			);
+			registerApiProvider({
+				api: "pi-subagents-test-api" as any,
+				stream: (() => undefined) as any,
+				streamSimple: ((_model: unknown, _context: unknown, options: unknown) => options) as any,
+			}, sourceId);
+			const extension = (await import(`${pathToFileURL(loadablePath).href}?${Date.now()}`)).default;
+			let registration: { provider: string; config: any } | undefined;
+			let beforeProviderRequest: ((event: unknown, ctx: any) => void) | undefined;
+			extension({
+				registerProvider(provider: string, config: any) {
+					registration = { provider, config };
+				},
+				on(event: string, handler: (event: unknown, ctx: any) => void) {
+					if (event === "before_provider_request") beforeProviderRequest = handler;
+				},
+			});
+			expect(registration).toBeUndefined();
+			beforeProviderRequest?.({}, { model: { provider: "test-provider" } });
+			expect(registration?.provider).toBe("test-provider");
+			const options = registration?.config.streamSimple(
+				{ api: "pi-subagents-test-api" },
+				{},
+				{ maxRetries: 9, marker: true },
+			);
+			expect(options).toEqual({ maxRetries: 0, marker: true });
+		} finally {
+			unregisterApiProviders(sourceId);
+			rmSync(policy.dir, { recursive: true, force: true });
+		}
+	});
+});
+
 describe("runSingleAgent transport and lifecycle", () => {
 	const agent = {
 		name: "fake",
@@ -173,8 +228,9 @@ describe("runSingleAgent transport and lifecycle", () => {
 			agentName: agent.name,
 			task: "hang after one line",
 			makeDetails: (results) => ({ mode: "single", results }),
-			idleTimeoutMs: 50,
+			idleTimeoutMs: 1_000,
 		});
+			expect(getFinalOutput(result.messages)).toBe("started");
 			expect(result.stopReason).toBe("error");
 			expect(result.errorMessage).toContain("idle timeout");
 			expect(result.exitCode).not.toBe(0);
@@ -184,10 +240,42 @@ describe("runSingleAgent transport and lifecycle", () => {
 		}
 	});
 
+	it("aborts Pi's outer turn retry as soon as it is scheduled", async () => {
+		const dir = mkdtempSync(join(tmpdir(), "pi-subagents-turn-retry-"));
+		const script = join(dir, "turn-retry-child.mjs");
+		writeFileSync(
+			script,
+			fakeRpcScript({
+				autoSettle: false,
+				onPrompt: `send({ type: "message_end", message: { role: "assistant", content: [], stopReason: "error", errorMessage: "429 rate limit" } });
+	send({ type: "auto_retry_start", attempt: 1, maxAttempts: 3, delayMs: 2000 });`,
+				onAbortRetry: `send({ type: "auto_retry_end", success: false, attempt: 1 });
+	send({ type: "agent_settled" });`,
+			}),
+			"utf8",
+		);
+		const previousScript = process.argv[1];
+		process.argv[1] = script;
+		try {
+			const result = await runSingleAgent({
+				defaultCwd: process.cwd(),
+				agent,
+				agentName: agent.name,
+				task: "do not retry 429",
+				makeDetails: (results) => ({ mode: "single", results }),
+			});
+			expect(result.stopReason).toBe("error");
+			expect(result.errorMessage).toBe("429 rate limit");
+		} finally {
+			process.argv[1] = previousScript;
+			rmSync(dir, { recursive: true, force: true });
+		}
+	});
+
 	it("does not fire idle timeout while stdout is active", async () => {
 		const dir = mkdtempSync(join(tmpdir(), "pi-subagents-idle-active-"));
 		const script = join(dir, "active-child.mjs");
-		// Emit a line every 20ms so stdout never goes idle; finish before the idle timeout.
+		// Run longer than the idle timeout while emitting a line every 200ms.
 		writeFileSync(
 			script,
 			fakeRpcScript({
@@ -195,12 +283,12 @@ describe("runSingleAgent transport and lifecycle", () => {
 const timer = setInterval(() => {
 	n++;
 	send({ type: "message_update", assistantMessageEvent: { type: "thinking_delta" } });
-	if (n >= 5) {
+	if (n >= 7) {
 		clearInterval(timer);
 		send({ type: "message_end", message: { role: "assistant", content: [{ type: "text", text: "done" }], stopReason: "stop" } });
 		send({ type: "agent_settled" });
 	}
-}, 20);`,
+}, 200);`,
 				autoSettle: false,
 			}),
 			"utf8",
@@ -214,7 +302,7 @@ const timer = setInterval(() => {
 				agentName: agent.name,
 				task: "keep busy",
 				makeDetails: (results) => ({ mode: "single", results }),
-				idleTimeoutMs: 100,
+				idleTimeoutMs: 1_000,
 			});
 			expect(result.exitCode).toBe(0);
 			expect(getFinalOutput(result.messages)).toBe("done");
@@ -230,7 +318,7 @@ describe("isModelLevelFailure", () => {
 		const failed = result({
 			exitCode: 1,
 			stopReason: "error",
-			messages: [{ role: "assistant", content: [], stopReason: "error", errorMessage: "model not found" } as any],
+			messages: [{ role: "assistant", content: [], stopReason: "error", errorMessage: "429 rate limit" } as any],
 		});
 		expect(isModelLevelFailure(failed)).toBe(true);
 	});
@@ -254,10 +342,24 @@ describe("isModelLevelFailure", () => {
 		expect(isModelLevelFailure(result({ exitCode: 0, stopReason: "end" }))).toBe(false);
 	});
 
-	it("is false when the model produced text (task-level failure)", () => {
+	it("is false when a task failure ends with a non-error assistant stop", () => {
 		expect(
-			isModelLevelFailure(result({ exitCode: 1, stopReason: "error", messages: [assistant("build failed")] })),
+			isModelLevelFailure(result({
+				exitCode: 1,
+				stopReason: "error",
+				messages: [{ ...assistant("build failed"), stopReason: "stop" }],
+			})),
 		).toBe(false);
+	});
+
+	it("is true when a terminal provider error preserves partial text", () => {
+		expect(
+			isModelLevelFailure(result({
+				exitCode: 1,
+				stopReason: "error",
+				messages: [{ ...assistant("partial response"), stopReason: "error", errorMessage: "stream terminated" } as any],
+			})),
+		).toBe(true);
 	});
 
 	it("is false for aborts", () => {
@@ -307,7 +409,7 @@ describe("isModelLevelFailure", () => {
 	});
 });
 
-describe("runSingleAgentWithModelFallback", () => {
+describe("runSingleAgentWithMainFallback", () => {
 	const agent = {
 		name: "fake",
 		description: "fake",
@@ -321,43 +423,47 @@ describe("runSingleAgentWithModelFallback", () => {
 	const fallbackChildScript = (attemptLog: string): string => fakeRpcScript({
 		setup: `fs.appendFileSync(${JSON.stringify(attemptLog)}, "attempt\\n");\nconst modelArg = process.argv.indexOf("--model");\nconst model = modelArg !== -1 ? process.argv[modelArg + 1] : "";`,
 		onPrompt: `if (model.startsWith("openai-codex")) {
-	send({ type: "message_end", message: { role: "assistant", content: [], stopReason: "error", errorMessage: "model not found" } });
+	send({ type: "tool_execution_end", toolName: "bash", isError: true, result: { content: [{ type: "text", text: "selected-model test failed" }] } });
+	send({ type: "message_end", message: { role: "assistant", content: [{ type: "text", text: "partial selected-model output" }], stopReason: "error", errorMessage: "429 rate limit", usage: { input: 3, output: 2, cacheRead: 1, cacheWrite: 0, cost: { total: 0.01 }, totalTokens: 6 } } });
 } else {
 	send({ type: "message_end", message: { role: "assistant", content: [{ type: "text", text: "recovered on main model" }], stopReason: "stop" } });
 }`,
 	});
 
-	it("falls back to the next pool model and reports the live/final model", async () => {
+	it("hands directly to main and re-clamps thinking after selected-model failure", async () => {
 		const dir = mkdtempSync(join(tmpdir(), "pi-subagents-fallback-"));
 		const script = join(dir, "fallback-child.cjs");
 		const log = join(dir, "attempts.log");
 		writeFileSync(script, fallbackChildScript(log), "utf8");
 		const previousScript = process.argv[1];
 		process.argv[1] = script;
-		const liveModels: Array<{ model?: string; fallbackFrom?: string }> = [];
+		const liveModels: Array<{ kind: "model"; model?: string; thinking?: string; fallbackFrom?: string }> = [];
 		try {
-			const result = await runSingleAgentWithModelFallback(
+			const result = await runSingleAgentWithMainFallback(
 				{
 					defaultCwd: process.cwd(),
 					agent: { ...agent, model: "openai-codex/gpt-5.6-sol" },
 					agentName: agent.name,
 					task: "review",
-					runLevelRetryDelaysMs: [],
+					thinkingLevel: "high",
+					thinkingLevelForModel: (ref) => ref === "anthropic/main" ? "max" : "low",
 					onLive: (event) => {
 						if (event.kind === "model") liveModels.push(event);
 					},
 					makeDetails: (results) => ({ mode: "single", results }),
 				},
-				["deepseek/deepseek-v4-flash"],
+				"anthropic/main",
 			);
 			expect(result.exitCode).toBe(0);
 			expect(getFinalOutput(result.messages)).toBe("recovered on main model");
-			expect(result.model).toBe("deepseek/deepseek-v4-flash");
+			expect(result.model).toBe("anthropic/main");
+			expect(result.thinking).toBe("max");
 			expect(result.modelFallbackFrom).toBe("openai-codex/gpt-5.6-sol");
-			expect(result.modelRetries).toBe(0);
+			expect(result.failedTools).toEqual([{ toolName: "bash", error: "selected-model test failed" }]);
+			expect(result.usage).toMatchObject({ input: 3, output: 2, cacheRead: 1, cost: 0.01, turns: 2 });
 			expect(liveModels).toEqual([
-				{ kind: "model", model: "openai-codex/gpt-5.6-sol" },
-				{ kind: "model", model: "deepseek/deepseek-v4-flash", fallbackFrom: "openai-codex/gpt-5.6-sol" },
+				{ kind: "model", model: "openai-codex/gpt-5.6-sol", thinking: "low" },
+				{ kind: "model", model: "anthropic/main", thinking: "max", fallbackFrom: "openai-codex/gpt-5.6-sol" },
 			]);
 			expect(readFileSync(log, "utf8").split("\n").filter(Boolean)).toHaveLength(2);
 		} finally {
@@ -366,7 +472,7 @@ describe("runSingleAgentWithModelFallback", () => {
 		}
 	});
 
-	it("reports the retried failure with the fallback origin when both attempts fail (run-level retry disabled)", async () => {
+	it("reports the fallback origin when both selected and main models fail", async () => {
 		const dir = mkdtempSync(join(tmpdir(), "pi-subagents-fallback-"));
 		const script = join(dir, "always-fail-child.mjs");
 		writeFileSync(
@@ -379,23 +485,21 @@ describe("runSingleAgentWithModelFallback", () => {
 		const previousScript = process.argv[1];
 		process.argv[1] = script;
 		try {
-			const result = await runSingleAgentWithModelFallback(
+			const result = await runSingleAgentWithMainFallback(
 				{
 					defaultCwd: process.cwd(),
 					agent: { ...agent, model: "openai-codex/gpt-5.6-sol" },
 					agentName: agent.name,
 					task: "review",
 					makeDetails: (results) => ({ mode: "single", results }),
-					runLevelRetryDelaysMs: [],
 				},
-				["deepseek/deepseek-v4-flash"],
+				"anthropic/main",
 			);
 			expect(result.exitCode).toBe(1);
 			expect(result.stopReason).toBe("error");
 			expect(result.errorMessage).toBe("provider down");
 			expect(result.modelFallbackFrom).toBe("openai-codex/gpt-5.6-sol");
-			expect(result.model).toBe("deepseek/deepseek-v4-flash");
-			expect(result.modelRetries).toBe(0);
+			expect(result.model).toBe("anthropic/main");
 		} finally {
 			process.argv[1] = previousScript;
 			rmSync(dir, { recursive: true, force: true });
@@ -410,17 +514,15 @@ describe("runSingleAgentWithModelFallback", () => {
 		const previousScript = process.argv[1];
 		process.argv[1] = script;
 		try {
-			const result = await runSingleAgentWithModelFallback({
+			const result = await runSingleAgentWithMainFallback({
 				defaultCwd: process.cwd(),
 				agent: { ...agent, model: "openai-codex/gpt-5.6-sol" },
 				agentName: agent.name,
 				task: "review",
-				runLevelRetryDelaysMs: [],
 				makeDetails: (results) => ({ mode: "single", results }),
 			});
 			expect(result.exitCode).toBe(1);
 			expect(result.modelFallbackFrom).toBeUndefined();
-			expect(result.modelRetries).toBe(0);
 			expect(readFileSync(log, "utf8").split("\n").filter(Boolean)).toHaveLength(1);
 		} finally {
 			process.argv[1] = previousScript;
@@ -428,7 +530,7 @@ describe("runSingleAgentWithModelFallback", () => {
 		}
 	});
 
-	it("does not advance the model pool for an ordinary tool failure", async () => {
+	it("does not hand to main for an ordinary tool failure", async () => {
 		const dir = mkdtempSync(join(tmpdir(), "pi-subagents-tool-failure-"));
 		const script = join(dir, "tool-failure-child.mjs");
 		const log = join(dir, "attempts.log");
@@ -437,310 +539,30 @@ describe("runSingleAgentWithModelFallback", () => {
 			fakeRpcScript({
 				setup: `const modelIndex = process.argv.indexOf("--model");\nfs.appendFileSync(${JSON.stringify(log)}, process.argv[modelIndex + 1] + "\\n");`,
 				onPrompt: `send({ type: "tool_execution_end", toolName: "bash", isError: true, result: { content: [{ type: "text", text: "tests failed" }] } });
-	send({ type: "message_end", message: { role: "assistant", content: [{ type: "text", text: "The task failed because its test tool failed." }], stopReason: "error", errorMessage: "task failed after a tool error" } });`,
+	send({ type: "message_end", message: { role: "assistant", content: [{ type: "text", text: "The task failed because its test tool failed." }], stopReason: "stop" } });`,
 			}),
 			"utf8",
 		);
 		const previousScript = process.argv[1];
 		process.argv[1] = script;
 		try {
-			const result = await runSingleAgentWithModelFallback(
+			const result = await runSingleAgentWithMainFallback(
 				{
 					defaultCwd: process.cwd(),
 					agent: { ...agent, model: "anthropic/primary" },
 					agentName: agent.name,
 					task: "run tests",
-					runLevelRetryDelaysMs: [10, 10],
 					makeDetails: (results) => ({ mode: "single", results }),
 				},
-				["openai/backup", "google/main"],
+				"openai/main",
 			);
-			expect(result.exitCode).toBe(1);
+			expect(result.exitCode).toBe(0);
 			expect(result.failedTools).toHaveLength(1);
 			expect(result.model).toBe("anthropic/primary");
 			expect(result.modelFallbackFrom).toBeUndefined();
 			expect(readFileSync(log, "utf8").trim()).toBe("anthropic/primary");
 		} finally {
 			process.argv[1] = previousScript;
-			rmSync(dir, { recursive: true, force: true });
-		}
-	});
-});
-
-describe("runSingleAgentWithModelFallback run-level retry", () => {
-	const agent = {
-		name: "fake",
-		description: "fake",
-		systemPrompt: "",
-		source: "builtin" as const,
-		filePath: "/agents/fake.md",
-	};
-
-	// Child that fails with a transient error for the first `failTimes` launches
-	// (counting via LOG_PATH), then emits a normal success on the same model.
-	const transientThenRecoverScript = (failTimes: number): string => fakeRpcScript({
-		setup: `const log = process.env.LOG_PATH;\nfs.appendFileSync(log, "attempt\\n");\nconst count = fs.readFileSync(log, "utf8").split("\\n").filter(Boolean).length;`,
-		onPrompt: `if (count <= ${failTimes}) {
-	send({ type: "message_end", message: { role: "assistant", content: [], stopReason: "error", errorMessage: "provider down" } });
-} else {
-	send({ type: "message_end", message: { role: "assistant", content: [{ type: "text", text: "recovered on same model" }], stopReason: "stop" } });
-}`,
-	});
-
-	const withArgv = (script: string, fn: () => Promise<void>): Promise<void> => {
-		const previousScript = process.argv[1];
-		process.argv[1] = script;
-		return fn().finally(() => {
-			process.argv[1] = previousScript;
-		});
-	};
-
-	it("skips same-model retries for a permanent model error, then falls back", async () => {
-		const dir = mkdtempSync(join(tmpdir(), "pi-subagents-runlevel-fallback-"));
-		const script = join(dir, "broken-child.cjs");
-		const log = join(dir, "attempts.log");
-		// A stale model id is permanent for that candidate; the fallback should
-		// start immediately even when retry delays are configured.
-		writeFileSync(
-			script,
-			fakeRpcScript({
-				setup: `fs.appendFileSync(${JSON.stringify(log)}, "attempt\\n");\nconst modelArg = process.argv.indexOf("--model");\nconst model = modelArg !== -1 ? process.argv[modelArg + 1] : "";`,
-				onPrompt: `if (model.startsWith("openai-codex")) {
-	send({ type: "message_end", message: { role: "assistant", content: [], stopReason: "error", errorMessage: "model not found" } });
-} else {
-	send({ type: "message_end", message: { role: "assistant", content: [{ type: "text", text: "recovered on main model" }], stopReason: "stop" } });
-}`,
-			}),
-			"utf8",
-		);
-		try {
-			await withArgv(script, async () => {
-				const result = await runSingleAgentWithModelFallback(
-					{
-						defaultCwd: process.cwd(),
-						agent: { ...agent, model: "openai-codex/gpt-5.6-sol" },
-						agentName: agent.name,
-						task: "review",
-						runLevelRetryDelaysMs: [10, 10, 10, 10, 10],
-						makeDetails: (results) => ({ mode: "single", results }),
-					},
-					["deepseek/deepseek-v4-flash"],
-				);
-				expect(result.exitCode).toBe(0);
-				expect(getFinalOutput(result.messages)).toBe("recovered on main model");
-				expect(result.model).toBe("deepseek/deepseek-v4-flash");
-				expect(result.modelFallbackFrom).toBe("openai-codex/gpt-5.6-sol");
-				expect(result.modelRetries).toBe(0);
-				// One stale-primary attempt, then one fallback attempt — no 60s backoff.
-				expect(readFileSync(log, "utf8").split("\n").filter(Boolean)).toHaveLength(2);
-			});
-		} finally {
-			rmSync(dir, { recursive: true, force: true });
-		}
-	});
-
-	it("stops same-model backoff when a transient retry becomes permanently invalid", async () => {
-		const dir = mkdtempSync(join(tmpdir(), "pi-subagents-runlevel-permanent-after-retry-"));
-		const script = join(dir, "permanent-after-retry-child.cjs");
-		const log = join(dir, "attempts.log");
-		writeFileSync(
-			script,
-			fakeRpcScript({
-				setup: `const log = ${JSON.stringify(log)};\nfs.appendFileSync(log, "attempt\\n");\nconst count = fs.readFileSync(log, "utf8").split("\\n").filter(Boolean).length;\nconst modelIndex = process.argv.indexOf("--model");\nconst model = modelIndex === -1 ? "" : process.argv[modelIndex + 1];`,
-				onPrompt: `if (model === "anthropic/primary" && count === 1) {
-	send({ type: "message_end", message: { role: "assistant", content: [], stopReason: "error", errorMessage: "provider down" } });
-} else if (model === "anthropic/primary") {
-	send({ type: "message_end", message: { role: "assistant", content: [], stopReason: "error", errorMessage: "model not found" } });
-} else {
-	send({ type: "message_end", message: { role: "assistant", content: [{ type: "text", text: "backup recovered" }], stopReason: "stop" } });
-}`,
-			}),
-			"utf8",
-		);
-		try {
-			await withArgv(script, async () => {
-				const result = await runSingleAgentWithModelFallback(
-					{
-						defaultCwd: process.cwd(),
-						agent: { ...agent, model: "anthropic/primary" },
-						agentName: agent.name,
-						task: "review",
-						runLevelRetryDelaysMs: [10, 10, 10, 10, 10],
-						makeDetails: (results) => ({ mode: "single", results }),
-					},
-					["openai/backup"],
-				);
-				expect(result.exitCode).toBe(0);
-				expect(result.model).toBe("openai/backup");
-				expect(result.modelRetries).toBe(1);
-				expect(readFileSync(log, "utf8").split("\n").filter(Boolean)).toHaveLength(3);
-			});
-		} finally {
-			rmSync(dir, { recursive: true, force: true });
-		}
-	});
-
-	it("recovers on a later same-model retry without falling back", async () => {
-		const dir = mkdtempSync(join(tmpdir(), "pi-subagents-runlevel-recover-"));
-		const script = join(dir, "recover-child.cjs");
-		const log = join(dir, "attempts.log");
-		writeFileSync(script, transientThenRecoverScript(3), "utf8");
-		try {
-			await withArgv(script, async () => {
-				const result = await runSingleAgentWithModelFallback(
-					{
-						defaultCwd: process.cwd(),
-						agent: { ...agent, model: "openai-codex/gpt-5.6-sol" },
-						agentName: agent.name,
-						task: "review",
-						runLevelRetryDelaysMs: [10, 10, 10, 10, 10],
-						env: { ...process.env, LOG_PATH: log },
-						makeDetails: (results) => ({ mode: "single", results }),
-					},
-					["deepseek/deepseek-v4-flash"],
-				);
-				expect(result.exitCode).toBe(0);
-				expect(getFinalOutput(result.messages)).toBe("recovered on same model");
-				expect(result.model).toBe("openai-codex/gpt-5.6-sol");
-				expect(result.modelFallbackFrom).toBeUndefined();
-				expect(result.modelRetries).toBe(3);
-				// 1 initial + 3 same-model retries; the 4th launch succeeds.
-				expect(readFileSync(log, "utf8").split("\n").filter(Boolean)).toHaveLength(4);
-			});
-		} finally {
-			rmSync(dir, { recursive: true, force: true });
-		}
-	});
-
-	it("advances immediately to backup on a terminal primary error", async () => {
-		const dir = mkdtempSync(join(tmpdir(), "pi-subagents-runlevel-terminal-"));
-		const script = join(dir, "quota-child.cjs");
-		const log = join(dir, "attempts.log");
-		writeFileSync(
-			script,
-			fakeRpcScript({
-				setup: `fs.appendFileSync(${JSON.stringify(log)}, "attempt\\n");\nconst modelIndex = process.argv.indexOf("--model");\nconst model = modelIndex === -1 ? "" : process.argv[modelIndex + 1];`,
-				onPrompt: `if (model.startsWith("openai-codex")) {
-	send({ type: "message_end", message: { role: "assistant", content: [], stopReason: "error", errorMessage: "insufficient_quota: you exceeded your quota" } });
-} else {
-	send({ type: "message_end", message: { role: "assistant", content: [{ type: "text", text: "backup recovered" }], stopReason: "stop" } });
-}`,
-			}),
-			"utf8",
-		);
-		try {
-			await withArgv(script, async () => {
-				const result = await runSingleAgentWithModelFallback(
-					{
-						defaultCwd: process.cwd(),
-						agent: { ...agent, model: "openai-codex/gpt-5.6-sol" },
-						agentName: agent.name,
-						task: "review",
-						runLevelRetryDelaysMs: [10, 10, 10, 10, 10],
-						env: { ...process.env, LOG_PATH: log },
-						makeDetails: (results) => ({ mode: "single", results }),
-					},
-					["deepseek/deepseek-v4-flash"],
-				);
-				expect(result.exitCode).toBe(0);
-				expect(getFinalOutput(result.messages)).toBe("backup recovered");
-				expect(result.model).toBe("deepseek/deepseek-v4-flash");
-				expect(result.modelFallbackFrom).toBe("openai-codex/gpt-5.6-sol");
-				expect(result.modelRetries).toBe(0);
-				expect(readFileSync(log, "utf8").split("\n").filter(Boolean)).toHaveLength(2);
-			});
-		} finally {
-			rmSync(dir, { recursive: true, force: true });
-		}
-	});
-
-	it("stops same-model retries and advances when a retry becomes terminal", async () => {
-		const dir = mkdtempSync(join(tmpdir(), "pi-subagents-runlevel-late-terminal-"));
-		const script = join(dir, "late-terminal-child.cjs");
-		const log = join(dir, "attempts.log");
-		writeFileSync(
-			script,
-			fakeRpcScript({
-				setup: `fs.appendFileSync(${JSON.stringify(log)}, "attempt\\n");\nconst count = fs.readFileSync(${JSON.stringify(log)}, "utf8").split("\\n").filter(Boolean).length;\nconst modelArg = process.argv.indexOf("--model");\nconst model = modelArg === -1 ? "" : process.argv[modelArg + 1];`,
-				onPrompt: `if (!model.startsWith("openai-codex")) {
-	send({ type: "message_end", message: { role: "assistant", content: [{ type: "text", text: "backup recovered after terminal retry" }], stopReason: "stop" } });
-} else if (count === 1) {
-	send({ type: "message_end", message: { role: "assistant", content: [], stopReason: "error", errorMessage: "503 provider down" } });
-} else {
-	send({ type: "message_end", message: { role: "assistant", content: [], stopReason: "error", errorMessage: "insufficient_quota" } });
-}`,
-			}),
-			"utf8",
-		);
-		try {
-			await withArgv(script, async () => {
-				const result = await runSingleAgentWithModelFallback(
-					{
-						defaultCwd: process.cwd(),
-						agent: { ...agent, model: "openai-codex/gpt-5.6-sol" },
-						agentName: agent.name,
-						task: "review",
-						runLevelRetryDelaysMs: [10, 10],
-						makeDetails: (results) => ({ mode: "single", results }),
-					},
-					["deepseek/deepseek-v4-flash"],
-				);
-				expect(result.exitCode).toBe(0);
-				expect(getFinalOutput(result.messages)).toBe("backup recovered after terminal retry");
-				expect(result.model).toBe("deepseek/deepseek-v4-flash");
-				expect(result.modelFallbackFrom).toBe("openai-codex/gpt-5.6-sol");
-				expect(result.modelRetries).toBe(1);
-				expect(readFileSync(log, "utf8").split("\n").filter(Boolean)).toHaveLength(3);
-			});
-		} finally {
-			rmSync(dir, { recursive: true, force: true });
-		}
-	});
-
-	it("retries a transient backup, then advances to the current main model", async () => {
-		const dir = mkdtempSync(join(tmpdir(), "pi-subagents-runlevel-chain-"));
-		const script = join(dir, "chain-child.cjs");
-		const log = join(dir, "attempts.log");
-		writeFileSync(
-			script,
-			fakeRpcScript({
-				setup: `const modelIndex = process.argv.indexOf("--model");\nconst model = modelIndex === -1 ? "" : process.argv[modelIndex + 1];\nfs.appendFileSync(${JSON.stringify(log)}, model + "\\n");`,
-				onPrompt: `if (model.startsWith("openai-codex")) {
-	send({ type: "message_end", message: { role: "assistant", content: [], stopReason: "error", errorMessage: "Request failed with status 401 Unauthorized" } });
-} else if (model.startsWith("deepseek")) {
-	send({ type: "message_end", message: { role: "assistant", content: [], stopReason: "error", errorMessage: "provider down" } });
-} else {
-	send({ type: "message_end", message: { role: "assistant", content: [{ type: "text", text: "main recovered" }], stopReason: "stop" } });
-}`,
-			}),
-			"utf8",
-		);
-		try {
-			await withArgv(script, async () => {
-				const result = await runSingleAgentWithModelFallback(
-					{
-						defaultCwd: process.cwd(),
-						agent: { ...agent, model: "openai-codex/gpt-5.6-sol" },
-						agentName: agent.name,
-						task: "review",
-						runLevelRetryDelaysMs: [10],
-						makeDetails: (results) => ({ mode: "single", results }),
-					},
-					["deepseek/deepseek-v4-flash", "anthropic/main"],
-				);
-				expect(result.exitCode).toBe(0);
-				expect(getFinalOutput(result.messages)).toBe("main recovered");
-				expect(result.model).toBe("anthropic/main");
-				expect(result.modelFallbackFrom).toBe("openai-codex/gpt-5.6-sol");
-				expect(result.modelRetries).toBe(1);
-				expect(readFileSync(log, "utf8").trim().split("\n")).toEqual([
-					"openai-codex/gpt-5.6-sol",
-					"deepseek/deepseek-v4-flash",
-					"deepseek/deepseek-v4-flash",
-					"anthropic/main",
-				]);
-			});
-		} finally {
 			rmSync(dir, { recursive: true, force: true });
 		}
 	});
@@ -767,11 +589,11 @@ describe("session resume helpers", () => {
 
 	it("buildFallbackResumeReason mentions the failed model", () => {
 		expect(buildFallbackResumeReason("openai-codex/gpt-5.6-sol")).toContain("openai-codex/gpt-5.6-sol");
-		expect(buildFallbackResumeReason()).toContain("configured pool");
+		expect(buildFallbackResumeReason()).toContain("current main model");
 	});
 });
 
-describe("runSingleAgentWithModelFallback session resume", () => {
+describe("runSingleAgentWithMainFallback session resume", () => {
 	const agent = {
 		name: "fake",
 		description: "fake",
@@ -794,31 +616,31 @@ describe("runSingleAgentWithModelFallback session resume", () => {
 	const sessionAwareChild = (log: string): string => fakeRpcScript({
 		setup: `const argv = process.argv;\nfs.appendFileSync(${JSON.stringify(log)}, JSON.stringify(argv) + "\\n");\nconst modelIdx = argv.indexOf("--model");\nconst model = modelIdx !== -1 ? argv[modelIdx + 1] : "";`,
 		onPrompt: `if (model.startsWith("openai-codex")) {
-	send({ type: "message_end", message: { role: "assistant", content: [], stopReason: "error", errorMessage: "model not found" } });
+	send({ type: "tool_execution_end", toolName: "bash", isError: true, result: { content: [{ type: "text", text: "selected-model test failed" }] } });
+	send({ type: "message_end", message: { role: "assistant", content: [{ type: "text", text: "partial selected-model output" }], stopReason: "error", errorMessage: "429 rate limit", usage: { input: 3, output: 2, cacheRead: 1, cacheWrite: 0, cost: { total: 0.01 }, totalTokens: 6 } } });
 } else {
 	send({ type: "message_end", message: { role: "assistant", content: [{ type: "text", text: "recovered" }], stopReason: "stop" } });
 }`,
 	});
 
-	it("resumes the session (not restarts) when falling back to another model", async () => {
+	it("resumes the session when handing from selected to main model", async () => {
 		const dir = mkdtempSync(join(tmpdir(), "pi-subagents-resume-"));
 		const script = join(dir, "resume-child.cjs");
 		const log = join(dir, "flags.log");
 		writeFileSync(script, sessionAwareChild(log), "utf8");
 		await withArgv(script, async () => {
-			const result = await runSingleAgentWithModelFallback(
+			const result = await runSingleAgentWithMainFallback(
 				{
 					defaultCwd: process.cwd(),
 					agent: { ...agent, model: "openai-codex/gpt-5.6-sol" },
 					agentName: agent.name,
 					task: "review src/index.ts",
-					runLevelRetryDelaysMs: [],
 					makeDetails: (results) => ({ mode: "single", results }),
 				},
-				["deepseek/deepseek-v4-flash"],
+				"anthropic/main",
 			);
 			expect(result.exitCode).toBe(0);
-			expect(result.model).toBe("deepseek/deepseek-v4-flash");
+			expect(result.model).toBe("anthropic/main");
 			expect(result.modelFallbackFrom).toBe("openai-codex/gpt-5.6-sol");
 			// The fallback attempt reused the prior session, inheriting its context.
 			const invocations = readFileSync(log, "utf8")
@@ -856,12 +678,11 @@ describe("runSingleAgentWithModelFallback session resume", () => {
 			"utf8",
 		);
 		await withArgv(script, async () => {
-			const result = await runSingleAgentWithModelFallback({
+			const result = await runSingleAgentWithMainFallback({
 				defaultCwd: process.cwd(),
 				agent: { ...agent, model: "openai-codex/gpt-5.6-sol" },
 				agentName: agent.name,
 				task: "review",
-				runLevelRetryDelaysMs: [],
 				makeDetails: (results) => ({ mode: "single", results }),
 			});
 			expect(isModelLevelFailure(result)).toBe(true);
@@ -875,73 +696,7 @@ describe("runSingleAgentWithModelFallback session resume", () => {
 	});
 });
 
-describe("isTerminalModelError (unit)", () => {
-	const base = (overrides: Partial<SingleResult>): SingleResult => ({
-		agent: "worker",
-		task: "t",
-		exitCode: 1,
-		messages: [],
-		stderr: "",
-		usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, cost: 0, contextTokens: 0, turns: 0 },
-		...overrides,
-	});
-
-	it("is terminal for quota / billing / usage-limit text", () => {
-		expect(isTerminalModelError(base({ errorMessage: "insufficient_quota: exceeded" }))).toBe(true);
-		expect(isTerminalModelError(base({ errorMessage: "You have exceeded your quota" }))).toBe(true);
-		expect(isTerminalModelError(base({ errorMessage: "out of budget" }))).toBe(true);
-		expect(isTerminalModelError(base({ errorMessage: "billing: card declined" }))).toBe(true);
-		expect(isTerminalModelError(base({ errorMessage: "monthly usage limit reached" }))).toBe(true);
-	});
-
-	it("is terminal for auth / invalid-key text", () => {
-		expect(isTerminalModelError(base({ errorMessage: "invalid api key" }))).toBe(true);
-		expect(isTerminalModelError(base({ errorMessage: "Incorrect API key provided" }))).toBe(true);
-		expect(isTerminalModelError(base({ errorMessage: "Request failed with status 401" }))).toBe(true);
-		expect(isTerminalModelError(base({ errorMessage: "403 forbidden" }))).toBe(true);
-		expect(isTerminalModelError(base({ errorMessage: "unauthorized" }))).toBe(true);
-	});
-
-	it("is NOT terminal for transient provider errors", () => {
-		expect(isTerminalModelError(base({ errorMessage: "model not found" }))).toBe(false);
-		expect(isTerminalModelError(base({ errorMessage: "provider down" }))).toBe(false);
-		expect(isTerminalModelError(base({ errorMessage: "503 Service Unavailable" }))).toBe(false);
-		expect(isTerminalModelError(base({ errorMessage: "429 Too Many Requests" }))).toBe(false);
-		expect(isTerminalModelError(base({ errorMessage: "overloaded" }))).toBe(false);
-		expect(isTerminalModelError(base({ errorMessage: "network error: fetch failed" }))).toBe(false);
-		expect(isTerminalModelError(base({ errorMessage: "Subagent idle timeout: no activity for 90 seconds." }))).toBe(false);
-	});
-
-	it("does NOT let noisy stderr override a transient errorMessage", () => {
-		// A transient 503 must stay retryable even when stderr coincidentally
-		// mentions a terminal-looking word (npm warning, proxy banner).
-		expect(isTerminalModelError(base({ errorMessage: "503 Service Unavailable", stderr: "npm warn billing..." }))).toBe(false);
-		expect(isTerminalModelError(base({ errorMessage: "overloaded", stderr: "403 forbidden in some log line" }))).toBe(false);
-	});
-
-	it("classifies a terminal error from stderr when there is no errorMessage", () => {
-		expect(isTerminalModelError(base({ stderr: "invalid api key provided" }))).toBe(true);
-		expect(isTerminalModelError(base({ stderr: "insufficient_quota" }))).toBe(true);
-	});
-
-	it("is NOT terminal when there is no error message", () => {
-		expect(isTerminalModelError(base({}))).toBe(false);
-		expect(isTerminalModelError(base({ errorMessage: "" }))).toBe(false);
-	});
-
-	it("classifies permanent model/provider configuration failures separately", () => {
-		expect(isPermanentModelCandidateError(base({ errorMessage: "model not found" }))).toBe(true);
-		expect(isPermanentModelCandidateError(base({ errorMessage: "Unknown model: stale/id" }))).toBe(true);
-		expect(isPermanentModelCandidateError(base({ errorMessage: "404 Not Found" }))).toBe(true);
-		expect(isPermanentModelCandidateError(base({ stderr: "provider does not exist" }))).toBe(true);
-		expect(isPermanentModelCandidateError(base({ errorMessage: "503 Service Unavailable" }))).toBe(false);
-		expect(isPermanentModelCandidateError(base({ errorMessage: "503: model temporarily unavailable" }))).toBe(false);
-		expect(isPermanentModelCandidateError(base({ errorMessage: "429 Too Many Requests" }))).toBe(false);
-		expect(isPermanentModelCandidateError(base({ errorMessage: "network timeout" }))).toBe(false);
-	});
-});
-
-describe("runSingleAgentWithModelFallback startup retry", () => {
+describe("runSingleAgentWithMainFallback startup retry", () => {
 	const agent = {
 		name: "fake",
 		description: "fake",
@@ -972,7 +727,7 @@ describe("runSingleAgentWithModelFallback startup retry", () => {
 		writeFileSync(script, retryThenSucceedScript(1), "utf8");
 		try {
 			await withArgv(script, async () => {
-				const result = await runSingleAgentWithModelFallback({
+				const result = await runSingleAgentWithMainFallback({
 					defaultCwd: process.cwd(),
 					agent,
 					agentName: agent.name,
@@ -1005,7 +760,7 @@ process.exit(1);`,
 		);
 		try {
 			await withArgv(script, async () => {
-				const result = await runSingleAgentWithModelFallback({
+				const result = await runSingleAgentWithMainFallback({
 					defaultCwd: process.cwd(),
 					agent,
 					agentName: agent.name,
@@ -1040,13 +795,12 @@ process.exit(1);`,
 		);
 		try {
 			await withArgv(script, async () => {
-				const result = await runSingleAgentWithModelFallback({
+				const result = await runSingleAgentWithMainFallback({
 					defaultCwd: process.cwd(),
 					agent,
 					agentName: agent.name,
 					task: "real error",
 					startupRetryDelaysMs: [10, 10, 10],
-					runLevelRetryDelaysMs: [],
 					env: { ...process.env, LOG_PATH: log },
 					makeDetails: (results) => ({ mode: "single", results }),
 				});
@@ -1054,6 +808,40 @@ process.exit(1);`,
 				expect(result.dispatchFailed).toBeUndefined();
 				expect(result.startupRetries).toBeUndefined();
 				expect(result.stderr).toContain("some real error");
+				expect(readFileSync(log, "utf8").split("\n").filter(Boolean)).toHaveLength(1);
+			});
+		} finally {
+			rmSync(dir, { recursive: true, force: true });
+		}
+	});
+
+	it("does not retry after the child accepted the prompt", async () => {
+		const dir = mkdtempSync(join(tmpdir(), "pi-subagents-startup-accepted-"));
+		const script = join(dir, "accepted-child.cjs");
+		const log = join(dir, "attempts.log");
+		writeFileSync(
+			script,
+			fakeRpcScript({
+				setup: `fs.appendFileSync(process.env.LOG_PATH, "attempt\\n");`,
+				emitAgentStart: false,
+				autoSettle: false,
+				onPrompt: `setTimeout(() => process.exit(1), 10);`,
+			}),
+			"utf8",
+		);
+		try {
+			await withArgv(script, async () => {
+				const result = await runSingleAgentWithMainFallback({
+					defaultCwd: process.cwd(),
+					agent,
+					agentName: agent.name,
+					task: "accepted then crashed",
+					startupRetryDelaysMs: [10, 10, 10],
+					env: { ...process.env, LOG_PATH: log },
+					makeDetails: (results) => ({ mode: "single", results }),
+				});
+				expect(result.rpcPromptAccepted).toBe(true);
+				expect(result.startupRetries).toBeUndefined();
 				expect(readFileSync(log, "utf8").split("\n").filter(Boolean)).toHaveLength(1);
 			});
 		} finally {
@@ -1077,13 +865,12 @@ process.exit(1);`,
 		);
 		try {
 			await withArgv(script, async () => {
-				const result = await runSingleAgentWithModelFallback({
+				const result = await runSingleAgentWithMainFallback({
 					defaultCwd: process.cwd(),
 					agent,
 					agentName: agent.name,
 					task: "real model error",
 					startupRetryDelaysMs: [10, 10, 10],
-					runLevelRetryDelaysMs: [],
 					env: { ...process.env, LOG_PATH: log },
 					makeDetails: (results) => ({ mode: "single", results }),
 				});
@@ -1126,12 +913,17 @@ describe("isRetryableStartupFailure (unit)", () => {
 		expect(isRetryableStartupFailure(base({ dispatchFailed: true }), 120)).toBe(false);
 	});
 
+	it("is not retryable after an accepted prompt or agent activity", () => {
+		expect(isRetryableStartupFailure(base({ rpcPromptAccepted: true }), 120)).toBe(false);
+		expect(isRetryableStartupFailure(base({ rpcActivity: true }), 120)).toBe(false);
+	});
+
 	it("is not retryable when stderr carries a real error", () => {
 		expect(isRetryableStartupFailure(base({ stderr: "ENOENT: spawn pi" }), 120)).toBe(false);
 	});
 
 	it("is not retryable when an error message is set", () => {
-		expect(isRetryableStartupFailure(base({ errorMessage: "model not found" }), 120)).toBe(false);
+		expect(isRetryableStartupFailure(base({ errorMessage: "429 rate limit" }), 120)).toBe(false);
 	});
 
 	it("is not retryable when the run produced model output", () => {
@@ -1198,6 +990,24 @@ describe("extractToolErrorText", () => {
 	});
 });
 
+describe("failed tool diagnostics", () => {
+	it("shows every retained diagnostic in explicit status even when the run failed", () => {
+		const failed = result({
+			exitCode: 1,
+			stopReason: "error",
+			errorMessage: "provider failed",
+			failedTools: Array.from({ length: 4 }, (_, index) => ({
+				toolName: `tool-${index + 1}`,
+				error: `error-${index + 1}`,
+			})),
+		});
+		const formatted = formatCompletionBlock(failed, 80, undefined, { failedToolDetails: true });
+		for (let index = 1; index <= 4; index++) {
+			expect(formatted).toContain(`- tool-${index}: error-${index}`);
+		}
+	});
+});
+
 describe("getResultOutput", () => {
 	it("returns the final assistant text for a successful run", () => {
 		const r = result({ exitCode: 0, messages: [assistant("all done")] });
@@ -1232,10 +1042,72 @@ describe("writeResultArtifact", () => {
 		rmSync(artifactPath, { force: true });
 	});
 
-	it("groups results under a per-project subdirectory when cwd is given", () => {
+	it("groups results by a stable full-project-path key", () => {
 		const artifactPath = writeResultArtifact("body", "worker", "/home/user/my-project");
-		expect(artifactPath).toContain(join("pi-subagents-results", "my-project"));
+		expect(dirname(artifactPath)).toContain(join("pi-subagents-results", resultArtifactProjectKey("/home/user/my-project")));
 		expect(readFileSync(artifactPath, "utf8")).toBe("body");
 		rmSync(artifactPath, { force: true });
+	});
+
+	it("uses the result's original project cwd instead of the query cwd", () => {
+		const parent = mkdtempSync(join(isolatedTemp, "pi-subagents-result-cwd-"));
+		const original = join(parent, "original", "same-name");
+		const query = join(parent, "query", "same-name");
+		mkdirSync(original, { recursive: true });
+		mkdirSync(query, { recursive: true });
+		const formatted = formatCompletionBlock(result({
+			projectCwd: original,
+			messages: [assistant("line one\nline two")],
+		}), 1, query);
+		const artifact = /full result: (.+)\)/.exec(formatted)?.[1];
+		expect(artifact).toBeDefined();
+		expect(dirname(artifact!)).toContain(resultArtifactProjectKey(original));
+		expect(dirname(artifact!)).not.toContain(resultArtifactProjectKey(query));
+		rmSync(artifact!, { force: true });
+		rmSync(parent, { recursive: true, force: true });
+	});
+
+	it("keeps same-named projects in separate retention buckets", () => {
+		const parent = mkdtempSync(join(isolatedTemp, "pi-subagents-project-keys-"));
+		const first = join(parent, "one", "same-name");
+		const second = join(parent, "two", "same-name");
+		mkdirSync(first, { recursive: true });
+		mkdirSync(second, { recursive: true });
+		const firstArtifact = writeResultArtifact("one", "worker", first);
+		const secondArtifact = writeResultArtifact("two", "worker", second);
+		expect(dirname(firstArtifact)).not.toBe(dirname(secondArtifact));
+		rmSync(firstArtifact, { force: true });
+		rmSync(secondArtifact, { force: true });
+		rmSync(parent, { recursive: true, force: true });
+	});
+
+	it("bounds Markdown artifacts by age and count without touching other files", () => {
+		expect(RESULT_ARTIFACT_MAX_AGE_MS).toBe(7 * 24 * 60 * 60 * 1_000);
+		expect(RESULT_ARTIFACT_MAX_FILES_PER_PROJECT).toBe(50);
+		const root = mkdtempSync(join(isolatedTemp, "pi-subagents-artifact-prune-"));
+		const project = join(root, "project");
+		mkdirSync(project);
+		const now = 10_000_000;
+		const writeAt = (name: string, mtimeMs: number): void => {
+			const path = join(project, name);
+			writeFileSync(path, name, "utf8");
+			utimesSync(path, mtimeMs / 1_000, mtimeMs / 1_000);
+		};
+		writeAt("pi-subagent-10000000000000-aaaaaaaaaaaa-newest.md", now - 100);
+		writeAt("pi-subagent-10000000000001-bbbbbbbbbbbb-second.md", now - 200);
+		writeAt("pi-subagent-10000000000002-cccccccccccc-overflow.md", now - 300);
+		writeAt("pi-subagent-10000000000003-dddddddddddd-expired.md", now - 2_000);
+		writeAt("unknown.md", now - 2_000);
+		writeAt("unrelated.txt", now - 2_000);
+
+		pruneResultArtifacts(root, { now, maxAgeMs: 1_000, maxFilesPerProject: 2 });
+
+		expect(readdirSync(project).sort()).toEqual([
+			"pi-subagent-10000000000000-aaaaaaaaaaaa-newest.md",
+			"pi-subagent-10000000000001-bbbbbbbbbbbb-second.md",
+			"unknown.md",
+			"unrelated.txt",
+		]);
+		rmSync(root, { recursive: true, force: true });
 	});
 });

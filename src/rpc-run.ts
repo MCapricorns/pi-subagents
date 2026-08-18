@@ -52,18 +52,23 @@ export interface RpcSingleResult {
 	thinking?: string;
 	stopReason?: string;
 	errorMessage?: string;
-	/** Primary model when this result came from a later candidate in its configured pool. */
+	/** Selected model when this result handed off to the current main model. */
 	modelFallbackFrom?: string;
 	dispatchFailed?: boolean;
 	/** An accepted generation failed because an RPC prompt was rejected before
-	 * model execution. This remains model-candidate retry/fallback eligible even
-	 * when an earlier, aborted objective left assistant text in the session. */
+	 * model execution. This remains main-model handoff eligible even when an
+	 * earlier, aborted objective left assistant text in the session. */
 	rpcPromptRejected?: boolean;
+	/** The child accepted a prompt; startup retries must never duplicate it. */
+	rpcPromptAccepted?: boolean;
+	/** Pi emitted agent/turn/model/tool activity for this attempt. */
+	rpcActivity?: boolean;
 	startupRetries?: number;
-	modelRetries?: number;
 	failedTools?: Array<{ toolName: string; error: string }>;
 	sessionId?: string;
 	sessionDir?: string;
+	/** Original task/project cwd used for result-artifact retention buckets. */
+	projectCwd?: string;
 	/** Internal disposition: dispatch suppresses completion delivery for parks. */
 	parked?: boolean;
 	/** Stable logical run id assigned by dispatch (also present on queued results). */
@@ -84,7 +89,7 @@ export interface RpcSingleResult {
 
 export type SubagentLiveEvent =
 	| { kind: "status"; status: "queued" | "running" | "steering" | "interrupting" | "parked" | "done" | "failed" }
-	| { kind: "model"; model?: string; fallbackFrom?: string }
+	| { kind: "model"; model?: string; thinking?: ThinkingLevel; fallbackFrom?: string }
 	| { kind: "usage"; usage: UsageStats; model?: string }
 	| { kind: "tool_start"; toolCallId?: string; toolName: string; args: unknown }
 	| { kind: "tool_end"; toolCallId?: string; toolName: string; isError: boolean }
@@ -110,7 +115,7 @@ interface AttemptControl {
 }
 
 /**
- * Stable control surface for a logical run generation. Retry/fallback attempts
+ * Stable control surface for a logical run generation. Startup/main-handoff attempts
  * attach and detach beneath it, so callers never retain a stale child handle.
  * Control calls are serialized to prevent overlapping abort/settle/prompt flows.
  */
@@ -338,6 +343,46 @@ export function extractToolErrorText(content: unknown): string {
 		.join("\n");
 }
 
+interface ChildRetryPolicyExtension {
+	dir: string;
+	filePath: string;
+}
+
+/** Build a child-only Pi extension that replaces the selected provider's
+ * stream adapter with its registered API implementation while forcing
+ * maxRetries=0. It uses Pi's public extension and pi-ai compatibility APIs, so
+ * it works in Node and standalone/Bun builds without touching user settings. */
+export async function writeChildRetryPolicyExtension(
+	modelRef?: string,
+): Promise<ChildRetryPolicyExtension> {
+	const dir = await mkdtemp(join(tmpdir(), "pi-subagents-policy-"));
+	const filePath = join(dir, "no-provider-retries.mjs");
+	const slash = modelRef?.indexOf("/") ?? -1;
+	const selectedProvider = slash > 0 ? modelRef!.slice(0, slash) : undefined;
+	const source = `import { getApiProvider } from "@earendil-works/pi-ai/compat";\n`
+		+ `const selectedProvider = ${JSON.stringify(selectedProvider)};\n`
+		+ `export default function noProviderRetries(pi) {\n`
+		+ `  pi.on("before_provider_request", (_event, ctx) => {\n`
+		+ `    const providerId = ctx.model?.provider ?? selectedProvider;\n`
+		+ `    if (!providerId) return;\n`
+		+ `    pi.registerProvider(providerId, {\n`
+		+ `      streamSimple(model, context, options) {\n`
+		+ `        const api = getApiProvider(model.api);\n`
+		+ `        if (!api) throw new Error(\`No API stream implementation is registered for \${model.api}.\`);\n`
+		+ `        return api.streamSimple(model, context, { ...options, maxRetries: 0 });\n`
+		+ `      },\n`
+		+ `    });\n`
+		+ `  });\n`
+		+ `}\n`;
+	try {
+		await writeFile(filePath, source, "utf8");
+		return { dir, filePath };
+	} catch (error) {
+		await rm(dir, { recursive: true, force: true }).catch(() => undefined);
+		throw error;
+	}
+}
+
 async function writePromptToTempFile(agentName: string, prompt: string): Promise<{ dir: string; filePath: string }> {
 	const dir = await mkdtemp(join(tmpdir(), "pi-subagents-"));
 	const safeName = agentName.replace(/[^\w.-]+/g, "_");
@@ -420,6 +465,15 @@ export async function runRpcAgentAttempt(options: RunRpcAttemptOptions): Promise
 		tmpPromptDir = tmp.dir;
 		tmpPromptPath = tmp.filePath;
 		args.push("--append-system-prompt", tmpPromptPath);
+	}
+
+	let retryPolicy: ChildRetryPolicyExtension;
+	try {
+		retryPolicy = await writeChildRetryPolicyExtension(agent.model);
+		args.push("--extension", retryPolicy.filePath);
+	} catch (error) {
+		if (tmpPromptDir) await rm(tmpPromptDir, { recursive: true, force: true }).catch(() => undefined);
+		throw error;
 	}
 
 	const result: RpcSingleResult = {
@@ -512,6 +566,7 @@ export async function runRpcAgentAttempt(options: RunRpcAttemptOptions): Promise
 	const resolveInitialPrompt = (accepted: boolean, error?: Error): void => {
 		if (initialPromptResolved) return;
 		initialPromptResolved = true;
+		if (accepted) result.rpcPromptAccepted = true;
 		initialPrompt.resolve({ accepted, error });
 	};
 
@@ -737,6 +792,33 @@ export async function runRpcAgentAttempt(options: RunRpcAttemptOptions): Promise
 			}
 		}
 		if (finished) return;
+
+		if (
+			[
+				"agent_start",
+				"agent_end",
+				"turn_start",
+				"turn_end",
+				"message_start",
+				"message_update",
+				"message_end",
+				"tool_execution_start",
+				"tool_execution_update",
+				"tool_execution_end",
+				"auto_retry_start",
+				"auto_retry_end",
+				"agent_settled",
+			].includes(event.type)
+		) {
+			result.rpcActivity = true;
+		}
+
+		// The child provider adapter disables request-level retries. Cancel Pi's
+		// separate outer turn retry the instant it is scheduled, before another
+		// same-model provider call can begin.
+		if (event.type === "auto_retry_start") {
+			void send({ type: "abort_retry" }).catch(() => undefined);
+		}
 
 		// Child RPC mode exposes extension dialogs. Sub-agents are non-interactive:
 		// cancel blocking dialogs so an unrelated child extension cannot deadlock.
@@ -973,5 +1055,6 @@ export async function runRpcAgentAttempt(options: RunRpcAttemptOptions): Promise
 				/* ignore */
 			}
 		}
+		await rm(retryPolicy.dir, { recursive: true, force: true }).catch(() => undefined);
 	}
 }

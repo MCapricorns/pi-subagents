@@ -5,6 +5,7 @@ import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { loadConfig, saveConfig } from "./config.ts";
 import { announceRecoveryRecords } from "./recovery.ts";
 import type { SubagentRuntime } from "./runtime.ts";
+import { pruneResultArtifacts } from "./spawn.ts";
 import { installActiveRunsWidget } from "./widget.ts";
 
 const ANNOUNCEMENTS: Array<{
@@ -60,6 +61,7 @@ async function announceNewFeatures(
 
 export function registerAnnouncements(pi: ExtensionAPI, runtime: SubagentRuntime): void {
 	pi.on("session_start", async (_event, ctx) => {
+		pruneResultArtifacts();
 		await announceRecoveryRecords(runtime.configPath, ctx);
 		if (ctx.mode !== "tui") return;
 		installActiveRunsWidget(ctx);

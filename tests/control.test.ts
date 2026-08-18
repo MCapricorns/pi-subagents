@@ -415,7 +415,7 @@ describe("queued controls and stale generations", () => {
 		writeFileSync(join(testDir, "pi-subagents.json"), JSON.stringify({ maxConcurrency: 1 }), "utf8");
 		const oldSessionDir = mkdtempSync(join(testDir, "completed-session-"));
 		writeFileSync(join(oldSessionDir, "retained.txt"), "old retained context", "utf8");
-		vi.spyOn(spawn, "runSingleAgentWithModelFallback").mockImplementation(async (options: any) => {
+		vi.spyOn(spawn, "runSingleAgentWithMainFallback").mockImplementation(async (options: any) => {
 			if (options.task === "Completed objective") {
 				return {
 					agent: "worker",
@@ -487,7 +487,7 @@ describe("queued controls and stale generations", () => {
 		});
 		const sessionDir = mkdtempSync(join(testDir, "retry-park-session-"));
 		writeFileSync(join(sessionDir, "now_retry-park.jsonl"), "", "utf8");
-		const runSpy = vi.spyOn(spawn, "runSingleAgentWithModelFallback")
+		const runSpy = vi.spyOn(spawn, "runSingleAgentWithMainFallback")
 			.mockImplementationOnce(async (options: any) => {
 				options.control.markRetrying();
 				return firstResult;
@@ -550,7 +550,7 @@ describe("queued controls and stale generations", () => {
 		});
 		const sessionDir = mkdtempSync(join(testDir, "resume-race-session-"));
 		writeFileSync(join(sessionDir, "now_resume-race.jsonl"), "", "utf8");
-		const runSpy = vi.spyOn(spawn, "runSingleAgentWithModelFallback").mockResolvedValue({
+		const runSpy = vi.spyOn(spawn, "runSingleAgentWithMainFallback").mockResolvedValue({
 			agent: "worker",
 			task: "race",
 			exitCode: 0,
@@ -591,7 +591,7 @@ describe("queued controls and stale generations", () => {
 		const sessionDir = mkdtempSync(join(testDir, "retained-session-"));
 		writeFileSync(join(sessionDir, "now_id.jsonl"), "", "utf8");
 		let staleLive: ((event: any) => void) | undefined;
-		const runSpy = vi.spyOn(spawn, "runSingleAgentWithModelFallback")
+		const runSpy = vi.spyOn(spawn, "runSingleAgentWithMainFallback")
 			.mockImplementationOnce(async (options: any) => {
 				staleLive = options.onLive;
 				return {

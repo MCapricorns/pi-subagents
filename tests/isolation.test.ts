@@ -403,7 +403,7 @@ describe("logical worktree reuse and guarded finalization", () => {
 			return controller;
 		});
 		const sessionDir = mkdtempSync(join(tmpdir(), "pi-subagents-isolation-session-"));
-		const run = vi.spyOn(spawnModule, "runSingleAgentWithModelFallback")
+		const run = vi.spyOn(spawnModule, "runSingleAgentWithMainFallback")
 			.mockResolvedValueOnce(emptyResult("park me", {
 				parked: true,
 				sessionId: "session-1",
@@ -442,7 +442,7 @@ describe("logical worktree reuse and guarded finalization", () => {
 		});
 		const retained = createRetainedSession(firstHandle.cwd);
 		let resumedOptions: any;
-		vi.spyOn(spawnModule, "runSingleAgentWithModelFallback")
+		vi.spyOn(spawnModule, "runSingleAgentWithMainFallback")
 			.mockResolvedValueOnce(emptyResult("generation one", {
 				sessionId: retained.id,
 				sessionDir: retained.dir,
@@ -506,7 +506,7 @@ describe("logical worktree reuse and guarded finalization", () => {
 			return controller;
 		});
 		const retained = createRetainedSession(firstHandle.cwd);
-		vi.spyOn(spawnModule, "runSingleAgentWithModelFallback")
+		vi.spyOn(spawnModule, "runSingleAgentWithMainFallback")
 			.mockResolvedValueOnce(emptyResult("generation one", {
 				sessionId: retained.id,
 				sessionDir: retained.dir,
@@ -544,7 +544,7 @@ describe("logical worktree reuse and guarded finalization", () => {
 			queued.push(task);
 			return new AbortController();
 		});
-		const run = vi.spyOn(spawnModule, "runSingleAgentWithModelFallback").mockResolvedValue(emptyResult("replacement"));
+		const run = vi.spyOn(spawnModule, "runSingleAgentWithMainFallback").mockResolvedValue(emptyResult("replacement"));
 		const { subagent, control } = registered();
 		const dispatched = await execute(subagent, { agent: "worker", task: "old", isolation: "worktree" }, root);
 		const runId = dispatched.details.results[0].runId;
@@ -559,7 +559,7 @@ describe("logical worktree reuse and guarded finalization", () => {
 		rmSync(root, { recursive: true, force: true });
 	});
 
-	it("passes one worktree through the full model candidate pool", async () => {
+	it("passes one worktree through the selected-to-main model route", async () => {
 		const root = mkdtempSync(join(tmpdir(), "pi-subagents-isolation-model-"));
 		const handle = fakeWorktree(root);
 		const create = vi.spyOn(worktreeModule, "createWorktreeIsolation").mockResolvedValue(handle);
@@ -568,14 +568,14 @@ describe("logical worktree reuse and guarded finalization", () => {
 			queued = task;
 			return new AbortController();
 		});
-		const run = vi.spyOn(spawnModule, "runSingleAgentWithModelFallback").mockResolvedValue(emptyResult("pool"));
+		const run = vi.spyOn(spawnModule, "runSingleAgentWithMainFallback").mockResolvedValue(emptyResult("route"));
 		const { subagent } = registered();
-		await execute(subagent, { agent: "worker", task: "pool", isolation: "worktree" }, root);
+		await execute(subagent, { agent: "worker", task: "route", isolation: "worktree" }, root);
 		await queued(new AbortController().signal);
 		expect(create).toHaveBeenCalledTimes(1);
 		expect(run).toHaveBeenCalledTimes(1);
 		expect(run.mock.calls[0][0].cwd).toBe(handle.cwd);
-		expect(Array.isArray(run.mock.calls[0][1])).toBe(true);
+		expect(run.mock.calls[0][1]).toBeUndefined();
 		expect(handle.finalizeMock).toHaveBeenCalledTimes(1);
 		rmSync(root, { recursive: true, force: true });
 	});
@@ -591,7 +591,7 @@ describe("logical worktree reuse and guarded finalization", () => {
 			return controller;
 		});
 		const first = deferred<any>();
-		vi.spyOn(spawnModule, "runSingleAgentWithModelFallback")
+		vi.spyOn(spawnModule, "runSingleAgentWithMainFallback")
 			.mockImplementationOnce(async (options: any) => {
 				options.onLive?.({ kind: "status", status: "running" });
 				return first.promise;
@@ -618,7 +618,7 @@ describe("logical worktree reuse and guarded finalization", () => {
 		const handle = fakeWorktree(root);
 		handle.finalizeMock.mockImplementation(() => finalization.promise);
 		vi.spyOn(worktreeModule, "createWorktreeIsolation").mockResolvedValue(handle);
-		vi.spyOn(spawnModule, "runSingleAgentWithModelFallback").mockImplementation(async (options: any) => {
+		vi.spyOn(spawnModule, "runSingleAgentWithMainFallback").mockImplementation(async (options: any) => {
 			options.onLive?.({ kind: "status", status: "running" });
 			return emptyResult("settling");
 		});
@@ -648,7 +648,7 @@ describe("logical worktree reuse and guarded finalization", () => {
 		const handle = fakeWorktree(root);
 		handle.finalizeMock.mockImplementation(() => finalization.promise);
 		vi.spyOn(worktreeModule, "createWorktreeIsolation").mockResolvedValue(handle);
-		vi.spyOn(spawnModule, "runSingleAgentWithModelFallback").mockResolvedValue(emptyResult("stop while settling"));
+		vi.spyOn(spawnModule, "runSingleAgentWithMainFallback").mockResolvedValue(emptyResult("stop while settling"));
 		const { stub, subagent, stop, status } = registered();
 		const dispatched = await execute(subagent, {
 			agent: "worker",
@@ -695,7 +695,7 @@ describe("logical worktree reuse and guarded finalization", () => {
 			queued = task;
 			return new AbortController();
 		});
-		vi.spyOn(spawnModule, "runSingleAgentWithModelFallback").mockResolvedValue(emptyResult("conflict"));
+		vi.spyOn(spawnModule, "runSingleAgentWithMainFallback").mockResolvedValue(emptyResult("conflict"));
 		const { stub, subagent, status } = registered();
 		const dispatched = await execute(subagent, { agent: "worker", task: "conflict", isolation: "worktree" }, root);
 		const runId = dispatched.details.results[0].runId;
@@ -720,7 +720,7 @@ describe("shutdown and destructive-stop integration", () => {
 		const handle = fakeWorktree(root);
 		handle.finalizeMock.mockImplementation(() => finalization.promise);
 		vi.spyOn(worktreeModule, "createWorktreeIsolation").mockResolvedValue(handle);
-		vi.spyOn(spawnModule, "runSingleAgentWithModelFallback").mockImplementation(async (options: any) => {
+		vi.spyOn(spawnModule, "runSingleAgentWithMainFallback").mockImplementation(async (options: any) => {
 			options.onLive?.({ kind: "status", status: "running" });
 			await new Promise<void>((resolve) => {
 				if (options.signal.aborted) resolve();
@@ -780,7 +780,7 @@ describe("shutdown and destructive-stop integration", () => {
 				return controller;
 			});
 			const retained = createRetainedSession(firstHandle.cwd);
-			vi.spyOn(spawnModule, "runSingleAgentWithModelFallback").mockResolvedValue(
+			vi.spyOn(spawnModule, "runSingleAgentWithMainFallback").mockResolvedValue(
 				emptyResult("source", { sessionId: retained.id, sessionDir: retained.dir }),
 			);
 			const { stub, subagent, control } = registered();
@@ -824,7 +824,7 @@ describe("shutdown and destructive-stop integration", () => {
 			return controller;
 		});
 		const retained = createRetainedSession(firstHandle.cwd);
-		vi.spyOn(spawnModule, "runSingleAgentWithModelFallback").mockResolvedValue(
+		vi.spyOn(spawnModule, "runSingleAgentWithMainFallback").mockResolvedValue(
 			emptyResult("source", { sessionId: retained.id, sessionDir: retained.dir }),
 		);
 		const { stub, subagent, control } = registered();
@@ -863,7 +863,7 @@ describe("shutdown and destructive-stop integration", () => {
 		writeFileSync(join(root, "parked.txt"), "base\n", "utf8");
 		git(["add", "."]);
 		git(["commit", "-m", "base"]);
-		vi.spyOn(spawnModule, "runSingleAgentWithModelFallback").mockImplementation(async (options: any) => {
+		vi.spyOn(spawnModule, "runSingleAgentWithMainFallback").mockImplementation(async (options: any) => {
 			writeFileSync(join(options.cwd, "parked.txt"), "parked worker edit\n", "utf8");
 			return emptyResult("parked", { parked: true });
 		});
@@ -888,7 +888,7 @@ describe("shutdown and destructive-stop integration", () => {
 		git(["add", "."]);
 		git(["commit", "-m", "base"]);
 
-		vi.spyOn(spawnModule, "runSingleAgentWithModelFallback").mockImplementation(async (options: any) => {
+		vi.spyOn(spawnModule, "runSingleAgentWithMainFallback").mockImplementation(async (options: any) => {
 			writeFileSync(join(options.cwd, "partial.txt"), "partial worker edit\n", "utf8");
 			options.onLive?.({ kind: "status", status: "running" });
 			await new Promise<void>((resolve) => {

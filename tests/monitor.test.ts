@@ -71,12 +71,12 @@ describe("MonitorStore", () => {
 		expect(run.usage.cost).toBe(0.5);
 	});
 
-	it("setModel records the final pool candidate and fallback origin", () => {
+	it("setModel records the main handoff and failed selection", () => {
 		const store = new MonitorStore();
 		const id = store.addRun("worker", "Implement the change", "anthropic/primary");
-		store.setModel(id, "openai/backup", "anthropic/primary");
-		expect(store.getRuns()[0].model).toBe("openai/backup");
-		expect(store.getRuns()[0].modelFallbackFrom).toBe("anthropic/primary");
+		store.setModel(id, "openai/main", "anthropic/selected");
+		expect(store.getRuns()[0].model).toBe("openai/main");
+		expect(store.getRuns()[0].modelFallbackFrom).toBe("anthropic/selected");
 	});
 
 	it("clear removes all runs without resetting the id counter", () => {

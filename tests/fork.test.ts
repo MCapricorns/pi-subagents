@@ -276,7 +276,7 @@ describe("subagent_control fork", () => {
 		const source = createSession(cwd);
 		tempPaths.push(source.dir);
 		const queued = captureQueue();
-		const run = vi.spyOn(spawnModule, "runSingleAgentWithModelFallback").mockImplementation(async (options: any) =>
+		const run = vi.spyOn(spawnModule, "runSingleAgentWithMainFallback").mockImplementation(async (options: any) =>
 			result(options.task, {
 				id: options.sessionId ?? source.id,
 				dir: options.sessionDir ?? source.dir,
@@ -318,7 +318,7 @@ describe("subagent_control fork", () => {
 		const sourceBytes = readFileSync(source.file);
 		const queued = captureQueue();
 		let childOptions: any;
-		const run = vi.spyOn(spawnModule, "runSingleAgentWithModelFallback")
+		const run = vi.spyOn(spawnModule, "runSingleAgentWithMainFallback")
 			.mockResolvedValueOnce(result("source task", { id: source.id, dir: source.dir }))
 			.mockImplementationOnce(async (options: any) => {
 				childOptions = options;
@@ -368,7 +368,7 @@ describe("subagent_control fork", () => {
 		tempPaths.push(source.dir);
 		const queued = captureQueue();
 		let childOptions: any;
-		vi.spyOn(spawnModule, "runSingleAgentWithModelFallback")
+		vi.spyOn(spawnModule, "runSingleAgentWithMainFallback")
 			.mockResolvedValueOnce(result("parked task", { id: source.id, dir: source.dir }, { parked: true }))
 			.mockImplementationOnce(async (options: any) => {
 				childOptions = options;
@@ -397,7 +397,7 @@ describe("subagent_control fork", () => {
 		const queued = captureQueue();
 		const handle = fakeWorktree(cwd);
 		vi.spyOn(worktreeModule, "createWorktreeIsolation").mockResolvedValue(handle);
-		vi.spyOn(spawnModule, "runSingleAgentWithModelFallback").mockResolvedValue(
+		vi.spyOn(spawnModule, "runSingleAgentWithMainFallback").mockResolvedValue(
 			result("parked isolated", { id: source.id, dir: source.dir }, { parked: true }),
 		);
 		const { subagent, control } = registered();
@@ -421,7 +421,7 @@ describe("subagent_control fork", () => {
 		const source = createSession(cwd);
 		tempPaths.push(source.dir);
 		const queued = captureQueue();
-		vi.spyOn(spawnModule, "runSingleAgentWithModelFallback").mockResolvedValueOnce(
+		vi.spyOn(spawnModule, "runSingleAgentWithMainFallback").mockResolvedValueOnce(
 			result("failed task", { id: source.id, dir: source.dir }, {
 				exitCode: 1,
 				stopReason: "error",
@@ -443,7 +443,7 @@ describe("subagent_control fork", () => {
 		tempPaths.push(cwd);
 		const queued = captureQueue();
 		const activeGate = new Promise<any>(() => {});
-		vi.spyOn(spawnModule, "runSingleAgentWithModelFallback").mockImplementation(async (options: any) => {
+		vi.spyOn(spawnModule, "runSingleAgentWithMainFallback").mockImplementation(async (options: any) => {
 			const token = options.control.beginAttempt();
 			options.control.attach(token, {
 				steer: async () => {},
@@ -475,7 +475,7 @@ describe("subagent_control fork", () => {
 		vi.spyOn(worktreeModule, "createWorktreeIsolation").mockImplementation(async () => fakeWorktree(cwd));
 		const source = createSession(cwd);
 		tempPaths.push(source.dir);
-		vi.spyOn(spawnModule, "runSingleAgentWithModelFallback").mockResolvedValue(
+		vi.spyOn(spawnModule, "runSingleAgentWithMainFallback").mockResolvedValue(
 			result("isolated", { id: source.id, dir: source.dir }),
 		);
 		const second = registered();
@@ -498,7 +498,7 @@ describe("subagent_control fork", () => {
 		const source = createSession(cwd);
 		tempPaths.push(source.dir);
 		const queued = captureQueue();
-		vi.spyOn(spawnModule, "runSingleAgentWithModelFallback").mockResolvedValue(
+		vi.spyOn(spawnModule, "runSingleAgentWithMainFallback").mockResolvedValue(
 			result("source", { id: source.id, dir: source.dir }),
 		);
 		const { subagent, control, stop } = registered();
@@ -541,7 +541,7 @@ describe("subagent_control fork", () => {
 		const source = createSession(cwd);
 		tempPaths.push(source.dir);
 		const queued = captureQueue();
-		vi.spyOn(spawnModule, "runSingleAgentWithModelFallback").mockResolvedValue(
+		vi.spyOn(spawnModule, "runSingleAgentWithMainFallback").mockResolvedValue(
 			result("source", { id: source.id, dir: source.dir }),
 		);
 		const { subagent, control, stop } = registered();

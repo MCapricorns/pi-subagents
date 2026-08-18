@@ -73,25 +73,32 @@ export function formatUsage(usage: UsageStats): string {
 	return parts.join(" ");
 }
 
-export function formatCompletionBlock(result: SingleResult, maxResultLines: number, cwd?: string): string {
+export interface CompletionFormatOptions {
+	/** Include individual failed-tool errors. Reserved for explicit status lookup. */
+	failedToolDetails?: boolean;
+}
+
+export function formatCompletionBlock(
+	result: SingleResult,
+	maxResultLines: number,
+	cwd?: string,
+	options: CompletionFormatOptions = {},
+): string {
 	const failed = isFailedResult(result);
 	const failedTools = result.failedTools ?? [];
 	const status = failed
 		? "failed"
-		: failedTools.length > 0
+		: options.failedToolDetails && failedTools.length > 0
 			? `completed with ${failedTools.length} failed tool call${failedTools.length === 1 ? "" : "s"}`
 			: "completed";
 	const usage = formatUsage(result.usage);
 	const output = getResultOutput(result);
 	const { text, truncated } = truncateResultOutput(output, maxResultLines);
 	const fallbackNote = result.modelFallbackFrom
-		? ` (model pool fallback: primary ${result.modelFallbackFrom} → final ${result.model ?? "dynamic default"})`
+		? ` (selected model ${result.modelFallbackFrom} failed → main ${result.model ?? "dynamic default"})`
 		: "";
 	const startupRetryNote = result.startupRetries
 		? ` (recovered after ${result.startupRetries} startup retr${result.startupRetries === 1 ? "y" : "ies"} — concurrent pi startup race)`
-		: "";
-	const modelRetryNote = result.modelRetries
-		? ` (recovered after ${result.modelRetries} same-model retr${result.modelRetries === 1 ? "y" : "ies"} on a transient provider error)`
 		: "";
 	const relations = [
 		result.forkedFromRunId !== undefined ? `forked from #${result.forkedFromRunId}` : undefined,
@@ -99,7 +106,7 @@ export function formatCompletionBlock(result: SingleResult, maxResultLines: numb
 	].filter((value): value is string => Boolean(value));
 	const relationNote = relations.length > 0 ? ` · ${relations.join(" · ")}` : "";
 	const runNote = result.runId !== undefined ? ` · run #${result.runId}` : "";
-	const lines = [`### [${result.agent}] ${status}${usage ? ` (${usage})` : ""}${fallbackNote}${startupRetryNote}${modelRetryNote}${runNote}`, "", `Task: ${formatTaskSummary(result.task, 80, false)}`, ""];
+	const lines = [`### [${result.agent}] ${status}${usage ? ` (${usage})` : ""}${fallbackNote}${startupRetryNote}${runNote}`, "", `Task: ${formatTaskSummary(result.task, 80, false)}`, ""];
 	if (result.isolation === "worktree") {
 		const isolation =
 			result.integrationStatus === "integrated"
@@ -120,23 +127,22 @@ export function formatCompletionBlock(result: SingleResult, maxResultLines: numb
 		lines.push(`Relation: ${relations.join(" · ")}`, "");
 	}
 	lines.push(text);
-	// A run can exit cleanly while its last tools failed (e.g. a build that broke):
-	// the final text alone may claim more than the tools achieved, so surface the
-	// failures explicitly and tell the main agent to verify before relying on it.
-	if (!failed && failedTools.length > 0) {
-		const shown = failedTools.slice(0, 3);
-		const more = failedTools.length - shown.length;
+	// Explicit status always exposes every retained diagnostic, including when
+	// the overall run failed or was aborted. Automatic delivery adds only a
+	// compact pointer for otherwise-clean runs.
+	if (options.failedToolDetails && failedTools.length > 0) {
 		lines.push(
 			"",
-			`⚠ ${failedTools.length} tool call${failedTools.length === 1 ? "" : "s"} failed during this run — the final text above may not reflect a working state:`,
-			...shown.map((tool) => `- ${tool.toolName}: ${tool.error.trim() || "(no output)"}`),
+			`⚠ ${failedTools.length} failed tool call${failedTools.length === 1 ? "" : "s"}:`,
+			...failedTools.map((tool) => `- ${tool.toolName}: ${tool.error.trim() || "(no output)"}`),
 		);
-		if (more > 0) lines.push(`- … and ${more} more`);
-		lines.push("Verify the actual artifacts before relying on this report.");
+	} else if (!failed && failedTools.length > 0) {
+		const lookup = result.runId !== undefined ? ` · details: subagent_status #${result.runId}` : "";
+		lines.push("", `⚠ ${failedTools.length} failed tool call${failedTools.length === 1 ? "" : "s"}${lookup}`);
 	}
 	if (truncated) {
 		// The full text lives on disk so the main agent can read it on demand.
-		lines.push("", `(output truncated to ${maxResultLines} lines; full result: ${writeResultArtifact(output, result.agent, cwd)})`);
+		lines.push("", `(output truncated to ${maxResultLines} lines; full result: ${writeResultArtifact(output, result.agent, result.projectCwd ?? cwd)})`);
 	}
 	return lines.join("\n");
 }
@@ -148,15 +154,12 @@ export function formatCompletionBlock(result: SingleResult, maxResultLines: numb
  * RESUME it in-context once a model is available, instead of re-dispatching
  * fresh (which would re-scan everything). */
 export function modelLevelTakeoverNote(result: SingleResult, opts?: { runId?: number }): string {
-	const sameModel = result.modelRetries
-		? `, after ${result.modelRetries} same-model retr${result.modelRetries === 1 ? "y" : "ies"} on transient errors`
-		: "";
-	const retry = result.modelFallbackFrom ? ", and the configured backup chain also failed" : "";
+	const retry = result.modelFallbackFrom ? ", and the current main model also failed" : "";
 	const sessionPreserved = Boolean(result.sessionDir && result.sessionId) && opts?.runId !== undefined;
 	const recovery = sessionPreserved
 		? ` The sub-agent's earlier work in this run is preserved. Once a model is available again, call subagent_control with { action: "resume", id: ${opts!.runId} } to CONTINUE it in-context (it keeps the same run id and does not re-scan), or execute the task in the main window with your own tools.`
 		: ` Please execute this task in the main window with your own tools; do not re-dispatch it as a sub-agent.`;
-	return `The sub-agent could not complete this task: its model was unavailable or failed (or the run stalled)${sameModel}${retry}.${recovery}`;
+	return `The sub-agent could not complete this task: its model was unavailable or failed (or the run stalled)${retry}.${recovery}`;
 }
 
 /** Resolve a run-id request to actual ids: an exact numeric match always wins

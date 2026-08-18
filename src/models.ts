@@ -1,22 +1,26 @@
 /*
- * Model-pool resolution and setup-picker helpers.
+ * Model routing, capability-aware thinking, and setup-picker helpers.
  *
- * Runtime pools deliberately do not filter configured references by current
- * availability: a stale primary/backup is attempted and normal provider/model
- * failure handling advances to the next candidate. Setup uses the same catalog
- * only for honest availability labels; it never rewrites persisted choices.
+ * Runtime has one explicit fallback only: a configured agent/vision model hands
+ * off directly to the current main-window model. Setup lists only currently
+ * available models and derives thinking choices from Pi's model metadata.
  */
 
-import type { Api, Model } from "@earendil-works/pi-ai";
+import {
+	clampThinkingLevel,
+	getSupportedThinkingLevels,
+	type Api,
+	type Model,
+} from "@earendil-works/pi-ai";
 import type { ExtensionContext } from "@earendil-works/pi-coding-agent";
+import { DEFAULT_THINKING_LEVEL, type ThinkingLevel } from "./config.ts";
 
 export type ModelContext = Pick<ExtensionContext, "model" | "modelRegistry"> &
 	Partial<Pick<ExtensionContext, "scopedModels">>;
 
 export const CURRENT_MAIN_MODEL = "__current_main_model__";
 
-export type ModelPoolSlot = "primary" | "backup";
-export type ModelPickerSlot = ModelPoolSlot | "vision";
+export type ModelPickerSlot = "agent" | "vision";
 
 export interface ModelPickerItem {
 	value: string;
@@ -26,34 +30,26 @@ export interface ModelPickerItem {
 
 export type ModelListEntry = Pick<
 	Model<Api>,
-	"provider" | "id" | "name" | "input" | "reasoning"
+	"provider" | "id" | "name" | "input" | "reasoning" | "thinkingLevelMap"
 >;
 
-export interface ResolvedAgentModelPool {
-	/** Effective first candidate. Undefined means let pi use its normal default. */
+export interface ResolvedAgentModelRoute {
+	/** Effective first candidate. Undefined means let Pi use its normal default. */
 	primaryRef?: string;
-	/** Ordered candidates after the primary, already deduplicated. */
-	fallbackModelRefs: string[];
-	/** All known references in runtime order, useful for tests/inspection. */
+	/** Current main-window model when it differs from the selection. */
+	mainFallbackRef?: string;
+	/** Runtime order, useful for status/tests. */
 	candidateRefs: string[];
+	/** Configured ref skipped because Pi does not currently report it available. */
+	unavailableSelectedRef?: string;
 }
 
-export interface AgentModelPoolInput {
-	primaryRef?: string;
-	backupRef?: string;
+export interface AgentModelRouteInput {
+	selectedRef?: string;
 	mainRef?: string;
 	declaredDefaultRef?: string;
-}
-
-export interface AgentModelPoolMaps {
-	agentModels: Record<string, string>;
-	agentBackupModels: Record<string, string>;
-}
-
-export interface AgentModelPoolRow {
-	name: string;
-	primary: string;
-	backup: string;
+	/** When supplied, a configured selection outside this live set is skipped. */
+	availableRefs?: readonly string[];
 }
 
 function cleanModelRef(ref: string | undefined): string | undefined {
@@ -76,62 +72,84 @@ export function currentModelRef(ctx: Pick<ModelContext, "model">): string | unde
  */
 export function availableModelsInScope(ctx: ModelContext): readonly Model<Api>[] {
 	const models = ctx.modelRegistry.getAvailable();
-	// scopedModels was added after the declared Pi 0.80.6 minimum. Treat a
-	// missing field exactly like an empty scope and use the full live registry.
+	// scopedModels was added after the original Pi minimum. Treat a missing field
+	// exactly like an empty scope and use the full live registry.
 	const scopedModels = ctx.scopedModels ?? [];
 	if (scopedModels.length === 0) return models;
 	const scopedRefs = new Set(scopedModels.map((entry) => modelRef(entry.model)));
 	return models.filter((model) => scopedRefs.has(modelRef(model)));
 }
 
+export function findModelByRef(
+	models: readonly Model<Api>[],
+	ref: string | undefined,
+): Model<Api> | undefined {
+	const normalized = cleanModelRef(ref);
+	return normalized ? models.find((model) => modelRef(model) === normalized) : undefined;
+}
+
 /**
- * Resolve one agent's ordered runtime pool:
+ * Resolve one agent's runtime route:
  *
- * configured primary -> configured backup -> current main-window model
+ * configured selection -> current main-window model
  *
- * Without a primary override, the current main model remains the primary; an
- * agent-declared default is used only when no main model exists. Equal refs are
- * removed without consulting availability, so stale refs stay in the chain and
- * fail normally at runtime instead of being silently repaired.
+ * Without an override, current main is primary; the agent-declared default is
+ * used only when no main model exists. A configured selection that Pi no longer
+ * reports as available is skipped immediately instead of spawning a doomed child.
  */
-export function resolveAgentModelPool(input: AgentModelPoolInput): ResolvedAgentModelPool {
+export function resolveAgentModelRoute(input: AgentModelRouteInput): ResolvedAgentModelRoute {
+	const selectedRef = cleanModelRef(input.selectedRef);
 	const mainRef = cleanModelRef(input.mainRef);
-	const primaryRef = cleanModelRef(input.primaryRef) ?? mainRef ?? cleanModelRef(input.declaredDefaultRef);
-	const ordered = [primaryRef, cleanModelRef(input.backupRef), mainRef];
-	const seen = new Set<string>();
-	const candidateRefs: string[] = [];
-	for (const ref of ordered) {
-		if (!ref || seen.has(ref)) continue;
-		seen.add(ref);
-		candidateRefs.push(ref);
-	}
-	const fallbackModelRefs = candidateRefs.filter((ref) => ref !== primaryRef);
-	return { primaryRef, fallbackModelRefs, candidateRefs };
+	const declaredDefaultRef = cleanModelRef(input.declaredDefaultRef);
+	const available = input.availableRefs
+		? new Set(input.availableRefs.map((ref) => ref.trim()).filter(Boolean))
+		: undefined;
+	const selectedAvailable = !selectedRef || !available || available.has(selectedRef);
+	const usableSelectedRef = selectedAvailable ? selectedRef : undefined;
+	const primaryRef = usableSelectedRef ?? mainRef ?? declaredDefaultRef;
+	const ordered = [primaryRef, usableSelectedRef && usableSelectedRef !== mainRef ? mainRef : undefined];
+	const candidateRefs = [...new Set(ordered.filter((ref): ref is string => Boolean(ref)))];
+	return {
+		primaryRef,
+		...(candidateRefs[1] ? { mainFallbackRef: candidateRefs[1] } : {}),
+		candidateRefs,
+		...(!selectedAvailable && selectedRef ? { unavailableSelectedRef: selectedRef } : {}),
+	};
+}
+
+/** The exact levels Pi exposes for this model, including `off` when supported. */
+export function supportedThinkingLevels(model: Model<Api> | undefined): ThinkingLevel[] {
+	return model ? (getSupportedThinkingLevels(model) as ThinkingLevel[]) : [];
+}
+
+/** Clamp an agent preference to the effective model's actual capability map. */
+export function resolveThinkingLevel(
+	model: Model<Api> | undefined,
+	preferred: ThinkingLevel = DEFAULT_THINKING_LEVEL,
+): ThinkingLevel {
+	return model ? (clampThinkingLevel(model, preferred) as ThinkingLevel) : preferred;
 }
 
 function modelCapabilities(model: ModelListEntry): string {
-	const capabilities = [model.input.includes("image") ? "vision" : "text-only"];
-	if (model.reasoning) capabilities.push("reasoning");
-	return capabilities.join(" + ");
+	const input = model.input.includes("image") ? "vision" : "text-only";
+	const thinking = getSupportedThinkingLevels(model as Model<Api>).join("/");
+	return `${input} · thinking: ${thinking}`;
 }
 
-/** Build the single searchable model list shared by primary/backup/vision picks.
- * Only refs Pi currently reports as available are shown, which means providers
- * without a configured API key/OAuth session never flood the setup picker. */
+/** Build one searchable list for agent or vision selection. Only models Pi
+ * currently reports as available are supplied by setup. */
 export function buildModelPickerItems(options: {
 	models: readonly ModelListEntry[];
-	availableRefs: readonly string[];
 	slot: ModelPickerSlot;
 	configuredRef?: string;
 	mainRef?: string;
 }): ModelPickerItem[] {
 	const configuredRef = cleanModelRef(options.configuredRef);
 	const mainRef = cleanModelRef(options.mainRef);
-	const available = new Set(options.availableRefs.map((ref) => ref.trim()));
 	const byRef = new Map<string, ModelListEntry>();
 	for (const model of options.models) {
 		const ref = modelRef(model);
-		if (available.has(ref) && !byRef.has(ref)) byRef.set(ref, model);
+		if (!byRef.has(ref)) byRef.set(ref, model);
 	}
 
 	const refs = [...byRef.keys()]
@@ -142,26 +160,18 @@ export function buildModelPickerItems(options: {
 			return leftRank - rightRank || left.localeCompare(right);
 		});
 
-	const dynamic = options.slot === "backup"
-		? {
-			value: CURRENT_MAIN_MODEL,
-			label: "Current main model (default)",
-			description: "Clear configured backup; use the main-window model dynamically",
-		}
-		: {
-			value: CURRENT_MAIN_MODEL,
-			label: "Current main model (dynamic)",
-			description: options.slot === "vision"
-				? "Clear vision override; use the main-window model for vision tasks"
-				: "Clear primary override; use the main-window model dynamically",
-		};
-
+	const dynamic: ModelPickerItem = {
+		value: CURRENT_MAIN_MODEL,
+		label: "Current main model (dynamic)",
+		description: options.slot === "vision"
+			? "Clear vision override; use the current main model for image tasks"
+			: "Clear agent override; use the current main model dynamically",
+	};
 	const items: ModelPickerItem[] = [dynamic];
 	for (const ref of refs) {
 		const model = byRef.get(ref)!;
-		const tags = ["available"];
-		if (ref === configuredRef) tags.push("configured");
-		if (ref === mainRef) tags.push("current main");
+		const tags = [ref === configuredRef ? "configured" : "", ref === mainRef ? "current main" : ""]
+			.filter(Boolean);
 		const name = model.name.trim() && model.name !== model.id ? model.name.trim() : undefined;
 		items.push({
 			value: ref,
@@ -172,31 +182,14 @@ export function buildModelPickerItems(options: {
 	return items;
 }
 
-/** Pure pool update: the dynamic/default choice removes the persisted override. */
-export function applyModelPoolChoice(
-	current: AgentModelPoolMaps,
+/** The dynamic choice removes the persisted per-agent override. */
+export function applyAgentModelChoice(
+	current: Record<string, string>,
 	agentName: string,
-	slot: ModelPoolSlot,
 	choice: string,
-): AgentModelPoolMaps {
-	const next: AgentModelPoolMaps = {
-		agentModels: { ...current.agentModels },
-		agentBackupModels: { ...current.agentBackupModels },
-	};
-	const target = slot === "primary" ? next.agentModels : next.agentBackupModels;
-	if (choice === CURRENT_MAIN_MODEL) delete target[agentName];
-	else target[agentName] = choice.trim();
+): Record<string, string> {
+	const next = { ...current };
+	if (choice === CURRENT_MAIN_MODEL) delete next[agentName];
+	else next[agentName] = choice.trim();
 	return next;
-}
-
-/** Pure rows used by the overview component and focused helper tests. */
-export function buildAgentModelPoolRows(
-	agentNames: readonly string[],
-	pools: AgentModelPoolMaps,
-): AgentModelPoolRow[] {
-	return agentNames.map((name) => ({
-		name,
-		primary: pools.agentModels[name] ?? "Main (dynamic)",
-		backup: pools.agentBackupModels[name] ?? "Main (default)",
-	}));
 }
