@@ -67,9 +67,11 @@ describe("configured-agent flow", () => {
 			thinkingLevelMap: { medium: null, xhigh: null, max: null },
 		};
 		const screens: string[] = [];
+		let agentPickerVisits = 0;
 		const keybindings = {
 			matches(data: string, action: string) {
-				return data === "enter" && action === "tui.select.confirm";
+				return (data === "enter" && action === "tui.select.confirm")
+					|| (data === "escape" && action === "tui.select.cancel");
 			},
 		};
 		const ctx: any = {
@@ -89,8 +91,14 @@ describe("configured-agent flow", () => {
 						keybindings,
 						resolve,
 					);
-					screens.push(component.render(160).join("\n"));
-					component.handleInput("enter");
+					const screen = component.render(160).join("\n");
+					screens.push(screen);
+					if (screen.includes("Configure which agent?")) {
+						agentPickerVisits += 1;
+						component.handleInput(agentPickerVisits === 1 ? "enter" : "escape");
+					} else {
+						component.handleInput("enter");
+					}
 				}),
 			},
 		};
@@ -107,6 +115,89 @@ describe("configured-agent flow", () => {
 			expect(thinkingScreen).not.toContain("max —");
 			const saved = JSON.parse(readFileSync(configPath, "utf8"));
 			expect(saved.agentThinkingLevels).toEqual({});
+			expect(agentPickerVisits).toBe(2);
+		} finally {
+			rmSync(dir, { recursive: true, force: true });
+		}
+	});
+
+	it("returns to the agent picker after a model pick so another agent can be set", async () => {
+		const dir = mkdtempSync(join(tmpdir(), "pi-subagents-setup-loop-"));
+		const configPath = join(dir, "pi-subagents.json");
+		writeFileSync(configPath, JSON.stringify({ enabledAgents: ["explore", "worker"] }), "utf8");
+		const haiku = {
+			provider: "anthropic",
+			id: "haiku",
+			name: "Haiku",
+			input: ["text"],
+			reasoning: false,
+		};
+		const sonnet = {
+			provider: "anthropic",
+			id: "sonnet",
+			name: "Sonnet",
+			input: ["text"],
+			reasoning: false,
+		};
+		const screens: string[] = [];
+		let agentPickerVisits = 0;
+		const keybindings = {
+			matches(data: string, action: string) {
+				return (data === "enter" && action === "tui.select.confirm")
+					|| (data === "escape" && action === "tui.select.cancel")
+					|| (data === "down" && action === "tui.select.down");
+			},
+		};
+		const ctx: any = {
+			mode: "tui",
+			cwd: dir,
+			isProjectTrusted: () => true,
+			model: haiku,
+			modelRegistry: { getAvailable: () => [haiku, sonnet] },
+			ui: {
+				notify: vi.fn(),
+				select: vi.fn(async (_title: string, options: string[]) =>
+					options.find((option) => option.startsWith("Configure an agent"))),
+				custom: (factory: any) => new Promise((resolve) => {
+					const component = factory(
+						{ requestRender: () => {} },
+						{ fg: (_color: string, text: string) => text, bold: (text: string) => text },
+						keybindings,
+						resolve,
+					);
+					const screen = component.render(160).join("\n");
+					screens.push(screen);
+					if (screen.includes("Configure which agent?")) {
+						agentPickerVisits += 1;
+						if (agentPickerVisits === 1) component.handleInput("enter");
+						else if (agentPickerVisits === 2) {
+							component.handleInput("down");
+							component.handleInput("enter");
+						} else {
+							component.handleInput("escape");
+						}
+					} else if (screen.includes('Model for "explore"?')) {
+						component.handleInput("down");
+						component.handleInput("enter");
+					} else if (screen.includes('Model for "worker"?')) {
+						component.handleInput("down");
+						component.handleInput("down");
+						component.handleInput("enter");
+					} else {
+						component.handleInput("enter");
+					}
+				}),
+			},
+		};
+		try {
+			await runSetup(ctx, configPath);
+			expect(screens.filter((screen) => screen.includes("Configure which agent?")).length).toBe(3);
+			expect(screens.some((screen) => screen.includes("Thinking for"))).toBe(false);
+			const saved = JSON.parse(readFileSync(configPath, "utf8"));
+			expect(saved.agentModels).toEqual({
+				explore: "anthropic/haiku",
+				worker: "anthropic/sonnet",
+			});
 		} finally {
 			rmSync(dir, { recursive: true, force: true });
 		}

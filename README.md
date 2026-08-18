@@ -277,7 +277,9 @@ sessions show the recovery paths again until the artifacts are removed.
 Stored at `~/.pi/agent/pi-subagents.json` (follows `PI_CODING_AGENT_DIR` when
 set). `/subagents-setup` has five top-level choices: enable agents, configure one
 agent's model/thinking, choose a vision model, runtime settings, or full setup.
-There is no backup pool or global thinking menu. Model pickers show only in-scope
+After one agent's model + thinking picks, the wizard returns to the agent picker
+so several agents can be configured in one pass; Esc at any step ends the pass
+and keeps every agent already configured. There is no backup pool or global thinking menu. Model pickers show only in-scope
 models with configured authentication and display their real supported thinking
 levels. Thinking defaults to **Auto**; manual overrides show only levels supported
 by that agent's effective model. `notifyOnReviewPass` and `maxResultLines` remain

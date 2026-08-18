@@ -204,9 +204,44 @@ async function pickAgentToConfigure(
 	return promptSelectOne(
 		ctx,
 		"Configure which agent?",
-		"Type to filter • ↑/↓ • Enter selects • Esc cancels",
+		"Type to filter • ↑/↓ • Enter selects • Esc ends this pass",
 		enabledAgents.map((name) => ({ value: name, label: moduleLabel(name) })),
 	);
+}
+
+/** One agent: model, then thinking if the model exposes a choice. Esc at any
+ * step ends the caller's pass; earlier agents in that pass stay applied. */
+async function configureOneAgent(
+	ctx: ExtensionCommandContext,
+	config: SubagentsConfig,
+): Promise<
+	| {
+			name: string;
+			model: string;
+			strength: ThinkingLevel | typeof AUTO_THINKING;
+	  }
+	| undefined
+> {
+	const name = await pickAgentToConfigure(ctx, config.enabledAgents);
+	if (name === undefined) return undefined;
+	const modelChoice = await pickAgentModel(
+		ctx,
+		name,
+		config.agentModels[name],
+		"stops — earlier agent changes are kept",
+	);
+	if (modelChoice === undefined) return undefined;
+	const model = effectiveModelForChoice(ctx, modelChoice);
+	const strength = await pickAgentStrength(
+		ctx,
+		name,
+		model,
+		config.agentThinkingLevels[name],
+		actualAgentThinkingDefault(ctx, config, name),
+		"stops — earlier agent changes are kept",
+	);
+	if (strength === undefined) return undefined;
+	return { name, model: modelChoice, strength };
 }
 
 async function pickInjection(ctx: ExtensionCommandContext, current: boolean): Promise<boolean | undefined> {
@@ -379,28 +414,19 @@ async function runMenu(ctx: ExtensionCommandContext, configPath: string, config:
 		next.agentModels = keepAgentEntries(next.agentModels, enabled);
 		next.agentThinkingLevels = keepAgentEntries(next.agentThinkingLevels, enabled);
 	} else if (choice.startsWith("Configure")) {
-		const agentName = await pickAgentToConfigure(ctx, next.enabledAgents);
-		if (agentName === undefined) return notifyCancelled(ctx);
-		const modelChoice = await pickAgentModel(
-			ctx,
-			agentName,
-			next.agentModels[agentName],
-			"cancels agent changes",
-		);
-		if (modelChoice === undefined) return notifyCancelled(ctx);
-		const model = effectiveModelForChoice(ctx, modelChoice);
-		const strength = await pickAgentStrength(
-			ctx,
-			agentName,
-			model,
-			next.agentThinkingLevels[agentName],
-			actualAgentThinkingDefault(ctx, next, agentName),
-			"cancels agent changes",
-		);
-		if (strength === undefined) return notifyCancelled(ctx);
-		next.agentModels = applyAgentModelChoice(next.agentModels, agentName, modelChoice);
-		if (strength === AUTO_THINKING) delete next.agentThinkingLevels[agentName];
-		else next.agentThinkingLevels[agentName] = strength;
+		// Per-agent loop: model (+ thinking when the model exposes a choice), then
+		// back to the agent picker so several agents can be set in one pass. Esc
+		// at any step ends the loop; agents already configured in this pass are kept.
+		let configuredAny = false;
+		while (true) {
+			const picked = await configureOneAgent(ctx, next);
+			if (picked === undefined) break;
+			configuredAny = true;
+			next.agentModels = applyAgentModelChoice(next.agentModels, picked.name, picked.model);
+			if (picked.strength === AUTO_THINKING) delete next.agentThinkingLevels[picked.name];
+			else next.agentThinkingLevels[picked.name] = picked.strength;
+		}
+		if (!configuredAny) return notifyCancelled(ctx);
 	} else if (choice.startsWith("Change vision")) {
 		const visionModel = await pickVisionModel(ctx, config.visionModel);
 		if (visionModel === undefined) return notifyCancelled(ctx);
