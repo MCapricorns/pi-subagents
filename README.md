@@ -338,9 +338,13 @@ parent does not `abort_retry` them — and only a settled model-level failure
 hands off to current main. This uses supported extension/RPC surfaces in Node
 and standalone/Bun builds, never rewrites global or project settings, and does
 not alter descendant tool environments. Tool/test failures stay on the same
-model because they are task failures, not model availability failures. Only a truly
-zero-activity process startup race can retry; an accepted prompt or any
-agent/turn/stream/tool activity forbids replay.
+model because they are task failures, not model availability failures. A child is
+probed with RPC `get_state` before the first prompt so the 30s command ACK clock
+does not include process boot. Only a zero-activity startup miss can retry — a
+silent fast exit, a `get_state` handshake timeout, or an initial prompt ACK
+timeout before any agent/turn/stream/tool activity. Those transport misses are
+not model-level failures and do not hand the task to the main window. An accepted
+prompt or any activity forbids replay.
 
 Auto thinking starts from the Agent's declared preference (`low` for `explore`,
 `high` for the other built-ins) and uses Pi's capability map to clamp it to the

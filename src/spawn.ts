@@ -22,6 +22,7 @@ import {
 	emptyUsage,
 	extractToolErrorText,
 	getPiInvocation,
+	isRpcCommandTimeoutError,
 	RpcRunControl,
 	runRpcAgentAttempt,
 	sessionExists,
@@ -37,6 +38,7 @@ export {
 	DEPTH_ENV_VAR,
 	extractToolErrorText,
 	getPiInvocation,
+	isRpcCommandTimeoutError,
 	RpcRunControl,
 	sessionExists,
 	SUBAGENT_KILL_GRACE_MS,
@@ -201,6 +203,8 @@ export function isModelLevelFailure(result: SingleResult): boolean {
 	if (!isFailedResult(result)) return false;
 	if (result.stopReason === "aborted") return false;
 	if (result.dispatchFailed) return false;
+	if (result.rpcStartupFailed) return false;
+	if (isRpcCommandTimeoutError(result.errorMessage)) return false;
 	if (result.integrationStatus === "retained") return false;
 	if (result.errorMessage?.includes("idle timeout")) return true;
 	if (result.rpcPromptRejected) return true;
@@ -217,6 +221,9 @@ export function isModelLevelFailure(result: SingleResult): boolean {
 	}
 
 	if ((result.failedTools?.length ?? 0) > 0) return false;
+	// No accepted prompt, no activity, and no assistant turn means the provider
+	// was never reached. Stderr or an exit error here is a startup/transport miss.
+	if (!result.rpcPromptAccepted && !result.rpcActivity) return false;
 	return Boolean(
 		result.rpcPromptAccepted ||
 		result.rpcActivity ||
@@ -235,6 +242,7 @@ export function isRetryableStartupFailure(result: SingleResult, durationMs: numb
 	if (result.messages.length > 0) return false;
 	const usage = result.usage;
 	if (usage.turns || usage.input || usage.output || usage.cacheRead || usage.cacheWrite || usage.cost) return false;
+	if (result.rpcStartupFailed) return true;
 	if (durationMs > MAX_SUBAGENT_STARTUP_FAILURE_DURATION_MS) return false;
 	if (result.stderr.trim().length > 0) return false;
 	if (result.errorMessage && result.errorMessage.trim().length > 0) return false;
@@ -242,7 +250,7 @@ export function isRetryableStartupFailure(result: SingleResult, durationMs: numb
 }
 
 export function formatStartupRetryExhaustedError(model: string, attempts: number): string {
-	return `Subagent failed to start after ${attempts} attempt${attempts === 1 ? "" : "s"} on ${model}: the child exited before any model, tool, output, or usage activity. This is typically a concurrent pi startup race (several sub-agents starting at once). Retry the dispatch, or temporarily lower maxConcurrency in /subagents-setup.`;
+	return `Subagent failed to start after ${attempts} attempt${attempts === 1 ? "" : "s"} on ${model}: the child never accepted its initial RPC prompt or produced any model, tool, output, or usage activity. This is typically a concurrent pi startup race (several sub-agents starting at once). Retry the dispatch, or temporarily lower maxConcurrency in /subagents-setup.`;
 }
 
 export async function waitForStartupRetry(delayMs: number, signal?: AbortSignal): Promise<boolean> {
@@ -326,6 +334,8 @@ export interface RunSingleOptions {
 	env?: NodeJS.ProcessEnv;
 	/** Stable logical-generation controller shared across retry attempts. */
 	control?: RpcRunControl;
+	rpcReadyTimeoutMs?: number;
+	rpcCommandTimeoutMs?: number;
 }
 
 function controlledDisposition(options: RunSingleOptions, base?: SingleResult): SingleResult | undefined {
@@ -391,6 +401,8 @@ export async function runSingleAgent(options: RunSingleOptions): Promise<SingleR
 		onLive: options.onLive,
 		env: options.env,
 		control,
+		rpcReadyTimeoutMs: options.rpcReadyTimeoutMs,
+		rpcCommandTimeoutMs: options.rpcCommandTimeoutMs,
 	});
 	result.task = control?.getObjective() ?? result.task;
 	return result;

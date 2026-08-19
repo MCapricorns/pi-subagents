@@ -416,6 +416,36 @@ describe("isModelLevelFailure", () => {
 			),
 		).toBe(false);
 	});
+
+	it("is false for a pre-prompt crash that only wrote stderr", () => {
+		expect(
+			isModelLevelFailure(result({
+				exitCode: 1,
+				stopReason: "error",
+				stderr: "jiti failed to compile an extension",
+				errorMessage: "Subagent RPC process exited before settling (code=1).",
+			})),
+		).toBe(false);
+	});
+
+	it("is false for an RPC handshake or prompt ACK timeout", () => {
+		expect(
+			isModelLevelFailure(result({
+				exitCode: 1,
+				stopReason: "error",
+				errorMessage: "Timed out waiting for RPC response to prompt.",
+				rpcStartupFailed: true,
+			})),
+		).toBe(false);
+		expect(
+			isModelLevelFailure(result({
+				exitCode: 1,
+				stopReason: "error",
+				errorMessage: "Replacement prompt was rejected: Timed out waiting for RPC response to prompt.",
+				rpcPromptAccepted: true,
+			})),
+		).toBe(false);
+	});
 });
 
 describe("runSingleAgentWithMainFallback", () => {
@@ -858,6 +888,125 @@ process.exit(1);`,
 		}
 	});
 
+	it("retries a get_state handshake timeout, then succeeds", async () => {
+		const dir = mkdtempSync(join(tmpdir(), "pi-subagents-startup-handshake-"));
+		const script = join(dir, "handshake-retry-child.cjs");
+		const log = join(dir, "attempts.log");
+		writeFileSync(
+			script,
+			fakeRpcScript({
+				setup: `fs.appendFileSync(process.env.LOG_PATH, "attempt\\n");
+const count = fs.readFileSync(process.env.LOG_PATH, "utf8").split("\\n").filter(Boolean).length;`,
+				onGetState: `if (count > 1) respond(command);`,
+				onPrompt: `send({ type: "message_end", message: { role: "assistant", content: [{ type: "text", text: "recovered after handshake timeout" }], stopReason: "stop" } });`,
+			}),
+			"utf8",
+		);
+		try {
+			await withArgv(script, async () => {
+				const result = await runSingleAgentWithMainFallback({
+					defaultCwd: process.cwd(),
+					agent,
+					agentName: agent.name,
+					task: "survive a handshake timeout",
+					startupRetryDelaysMs: [10],
+					rpcReadyTimeoutMs: 80,
+					env: { ...process.env, LOG_PATH: log },
+					makeDetails: (results) => ({ mode: "single", results }),
+				});
+				expect(result.exitCode).toBe(0);
+				expect(getFinalOutput(result.messages)).toBe("recovered after handshake timeout");
+				expect(result.startupRetries).toBe(1);
+				expect(result.dispatchFailed).toBeUndefined();
+				expect(isModelLevelFailure(result)).toBe(false);
+				expect(readFileSync(log, "utf8").split("\n").filter(Boolean)).toHaveLength(2);
+			});
+		} finally {
+			rmSync(dir, { recursive: true, force: true });
+		}
+	});
+
+	it("retries an initial prompt ACK timeout, then succeeds", async () => {
+		const dir = mkdtempSync(join(tmpdir(), "pi-subagents-startup-prompt-ack-"));
+		const script = join(dir, "prompt-ack-retry-child.cjs");
+		const log = join(dir, "attempts.log");
+		writeFileSync(
+			script,
+			fakeRpcScript({
+				setup: `fs.appendFileSync(process.env.LOG_PATH, "attempt\\n");
+const count = fs.readFileSync(process.env.LOG_PATH, "utf8").split("\\n").filter(Boolean).length;`,
+				emitAgentStart: false,
+				autoSettle: false,
+				onPromptPreflight: `if (count > 1) respond(command);`,
+				onPrompt: `if (count === 1) return;
+send({ type: "agent_start" });
+send({ type: "message_end", message: { role: "assistant", content: [{ type: "text", text: "recovered after prompt ack timeout" }], stopReason: "stop" } });
+send({ type: "agent_settled" });`,
+			}),
+			"utf8",
+		);
+		try {
+			await withArgv(script, async () => {
+				const result = await runSingleAgentWithMainFallback({
+					defaultCwd: process.cwd(),
+					agent,
+					agentName: agent.name,
+					task: "survive a prompt ack timeout",
+					startupRetryDelaysMs: [10],
+					rpcCommandTimeoutMs: 80,
+					env: { ...process.env, LOG_PATH: log },
+					makeDetails: (results) => ({ mode: "single", results }),
+				});
+				expect(result.exitCode).toBe(0);
+				expect(getFinalOutput(result.messages)).toBe("recovered after prompt ack timeout");
+				expect(result.startupRetries).toBe(1);
+				expect(result.dispatchFailed).toBeUndefined();
+				expect(isModelLevelFailure(result)).toBe(false);
+				expect(readFileSync(log, "utf8").split("\n").filter(Boolean)).toHaveLength(2);
+			});
+		} finally {
+			rmSync(dir, { recursive: true, force: true });
+		}
+	});
+
+	it("surfaces a dispatch failure after exhausting prompt ACK timeouts", async () => {
+		const dir = mkdtempSync(join(tmpdir(), "pi-subagents-startup-ack-exhaust-"));
+		const script = join(dir, "never-ack.cjs");
+		const log = join(dir, "attempts.log");
+		writeFileSync(
+			script,
+			fakeRpcScript({
+				setup: `fs.appendFileSync(process.env.LOG_PATH, "attempt\\n");`,
+				onGetState: "",
+				onPrompt: "",
+				autoSettle: false,
+			}),
+			"utf8",
+		);
+		try {
+			await withArgv(script, async () => {
+				const result = await runSingleAgentWithMainFallback({
+					defaultCwd: process.cwd(),
+					agent,
+					agentName: agent.name,
+					task: "never acks",
+					startupRetryDelaysMs: [10],
+					rpcReadyTimeoutMs: 50,
+					env: { ...process.env, LOG_PATH: log },
+					makeDetails: (results) => ({ mode: "single", results }),
+				});
+				expect(result.exitCode).toBe(1);
+				expect(result.dispatchFailed).toBe(true);
+				expect(result.rpcStartupFailed).toBe(true);
+				expect(isModelLevelFailure(result)).toBe(false);
+				expect(result.errorMessage).toContain("failed to start after 2 attempts");
+				expect(readFileSync(log, "utf8").split("\n").filter(Boolean)).toHaveLength(2);
+			});
+		} finally {
+			rmSync(dir, { recursive: true, force: true });
+		}
+	});
+
 	it("does not retry a run that produced model output", async () => {
 		// A run that emitted a message_end (even a failing one) did real work and
 		// must not be retried as a startup race; it belongs to model fallback.
@@ -947,6 +1096,15 @@ describe("isRetryableStartupFailure (unit)", () => {
 
 	it("is not retryable when the run outlived the startup window", () => {
 		expect(isRetryableStartupFailure(base({}), 5000)).toBe(false);
+	});
+
+	it("is retryable for an RPC startup timeout even after the fast-exit window", () => {
+		expect(
+			isRetryableStartupFailure(base({
+				errorMessage: "Timed out waiting for RPC response to get_state.",
+				rpcStartupFailed: true,
+			}), 30_000),
+		).toBe(true);
 	});
 });
 

@@ -20,8 +20,15 @@ import type { IsolationMode, WorktreeFinalizationStatus } from "./worktree.ts";
 
 export const DEPTH_ENV_VAR = "PI_SUBAGENT_DEPTH";
 export const SUBAGENT_KILL_GRACE_MS = 5_000;
+/** ACK budget after the child is known to be reading RPC. */
 export const RPC_COMMAND_TIMEOUT_MS = 30_000;
+/** Time allowed for the child to boot and answer get_state. */
+export const RPC_READY_TIMEOUT_MS = 60_000;
 export const RPC_ABORT_SETTLE_TIMEOUT_MS = 5_000;
+
+export function isRpcCommandTimeoutError(message?: string): boolean {
+	return typeof message === "string" && message.includes("Timed out waiting for RPC response");
+}
 
 /** Prevent RPC prompt expansion when a control objective itself starts with
  * slash (for example `/subagents-setup`). The original text stays verbatim
@@ -59,6 +66,9 @@ export interface RpcSingleResult {
 	 * model execution. This remains main-model handoff eligible even when an
 	 * earlier, aborted objective left assistant text in the session. */
 	rpcPromptRejected?: boolean;
+	/** Handshake or initial prompt ACK never came back. This is a startup/
+	 * transport miss, not a model/provider failure. */
+	rpcStartupFailed?: boolean;
 	/** The child accepted a prompt; startup retries must never duplicate it. */
 	rpcPromptAccepted?: boolean;
 	/** Pi emitted agent/turn/model/tool activity for this attempt. */
@@ -408,7 +418,7 @@ interface RpcResponse {
 interface PendingRequest {
 	resolve: (response: RpcResponse) => void;
 	reject: (error: Error) => void;
-	timer: ReturnType<typeof setTimeout>;
+	timer?: ReturnType<typeof setTimeout>;
 }
 
 interface Deferred<T> {
@@ -442,6 +452,8 @@ export interface RunRpcAttemptOptions {
 	onLive?: (event: SubagentLiveEvent) => void;
 	env?: NodeJS.ProcessEnv;
 	control?: RpcRunControl;
+	rpcReadyTimeoutMs?: number;
+	rpcCommandTimeoutMs?: number;
 }
 
 /** Run one persistent RPC child until a stable `agent_settled` or control action. */
@@ -549,7 +561,7 @@ export async function runRpcAgentAttempt(options: RunRpcAttemptOptions): Promise
 
 	const rejectPending = (error: Error): void => {
 		for (const request of pendingRequests.values()) {
-			clearTimeout(request.timer);
+			if (request.timer) clearTimeout(request.timer);
 			request.reject(error);
 		}
 		pendingRequests.clear();
@@ -589,32 +601,46 @@ export async function runRpcAgentAttempt(options: RunRpcAttemptOptions): Promise
 		}
 	};
 
-	const writeLine = (value: object): void => {
-		if (!proc.stdin || proc.stdin.destroyed || !proc.stdin.writable) {
-			throw new Error("Subagent RPC stdin is not writable.");
-		}
-		// JSON strings may contain U+2028/U+2029. Only the final ASCII LF frames a
-		// record; never use a generic line reader on the receiving side.
-		proc.stdin.write(`${JSON.stringify(value)}\n`, "utf8");
-	};
+	const readyTimeoutMs = options.rpcReadyTimeoutMs ?? RPC_READY_TIMEOUT_MS;
+	const commandTimeoutMs = options.rpcCommandTimeoutMs ?? RPC_COMMAND_TIMEOUT_MS;
 
-	const send = async (command: Record<string, unknown>): Promise<RpcResponse> => {
+	const writeLine = (value: object): Promise<void> =>
+		new Promise((resolve, reject) => {
+			if (!proc.stdin || proc.stdin.destroyed || !proc.stdin.writable) {
+				reject(new Error("Subagent RPC stdin is not writable."));
+				return;
+			}
+			// JSON strings may contain U+2028/U+2029. Only the final ASCII LF frames a
+			// record; never use a generic line reader on the receiving side.
+			proc.stdin.write(`${JSON.stringify(value)}\n`, "utf8", (error) => {
+				if (error) reject(error);
+				else resolve();
+			});
+		});
+
+	const send = async (command: Record<string, unknown>, timeoutMs = commandTimeoutMs): Promise<RpcResponse> => {
 		if (finished || closed) throw new Error("Subagent RPC process is no longer active.");
 		const id = `req_${++requestId}`;
+		const payload = { ...command, id };
 		return new Promise<RpcResponse>((resolve, reject) => {
-			const timer = setTimeout(() => {
-				pendingRequests.delete(id);
-				reject(new Error(`Timed out waiting for RPC response to ${String(command.type)}.`));
-			}, RPC_COMMAND_TIMEOUT_MS);
-			if (typeof timer.unref === "function") timer.unref();
-			pendingRequests.set(id, { resolve, reject, timer });
-			try {
-				writeLine({ ...command, id });
-			} catch (error) {
-				pendingRequests.delete(id);
-				clearTimeout(timer);
-				reject(error instanceof Error ? error : new Error(String(error)));
-			}
+			const pending: PendingRequest = { resolve, reject };
+			pendingRequests.set(id, pending);
+			void writeLine(payload).then(
+				() => {
+					if (!pendingRequests.has(id)) return;
+					pending.timer = setTimeout(() => {
+						pendingRequests.delete(id);
+						reject(new Error(`Timed out waiting for RPC response to ${String(command.type)}.`));
+					}, timeoutMs);
+					if (typeof pending.timer.unref === "function") pending.timer.unref();
+				},
+				(error) => {
+					if (!pendingRequests.has(id)) return;
+					pendingRequests.delete(id);
+					if (pending.timer) clearTimeout(pending.timer);
+					reject(error instanceof Error ? error : new Error(String(error)));
+				},
+			);
 		}).then((response) => {
 			if (!response.success) throw new Error(response.error || `RPC ${response.command} failed.`);
 			return response;
@@ -708,7 +734,7 @@ export async function runRpcAgentAttempt(options: RunRpcAttemptOptions): Promise
 				result.exitCode = 1;
 				result.stopReason = "error";
 				result.errorMessage = `Replacement prompt was rejected: ${promptError.message}`;
-				result.rpcPromptRejected = true;
+				if (!isRpcCommandTimeoutError(promptError.message)) result.rpcPromptRejected = true;
 				finish();
 				terminate();
 				if (!closed) await processClosed.promise;
@@ -716,18 +742,41 @@ export async function runRpcAgentAttempt(options: RunRpcAttemptOptions): Promise
 			}
 		},
 		async park(): Promise<void> {
+			const markParked = (): void => {
+				result.parked = true;
+				result.exitCode = 0;
+				result.stopReason = undefined;
+				result.errorMessage = undefined;
+				result.rpcStartupFailed = undefined;
+				result.rpcPromptRejected = undefined;
+			};
 			if (finished) {
 				if (!closed) await processClosed.promise;
+				if (result.parked) return;
+				// Handshake/startup already tore the child down. Convert a pre-prompt
+				// settlement into a park instead of throwing past the control tool.
+				if (!result.rpcPromptAccepted) {
+					markParked();
+					return;
+				}
 				throw new Error("Thread already settled before it could be parked.");
 			}
 			setAttemptPhase("interrupting");
+			if (!initialPromptResolved) {
+				const parked = new Error("Run was parked before its initial prompt.");
+				resolveInitialPrompt(false, parked);
+				rejectPending(parked);
+				markParked();
+				setAttemptPhase("parked");
+				finish();
+				terminate();
+				if (!closed) await processClosed.promise;
+				return;
+			}
 			const accepted = await abortAcceptedPrompt();
 			if (!accepted && !closed) await processClosed.promise;
 			if (finished && accepted) throw new Error("Thread exited while parking.");
-			result.parked = true;
-			result.exitCode = 0;
-			result.stopReason = undefined;
-			result.errorMessage = undefined;
+			markParked();
 			setAttemptPhase("parked");
 			finish();
 			terminate();
@@ -739,6 +788,11 @@ export async function runRpcAgentAttempt(options: RunRpcAttemptOptions): Promise
 				return;
 			}
 			setAttemptPhase("interrupting");
+			if (!initialPromptResolved) {
+				const stopped = new Error(reason);
+				resolveInitialPrompt(false, stopped);
+				rejectPending(stopped);
+			}
 			let timer: ReturnType<typeof setTimeout> | undefined;
 			const timeout = new Promise<boolean>((resolve) => {
 				timer = setTimeout(() => resolve(false), RPC_ABORT_SETTLE_TIMEOUT_MS);
@@ -826,11 +880,7 @@ export async function runRpcAgentAttempt(options: RunRpcAttemptOptions): Promise
 			typeof event.id === "string" &&
 			["select", "confirm", "input", "editor"].includes(event.method)
 		) {
-			try {
-				writeLine({ type: "extension_ui_response", id: event.id, cancelled: true });
-			} catch {
-				/* process failure is handled by close/error */
-			}
+			void writeLine({ type: "extension_ui_response", id: event.id, cancelled: true }).catch(() => undefined);
 			return;
 		}
 
@@ -1019,20 +1069,36 @@ export async function runRpcAgentAttempt(options: RunRpcAttemptOptions): Promise
 			resolveInitialPrompt(false, new Error("Run was stopped before its initial prompt."));
 			await attemptControl.stop();
 		} else {
-			void send({ type: "prompt", message: asPlainTextRpcPrompt(options.prompt) }).then(
-				() => resolveInitialPrompt(true),
-				(error) => {
-					const promptError = error instanceof Error ? error : new Error(String(error));
-					resolveInitialPrompt(false, promptError);
-					if (finished) return;
-					result.exitCode = 1;
-					result.stopReason = "error";
-					result.errorMessage = promptError.message;
-					result.rpcPromptRejected = true;
-					finish();
-					terminate();
-				},
-			);
+			const failBeforePrompt = (error: Error, startup: boolean): void => {
+				resolveInitialPrompt(false, error);
+				if (finished) return;
+				result.exitCode = 1;
+				result.stopReason = "error";
+				result.errorMessage = error.message;
+				if (startup) result.rpcStartupFailed = true;
+				else result.rpcPromptRejected = true;
+				finish();
+				terminate();
+			};
+			try {
+				await send({ type: "get_state" }, readyTimeoutMs);
+			} catch (error) {
+				const handshakeError = error instanceof Error ? error : new Error(String(error));
+				if (!control?.isParkRequested() && !control?.isStopRequested()) {
+					failBeforePrompt(handshakeError, true);
+				} else {
+					resolveInitialPrompt(false, handshakeError);
+				}
+			}
+			if (!finished && !initialPromptResolved && !control?.isParkRequested() && !control?.isStopRequested()) {
+				void send({ type: "prompt", message: asPlainTextRpcPrompt(options.prompt) }).then(
+					() => resolveInitialPrompt(true),
+					(error) => {
+						const promptError = error instanceof Error ? error : new Error(String(error));
+						failBeforePrompt(promptError, isRpcCommandTimeoutError(promptError.message));
+					},
+				);
+			}
 		}
 		await outcome.promise;
 		terminate();

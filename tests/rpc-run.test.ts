@@ -143,6 +143,116 @@ send({ type: "message_end", message: { role: "assistant", content: [{ type: "tex
 	});
 });
 
+describe("RPC handshake", () => {
+	it("probes get_state before sending the initial prompt", async () => {
+		const dir = mkdtempSync(join(tmpdir(), "pi-subagents-rpc-handshake-"));
+		const script = join(dir, "handshake-child.mjs");
+		const log = join(dir, "commands.log");
+		writeFileSync(
+			script,
+			fakeRpcScript({
+				setup: `const commandLog = ${JSON.stringify(log)};`,
+				onGetState: `fs.appendFileSync(commandLog, JSON.stringify({ type: "get_state" }) + "\\n");
+respond(command);`,
+				onPrompt: `fs.appendFileSync(commandLog, JSON.stringify({ type: "prompt" }) + "\\n");
+send({ type: "message_end", message: { role: "assistant", content: [{ type: "text", text: "ready" }], stopReason: "stop" } });`,
+			}),
+			"utf8",
+		);
+		const previous = process.argv[1];
+		process.argv[1] = script;
+		try {
+			const result = await runSingleAgent({
+				defaultCwd: process.cwd(),
+				agent,
+				agentName: agent.name,
+				task: "handshake",
+				makeDetails: (results) => ({ mode: "single", results }),
+			});
+			expect(result.exitCode).toBe(0);
+			expect(readLog(log).map((entry) => entry.type)).toEqual(["get_state", "prompt"]);
+		} finally {
+			process.argv[1] = previous;
+			rmSync(dir, { recursive: true, force: true });
+		}
+	});
+
+	it("parks during get_state without waiting for the child to close first", async () => {
+		const dir = mkdtempSync(join(tmpdir(), "pi-subagents-rpc-park-handshake-"));
+		const script = join(dir, "park-handshake-child.mjs");
+		const log = join(dir, "commands.log");
+		writeFileSync(
+			script,
+			fakeRpcScript({
+				setup: `const commandLog = ${JSON.stringify(log)};`,
+				onGetState: `fs.appendFileSync(commandLog, JSON.stringify({ type: "get_state" }) + "\\n");
+await new Promise((resolve) => setTimeout(resolve, 5_000));
+respond(command);`,
+				onPrompt: `fs.appendFileSync(commandLog, JSON.stringify({ type: "prompt" }) + "\\n");`,
+				autoSettle: false,
+			}),
+			"utf8",
+		);
+		const previous = process.argv[1];
+		process.argv[1] = script;
+		const control = new RpcRunControl("park during handshake", 1);
+		try {
+			const running = runSingleAgent({
+				defaultCwd: process.cwd(),
+				agent,
+				agentName: agent.name,
+				task: "park during handshake",
+				control,
+				makeDetails: (results) => ({ mode: "single", results }),
+			});
+			await waitFor(() => readLog(log).some((entry) => entry.type === "get_state"));
+			const started = Date.now();
+			await control.park();
+			const result = await running;
+			expect(Date.now() - started).toBeLessThan(2_000);
+			expect(result.parked).toBe(true);
+			expect(result.exitCode).toBe(0);
+			expect(result.rpcStartupFailed).toBeUndefined();
+			expect(readLog(log).map((entry) => entry.type)).toEqual(["get_state"]);
+		} finally {
+			process.argv[1] = previous;
+			rmSync(dir, { recursive: true, force: true });
+		}
+	});
+
+	it("does not start the prompt ACK clock until get_state succeeds", async () => {
+		const dir = mkdtempSync(join(tmpdir(), "pi-subagents-rpc-ready-"));
+		const script = join(dir, "slow-ready-child.mjs");
+		writeFileSync(
+			script,
+			fakeRpcScript({
+				onGetState: `await new Promise((resolve) => setTimeout(resolve, 80));\nrespond(command);`,
+				onPrompt: `send({ type: "message_end", message: { role: "assistant", content: [{ type: "text", text: "booted" }], stopReason: "stop" } });`,
+			}),
+			"utf8",
+		);
+		const previous = process.argv[1];
+		process.argv[1] = script;
+		try {
+			const result = await runSingleAgent({
+				defaultCwd: process.cwd(),
+				agent,
+				agentName: agent.name,
+				task: "slow boot",
+				rpcCommandTimeoutMs: 40,
+				rpcReadyTimeoutMs: 500,
+				makeDetails: (results) => ({ mode: "single", results }),
+			});
+			expect(result.exitCode).toBe(0);
+			expect(getFinalOutput(result.messages)).toBe("booted");
+			expect(result.rpcStartupFailed).toBeUndefined();
+		} finally {
+			process.argv[1] = previous;
+			rmSync(dir, { recursive: true, force: true });
+		}
+	});
+});
+
 describe("RPC control ordering", () => {
 	it("waits for initial prompt acceptance before aborting a starting retarget", async () => {
 		const dir = mkdtempSync(join(tmpdir(), "pi-subagents-rpc-preflight-"));
