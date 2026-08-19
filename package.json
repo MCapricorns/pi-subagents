@@ -1,6 +1,6 @@
 {
   "name": "@ferris1225/pi-subagents",
-  "version": "2.0.1",
+  "version": "2.0.2",
   "description": "Controllable background sub-agent threads for pi: specialized roles, capability-aware thinking, direct main-model fallback, auto-fix chains, and Git worktree isolation.",
   "type": "module",
   "license": "MIT",

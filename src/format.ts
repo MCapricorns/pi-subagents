@@ -155,11 +155,15 @@ export function formatCompletionBlock(
  * fresh (which would re-scan everything). */
 export function modelLevelTakeoverNote(result: SingleResult, opts?: { runId?: number }): string {
 	const retry = result.modelFallbackFrom ? ", and the current main model also failed" : "";
+	const detail = result.errorMessage?.trim();
+	const cause = detail
+		? `its model/provider call failed (${detail})`
+		: "its model was unavailable or failed (or the run stalled)";
 	const sessionPreserved = Boolean(result.sessionDir && result.sessionId) && opts?.runId !== undefined;
 	const recovery = sessionPreserved
 		? ` The sub-agent's earlier work in this run is preserved. Once a model is available again, call subagent_control with { action: "resume", id: ${opts!.runId} } to CONTINUE it in-context (it keeps the same run id and does not re-scan), or execute the task in the main window with your own tools.`
 		: ` Please execute this task in the main window with your own tools; do not re-dispatch it as a sub-agent.`;
-	return `The sub-agent could not complete this task: its model was unavailable or failed (or the run stalled)${retry}.${recovery}`;
+	return `The sub-agent could not complete this task: ${cause}${retry}.${recovery}`;
 }
 
 /** Resolve a run-id request to actual ids: an exact numeric match always wins

@@ -88,9 +88,10 @@ index.
 - **Direct fallback with real thinking capabilities** — each agent has at most
   one selected model. An unavailable selection, rate limit, invalid key, quota,
   missing model, or provider failure hands directly to the current main model.
-  A child-only provider adapter forces request retries to zero, and the RPC
-  parent cancels Pi's outer turn retry before another call, without changing user
-  settings. Auto thinking clamps the agent preference to the
+  A child-only provider adapter forces inner request retries to zero; transient
+  stream drops still use Pi's outer turn retry, and only a settled model-level
+  failure hands off, without changing user settings. Auto thinking clamps the
+  agent preference to the
   effective model's real `thinkingLevelMap`; manual setup shows only levels that
   model supports.
 - **Resumes, retargets, and forks preserve context** — every run is session-backed.
@@ -331,12 +332,13 @@ available catalog is skipped. Any model-level runtime failure — rate limit,
 quota, invalid key/auth, missing model, provider error, or idle model stream —
 hands directly to current main, including stream errors that retain partial text.
 A child-only Pi extension wraps the selected provider's registered API stream
-with `maxRetries: 0`; if Pi schedules its separate outer turn retry, the RPC parent
-immediately sends `abort_retry` before another provider call. This uses supported
-extension/RPC surfaces in Node and standalone/Bun builds, never rewrites global or
-project settings, and does not alter descendant tool environments. Tool/test
-failures stay on the same model because they are task failures, not model
-availability failures. Only a truly
+with `maxRetries: 0` so a deterministic auth/quota miss fails fast. Transient
+stream drops such as xAI `terminated` still use Pi's outer turn retry — the
+parent does not `abort_retry` them — and only a settled model-level failure
+hands off to current main. This uses supported extension/RPC surfaces in Node
+and standalone/Bun builds, never rewrites global or project settings, and does
+not alter descendant tool environments. Tool/test failures stay on the same
+model because they are task failures, not model availability failures. Only a truly
 zero-activity process startup race can retry; an accepted prompt or any
 agent/turn/stream/tool activity forbids replay.
 

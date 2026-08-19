@@ -240,16 +240,23 @@ describe("runSingleAgent transport and lifecycle", () => {
 		}
 	});
 
-	it("aborts Pi's outer turn retry as soon as it is scheduled", async () => {
+	it("lets Pi's outer turn retry recover a terminated stream", async () => {
 		const dir = mkdtempSync(join(tmpdir(), "pi-subagents-turn-retry-"));
 		const script = join(dir, "turn-retry-child.mjs");
+		const abortLog = join(dir, "abort.log");
 		writeFileSync(
 			script,
 			fakeRpcScript({
 				autoSettle: false,
-				onPrompt: `send({ type: "message_end", message: { role: "assistant", content: [], stopReason: "error", errorMessage: "429 rate limit" } });
-	send({ type: "auto_retry_start", attempt: 1, maxAttempts: 3, delayMs: 2000 });`,
-				onAbortRetry: `send({ type: "auto_retry_end", success: false, attempt: 1 });
+				onPrompt: `send({ type: "message_end", message: { role: "assistant", content: [{ type: "text", text: "partial" }], stopReason: "error", errorMessage: "terminated" } });
+	send({ type: "auto_retry_start", attempt: 1, maxAttempts: 3, delayMs: 10 });
+	setTimeout(() => {
+		send({ type: "auto_retry_end", success: true, attempt: 1 });
+		send({ type: "message_end", message: { role: "assistant", content: [{ type: "text", text: "recovered after terminated" }], stopReason: "stop" } });
+		send({ type: "agent_settled" });
+	}, 30);`,
+				onAbortRetry: `fs.appendFileSync(${JSON.stringify(abortLog)}, "aborted\\n");
+	send({ type: "auto_retry_end", success: false, attempt: 1 });
 	send({ type: "agent_settled" });`,
 			}),
 			"utf8",
@@ -261,11 +268,13 @@ describe("runSingleAgent transport and lifecycle", () => {
 				defaultCwd: process.cwd(),
 				agent,
 				agentName: agent.name,
-				task: "do not retry 429",
+				task: "retry terminated streams",
 				makeDetails: (results) => ({ mode: "single", results }),
 			});
-			expect(result.stopReason).toBe("error");
-			expect(result.errorMessage).toBe("429 rate limit");
+			expect(existsSync(abortLog)).toBe(false);
+			expect(result.stopReason).toBe("stop");
+			expect(getFinalOutput(result.messages)).toBe("recovered after terminated");
+			expect(result.exitCode).toBe(0);
 		} finally {
 			process.argv[1] = previousScript;
 			rmSync(dir, { recursive: true, force: true });

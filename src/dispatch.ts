@@ -1483,7 +1483,8 @@ export function registerSubagentTool(pi: ExtensionAPI, runtime: SubagentRuntime)
 								triggerTurn: completionTriggersTurn(result, runConfig.notifyOnReviewPass),
 							};
 							if (modelLevel) {
-								runCtx.ui.notify(`✗ ${result.agent} dispatch failed: model unavailable or broken — task handed to the main window`, "error");
+								const detail = result.errorMessage?.trim() || "model unavailable or broken";
+								runCtx.ui.notify(`✗ ${result.agent} dispatch failed: ${detail} — task handed to the main window`, "error");
 							} else if (dispatchFailed) {
 								runCtx.ui.notify(`✗ ${result.agent} dispatch failed: ${result.errorMessage ?? "dispatch crashed"}`, "error");
 							}

@@ -813,12 +813,11 @@ export async function runRpcAgentAttempt(options: RunRpcAttemptOptions): Promise
 			result.rpcActivity = true;
 		}
 
-		// The child provider adapter disables request-level retries. Cancel Pi's
-		// separate outer turn retry the instant it is scheduled, before another
-		// same-model provider call can begin.
-		if (event.type === "auto_retry_start") {
-			void send({ type: "abort_retry" }).catch(() => undefined);
-		}
+		// Let Pi's outer turn retry run. Grok/xAI long streams commonly drop with
+		// a retryable `terminated` mid-turn; aborting that retry was misread as
+		// "model unavailable" and handed a still-working model back to the parent.
+		// After retries exhaust, dispatch still classifies a settled model-level
+		// failure and hands off.
 
 		// Child RPC mode exposes extension dialogs. Sub-agents are non-interactive:
 		// cancel blocking dialogs so an unrelated child extension cannot deadlock.
