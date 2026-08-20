@@ -429,12 +429,13 @@ npm run check
 npm test
 ```
 
-The source is modular: `dispatch.ts` (dispatch, controls, isolation, auto-fix),
+The source is modular: `dispatch.ts` (public dispatch contract + auto-fix),
+`thread-lifecycle.ts` (queued generations, resume/fork, and isolation settlement),
 `rpc-run.ts` / `spawn.ts` (persistent child transport + selected→main handoff),
 `worktree.ts` / `session-fork.ts` (filesystem/session branching), `tools.ts`
 (wait/status/control/stop), `widget.ts` (active-only TUI status), `announcements.ts`
-(recovery and feature notices), and `runtime.ts` (session-scoped ownership). No runtime dependencies beyond pi peer
-dependencies.
+(recovery and feature notices), and `runtime.ts` (session-scoped ownership). No runtime
+dependencies beyond pi peer dependencies.
 
 ## License
 
