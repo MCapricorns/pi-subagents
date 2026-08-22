@@ -98,8 +98,11 @@ export function defaultIsolationMode(mode: "single" | "parallel", agentName: str
 const IMAGE_FILE_PATTERN = /\.(?:png|jpe?g|webp|gif|bmp|tiff?|avif)\b/i;
 /** Frontend/UI work: the agent may screenshot and visually verify what it
  * builds, and the model cannot be swapped mid-run — vision must be on at
- * spawn. `\bUI\b` stays case-sensitive so ordinary words never match. */
-const FRONTEND_PATTERN = /\b(?:vue|react|svelte|angular|nuxt|next\.?js|vite|tailwind|screenshots?|mockups?|wireframes?|UI)\b|前端|界面|页面|样式|截图|设计稿/i;
+ * spawn. Only language-neutral signals: code terms and file names stay in
+ * English even in non-English briefs; purely semantic wording is the LLM's
+ * job via the vision flag, not a per-language keyword list. Word boundaries
+ * keep ordinary words (build, guide, reactor) from matching. */
+const FRONTEND_PATTERN = /\b(?:vue|react|svelte|angular|nuxt|next\.?js|vite|tailwind|screenshots?|mockups?|wireframes?|UI)\b/i;
 const FRONTEND_FILE_PATTERN = /\.(?:vue|html?|css|svg)\b/i;
 
 /** Deterministic vision fallback: a brief that names an image file or describes

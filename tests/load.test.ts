@@ -1726,7 +1726,7 @@ describe("vision-flagged dispatch", () => {
 		expect(taskImpliesVision("see docs/shot.jpeg now")).toBe(true);
 		expect(taskImpliesVision("compare mockup.webp, icon.gif, chart.tiff")).toBe(true);
 		expect(taskImpliesVision("Build the settings page as a Vue component with nice styling")).toBe(true);
-		expect(taskImpliesVision("改一下这个页面的样式，好看点")).toBe(true);
+		expect(taskImpliesVision("用 Vue 写一个设置页面，样式好看点")).toBe(true);
 		expect(taskImpliesVision("fix the React dashboard layout")).toBe(true);
 		expect(taskImpliesVision("update styles.css and index.html")).toBe(true);
 		expect(taskImpliesVision("Compare the two screenshots")).toBe(true);
@@ -1737,6 +1737,9 @@ describe("vision-flagged dispatch", () => {
 		expect(taskImpliesVision("add tests for the build guide module")).toBe(false);
 		expect(taskImpliesVision("update image.ts and sprite handling")).toBe(false);
 		expect(taskImpliesVision("write the API pagination logic")).toBe(false);
+		// Purely semantic wording in any language is the LLM's job (the vision
+		// flag), not the deterministic keyword backstop.
+		expect(taskImpliesVision("改一下这个页面的样式，好看点")).toBe(false);
 	});
 
 	it("auto-flags a task that names an image file even without vision: true", async () => {
