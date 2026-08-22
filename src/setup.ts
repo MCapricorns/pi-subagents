@@ -37,7 +37,6 @@ import {
 	modelRef,
 	resolveThinkingLevel,
 	supportedThinkingLevels,
-	type ModelPickerSlot,
 } from "./models.ts";
 import { promptSelectMany, promptSelectOne } from "./ui.ts";
 import { discoverAgents } from "./agents.ts";
@@ -96,14 +95,12 @@ async function pickEnabledAgents(
 async function pickConfiguredModel(
 	ctx: ExtensionCommandContext,
 	title: string,
-	slot: ModelPickerSlot,
 	configuredRef: string | undefined,
 	escNote: string,
 ): Promise<string | undefined> {
 	const models = availableModelsInScope(ctx);
 	const items = buildModelPickerItems({
 		models,
-		slot,
 		configuredRef,
 		mainRef: currentModelRef(ctx),
 	});
@@ -122,20 +119,7 @@ async function pickAgentModel(
 	currentRef: string | undefined,
 	escNote = "cancels setup",
 ): Promise<string | undefined> {
-	return pickConfiguredModel(ctx, `Model for "${agentName}"?`, "agent", currentRef, escNote);
-}
-
-async function pickVisionModel(
-	ctx: ExtensionCommandContext,
-	currentRef: string | undefined,
-): Promise<string | undefined> {
-	return pickConfiguredModel(
-		ctx,
-		"Vision model for image tasks? (failure → current main model)",
-		"vision",
-		currentRef,
-		"cancels setup",
-	);
+	return pickConfiguredModel(ctx, `Model for "${agentName}"?`, currentRef, escNote);
 }
 
 const THINKING_LEVEL_HINTS: Record<ThinkingLevel, string> = {
@@ -304,8 +288,6 @@ async function runFullSetup(ctx: ExtensionCommandContext, configPath: string, ba
 		agentModels = applyAgentModelChoice(agentModels, agentName, choice);
 	}
 
-	const visionModel = await pickVisionModel(ctx, base.visionModel);
-	if (visionModel === undefined) return notifyCancelled(ctx);
 	const injection = await pickInjection(ctx, base.proactiveInjection);
 	if (injection === undefined) return notifyCancelled(ctx);
 	const scope = await pickScope(ctx, base.agentScope);
@@ -349,7 +331,6 @@ async function runFullSetup(ctx: ExtensionCommandContext, configPath: string, ba
 		idleTimeoutSec,
 		announcedFeatures: base.announcedFeatures,
 	};
-	if (visionModel !== CURRENT_MAIN_MODEL) next.visionModel = visionModel;
 	await saveConfig(next, configPath);
 	ctx.ui.notify(`pi-subagents configured with Auto thinking. Saved to ${configPath}`, "info");
 }
@@ -395,7 +376,6 @@ async function runMenu(ctx: ExtensionCommandContext, configPath: string, config:
 	const choice = await ctx.ui.select("pi-subagents settings", [
 		"Enable/disable agents",
 		"Configure an agent (model + thinking)",
-		"Change vision model",
 		"Runtime settings",
 		"Full re-setup",
 	]);
@@ -427,11 +407,6 @@ async function runMenu(ctx: ExtensionCommandContext, configPath: string, config:
 			else next.agentThinkingLevels[picked.name] = picked.strength;
 		}
 		if (!configuredAny) return notifyCancelled(ctx);
-	} else if (choice.startsWith("Change vision")) {
-		const visionModel = await pickVisionModel(ctx, config.visionModel);
-		if (visionModel === undefined) return notifyCancelled(ctx);
-		if (visionModel === CURRENT_MAIN_MODEL) delete next.visionModel;
-		else next.visionModel = visionModel;
 	} else {
 		const updated = await updateRuntimeSetting(ctx, next);
 		if (updated === undefined) return notifyCancelled(ctx);

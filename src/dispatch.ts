@@ -3,9 +3,6 @@
  * child processes, single or parallel. Owns the public dispatch contract,
  * per-run status tracking, the auto-fix chain (REVIEW_FAIL → worker → re-review),
  * and completion delivery. Stable thread generations live in thread-lifecycle.ts.
- *
- * Vision: a task flagged `vision: true` uses the configured vision model, then
- * hands directly to the current main-window model on model/provider failure.
  */
 
 import { StringEnum } from "@earendil-works/pi-ai";
@@ -58,9 +55,6 @@ export { FORK_CONTINUATION_PROMPT, isWorktreeCapableAgent } from "./thread-lifec
 
 const NON_BLANK_TASK_OPTIONS = { minLength: 1, pattern: "\\S" } as const;
 
-const VISION_DESCRIPTION =
-	"Set true when the task may require viewing images (screenshots, mockups, designs) — the configured vision model is used first, then model-level failures hand directly to the current main-window model. A task that names an image file or describes frontend/UI work (Vue/React, mockups, screenshots, page styling) is dispatched as vision automatically";
-
 const ISOLATION_DESCRIPTION =
 	"Filesystem isolation: shared uses the caller's working tree; worktree creates a detached temporary Git worktree (write-capable agents, including worker and cleaner, only)";
 
@@ -75,7 +69,6 @@ const TaskItem = Type.Object({
 		description: "Self-contained task to delegate (the agent has no memory of this conversation)",
 	}),
 	cwd: Type.Optional(Type.String({ description: "Working directory for the agent process" })),
-	vision: Type.Optional(Type.Boolean({ description: VISION_DESCRIPTION })),
 	isolation: IsolationSchema,
 });
 
@@ -86,7 +79,6 @@ const SubagentParams = Type.Object({
 	),
 	tasks: Type.Optional(Type.Array(TaskItem, { description: "Array of {agent, task} for parallel execution" })),
 	cwd: Type.Optional(Type.String({ description: "Working directory for the agent process (single mode)" })),
-	vision: Type.Optional(Type.Boolean({ description: VISION_DESCRIPTION })),
 	isolation: IsolationSchema,
 });
 
@@ -94,27 +86,6 @@ export function defaultIsolationMode(mode: "single" | "parallel", agentName: str
 	if (requested) return requested;
 	return mode === "parallel" && agentName === "worker" ? "worktree" : "shared";
 }
-
-const IMAGE_FILE_PATTERN = /\.(?:png|jpe?g|webp|gif|bmp|tiff?|avif)\b/i;
-/** Frontend/UI work: the agent may screenshot and visually verify what it
- * builds, and the model cannot be swapped mid-run — vision must be on at
- * spawn. Only language-neutral signals: code terms and file names stay in
- * English even in non-English briefs; purely semantic wording is the LLM's
- * job via the vision flag, not a per-language keyword list. Word boundaries
- * keep ordinary words (build, guide, reactor) from matching. */
-const FRONTEND_PATTERN = /\b(?:vue|react|svelte|angular|nuxt|next\.?js|vite|tailwind|screenshots?|mockups?|wireframes?|UI)\b/i;
-const FRONTEND_FILE_PATTERN = /\.(?:vue|html?|css|svg)\b/i;
-
-/** Deterministic vision fallback: a brief that names an image file or describes
- * frontend/UI work is vision work even when the dispatcher forgot the flag —
- * prompting alone cannot guarantee `vision: true`, and a non-vision model can
- * neither see reference images nor visually verify what it builds. */
-export function taskImpliesVision(task: string): boolean {
-	return IMAGE_FILE_PATTERN.test(task) || FRONTEND_FILE_PATTERN.test(task) || FRONTEND_PATTERN.test(task);
-}
-
-const wantsVision = (flag: boolean | undefined, task: string): boolean =>
-	flag === true || taskImpliesVision(task);
 
 const autoFixRootTails = new Map<string, Promise<void>>();
 
@@ -172,7 +143,6 @@ export function registerSubagentTool(pi: ExtensionAPI, runtime: SubagentRuntime)
 			"It starts agents in the background and immediately returns control to the main window; completion messages automatically wake the main agent to continue.",
 			"Each agent has no memory of this conversation — brief it fully (goal, exact paths, constraints, expected output).",
 			"Results arrive as wake-up messages automatically — you do NOT need to wait. If you must get a result in-turn, subagent_wait is a non-blocking lookup by default (pass timeoutMs to block).",
-			"Vision: set vision: true when the task may require viewing images (screenshots, mockups, design files — e.g. frontend work) — the configured vision model is used first, then model-level failures hand directly to the current main-window model.",
 		].join(" "),
 		promptSnippet:
 			"Start background subagents: explore (read-only search), worker (implement), cleaner (explicit evidence-first cleanup), reviewer (pre-commit review); completion automatically resumes the main agent. Simple tasks: use direct tools, not subagents.",
@@ -188,7 +158,6 @@ export function registerSubagentTool(pi: ExtensionAPI, runtime: SubagentRuntime)
 			"Use isolation: worktree only for worker, cleaner, or another write-capable agent and only inside a Git repository with a committed HEAD; parallel worker tasks default to worktree, while cleaner must opt in. Setup or integration failures never silently fall back to shared.",
 			"NEVER sleep or poll, and do NOT call subagent_wait to hold the turn — subagent ends the turn immediately and the result arrives as a message that wakes you automatically (even mid-turn). Ending your turn is the default and the only correct way to wait.",
 			"If you must keep the turn for a result, call subagent_wait with an explicit timeoutMs (non-blocking by default) — never bash sleep/timeout to wait for a sub-agent.",
-			"When a delegated task may require viewing images (frontend screenshots, mockups, design comparisons), pass vision: true and give the sub-agent the exact image paths — it reads them with its read tool. The configured vision model is used first; model-level failures hand directly to the current main-window model.",
 			"When a sub-agent result arrives it is already shown to the user — do NOT restate, paraphrase, or summarize it; reply with only your own conclusion or next action (often just one line), since duplicating the result wastes tokens for nothing.",
 		],
 		parameters: SubagentParams,
@@ -320,13 +289,10 @@ export function registerSubagentTool(pi: ExtensionAPI, runtime: SubagentRuntime)
 				executionCwd: string,
 				signal: AbortSignal,
 				meta: RunChainMeta,
-				vision = false,
 			): Promise<{ runId?: number; result: SingleResult }> => {
 				const agent = agents.find((candidate) => candidate.name === agentName);
 				if (!agent) return { result: failedStartResult(agentName, task, `Unknown agent: "${agentName}".`) };
-				// Vision chains use the vision override first; every model-level failure
-				// hands directly to the current main model with re-clamped thinking.
-				const route = resolveDispatchModelRoute(agent, config, ctx, vision);
+				const route = resolveDispatchModelRoute(agent, config, ctx);
 				const thinkingLevel = route.thinkingLevel;
 				const runId = monitor.addRun(agent.name, task, route.agent.model, thinkingLevel, meta);
 				const onLive = makeLiveHandler(runId);
@@ -397,7 +363,6 @@ export function registerSubagentTool(pi: ExtensionAPI, runtime: SubagentRuntime)
 				parentGroupId: string,
 				parentRunId: number,
 				executionCwd: string,
-				vision = false,
 			): void => {
 				const parentThreadAtStart = runtime.threads.get(parentRunId);
 				if (!parentThreadAtStart) return;
@@ -446,7 +411,7 @@ export function registerSubagentTool(pi: ExtensionAPI, runtime: SubagentRuntime)
 								groupId: parentGroupId,
 								relationLabel: `fix round ${round}`,
 								parentRunId,
-							}, vision);
+							});
 							// Preserve the newest sub-step before checking chain ownership. A
 							// destructive stop invalidates ownsParent() while this child is
 							// aborting, and its partial output must become the parent's stopped
@@ -470,7 +435,7 @@ export function registerSubagentTool(pi: ExtensionAPI, runtime: SubagentRuntime)
 								groupId: parentGroupId,
 								relationLabel: `re-review round ${round}`,
 								parentRunId,
-							}, vision);
+							});
 							if (
 								runtime.threads.get(parentRunId) === parentThreadAtStart &&
 								parentThreadAtStart.generation === parentGeneration
@@ -649,7 +614,6 @@ export function registerSubagentTool(pi: ExtensionAPI, runtime: SubagentRuntime)
 						item.agent,
 						item.task,
 						item.cwd,
-						wantsVision(item.vision, item.task),
 						defaultIsolationMode("parallel", item.agent, item.isolation as IsolationMode | undefined),
 					));
 				}
@@ -687,7 +651,6 @@ export function registerSubagentTool(pi: ExtensionAPI, runtime: SubagentRuntime)
 				params.agent as string,
 				params.task as string,
 				params.cwd,
-				wantsVision(params.vision, params.task as string),
 				defaultIsolationMode("single", params.agent as string, params.isolation as IsolationMode | undefined),
 			);
 			if (result.exitCode !== -1) {

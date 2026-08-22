@@ -69,7 +69,7 @@ export default function (pi: ExtensionAPI): void {
 	registerLookupTools(pi, runtime);
 
 	pi.registerCommand("subagents-setup", {
-		description: "Configure pi-subagents: agents, selected models, capability-aware thinking, vision, and runtime settings",
+		description: "Configure pi-subagents: agents, selected models, capability-aware thinking, and runtime settings",
 		handler: async (_args, ctx) => {
 			await runSetup(ctx, configPath);
 		},

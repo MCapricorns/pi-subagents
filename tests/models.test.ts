@@ -102,7 +102,6 @@ describe("model setup helpers", () => {
 	it("shows actual thinking levels and a dynamic-main choice", () => {
 		const items = buildModelPickerItems({
 			models,
-			slot: "agent",
 			configuredRef: "anthropic/claude-vision",
 			mainRef: "openai/gpt-fast",
 		});
@@ -116,18 +115,17 @@ describe("model setup helpers", () => {
 			.toContain("thinking: off");
 	});
 
-	it("offers only image-capable models for vision", () => {
-		const items = buildModelPickerItems({ models, slot: "vision" });
-		expect(items.map((item) => item.value)).toEqual([
-			CURRENT_MAIN_MODEL,
-			"anthropic/claude-vision",
-		]);
+	it("labels image-capable models so a vision-capable agent model is visible", () => {
+		const items = buildModelPickerItems({ models });
+		expect(items.find((item) => item.value === "anthropic/claude-vision")?.description)
+			.toContain("vision");
+		expect(items.find((item) => item.value === "openai/gpt-fast")?.description)
+			.toContain("text-only");
 	});
 
 	it("does not reinsert stale configured refs", () => {
 		const items = buildModelPickerItems({
 			models: [models[1]],
-			slot: "agent",
 			configuredRef: "removed/stale",
 		});
 		expect(items.map((item) => item.value)).toEqual([CURRENT_MAIN_MODEL, "openai/gpt-fast"]);

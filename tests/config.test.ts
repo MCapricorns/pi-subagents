@@ -131,13 +131,9 @@ describe("normalizeConfig", () => {
 		expect(normalizeConfig({ idleTimeoutSec: "off" }).idleTimeoutSec).toBe(DEFAULT_IDLE_TIMEOUT_SEC);
 	});
 
-	it("keeps a valid visionModel and drops invalid ones", () => {
-		expect(normalizeConfig({ visionModel: "anthropic/claude-sonnet-4-5" }).visionModel).toBe(
-			"anthropic/claude-sonnet-4-5",
-		);
-		expect(normalizeConfig({ visionModel: "noslash" }).visionModel).toBeUndefined();
-		expect(normalizeConfig({ visionModel: 42 }).visionModel).toBeUndefined();
-		expect(normalizeConfig({}).visionModel).toBeUndefined();
+	it("drops the obsolete visionModel key during normalization", () => {
+		expect("visionModel" in normalizeConfig({ visionModel: "anthropic/claude-sonnet-4-5" })).toBe(false);
+		expect("visionModel" in normalizeConfig({})).toBe(false);
 	});
 
 	it("keeps announcedFeatures as a string array and drops garbage", () => {

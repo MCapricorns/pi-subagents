@@ -52,7 +52,6 @@ export interface SubagentThread {
 	cwd: string;
 	/** Actual child cwd (the equivalent path inside an isolated worktree). */
 	executionCwd: string;
-	vision: boolean;
 	thinkingLevel?: ThinkingLevel;
 	isolation: IsolationMode;
 	worktree?: WorktreeIsolation;

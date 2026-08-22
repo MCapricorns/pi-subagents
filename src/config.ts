@@ -99,15 +99,8 @@ export interface SubagentsConfig {
 	 */
 	idleTimeoutSec: number;
 	/**
-	 * Vision-capable model for tasks flagged `vision: true` (viewing screenshots,
-	 * mockups, designs). Unset means such tasks fall back to the main session's
-	 * current model.
-	 */
-	visionModel?: string;
-	/**
-	 * One-time feature announcements already shown to the user (e.g. "vision
-	 * model" after an update that introduced it). Persisted so the notice never
-	 * nags again.
+	 * One-time feature announcements already shown to the user. Persisted so
+	 * the notice never nags again.
 	 */
 	announcedFeatures: string[];
 }
@@ -210,10 +203,6 @@ export function normalizeConfig(raw: unknown): SubagentsConfig {
 	// 0 disables the idle watchdog; otherwise clamp to [0, upper].
 	if (typeof raw.idleTimeoutSec === "number" && Number.isFinite(raw.idleTimeoutSec)) {
 		config.idleTimeoutSec = Math.max(0, Math.min(IDLE_TIMEOUT_SEC_LIMIT, Math.round(raw.idleTimeoutSec)));
-	}
-
-	if (isModelReference(raw.visionModel)) {
-		config.visionModel = (raw.visionModel as string).trim();
 	}
 
 	if (Array.isArray(raw.announcedFeatures)) {

@@ -3,7 +3,6 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { BackgroundTaskQueue, type BackgroundTask } from "../src/background.ts";
-import { taskImpliesVision } from "../src/dispatch.ts";
 import register, { matchRunIds } from "../src/index.ts";
 import { monitor } from "../src/monitor.ts";
 import { persistRecoveryRecords } from "../src/recovery.ts";
@@ -141,11 +140,10 @@ describe("extension registration", () => {
 
 		expect(setWidget).toHaveBeenCalledWith("pi-subagents", expect.any(Function), { placement: "aboveEditor" });
 		expect(notify).toHaveBeenCalledWith(expect.stringContaining("recovery for run #41"), "error");
-		expect(notify).toHaveBeenCalledWith(expect.stringContaining("vision-capable model"), "info");
 		expect(notify).toHaveBeenCalledWith(expect.stringMatching(/cleaner agent.*\/subagents-setup/), "info");
 		const savedConfig = JSON.parse(readFileSync(configPath, "utf8"));
 		expect(savedConfig.enabledAgents).toEqual(["explore", "worker", "reviewer"]);
-		expect(savedConfig.announcedFeatures).toEqual(expect.arrayContaining(["visionModel", "cleanerAgent"]));
+		expect(savedConfig.announcedFeatures).toEqual(expect.arrayContaining(["cleanerAgent"]));
 
 		// Recovery remains visible while its artifact exists, but the feature markers
 		// prevent repeated informational notices on later session starts.
@@ -1663,29 +1661,17 @@ describe("before_agent_start injection", () => {
 	});
 });
 
-describe("vision-flagged dispatch", () => {
+describe("selected agent model dispatch", () => {
 	const AVAILABLE = [
 		{ provider: "openai", id: "current", reasoning: false, input: ["text"] },
 		{ provider: "anthropic", id: "sonnet", reasoning: true, input: ["text"], thinkingLevelMap: { max: "max" } },
-		{ provider: "anthropic", id: "vision", reasoning: true, input: ["text", "image"], thinkingLevelMap: { medium: null, high: null, xhigh: null, max: null } },
 	];
 
-	function visionContext(uiNotify: ReturnType<typeof vi.fn>): any {
-		return {
-			...executionContext({ uiNotify }),
-			model: AVAILABLE[0],
-			modelRegistry: { getAvailable: () => AVAILABLE },
-		};
-	}
-
-	/** Register, run one dispatch with the given vision flag + config, and return
-	 * the captured enqueue task and the spawn spy for model assertions. */
-	async function dispatchWithVision(
-		vision: boolean,
+	/** Register, run one dispatch with the given config, and return the captured
+	 * enqueue task and the spawn spy for model assertions. */
+	async function dispatchWithConfig(
 		config: Record<string, unknown>,
 		uiNotify: ReturnType<typeof vi.fn>,
-		task = "Compare screenshots",
-		agent = "reviewer",
 	): Promise<{ controller: AbortController; runSpy: ReturnType<typeof vi.spyOn> }> {
 		if (!testAgentDir) throw new Error("test agent directory was not initialized");
 		writeFileSync(join(testAgentDir, "pi-subagents.json"), JSON.stringify(config), "utf8");
@@ -1700,7 +1686,7 @@ describe("vision-flagged dispatch", () => {
 			.spyOn(spawn, "runSingleAgentWithMainFallback")
 			.mockResolvedValue({
 				agent: "reviewer",
-				task,
+				task: "Review the change",
 				exitCode: 0,
 				messages: [],
 				stderr: "",
@@ -1709,11 +1695,11 @@ describe("vision-flagged dispatch", () => {
 		register(stub.api);
 		const tool = stub.tools.find((candidate) => candidate.name === "subagent");
 		await tool.execute(
-			"call-vision",
-			{ agent, task, vision },
+			"call-model",
+			{ agent: "reviewer", task: "Review the change" },
 			new AbortController().signal,
 			() => {},
-			visionContext(uiNotify),
+			{ ...executionContext({ uiNotify }), model: AVAILABLE[0], modelRegistry: { getAvailable: () => AVAILABLE } },
 		);
 		expect(captured).toHaveLength(1);
 		await captured[0](controller.signal);
@@ -1721,93 +1707,9 @@ describe("vision-flagged dispatch", () => {
 		return { controller, runSpy };
 	}
 
-	it("detects image references and frontend/UI signals in prose", () => {
-		expect(taskImpliesVision("read design.PNG")).toBe(true);
-		expect(taskImpliesVision("see docs/shot.jpeg now")).toBe(true);
-		expect(taskImpliesVision("compare mockup.webp, icon.gif, chart.tiff")).toBe(true);
-		expect(taskImpliesVision("Build the settings page as a Vue component with nice styling")).toBe(true);
-		expect(taskImpliesVision("用 Vue 写一个设置页面，样式好看点")).toBe(true);
-		expect(taskImpliesVision("fix the React dashboard layout")).toBe(true);
-		expect(taskImpliesVision("update styles.css and index.html")).toBe(true);
-		expect(taskImpliesVision("Compare the two screenshots")).toBe(true);
-	});
-
-	it("does not flag ordinary backend or prose tasks", () => {
-		expect(taskImpliesVision("refactor the reactor pattern in worker.ts")).toBe(false);
-		expect(taskImpliesVision("add tests for the build guide module")).toBe(false);
-		expect(taskImpliesVision("update image.ts and sprite handling")).toBe(false);
-		expect(taskImpliesVision("write the API pagination logic")).toBe(false);
-		// Purely semantic wording in any language is the LLM's job (the vision
-		// flag), not the deterministic keyword backstop.
-		expect(taskImpliesVision("改一下这个页面的样式，好看点")).toBe(false);
-	});
-
-	it("auto-flags a task that names an image file even without vision: true", async () => {
-		const uiNotify = vi.fn();
-		const { controller, runSpy } = await dispatchWithVision(
-			false,
-			{
-				agentModels: { reviewer: "anthropic/sonnet" },
-				visionModel: "anthropic/vision",
-			},
-			uiNotify,
-			"Compare screenshots/settings.png against the mockup home.png",
-		);
-		expect(runSpy.mock.calls[0][0].agent.model).toBe("anthropic/vision");
-		controller.abort();
-	});
-
-	it("auto-flags a frontend task so the worker can visually verify its own output", async () => {
-		const uiNotify = vi.fn();
-		const { controller, runSpy } = await dispatchWithVision(
-			false,
-			{
-				agentModels: { worker: "anthropic/sonnet" },
-				visionModel: "anthropic/vision",
-			},
-			uiNotify,
-			"Implement the Vue settings page per the design and polish the layout",
-			"worker",
-		);
-		expect(runSpy.mock.calls[0][0].agent.model).toBe("anthropic/vision");
-		controller.abort();
-	});
-
-	it("uses vision first, then current main, with capability-clamped thinking", async () => {
-		const uiNotify = vi.fn();
-		const { controller, runSpy } = await dispatchWithVision(
-			true,
-			{
-				agentModels: { reviewer: "anthropic/sonnet" },
-				visionModel: "anthropic/vision",
-			},
-			uiNotify,
-		);
-		const options = runSpy.mock.calls[0][0];
-		expect(options.agent.model).toBe("anthropic/vision");
-		expect(options.thinkingLevel).toBe("low");
-		expect(options.thinkingLevelForModel("openai/current")).toBe("off");
-		expect(runSpy.mock.calls[0][1]).toBe("openai/current");
-		controller.abort();
-	});
-
-	it("uses current main dynamically when no vision override is configured", async () => {
-		const uiNotify = vi.fn();
-		const { controller, runSpy } = await dispatchWithVision(
-			true,
-			{ agentModels: { reviewer: "anthropic/sonnet" } },
-			uiNotify,
-		);
-		expect(runSpy.mock.calls[0][0].agent.model).toBe("openai/current");
-		expect(runSpy.mock.calls[0][0].thinkingLevel).toBe("off");
-		expect(runSpy.mock.calls[0][1]).toBeUndefined();
-		controller.abort();
-	});
-
 	it("skips a stale selected agent model and preserves only the selection", async () => {
 		const uiNotify = vi.fn();
-		const { controller, runSpy } = await dispatchWithVision(
-			false,
+		const { controller, runSpy } = await dispatchWithConfig(
 			{
 				agentModels: { reviewer: "removed/primary" },
 				agentBackupModels: { reviewer: "legacy/backup" },
@@ -1822,20 +1724,17 @@ describe("vision-flagged dispatch", () => {
 		controller.abort();
 	});
 
-	it("skips a stale vision selection without rewriting it", async () => {
+	it("routes a configured agent model with capability-clamped thinking", async () => {
 		const uiNotify = vi.fn();
-		const { controller, runSpy } = await dispatchWithVision(
-			true,
-			{
-				agentModels: { reviewer: "anthropic/sonnet" },
-				visionModel: "anthropic/gone",
-			},
+		const { controller, runSpy } = await dispatchWithConfig(
+			{ agentModels: { reviewer: "anthropic/sonnet" } },
 			uiNotify,
 		);
-		expect(runSpy.mock.calls[0][0].agent.model).toBe("openai/current");
-		expect(runSpy.mock.calls[0][1]).toBeUndefined();
-		const saved = JSON.parse(readFileSync(join(testAgentDir!, "pi-subagents.json"), "utf8"));
-		expect(saved.visionModel).toBe("anthropic/gone");
+		const options = runSpy.mock.calls[0][0];
+		expect(options.agent.model).toBe("anthropic/sonnet");
+		expect(options.thinkingLevelForModel("openai/current")).toBe("off");
+		expect(runSpy.mock.calls[0][1]).toBe("openai/current");
 		controller.abort();
 	});
 });
+

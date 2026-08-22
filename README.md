@@ -61,11 +61,11 @@ index.
   into the main system prompt, so the main model sends broad searches to `explore`,
   self-contained implementations to `worker`, explicit cleanup intent to `cleaner`,
   and pre-commit reviews to `reviewer`. You just use pi; delegation happens by itself.
-- **Vision-capable image tasks** — flag screenshot/mockup/design work with
-  `vision: true`. The configured vision model hands directly to the current main
-  model on model/provider failure. Setup lists only in-scope, image-capable models
-  from providers with configured authentication, and failures never silently
-  rewrite your configuration.
+- **Multimodal work is a model choice, not a mode** — an agent that should see
+  screenshots, mockups, or its own rendered pages simply gets a multimodal model
+  through `/subagents-setup` (the picker labels each model `vision` or
+  `text-only`). The agent reads images with its `read` tool on whatever model it
+  runs; no per-task flag, no separate vision override.
 - **Results come back on their own** — completions are delivered as messages that
   wake the main agent automatically, even mid-turn. No polling, no `sleep`, no
   "go check" step. `subagent_wait` is a **non-blocking** in-turn lookup by default
@@ -201,15 +201,16 @@ subagent({
 
 ### Cleanup routing and lifecycle
 
-The injected guidance routes `cleaner` by explicit semantic intent: **code cleanup**,
-**dead code**, **代码清理**, **精简**, **清理冗余**, **简化**, or **去除过度设计**.
-Requested periodic maintenance passes also qualify; PR counts do not, and cleaner is
-never run automatically as the pre-commit gate.
+The injected guidance routes `cleaner` by explicit semantic intent in any
+language the conversation uses: **code cleanup**, **dead code**, redundancy,
+simplification, or over-engineering. Requested periodic maintenance passes also
+qualify; PR counts do not, and cleaner is never run automatically as the
+pre-commit gate.
 
-- **Audit mode:** audit/find/report/review or 审计/查找/检查/报告 wording produces
-  read-only ranked evidence.
-- **Apply mode:** explicit remove/clean/simplify/refactor or 清理/删除/移除/精简/简化/重构
-  wording permits the smallest proven edits plus narrow-then-broad verification.
+- **Audit mode:** audit/find/report/review wording produces read-only ranked
+  evidence.
+- **Apply mode:** explicit remove/clean/simplify/refactor wording permits the
+  smallest proven edits plus narrow-then-broad verification.
 
 ```text
 explicit cleanup intent → cleaner (audit or apply)
@@ -220,33 +221,23 @@ cleaner apply → reviewer gate → worker auto-fix (on REVIEW_FAIL) → reviewe
 portion runs only when enabled by `maxFixRounds`; cleaner itself is not a pre-commit
 hook or a PR-count scheduler.
 
-### Vision tasks (screenshots / mockups / designs)
+### Image work (screenshots / mockups / designs)
 
-When a task may require viewing images — frontend work, UI review, design
-comparisons — set `vision: true` and give the sub-agent the exact image paths:
+There is no vision flag or separate vision model. Give the agent a multimodal
+model in `/subagents-setup` and name the exact image paths in the task:
 
 ```ts
 subagent({
   agent: "reviewer",
   task: "Compare the UI in screenshots/settings.png against the mockup design.png; list every visual mismatch.",
-  vision: true,
 });
 ```
 
-The sub-agent reads images with its `read` tool. Runtime order for a
-vision-flagged run is `visionModel` → current main-window model. A stale or
-currently unavailable vision selection is skipped immediately without rewriting
-it. A vision-flagged auto-fix chain keeps the flag for worker/re-review rounds
-because they may need to inspect the same images.
-
-As a deterministic fallback, a brief that names an image file (an extension such
-as `.png`, `.jpg`, `.webp`) or describes frontend/UI work — Vue/React/Svelte
-pages, mockups, screenshots, page styling — is dispatched as
-vision even without the flag: the model cannot be swapped mid-run, so a worker
-that screenshots and visually verifies what it builds must start on a
-vision-capable model. How do you verify which model ran? The live widget line,
-dispatch result row, and `subagent_status` all show each run's effective model
-id, and a selected→main handoff is labeled with its origin.
+The sub-agent reads images with its `read` tool on its configured model; the
+setup picker labels each model `vision` or `text-only` so the choice is visible.
+The live widget line, dispatch result row, and `subagent_status` all show each
+run's effective model id, and a selected→main handoff is labeled with its
+origin.
 
 ### Controlling and stopping
 
@@ -302,8 +293,8 @@ sessions show the recovery paths again until the artifacts are removed.
 ## Configuration
 
 Stored at `~/.pi/agent/pi-subagents.json` (follows `PI_CODING_AGENT_DIR` when
-set). `/subagents-setup` has five top-level choices: enable agents, configure one
-agent's model/thinking, choose a vision model, runtime settings, or full setup.
+set). `/subagents-setup` has four top-level choices: enable agents, configure one
+agent's model/thinking, runtime settings, or full setup.
 After one agent's model + thinking picks, the wizard returns to the agent picker
 so several agents can be configured in one pass; Esc at any step ends the pass
 and keeps every agent already configured. There is no backup pool or global thinking menu. Model pickers show only in-scope
@@ -321,7 +312,6 @@ direct-file settings.
   "agentThinkingLevels": {
     "reviewer": "high"
   },
-  "visionModel": "anthropic/claude-sonnet-4-5",
   "notifyOnReviewPass": false,
   "maxResultLines": 80,
   "proactiveInjection": true,
@@ -337,7 +327,6 @@ direct-file settings.
 | `enabledAgents` | Agent names exposed to discovery and prompt injection. An empty array disables all agents. |
 | `agentModels` | Optional selected `provider/model-id` per agent. Missing = current main model. Model-level failure hands directly to current main. |
 | `agentThinkingLevels` | Optional manual preference per agent. Missing = Auto (agent frontmatter preference, or `high`, clamped to the effective model's supported levels). |
-| `visionModel` | Optional vision-capable model for `vision: true` tasks (screenshots/mockups/designs). Unset = falls back to the main session's current model. |
 | `notifyOnReviewPass` | When `true`, a passing reviewer result is delivered without waking the main agent (default `false`). |
 | `maxResultLines` | Max lines of a sub-agent result carried in the completion message (default `80`). Longer results are truncated; full text is written to an extension-named temporary `.md`. At session start and on each write, only recognized result files older than 7 days are removed; each canonical project path has its own newest-50 bucket. |
 | `proactiveInjection` | Whether to add the delegation directive to the main system prompt. |
@@ -349,7 +338,7 @@ direct-file settings.
 ### Model routing and thinking
 
 ```text
-selected agent/vision model → current main-window model
+selected agent model → current main-window model
 ```
 
 Without a selected model, current main runs immediately; agent frontmatter model

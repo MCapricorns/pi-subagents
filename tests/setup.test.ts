@@ -17,7 +17,6 @@ describe("setup model picker helpers", () => {
 				reasoning: true,
 				thinkingLevelMap: { xhigh: null, max: "max" },
 			}],
-			slot: "agent",
 			mainRef: "anthropic/claude-sonnet",
 		});
 		expect(dynamic).toMatchObject({
@@ -31,8 +30,8 @@ describe("setup model picker helpers", () => {
 		expect(pickerItemSearchText(model)).toContain("thinking:");
 	});
 
-	it("vision selection excludes text-only models", () => {
-		const items = buildModelPickerItems({
+	it("labels text-only models so agent model choices show the capability", () => {
+		const [, model] = buildModelPickerItems({
 			models: [{
 				provider: "openai",
 				id: "text-only",
@@ -40,9 +39,8 @@ describe("setup model picker helpers", () => {
 				input: ["text"],
 				reasoning: false,
 			}],
-			slot: "vision",
 		});
-		expect(items).toEqual([expect.objectContaining({ value: CURRENT_MAIN_MODEL })]);
+		expect(model.description).toContain("text-only");
 	});
 });
 

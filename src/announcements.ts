@@ -14,12 +14,6 @@ const ANNOUNCEMENTS: Array<{
 	message: string;
 }> = [
 	{
-		key: "visionModel",
-		condition: (config) => config.visionModel === undefined,
-		message:
-			"pi-subagents: new — a vision-capable model can now handle image tasks (screenshots, mockups, designs). Run /subagents-setup to configure it; until set, vision tasks use the main session's current model.",
-	},
-	{
 		key: "cleanerAgent",
 		condition: (config) => !config.enabledAgents.includes("cleaner"),
 		message:

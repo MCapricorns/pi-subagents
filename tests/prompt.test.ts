@@ -83,11 +83,9 @@ describe("buildDelegationDirective", () => {
 		expect(withReviewer).toContain("multi-model cross-review");
 	});
 
-	it("instructs the main agent to judge when a task needs vision and pass vision: true", () => {
+	it("no longer injects vision routing (agent model choice covers image work)", () => {
 		const directive = buildDelegationDirective([agent("explore"), agent("worker"), agent("reviewer")]);
-		expect(directive).toContain("Vision tasks");
-		expect(directive).toContain("pass `vision: true`");
-		expect(directive).toContain("falls back to the main session's current model");
+		expect(directive).not.toContain("vision");
 	});
 
 	it("tells the main agent not to re-state a sub-agent result", () => {

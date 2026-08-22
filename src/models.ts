@@ -1,7 +1,7 @@
 /*
  * Model routing, capability-aware thinking, and setup-picker helpers.
  *
- * Runtime has one explicit fallback only: a configured agent/vision model hands
+ * Runtime has one explicit fallback only: a configured agent model hands
  * off directly to the current main-window model. Setup lists only currently
  * available models and derives thinking choices from Pi's model metadata.
  */
@@ -19,8 +19,6 @@ export type ModelContext = Pick<ExtensionContext, "model" | "modelRegistry"> &
 	Partial<Pick<ExtensionContext, "scopedModels">>;
 
 export const CURRENT_MAIN_MODEL = "__current_main_model__";
-
-export type ModelPickerSlot = "agent" | "vision";
 
 export interface ModelPickerItem {
 	value: string;
@@ -136,11 +134,10 @@ function modelCapabilities(model: ModelListEntry): string {
 	return `${input} · thinking: ${thinking}`;
 }
 
-/** Build one searchable list for agent or vision selection. Only models Pi
+/** Build one searchable list for agent model selection. Only models Pi
  * currently reports as available are supplied by setup. */
 export function buildModelPickerItems(options: {
 	models: readonly ModelListEntry[];
-	slot: ModelPickerSlot;
 	configuredRef?: string;
 	mainRef?: string;
 }): ModelPickerItem[] {
@@ -153,7 +150,6 @@ export function buildModelPickerItems(options: {
 	}
 
 	const refs = [...byRef.keys()]
-		.filter((ref) => options.slot !== "vision" || byRef.get(ref)?.input.includes("image") === true)
 		.sort((left, right) => {
 			const leftRank = left === configuredRef ? 0 : left === mainRef ? 1 : 2;
 			const rightRank = right === configuredRef ? 0 : right === mainRef ? 1 : 2;
@@ -163,9 +159,7 @@ export function buildModelPickerItems(options: {
 	const dynamic: ModelPickerItem = {
 		value: CURRENT_MAIN_MODEL,
 		label: "Current main model (dynamic)",
-		description: options.slot === "vision"
-			? "Clear vision override; use the current main model for image tasks"
-			: "Clear agent override; use the current main model dynamically",
+		description: "Clear agent override; use the current main model dynamically",
 	};
 	const items: ModelPickerItem[] = [dynamic];
 	for (const ref of refs) {

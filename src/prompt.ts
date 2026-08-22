@@ -66,10 +66,6 @@ ${hasMultiple ? `- Run INDEPENDENT tasks in parallel: one subagent call with a \
 - Treat delegated agents as leaf workers: do not ask a sub-agent to dispatch another sub-agent; child processes do not have this tool. Use \`subagent_control fork\` on a parked/settled retained thread when you need an independent continuation with preserved context and a new run id.
 - Trust but verify: a sub-agent's summary describes intent, not outcome. Check the actual changes/results before reporting work done.
 ${hasExplore ? "- Treat `explore` findings as a retrieval index, never as sole proof for edits, deletion, security, compatibility, persistence, or dynamic reachability. Re-read load-bearing files before acting. An underpowered model can be false economy on complex dynamic, concurrent, migration, or security-sensitive code; use a stronger model or specialist there.\n" : ""}
-Vision tasks:
-- Judge whether a delegated task may require viewing images (frontend screenshots, mockups, design files, visual regression comparisons). If it might, pass \`vision: true\` in the subagent call and give the sub-agent the exact image paths — it reads them with its read tool. Naming an image file or describing frontend/UI work (Vue/React page, mockup, page styling) dispatches as vision automatically, but keep passing the flag for image work described without those signals.
-- \`vision: true\` runs the sub-agent on the vision-capable model configured in /subagents-setup; when none is configured it falls back to the main session's current model. Do not skip the flag because the agent's default model looks fast — a non-vision model cannot see the images.
-
 Result handoff (do not re-state):
 - A sub-agent's result arrives as a message that is already shown to the user. Do NOT restate, paraphrase, or re-summarize its findings in your reply — that just burns tokens duplicating what is already visible. The user can read the result above.
 - Reply only with what you ADD: your own conclusion, the next action you are taking, or a one-line acknowledgement. When the result already answers the user, a single sentence is enough — then end your turn or proceed.

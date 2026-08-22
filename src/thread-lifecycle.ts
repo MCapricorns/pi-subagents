@@ -92,12 +92,11 @@ export function resolveDispatchModelRoute(
 	agent: AgentConfig,
 	config: SubagentsConfig,
 	ctx: ExtensionContext,
-	vision: boolean,
 ): DispatchModelRoute {
 	const availableModels = availableModelsInScope(ctx);
 	const mainRef = currentModelRef(ctx);
 	const route = resolveAgentModelRoute({
-		selectedRef: vision ? config.visionModel : config.agentModels[agent.name],
+		selectedRef: config.agentModels[agent.name],
 		mainRef,
 		declaredDefaultRef: agent.model,
 		availableRefs: availableModels.map(modelRef),
@@ -137,7 +136,6 @@ interface BackgroundDispatcherOptions extends DispatchEnvironment {
 		parentGroupId: string,
 		parentRunId: number,
 		executionCwd: string,
-		vision?: boolean,
 	) => void;
 }
 
@@ -145,7 +143,6 @@ type BackgroundStarter = (
 	agentName: string,
 	task: string,
 	cwd: string | undefined,
-	vision?: boolean,
 	isolation?: IsolationMode,
 ) => Promise<SingleResult>;
 
@@ -204,7 +201,6 @@ export function createBackgroundDispatcher(options: BackgroundDispatcherOptions)
 		agentName: string,
 		task: string,
 		cwd: string | undefined,
-		vision = false,
 		isolation: IsolationMode = "shared",
 		existingThread?: SubagentThread,
 		newObjectiveOnResume = false,
@@ -253,7 +249,7 @@ export function createBackgroundDispatcher(options: BackgroundDispatcherOptions)
 			}
 		}
 		const executionCwd = worktree?.cwd ?? originalCwd;
-		const resolvedRoute = resolveDispatchModelRoute(agent, runConfig, runCtx, vision);
+		const resolvedRoute = resolveDispatchModelRoute(agent, runConfig, runCtx);
 		// Isolation is a persistent system-level invariant, not a one-shot task
 		// prefix: queued retargets, live retargets, resumes, and main-model
 		// handoffs all keep the same worktree boundary.
@@ -319,7 +315,6 @@ export function createBackgroundDispatcher(options: BackgroundDispatcherOptions)
 			thread.task = task;
 			thread.cwd = originalCwd;
 			thread.executionCwd = executionCwd;
-			thread.vision = vision;
 			thread.thinkingLevel = thinkingLevel;
 			thread.isolation = isolation;
 			thread.worktree = worktree;
@@ -343,7 +338,6 @@ export function createBackgroundDispatcher(options: BackgroundDispatcherOptions)
 				task,
 				cwd: originalCwd,
 				executionCwd,
-				vision,
 				thinkingLevel,
 				isolation,
 				worktree,
@@ -622,7 +616,6 @@ export function createBackgroundDispatcher(options: BackgroundDispatcherOptions)
 					thread.agentName,
 					nextTask,
 					thread.cwd,
-					thread.vision,
 					thread.isolation,
 					thread,
 					objective !== undefined,
@@ -784,7 +777,6 @@ export function createBackgroundDispatcher(options: BackgroundDispatcherOptions)
 					thread.agentName,
 					childTask,
 					thread.cwd,
-					thread.vision,
 					thread.isolation,
 					undefined,
 					false,
@@ -926,7 +918,7 @@ export function createBackgroundDispatcher(options: BackgroundDispatcherOptions)
 					// the same row now represents the chain until it resolves.
 					monitor.setStatus(runId, "running");
 					monitor.setActivity(runId, "auto-fix chain running");
-					startFixLoop(result, `fix-${runId}`, runId, thread.executionCwd, vision);
+					startFixLoop(result, `fix-${runId}`, runId, thread.executionCwd);
 					return;
 				}
 				// Claim terminal settlement synchronously before the first slow await.
