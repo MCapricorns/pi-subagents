@@ -3,6 +3,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { BackgroundTaskQueue, type BackgroundTask } from "../src/background.ts";
+import { taskImpliesVision } from "../src/dispatch.ts";
 import register, { matchRunIds } from "../src/index.ts";
 import { monitor } from "../src/monitor.ts";
 import { persistRecoveryRecords } from "../src/recovery.ts";
@@ -1683,6 +1684,8 @@ describe("vision-flagged dispatch", () => {
 		vision: boolean,
 		config: Record<string, unknown>,
 		uiNotify: ReturnType<typeof vi.fn>,
+		task = "Compare screenshots",
+		agent = "reviewer",
 	): Promise<{ controller: AbortController; runSpy: ReturnType<typeof vi.spyOn> }> {
 		if (!testAgentDir) throw new Error("test agent directory was not initialized");
 		writeFileSync(join(testAgentDir, "pi-subagents.json"), JSON.stringify(config), "utf8");
@@ -1697,7 +1700,7 @@ describe("vision-flagged dispatch", () => {
 			.spyOn(spawn, "runSingleAgentWithMainFallback")
 			.mockResolvedValue({
 				agent: "reviewer",
-				task: "Compare screenshots",
+				task,
 				exitCode: 0,
 				messages: [],
 				stderr: "",
@@ -1707,7 +1710,7 @@ describe("vision-flagged dispatch", () => {
 		const tool = stub.tools.find((candidate) => candidate.name === "subagent");
 		await tool.execute(
 			"call-vision",
-			{ agent: "reviewer", task: "Compare screenshots", vision },
+			{ agent, task, vision },
 			new AbortController().signal,
 			() => {},
 			visionContext(uiNotify),
@@ -1717,6 +1720,55 @@ describe("vision-flagged dispatch", () => {
 		expect(runSpy).toHaveBeenCalledTimes(1);
 		return { controller, runSpy };
 	}
+
+	it("detects image references and frontend/UI signals in prose", () => {
+		expect(taskImpliesVision("read design.PNG")).toBe(true);
+		expect(taskImpliesVision("see docs/shot.jpeg now")).toBe(true);
+		expect(taskImpliesVision("compare mockup.webp, icon.gif, chart.tiff")).toBe(true);
+		expect(taskImpliesVision("Build the settings page as a Vue component with nice styling")).toBe(true);
+		expect(taskImpliesVision("改一下这个页面的样式，好看点")).toBe(true);
+		expect(taskImpliesVision("fix the React dashboard layout")).toBe(true);
+		expect(taskImpliesVision("update styles.css and index.html")).toBe(true);
+		expect(taskImpliesVision("Compare the two screenshots")).toBe(true);
+	});
+
+	it("does not flag ordinary backend or prose tasks", () => {
+		expect(taskImpliesVision("refactor the reactor pattern in worker.ts")).toBe(false);
+		expect(taskImpliesVision("add tests for the build guide module")).toBe(false);
+		expect(taskImpliesVision("update image.ts and sprite handling")).toBe(false);
+		expect(taskImpliesVision("write the API pagination logic")).toBe(false);
+	});
+
+	it("auto-flags a task that names an image file even without vision: true", async () => {
+		const uiNotify = vi.fn();
+		const { controller, runSpy } = await dispatchWithVision(
+			false,
+			{
+				agentModels: { reviewer: "anthropic/sonnet" },
+				visionModel: "anthropic/vision",
+			},
+			uiNotify,
+			"Compare screenshots/settings.png against the mockup home.png",
+		);
+		expect(runSpy.mock.calls[0][0].agent.model).toBe("anthropic/vision");
+		controller.abort();
+	});
+
+	it("auto-flags a frontend task so the worker can visually verify its own output", async () => {
+		const uiNotify = vi.fn();
+		const { controller, runSpy } = await dispatchWithVision(
+			false,
+			{
+				agentModels: { worker: "anthropic/sonnet" },
+				visionModel: "anthropic/vision",
+			},
+			uiNotify,
+			"Implement the Vue settings page per the design and polish the layout",
+			"worker",
+		);
+		expect(runSpy.mock.calls[0][0].agent.model).toBe("anthropic/vision");
+		controller.abort();
+	});
 
 	it("uses vision first, then current main, with capability-clamped thinking", async () => {
 		const uiNotify = vi.fn();

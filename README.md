@@ -239,6 +239,15 @@ currently unavailable vision selection is skipped immediately without rewriting
 it. A vision-flagged auto-fix chain keeps the flag for worker/re-review rounds
 because they may need to inspect the same images.
 
+As a deterministic fallback, a brief that names an image file (an extension such
+as `.png`, `.jpg`, `.webp`) or describes frontend/UI work — Vue/React/Svelte
+pages, mockups, screenshots, page styling, 前端/界面/页面 — is dispatched as
+vision even without the flag: the model cannot be swapped mid-run, so a worker
+that screenshots and visually verifies what it builds must start on a
+vision-capable model. How do you verify which model ran? The live widget line,
+dispatch result row, and `subagent_status` all show each run's effective model
+id, and a selected→main handoff is labeled with its origin.
+
 ### Controlling and stopping
 
 Dispatch confirmations, tool result rows, and completion blocks all show the

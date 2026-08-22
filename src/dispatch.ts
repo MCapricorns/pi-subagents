@@ -59,7 +59,7 @@ export { FORK_CONTINUATION_PROMPT, isWorktreeCapableAgent } from "./thread-lifec
 const NON_BLANK_TASK_OPTIONS = { minLength: 1, pattern: "\\S" } as const;
 
 const VISION_DESCRIPTION =
-	"Set true when the task may require viewing images (screenshots, mockups, designs) — the configured vision model is used first, then model-level failures hand directly to the current main-window model";
+	"Set true when the task may require viewing images (screenshots, mockups, designs) — the configured vision model is used first, then model-level failures hand directly to the current main-window model. A task that names an image file or describes frontend/UI work (Vue/React, mockups, screenshots, page styling) is dispatched as vision automatically";
 
 const ISOLATION_DESCRIPTION =
 	"Filesystem isolation: shared uses the caller's working tree; worktree creates a detached temporary Git worktree (write-capable agents, including worker and cleaner, only)";
@@ -94,6 +94,24 @@ export function defaultIsolationMode(mode: "single" | "parallel", agentName: str
 	if (requested) return requested;
 	return mode === "parallel" && agentName === "worker" ? "worktree" : "shared";
 }
+
+const IMAGE_FILE_PATTERN = /\.(?:png|jpe?g|webp|gif|bmp|tiff?|avif)\b/i;
+/** Frontend/UI work: the agent may screenshot and visually verify what it
+ * builds, and the model cannot be swapped mid-run — vision must be on at
+ * spawn. `\bUI\b` stays case-sensitive so ordinary words never match. */
+const FRONTEND_PATTERN = /\b(?:vue|react|svelte|angular|nuxt|next\.?js|vite|tailwind|screenshots?|mockups?|wireframes?|UI)\b|前端|界面|页面|样式|截图|设计稿/i;
+const FRONTEND_FILE_PATTERN = /\.(?:vue|html?|css|svg)\b/i;
+
+/** Deterministic vision fallback: a brief that names an image file or describes
+ * frontend/UI work is vision work even when the dispatcher forgot the flag —
+ * prompting alone cannot guarantee `vision: true`, and a non-vision model can
+ * neither see reference images nor visually verify what it builds. */
+export function taskImpliesVision(task: string): boolean {
+	return IMAGE_FILE_PATTERN.test(task) || FRONTEND_FILE_PATTERN.test(task) || FRONTEND_PATTERN.test(task);
+}
+
+const wantsVision = (flag: boolean | undefined, task: string): boolean =>
+	flag === true || taskImpliesVision(task);
 
 const autoFixRootTails = new Map<string, Promise<void>>();
 
@@ -628,7 +646,7 @@ export function registerSubagentTool(pi: ExtensionAPI, runtime: SubagentRuntime)
 						item.agent,
 						item.task,
 						item.cwd,
-						item.vision === true,
+						wantsVision(item.vision, item.task),
 						defaultIsolationMode("parallel", item.agent, item.isolation as IsolationMode | undefined),
 					));
 				}
@@ -666,7 +684,7 @@ export function registerSubagentTool(pi: ExtensionAPI, runtime: SubagentRuntime)
 				params.agent as string,
 				params.task as string,
 				params.cwd,
-				params.vision === true,
+				wantsVision(params.vision, params.task as string),
 				defaultIsolationMode("single", params.agent as string, params.isolation as IsolationMode | undefined),
 			);
 			if (result.exitCode !== -1) {
