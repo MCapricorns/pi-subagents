@@ -966,6 +966,7 @@ export function createBackgroundDispatcher(options: BackgroundDispatcherOptions)
 							? `${formatCompletionBlock(result, runConfig.maxResultLines, result.projectCwd ?? originalCwd)}\n\n${modelLevelTakeoverNote(result, { runId })}`
 							: formatCompletionBlock(result, runConfig.maxResultLines, result.projectCwd ?? originalCwd),
 						triggerTurn: completionTriggersTurn(result, runConfig.notifyOnReviewPass),
+						usage: result.usage,
 					};
 					if (modelLevel) {
 						const detail = result.errorMessage?.trim() || "model unavailable or broken";
@@ -1040,6 +1041,7 @@ export function createBackgroundDispatcher(options: BackgroundDispatcherOptions)
 								agent: agent.name,
 								block: formatCompletionBlock(crashed, runConfig.maxResultLines, crashed.projectCwd ?? originalCwd),
 								triggerTurn: true,
+								usage: crashed.usage,
 							},
 						]);
 						runtime.completionBatcher.flush();

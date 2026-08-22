@@ -60,6 +60,13 @@ describe("buildFixTaskBrief", () => {
 		expect(brief).toContain("last auto-fix round");
 	});
 
+	it("instructs the worker to fix every finding, not only blockers", () => {
+		const brief = buildFixTaskBrief(reviewResult("## Findings\n- file.ts:10 minor issue\nVERDICT: REVIEW_FAIL"), 1, 2);
+		expect(brief).toContain("Fix EVERY finding");
+		expect(brief).toContain("no severity triage");
+		expect(brief).toContain("factually wrong or clearly out of scope");
+	});
+
 	it("notes a re-review will follow when rounds remain", () => {
 		const brief = buildFixTaskBrief(reviewResult("VERDICT: REVIEW_FAIL"), 1, 2);
 		expect(brief).toContain("re-review your changes automatically");
@@ -67,11 +74,41 @@ describe("buildFixTaskBrief", () => {
 });
 
 describe("buildReReviewBrief", () => {
-	it("embeds the prior review and asks for a verdict", () => {
-		const brief = buildReReviewBrief(reviewResult("## Critical\n- file.ts:42 bug\nVERDICT: REVIEW_FAIL"), 1);
+	const workerResult = (text: string): SingleResult =>
+		reviewResult(text, { agent: "worker" });
+
+	it("embeds the prior review and the worker report, then asks for a verdict", () => {
+		const brief = buildReReviewBrief(
+			reviewResult("## Findings\n- file.ts:42 bug\nVERDICT: REVIEW_FAIL"),
+			1,
+			workerResult("Fixed file.ts:42 by guarding the null case."),
+		);
 		expect(brief).toContain("round 1");
 		expect(brief).toContain("file.ts:42 bug");
+		expect(brief).toContain("guarding the null case");
 		expect(brief).toContain("VERDICT: REVIEW_PASS / REVIEW_FAIL");
+	});
+
+	it("requires every finding resolved, including warnings", () => {
+		const brief = buildReReviewBrief(
+			reviewResult("## Findings\n- file.ts:10 minor\nVERDICT: REVIEW_FAIL"),
+			1,
+			workerResult("Fixed file.ts:10."),
+		);
+		expect(brief).toContain("Rule on EVERY previous finding");
+		expect(brief).toContain("REQUEST_CHANGES only while an open finding remains");
+	});
+
+	it("carries the convergence contract: adjudicate rejections once, no re-opening resolved items", () => {
+		const brief = buildReReviewBrief(
+			reviewResult("## Findings\n- file.ts:10 minor\nVERDICT: REVIEW_FAIL"),
+			2,
+			workerResult("file.ts:10 is intended behavior; rejected as out of scope."),
+		);
+		expect(brief).toContain("adjudicated ONCE");
+		expect(brief).toContain("never simply restate the finding");
+		expect(brief).toContain("defects this round's");
+		expect(brief).toContain("Do NOT re-open a finding you verified as resolved");
 	});
 });
 

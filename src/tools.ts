@@ -695,6 +695,7 @@ export function registerLookupTools(pi: ExtensionAPI, runtime: SubagentRuntime):
 					agent: result.agent,
 					block: formatCompletionBlock(result, maxResultLines, result.projectCwd ?? ctx.cwd),
 					triggerTurn: true,
+					usage: result.usage,
 				})));
 				runtime.completionBatcher.flush();
 			}

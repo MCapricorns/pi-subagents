@@ -9,6 +9,7 @@ import {
 	type CompletionMessageItem,
 } from "../src/completion.ts";
 import { DEFAULT_CONFIG } from "../src/config.ts";
+import type { UsageStats } from "../src/rpc-run.ts";
 import type { SingleResult } from "../src/spawn.ts";
 
 function useFakeClock(): void {
@@ -32,9 +33,20 @@ function result(
 	};
 }
 
-function messageItem(agent: string, triggerTurn: boolean): CompletionMessageItem {
-	return { agent, block: `### [${agent}] completed\n\nTask: task\n\noutput`, triggerTurn };
+function messageItem(agent: string, triggerTurn: boolean, usage?: UsageStats): CompletionMessageItem {
+	return { agent, block: `### [${agent}] completed\n\nTask: task\n\noutput`, triggerTurn, ...(usage ? { usage } : {}) };
 }
+
+const usage = (overrides: Partial<UsageStats> = {}): UsageStats => ({
+	input: 0,
+	output: 0,
+	cacheRead: 0,
+	cacheWrite: 0,
+	cost: 0,
+	contextTokens: 0,
+	turns: 0,
+	...overrides,
+});
 
 afterEach(() => {
 	vi.useRealTimers();
@@ -178,6 +190,17 @@ describe("formatCompletionMessage", () => {
 		expect(formatCompletionMessage([worker, reviewer])).toBe(
 			`### Subagents completed (2): worker, reviewer\n\n${worker.block}\n\n${reviewer.block}`,
 		);
+	});
+
+	it("appends aggregate token/cost totals for a group with usage", () => {
+		const worker = messageItem("worker", true, usage({ input: 1_000, output: 500, cacheRead: 5_000, cost: 0.25, turns: 3 }));
+		const reviewer = messageItem("reviewer", false, usage({ input: 2_000, output: 100, cacheWrite: 200, cost: 0.125, turns: 2 }));
+		const text = formatCompletionMessage([worker, reviewer]);
+		expect(text).toContain(`\n\nTotals: 2 runs · ↑3.0k ↓600 R5.0k W200 $0.3750`);
+	});
+
+	it("omits the totals footer when no item carries usage", () => {
+		expect(formatCompletionMessage([messageItem("worker", true), messageItem("reviewer", false)])).not.toContain("Totals:");
 	});
 });
 

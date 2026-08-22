@@ -12,7 +12,7 @@
  */
 
 import { getResultOutput, isFailedResult, reviewVerdict, type SingleResult } from "./spawn.ts";
-import { extractKeyFragments, formatUsageCompact } from "./monitor.ts";
+import { extractKeyFragments, formatUsageCompact, sumUsage } from "./monitor.ts";
 import type { SubagentsConfig } from "./config.ts";
 
 /**
@@ -40,7 +40,7 @@ export function shouldTriggerFixLoop(result: SingleResult, config: SubagentsConf
 /**
  * Build the worker task brief for one fix round from a reviewer's findings.
  * The worker gets the full review text so it can address concrete file:line
- * issues, with instructions to fix only blockers and self-verify.
+ * issues, with instructions to fix every reported finding and self-verify.
  */
 export function buildFixTaskBrief(reviewerResult: SingleResult, round: number, maxRounds: number): string {
 	const review = getResultOutput(reviewerResult);
@@ -53,8 +53,9 @@ export function buildFixTaskBrief(reviewerResult: SingleResult, round: number, m
 		review,
 		`---`,
 		``,
-		`Fix the concrete blockers the reviewer flagged. Do NOT refactor unrelated code.`,
-		`Address every "Critical" item; address "Warnings" only if they are genuine.`,
+		`Fix EVERY finding in the reviewer's findings list — there is no severity triage; all of them get fixed.`,
+		`If a finding is factually wrong or clearly out of scope, say so explicitly instead of fixing it.`,
+		`Do NOT refactor unrelated code beyond what the findings require.`,
 		`After editing, run the project's format/build/tests when they exist and report`,
 		`exactly what you changed (paths + short rationale) so a reviewer can verify.`,
 		remaining > 0
@@ -120,18 +121,7 @@ export function formatChainSummary(steps: readonly ChainStep[]): string {
 		const id = step.runId !== undefined ? `#${step.runId} ` : "";
 		lines.push(`- ${id}${step.result.agent} · ${step.relation} · ${stepStatus(step)}${suffix}`);
 	}
-	const total = steps.reduce(
-		(acc, step) => {
-			acc.input += step.result.usage.input;
-			acc.output += step.result.usage.output;
-			acc.cacheRead += step.result.usage.cacheRead;
-			acc.cacheWrite += step.result.usage.cacheWrite;
-			acc.cost += step.result.usage.cost;
-			acc.turns += step.result.usage.turns;
-			return acc;
-		},
-		{ input: 0, output: 0, cacheRead: 0, cacheWrite: 0, cost: 0, contextTokens: 0, turns: 0 },
-	);
+	const total = sumUsage(steps.map((step) => step.result.usage));
 	const usage = formatUsageCompact(total);
 	lines.push("", `Totals: ${steps.length} run${steps.length === 1 ? "" : "s"}${usage ? ` · ${usage}` : ""}`);
 	const ids = steps.filter((step) => step.runId !== undefined).map((step) => `#${step.runId}`);
@@ -141,11 +131,14 @@ export function formatChainSummary(steps: readonly ChainStep[]): string {
 
 /**
  * The re-review brief handed to the reviewer after a worker fix round. Includes
- * the prior review so the reviewer can verify the fixes without re-discovering
- * the original issues.
+ * the prior review AND the worker's report so the reviewer can adjudicate
+ * rejections instead of restating findings. The convergence contract keeps
+ * rounds from ping-ponging: rule on the open findings once, add only defects
+ * this round's edits introduced, never re-open a verified resolution.
  */
-export function buildReReviewBrief(reviewerResult: SingleResult, round: number): string {
+export function buildReReviewBrief(reviewerResult: SingleResult, round: number, workerResult: SingleResult): string {
 	const review = getResultOutput(reviewerResult);
+	const workerReport = getResultOutput(workerResult);
 	return [
 		`Re-review after auto-fix round ${round}.`,
 		``,
@@ -154,8 +147,18 @@ export function buildReReviewBrief(reviewerResult: SingleResult, round: number):
 		review,
 		`---`,
 		``,
-		`Verify the worker's fixes address each blocker. Run \`git diff\` to see what changed.`,
-		`Classify honestly: APPROVE if blockers are resolved, REQUEST_CHANGES if not.`,
+		`The worker's report (what it changed, plus any finding it rejected as factually wrong or out of scope):`,
+		`---`,
+		workerReport,
+		`---`,
+		``,
+		`Rule on EVERY previous finding: resolved, or still open. A finding the worker rejected must be`,
+		`adjudicated ONCE — accept the rejection unless you can concretely refute the worker's reasoning;`,
+		`never simply restate the finding for another round.`,
+		`Run \`git diff\` to see what changed, then add NEW findings only when they are defects this round's`,
+		`edits introduced or exposed (or a load-bearing issue the earlier review genuinely missed).`,
+		`Do NOT re-open a finding you verified as resolved.`,
+		`REQUEST_CHANGES only while an open finding remains; otherwise APPROVE.`,
 		`End with your machine-readable verdict line as usual (VERDICT: REVIEW_PASS / REVIEW_FAIL).`,
 	].join("\n");
 }

@@ -78,7 +78,7 @@ Result handoff (do not re-state):
 
 Review & verification:
 - Never report an unrun check as passed; report it as unavailable or as a pre-existing failure.
-${hasReviewer ? `- For non-trivial diffs${hasCleaner ? " (including cleaner edits)" : ""}, run one fresh read-only \`reviewer\` sub-agent before reporting done. Fix only concrete blockers and re-review at most once.
+${hasReviewer ? `- For non-trivial diffs${hasCleaner ? " (including cleaner edits)" : ""}, run one fresh read-only \`reviewer\` sub-agent before reporting done. Fix every finding the reviewer reports and re-review at most once.
 - Use multi-model cross-review only when explicitly requested or for genuinely high-risk changes (security, unsafe/FFI, persistence-migration, concurrency). Reviewers are read-only; only the main agent edits.
-` : ""}- Commit or push only when explicitly requested, applicable checks pass, and no accepted blockers remain.`;
+` : ""}- Commit or push only when explicitly requested, applicable checks pass, and no unresolved review findings remain.`;
 }

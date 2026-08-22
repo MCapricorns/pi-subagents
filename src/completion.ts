@@ -8,6 +8,8 @@
  */
 
 import { getResultOutput, isFailedResult, reviewVerdict, type SingleResult } from "./spawn.ts";
+import { formatUsageCompact, sumUsage } from "./monitor.ts";
+import type { UsageStats } from "./rpc-run.ts";
 
 export interface CompletionBatchTimings {
 	debounceMs: number;
@@ -98,14 +100,20 @@ export interface CompletionMessageItem {
 	agent: string;
 	block: string;
 	triggerTurn: boolean;
+	/** Final usage of the underlying run (or chain); aggregated into the group totals. */
+	usage?: UsageStats;
 }
 
-/** Keep the established single-result shape; add a summary only for real groups. */
+/** Keep the established single-result shape; add a group header and an aggregate
+ * token/cost footer only for real groups. */
 export function formatCompletionMessage(items: readonly CompletionMessageItem[]): string {
 	if (items.length === 0) return "";
 	if (items.length === 1) return items[0].block;
 	const agents = items.map((item) => item.agent).join(", ");
-	return `### Subagents completed (${items.length}): ${agents}\n\n${items.map((item) => item.block).join("\n\n")}`;
+	const withUsage = items.filter((item) => item.usage !== undefined);
+	const totals = withUsage.length > 0 ? formatUsageCompact(sumUsage(withUsage.map((item) => item.usage!))) : "";
+	const footer = totals ? `\n\nTotals: ${items.length} runs · ${totals}` : "";
+	return `### Subagents completed (${items.length}): ${agents}\n\n${items.map((item) => item.block).join("\n\n")}${footer}`;
 }
 
 /** A grouped completion wakes the main agent when any member requires a turn. */

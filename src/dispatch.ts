@@ -34,6 +34,7 @@ import {
 	formatToolActivity,
 	monitor,
 	statusIcon,
+	sumUsage,
 	type RunChainMeta,
 } from "./monitor.ts";
 import type { SubagentRuntime } from "./runtime.ts";
@@ -423,6 +424,7 @@ export function registerSubagentTool(pi: ExtensionAPI, runtime: SubagentRuntime)
 							const workerStep = await launchInLoop("worker", fixBrief, executionCwd, signal, {
 								groupId: parentGroupId,
 								relationLabel: `fix round ${round}`,
+								parentRunId,
 							}, vision);
 							// Preserve the newest sub-step before checking chain ownership. A
 							// destructive stop invalidates ownsParent() while this child is
@@ -442,10 +444,11 @@ export function registerSubagentTool(pi: ExtensionAPI, runtime: SubagentRuntime)
 							if (!ownsParent()) return;
 							chain.push({ ...workerStep, relation: `fix round ${round}` });
 							if (!runtime.sessionActive || isFailedResult(workerStep.result)) break;
-							const reReviewBrief = buildReReviewBrief(lastReviewer, round);
+							const reReviewBrief = buildReReviewBrief(lastReviewer, round, workerStep.result);
 							const reviewStep = await launchInLoop("reviewer", reReviewBrief, executionCwd, signal, {
 								groupId: parentGroupId,
 								relationLabel: `re-review round ${round}`,
+								parentRunId,
 							}, vision);
 							if (
 								runtime.threads.get(parentRunId) === parentThreadAtStart &&
@@ -527,6 +530,7 @@ export function registerSubagentTool(pi: ExtensionAPI, runtime: SubagentRuntime)
 								agent: `auto-fix chain (${last.result.agent})`,
 								block,
 								triggerTurn: true,
+								usage: sumUsage(chain.map((step) => step.result.usage)),
 							},
 						]);
 						runtime.completionBatcher.flush();
@@ -570,6 +574,7 @@ export function registerSubagentTool(pi: ExtensionAPI, runtime: SubagentRuntime)
 									agent: initialReviewerResult.agent,
 									block: `${formatCompletionBlock(initialReviewerResult, config.maxResultLines, executionCwd)}\n\nAuto-fix chain crashed before completion: ${errorMessage}. The planned fix rounds did not run; the review above is the triggering reviewer's full output.`,
 									triggerTurn: true,
+									usage: initialReviewerResult.usage,
 								},
 							]);
 							runtime.completionBatcher.flush();

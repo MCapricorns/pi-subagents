@@ -407,7 +407,8 @@ send({
 			expect(stub.messages).toHaveLength(1);
 			const content = stub.messages[0].message.content;
 			expect(content).toContain("[worker] completed");
-			expect(content).toContain(`⚠ 4 failed tool calls · details: subagent_status #${runId}`);
+			// Failed-tool diagnostics are opt-in via subagent_status, never delivered.
+			expect(content).not.toContain("failed tool call");
 			expect(content).not.toContain("MSBuild.exe failed");
 			expect(content).not.toContain("fatal error C3861");
 			expect(stub.messages[0].options).toEqual({ deliverAs: "steer", triggerTurn: true });

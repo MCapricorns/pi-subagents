@@ -127,18 +127,15 @@ export function formatCompletionBlock(
 		lines.push(`Relation: ${relations.join(" · ")}`, "");
 	}
 	lines.push(text);
-	// Explicit status always exposes every retained diagnostic, including when
-	// the overall run failed or was aborted. Automatic delivery adds only a
-	// compact pointer for otherwise-clean runs.
+	// Failed-tool diagnostics are deliberate opt-in via subagent_status: agents
+	// report their own verification in the output above, and a transient failed
+	// call (no-match grep, rejected edit) is noise in an automatic delivery.
 	if (options.failedToolDetails && failedTools.length > 0) {
 		lines.push(
 			"",
 			`⚠ ${failedTools.length} failed tool call${failedTools.length === 1 ? "" : "s"}:`,
 			...failedTools.map((tool) => `- ${tool.toolName}: ${tool.error.trim() || "(no output)"}`),
 		);
-	} else if (!failed && failedTools.length > 0) {
-		const lookup = result.runId !== undefined ? ` · details: subagent_status #${result.runId}` : "";
-		lines.push("", `⚠ ${failedTools.length} failed tool call${failedTools.length === 1 ? "" : "s"}${lookup}`);
 	}
 	if (truncated) {
 		// The full text lives on disk so the main agent can read it on demand.

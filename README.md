@@ -32,15 +32,23 @@ The common quality loop now runs end to end without waking the main agent betwee
 steps:
 
 ```text
-reviewer (find blockers) → worker (fix) → reviewer (verify) → final PASS/FAIL
+reviewer (find issues) → worker (fix every finding) → reviewer (verify) → final PASS/FAIL
 ```
+
+Reviews use a single flat findings list — no severity triage. Every reported
+finding is fixed before the change is accepted, and each re-review converges on
+an open-finding set: the worker's explicit rejections are adjudicated once, only
+defects a fix round introduced or exposed are added, and resolved items never
+re-open. `maxFixRounds` stays the hard cap, so a chain always settles and wakes
+the main agent with the full picture.
 
 Cleanup stays a separate lifecycle: explicit cleanup intent can dispatch the
 evidence-first `cleaner`; any edits still go through the independent `reviewer`
 gate.
 
-Each chain is delivered as one concise completion group, while full per-run
-reports remain available through `subagent_status`. Its parent stays `running`
+Each chain is delivered as one concise completion group whose footer totals the
+aggregate token usage and cost of every included run, while full per-run reports
+remain available through `subagent_status`. Its parent stays `running`
 until the whole chain settles; completed internal rounds leave active status
 immediately, so no `done` row keeps accumulating elapsed time. Selected-to-main
 model handoffs keep the same retained context, and isolated parallel workers use
@@ -63,12 +71,16 @@ index.
   "go check" step. `subagent_wait` is a **non-blocking** in-turn lookup by default
   (pass `timeoutMs` to block); `subagent_status` inspects runs; `subagent_stop`
   cancels one and delivers its partial output.
-- **Active-only live widget** — each queued or running sub-agent gets one compact
-  width-aware primary line with task, effective model/thinking, and elapsed time;
-  current activity appears only when present on an indented second line:
+- **Active-only live widget, as a tree** — each queued or running sub-agent gets one compact
+  width-aware primary line with task, effective model/thinking, and elapsed time; current
+  activity appears only when present on an indented second line. Auto-fix rounds nest under
+  the triggering reviewer row that owns the chain, so it is always visible who dispatched
+  what; no run ids appear here — the tree and the task label identify each row:
   ```text
-  #7 cleaner · remove dead code in src/cache.ts · claude-sonnet-4-5/high · 42s
-    grep cacheKey
+  ● reviewer · review diff of src/foo.ts · claude-sonnet-4-5/high · 42s
+    ├ ● worker · fix round 1 · src/foo.ts · claude-sonnet-4-5/high · 10s
+    │    grep cacheKey
+    └ ○ reviewer · re-review round 1 · claude-sonnet-4-5/high · 3s
   ```
   Long tasks and activity paths truncate first (preserving a useful path tail when
   possible), groups have no blank rows, and settled/parked runs disappear immediately.
@@ -83,7 +95,10 @@ index.
 - **A quality gate that closes the loop** — when a reviewer returns `REVIEW_FAIL`,
   the extension dispatches a worker briefed with the concrete findings, then a
   re-review, up to `maxFixRounds` times — and only then wakes the main agent.
-  Every round stays in the triggering reviewer's cwd, and chains that target the
+  Every reported finding gets fixed (no severity triage), and re-reviews converge
+  on an open-finding set instead of ping-ponging: worker rejections are adjudicated
+  once, only defects the fix round introduced are added, and resolved items never
+  re-open. Every round stays in the triggering reviewer's cwd, and chains that target the
   same repository are serialized so shared-checkout edits cannot race.
 - **Direct fallback with real thinking capabilities** — each agent has at most
   one selected model. An unavailable selection, rate limit, invalid key, quota,
@@ -98,9 +113,9 @@ index.
   `subagent_control` can steer active work, retarget it after a stable abort,
   park/resume it under the same run id, or fork a parked/settled checkpoint into
   a new independent run. Concurrent resume calls are serialized.
-- **Concise but honest completions** — a clean process that contained failed tool
-  calls adds one short warning with its run id; individual errors stay out of the
-  main context and remain available through `subagent_status`. Actual process,
+- **Concise but honest completions** — group completions end with aggregate token
+  and cost totals across every included run; failed-tool diagnostics stay out of the
+  delivered message and remain one `subagent_status` call away. Actual process,
   model, and integration failures still surface as failures.
 - **Parallel fan-out with filesystem isolation** — independent tasks run up to a
   configurable limit (default 4). Parallel workers default to detached Git
@@ -123,8 +138,9 @@ an undifferentiated child-agent launcher:
   independent reviewer gate;
 - isolated, retained threads that can be steered, parked, resumed, retargeted, or
   forked under stable run ids;
-- the reviewer → worker auto-fix → reviewer loop;
-- compact failed-tool warnings with full diagnostics available by run id;
+- the reviewer → worker auto-fix → reviewer loop, fixing every finding under a
+  convergence contract with a hard round cap;
+- failed-tool diagnostics available by run id through `subagent_status`;
 - direct selected→main fallback plus capability-aware Auto thinking;
 - detached Git worktree isolation for parallel workers and opt-in write-capable
   cleaner runs.
@@ -226,7 +242,8 @@ because they may need to inspect the same images.
 ### Controlling and stopping
 
 Dispatch confirmations, tool result rows, and completion blocks all show the
-stable `#id`, so a thread remains directly controllable after its live UI is gone.
+stable `#id`, so a thread remains directly controllable after its live UI is gone
+(the widget itself identifies rows by tree position and task instead of ids).
 
 - `subagent_control` — `steer`, `retarget`, `park`, `resume`, or `fork` a logical
   thread by stable run id. Resume accepts an optional replacement objective;
@@ -317,7 +334,7 @@ direct-file settings.
 | `proactiveInjection` | Whether to add the delegation directive to the main system prompt. |
 | `agentScope` | `user`, `project`, or `both`; controls which user/project agent directories are discovered. |
 | `maxConcurrency` | Max sub-agent processes running at once (1–16, default 4), and the max tasks one parallel `subagent` call accepts. Extra work waits in the queue. |
-| `maxFixRounds` | Auto-fix rounds when a reviewer returns `REVIEW_FAIL` (default 2; `0` disables the loop). |
+| `maxFixRounds` | Auto-fix rounds when a reviewer returns `REVIEW_FAIL` (default 2; `0` disables the loop). Hard cap: the chain always settles, delivers its condensed summary, and wakes the main agent. |
 | `idleTimeoutSec` | Idle watchdog: a sub-agent whose stdout goes silent for this long is terminated; a selected model then hands to current main. `0` disables it. Default 90. |
 
 ### Model routing and thinking

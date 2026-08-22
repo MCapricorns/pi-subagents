@@ -53,12 +53,15 @@ export interface RunView {
 	groupId?: string;
 	/** Human-readable role within a chain, e.g. "fix round 1" or "re-review round 1". */
 	relationLabel?: string;
+	/** Owning run for chain children: the triggering reviewer whose row represents the chain. */
+	parentRunId?: number;
 }
 
 /** Optional chain metadata for runs spawned by an auto-fix loop. */
 export interface RunChainMeta {
 	groupId?: string;
 	relationLabel?: string;
+	parentRunId?: number;
 	isolation?: IsolationMode;
 	forkedFromRunId?: number;
 }
@@ -248,6 +251,21 @@ export function formatUsageCompact(usage: UsageStats): string {
 	return parts.join(" ");
 }
 
+/** Aggregate usage across several runs (chain steps or a completion group). */
+export function sumUsage(parts: readonly UsageStats[]): UsageStats {
+	const total: UsageStats = { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, cost: 0, contextTokens: 0, turns: 0 };
+	for (const part of parts) {
+		total.input += part.input;
+		total.output += part.output;
+		total.cacheRead += part.cacheRead;
+		total.cacheWrite += part.cacheWrite;
+		total.cost += part.cost;
+		total.contextTokens += part.contextTokens;
+		total.turns += part.turns;
+	}
+	return total;
+}
+
 export function formatDuration(ms: number): string {
 	const totalSeconds = Math.max(0, Math.floor(ms / 1000));
 	if (totalSeconds < 60) return `${totalSeconds}s`;
@@ -393,6 +411,7 @@ export class MonitorStore {
 			usage: emptyUsage(),
 			...(meta?.groupId ? { groupId: meta.groupId } : {}),
 			...(meta?.relationLabel ? { relationLabel: meta.relationLabel } : {}),
+			...(meta?.parentRunId !== undefined ? { parentRunId: meta.parentRunId } : {}),
 			...(meta?.isolation ? { isolation: meta.isolation, integrationStatus: meta.isolation === "worktree" ? "pending" : undefined } : {}),
 			...(meta?.forkedFromRunId !== undefined ? { forkedFromRunId: meta.forkedFromRunId } : {}),
 		});

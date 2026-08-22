@@ -99,15 +99,17 @@ describe("MonitorStore", () => {
 		expect(store.removeRun(id)).toBeUndefined();
 	});
 
-	it("addRun carries chain metadata (groupId and relationLabel)", () => {
+	it("addRun carries chain metadata (groupId, relationLabel, parentRunId)", () => {
 		const store = new MonitorStore();
 		const id = store.addRun("worker", "Fix the findings", undefined, undefined, {
 			groupId: "fix-3",
 			relationLabel: "fix round 1",
+			parentRunId: 3,
 		});
 		const run = store.findRun(id);
 		expect(run?.groupId).toBe("fix-3");
 		expect(run?.relationLabel).toBe("fix round 1");
+		expect(run?.parentRunId).toBe(3);
 	});
 });
 

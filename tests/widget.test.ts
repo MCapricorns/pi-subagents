@@ -32,23 +32,23 @@ describe("formatActiveRunLines", () => {
 
 		const lines = formatActiveRunLines(store.getRuns(), theme, 120);
 		expect(lines).toHaveLength(2);
-		expect(lines[0]).toContain(`#${running} worker`);
-		expect(lines[0]).toContain("Fix src/index.ts");
+		expect(lines[0]).toContain("worker · Fix src/index.ts");
 		expect(lines[0]).toContain("gpt-5-mini/high");
 		expect(lines[0]).not.toContain("openai/");
 		expect(lines[0]).not.toContain("edit src/index.ts");
 		expect(lines[1]).toBe("  edit src/index.ts");
 		expect(lines.join("\n")).not.toContain(`#${done}`);
 		expect(lines.join("\n")).not.toContain(`#${parked}`);
+		expect(lines.join("\n")).not.toMatch(/#\d+/);
 	});
 
 	it("omits a blank activity line and handles missing model/thinking", () => {
 		const store = new MonitorStore();
-		const id = store.addRun("explore", "Map the cleaner workflow");
+		store.addRun("explore", "Map the cleaner workflow");
 
 		const lines = formatActiveRunLines(store.getRuns(), theme, 120);
 		expect(lines).toHaveLength(1);
-		expect(lines[0]).toContain(`#${id} explore · Map the cleaner workflow`);
+		expect(lines[0]).toContain("explore · Map the cleaner workflow");
 		expect(lines[0]).not.toContain("undefined");
 	});
 
@@ -67,14 +67,65 @@ describe("formatActiveRunLines", () => {
 
 	it("keeps adjacent active groups compact with no blank rows", () => {
 		const store = new MonitorStore();
-		const first = store.addRun("explore", "Map config");
-		const second = store.addRun("reviewer", "Review config");
+		store.addRun("explore", "Map config");
+		store.addRun("reviewer", "Review config");
 
 		const lines = formatActiveRunLines(store.getRuns(), theme, 80);
 		expect(lines).toHaveLength(2);
-		expect(lines[0]).toContain(`#${first} explore`);
-		expect(lines[1]).toContain(`#${second} reviewer`);
+		expect(lines[0]).toContain("explore · Map config");
+		expect(lines[1]).toContain("reviewer · Review config");
 		expect(lines.every((line) => line.length > 0)).toBe(true);
+	});
+
+	it("nests auto-fix chain children under the triggering reviewer row", () => {
+		const store = new MonitorStore();
+		const parent = store.addRun("reviewer", "Review src/index.ts", "anthropic/claude-sonnet-4-5", "high");
+		store.setStatus(parent, "running");
+		store.setActivity(parent, "auto-fix chain running");
+		const fix = store.addRun(
+			"worker",
+			"Auto-fix round 1 of 2 (triggered by a failed review).\n- src/index.ts:42 bug",
+			"anthropic/claude-sonnet-4-5",
+			"high",
+			{ groupId: `fix-${parent}`, relationLabel: "fix round 1", parentRunId: parent },
+		);
+		store.setStatus(fix, "running");
+		store.setActivity(fix, "edit src/index.ts");
+		const reReview = store.addRun(
+			"reviewer",
+			"Re-review after auto-fix round 1.",
+			"anthropic/claude-sonnet-4-5",
+			"high",
+			{ groupId: `fix-${parent}`, relationLabel: "re-review round 1", parentRunId: parent },
+		);
+		store.setStatus(reReview, "queued");
+
+		const lines = formatActiveRunLines(store.getRuns(), theme, 120);
+		expect(lines).toHaveLength(4);
+		expect(lines[0]).toContain("reviewer · Review src/index.ts");
+		// Live children replace the parent's placeholder activity line.
+		expect(lines.join("\n")).not.toContain("auto-fix chain running");
+		expect(lines[1]).toContain("├ ● worker · fix round 1 · src/index.ts");
+		expect(lines[2]).toBe("      edit src/index.ts");
+		expect(lines[3]).toContain("└ ○ reviewer · re-review round 1");
+		expect(lines.join("\n")).not.toMatch(/#\d+/);
+	});
+
+	it("renders a chain child at root level with its relation when the parent row is gone", () => {
+		const store = new MonitorStore();
+		const orphan = store.addRun(
+			"worker",
+			"Auto-fix round 2 of 2.\n- src/widget.ts:10 issue",
+			undefined,
+			undefined,
+			{ groupId: "fix-999", relationLabel: "fix round 2", parentRunId: 999 },
+		);
+		store.setStatus(orphan, "running");
+
+		const lines = formatActiveRunLines(store.getRuns(), theme, 120);
+		expect(lines).toHaveLength(1);
+		expect(lines[0]).toContain("worker · fix round 2 · src/widget.ts");
+		expect(lines[0]).not.toContain("└");
 	});
 
 	it("shows an auto-fix parent as running with live elapsed after its review settles", () => {
