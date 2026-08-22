@@ -241,7 +241,7 @@ because they may need to inspect the same images.
 
 As a deterministic fallback, a brief that names an image file (an extension such
 as `.png`, `.jpg`, `.webp`) or describes frontend/UI work — Vue/React/Svelte
-pages, mockups, screenshots, page styling, 前端/界面/页面 — is dispatched as
+pages, mockups, screenshots, page styling — is dispatched as
 vision even without the flag: the model cannot be swapped mid-run, so a worker
 that screenshots and visually verifies what it builds must start on a
 vision-capable model. How do you verify which model ran? The live widget line,
