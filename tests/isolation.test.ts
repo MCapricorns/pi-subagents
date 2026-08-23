@@ -205,7 +205,7 @@ describe("dispatch isolation selection", () => {
 			tasks: [
 				{ agent: "worker", task: "default isolated" },
 				{ agent: "worker", task: "explicit shared", isolation: "shared" },
-				{ agent: "explore", task: "read only" },
+				{ agent: "explorer", task: "read only" },
 			],
 		}, root);
 		expect(parallel.details.results.map((result: any) => result.isolation)).toEqual([
@@ -376,12 +376,12 @@ describe("dispatch isolation selection", () => {
 		rmSync(root, { recursive: true, force: true });
 	});
 
-	it("rejects worktree isolation for explore/reviewer before enqueue", async () => {
+	it("rejects worktree isolation for explorer/reviewer before enqueue", async () => {
 		const root = mkdtempSync(join(tmpdir(), "pi-subagents-isolation-reject-"));
 		const create = vi.spyOn(worktreeModule, "createWorktreeIsolation");
 		const enqueue = vi.spyOn(BackgroundTaskQueue.prototype, "enqueue");
 		const { subagent } = registered();
-		for (const agent of ["explore", "reviewer"]) {
+		for (const agent of ["explorer", "reviewer"]) {
 			await expect(execute(subagent, { agent, task: "read", isolation: "worktree" }, root))
 				.rejects.toThrow(/read-only.*worktree isolation/i);
 		}

@@ -165,7 +165,7 @@ function tailGraphemes(segments: string[], maxWidth: number): string {
  * One-line task preview, capped by `maxWidth` display columns (default 80).
  * `keysOnly` (default): extracted key fragments (paths, quoted phrases,
  * symbols) are shown bare — the agent name is already displayed next to the
- * task line, so templated prose ("explore: trace how ...") adds nothing.
+ * task line, so templated prose ("explorer: trace how ...") adds nothing.
  * `keysOnly: false` keeps the prose as `head…tail` (used for completion
  * messages, where the Task line is the reader's only context).
  * Grapheme-safe — CJK, ZWJ emoji and combining sequences are never split.

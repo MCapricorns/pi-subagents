@@ -31,7 +31,7 @@ describe("MonitorStore", () => {
 	it("addRun derives a content label from the task", () => {
 		const store = new MonitorStore();
 		store.addRun("worker", "Fix the bug in src/index.ts and add tests");
-		store.addRun("explore", "Find where fixGridLayout is defined");
+		store.addRun("explorer", "Find where fixGridLayout is defined");
 		const [a, b] = store.getRuns();
 		expect(a.label).toBe("src/index.ts");
 		expect(b.label).toBe("fixGridLayout");
@@ -39,7 +39,7 @@ describe("MonitorStore", () => {
 
 	it("beginTurn clears finished runs but keeps active ones", () => {
 		const store = new MonitorStore();
-		const done = store.addRun("explore", "Map the codebase");
+		const done = store.addRun("explorer", "Map the codebase");
 		store.setStatus(done, "done");
 		const active = store.addRun("worker", "Implement the change");
 		store.setStatus(active, "running");
@@ -82,7 +82,7 @@ describe("MonitorStore", () => {
 	it("clear removes all runs without resetting the id counter", () => {
 		const store = new MonitorStore();
 		const first = store.addRun("worker", "Task A");
-		store.addRun("explore", "Task B");
+		store.addRun("explorer", "Task B");
 		store.clear();
 		expect(store.getRuns()).toHaveLength(0);
 		const next = store.addRun("worker", "Task C");
@@ -188,17 +188,17 @@ describe("formatTaskSummary", () => {
 
 	it("shows only the distinctive path, dropping templated prose", () => {
 		const summary = formatTaskSummary(
-			"explore: survey the widget rendering pipeline and completion batching paths to find every place that interacts with the footer data provider, then report how they connect src/footer-data-provider.ts",
+			"explorer: survey the widget rendering pipeline and completion batching paths to find every place that interacts with the footer data provider, then report how they connect src/footer-data-provider.ts",
 		);
 		expect(summary).toBe("src/footer-data-provider.ts");
 	});
 
-	it("shows the differing keyword for near-identical explore tasks", () => {
+	it("shows the differing keyword for near-identical explorer tasks", () => {
 		const a = formatTaskSummary(
-			"explore: trace how the batching pipeline drains and how completion messages are grouped, then report src/completion.ts",
+			"explorer: trace how the batching pipeline drains and how completion messages are grouped, then report src/completion.ts",
 		);
 		const b = formatTaskSummary(
-			"explore: trace how the batching pipeline drains and how completion messages are grouped, then report src/fixloop.ts",
+			"explorer: trace how the batching pipeline drains and how completion messages are grouped, then report src/fixloop.ts",
 		);
 		expect(a).toBe("src/completion.ts");
 		expect(b).toBe("src/fixloop.ts");
@@ -206,7 +206,7 @@ describe("formatTaskSummary", () => {
 
 	it("keeps the tail of an over-long single fragment", () => {
 		const longPath = `src/${"x".repeat(90)}/component.ts`;
-		const summary = formatTaskSummary(`explore: trace the deeply nested widget state and how it renders, look at ${longPath}`, 40);
+		const summary = formatTaskSummary(`explorer: trace the deeply nested widget state and how it renders, look at ${longPath}`, 40);
 		expect(summary.startsWith("…")).toBe(true);
 		expect(summary.endsWith("component.ts")).toBe(true);
 		expect(visibleWidth(summary)).toBeLessThanOrEqual(40);
@@ -330,7 +330,7 @@ describe("MonitorStore.subscribe", () => {
 		store.addRun("worker", "Implement the change");
 		expect(count).toBe(1);
 		unsub();
-		store.addRun("explore", "Map the codebase");
+		store.addRun("explorer", "Map the codebase");
 		expect(count).toBe(1);
 	});
 
@@ -357,7 +357,7 @@ describe("MonitorStore.subscribe", () => {
 
 	it("omits the thinking segment when absent", () => {
 		const store = new MonitorStore();
-		store.addRun("explore", "Map the codebase");
+		store.addRun("explorer", "Map the codebase");
 		const run = store.getRuns()[0];
 		expect(store.summarize(run)).not.toContain("thinking");
 	});

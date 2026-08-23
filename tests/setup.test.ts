@@ -51,11 +51,11 @@ describe("configured-agent flow", () => {
 		const projectAgents = join(dir, ".pi", "agents");
 		mkdirSync(projectAgents, { recursive: true });
 		writeFileSync(
-			join(projectAgents, "explore.md"),
-			"---\nname: explore\ndescription: project override\nthinking: high\n---\nProject explore prompt.\n",
+			join(projectAgents, "explorer.md"),
+			"---\nname: explorer\ndescription: project override\nthinking: high\n---\nProject explorer prompt.\n",
 			"utf8",
 		);
-		writeFileSync(configPath, JSON.stringify({ enabledAgents: ["explore"], agentScope: "project" }), "utf8");
+		writeFileSync(configPath, JSON.stringify({ enabledAgents: ["explorer"], agentScope: "project" }), "utf8");
 		const model = {
 			provider: "anthropic",
 			id: "selected",
@@ -102,7 +102,7 @@ describe("configured-agent flow", () => {
 		};
 		try {
 			await runSetup(ctx, configPath);
-			const thinkingScreen = screens.find((screen) => screen.includes('Thinking for "explore"?'));
+			const thinkingScreen = screens.find((screen) => screen.includes('Thinking for "explorer"?'));
 			expect(thinkingScreen).toContain("auto — high");
 			expect(thinkingScreen).toContain("off — no reasoning tokens");
 			expect(thinkingScreen).toContain("minimal — minimal reasoning");
@@ -122,7 +122,7 @@ describe("configured-agent flow", () => {
 	it("returns to the agent picker after a model pick so another agent can be set", async () => {
 		const dir = mkdtempSync(join(tmpdir(), "pi-subagents-setup-loop-"));
 		const configPath = join(dir, "pi-subagents.json");
-		writeFileSync(configPath, JSON.stringify({ enabledAgents: ["explore", "worker"] }), "utf8");
+		writeFileSync(configPath, JSON.stringify({ enabledAgents: ["explorer", "worker"] }), "utf8");
 		const haiku = {
 			provider: "anthropic",
 			id: "haiku",
@@ -174,7 +174,7 @@ describe("configured-agent flow", () => {
 						} else {
 							component.handleInput("escape");
 						}
-					} else if (screen.includes('Model for "explore"?')) {
+					} else if (screen.includes('Model for "explorer"?')) {
 						component.handleInput("down");
 						component.handleInput("enter");
 					} else if (screen.includes('Model for "worker"?')) {
@@ -193,7 +193,7 @@ describe("configured-agent flow", () => {
 			expect(screens.some((screen) => screen.includes("Thinking for"))).toBe(false);
 			const saved = JSON.parse(readFileSync(configPath, "utf8"));
 			expect(saved.agentModels).toEqual({
-				explore: "anthropic/haiku",
+				explorer: "anthropic/haiku",
 				worker: "anthropic/sonnet",
 			});
 		} finally {
@@ -236,12 +236,12 @@ describe("full setup flow", () => {
 		try {
 			await runSetup(ctx, configPath);
 			const config = JSON.parse(readFileSync(configPath, "utf8"));
-			expect(config.enabledAgents).toEqual(["explore", "worker", "cleaner", "reviewer"]);
+			expect(config.enabledAgents).toEqual(["explorer", "worker", "cleaner", "reviewer"]);
 			expect(config.agentModels).toEqual({});
 			expect(config.agentThinkingLevels).toEqual({});
 			expect(config).not.toHaveProperty("agentBackupModels");
 			expect(config).not.toHaveProperty("thinkingLevel");
-			for (const agent of ["explore", "worker", "cleaner", "reviewer"]) {
+			for (const agent of ["explorer", "worker", "cleaner", "reviewer"]) {
 				expect(screens.some((screen) => screen.includes(`Model for "${agent}"?`))).toBe(true);
 			}
 			expect(screens.some((screen) => screen.includes("Primary/Backup"))).toBe(false);

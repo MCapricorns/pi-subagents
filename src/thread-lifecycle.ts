@@ -69,7 +69,7 @@ function withWorktreeSystemPrompt(agent: AgentConfig): AgentConfig {
 }
 
 export function isWorktreeCapableAgent(agent: AgentConfig): boolean {
-	if (agent.name === "explore" || agent.name === "reviewer") return false;
+	if (agent.name === "explorer" || agent.name === "reviewer") return false;
 	if (agent.name === "worker") return true;
 	if (!agent.tools) return true;
 	return agent.tools.includes("edit") || agent.tools.includes("write");

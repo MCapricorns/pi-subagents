@@ -1,5 +1,5 @@
 /**
- * The `subagent` tool: dispatches explore/worker/cleaner/reviewer agents as isolated pi
+ * The `subagent` tool: dispatches explorer/worker/cleaner/reviewer agents as isolated pi
  * child processes, single or parallel. Owns the public dispatch contract,
  * per-run status tracking, the auto-fix chain (REVIEW_FAIL → worker → re-review),
  * and completion delivery. Stable thread generations live in thread-lifecycle.ts.
@@ -134,32 +134,15 @@ export function registerSubagentTool(pi: ExtensionAPI, runtime: SubagentRuntime)
 		name: "subagent",
 		label: "Subagent",
 		description: [
-			"Delegate a discrete, self-contained task to a specialized sub-agent running in an ISOLATED context window.",
-			"Built-in roles (only configured enabled agents can dispatch): explore (read-only codebase recon), worker (implement/fix/refactor/test, full tools), cleaner (explicit evidence-first cleanup, full/write tools), reviewer (adversarial pre-commit gate, read-only).",
-			"When cleaner is enabled, route explicit cleanup intent in any language (for example dead code, redundancy, simplification, or over-engineering), including a requested periodic cleanup pass. Audit/find/inspect/report is read-only evidence, while explicit remove/clean/simplify/refactor permits verified edits. Generic code review goes to reviewer. Never route cleaner by PR count or as the pre-commit gate; reviewer reviews its edits.",
-			"Modes: single ({agent, task}) or parallel ({tasks: [{agent, task}, ...]}).",
-			"Isolation: single tasks default to shared; parallel worker tasks default to detached Git worktrees unless isolation: shared is explicit. Cleaner is write-capable and can opt into worktree isolation; explore/reviewer cannot use it.",
-			"Use subagent_control to steer, retarget, park, resume, or fork a thread by its stable run id.",
-			"It starts agents in the background and immediately returns control to the main window; completion messages automatically wake the main agent to continue.",
-			"Each agent has no memory of this conversation — brief it fully (goal, exact paths, constraints, expected output).",
-			"Results arrive as wake-up messages automatically — you do NOT need to wait. If you must get a result in-turn, subagent_wait is a non-blocking lookup by default (pass timeoutMs to block).",
+			"Dispatch enabled specialized agents as isolated leaf Pi child processes, singly or in parallel.",
+			"Built-ins: explorer for broad read-only reconnaissance; worker for implementation; cleaner only for explicitly authorized cleanup/removal/simplification edits; reviewer for generic read-only assessments and pre-commit gates.",
+			"Work starts in the background; completion automatically resumes the main agent and is already shown to the user, so do not poll or restate it. Give each child a self-contained brief because it has no conversation memory.",
+			"Single tasks default to shared; parallel workers default to detached Git worktrees. Only write-capable agents can use worktree isolation, and failures never fall back silently to shared.",
+			"A selected-model or provider failure continues the retained session on the current main model; ordinary tool/task failures do not.",
+			"Use subagent_control to steer, retarget, park, resume, or fork by stable run id.",
 		].join(" "),
 		promptSnippet:
-			"Start background subagents: explore (read-only search), worker (implement), cleaner (explicit evidence-first cleanup), reviewer (pre-commit review); completion automatically resumes the main agent. Simple tasks: use direct tools, not subagents.",
-		promptGuidelines: [
-			"Delegate only when an isolated context genuinely pays: broad exploration, a self-contained implementation, explicit evidence-first cleanup, or a review gate. Handle simple lookups and one-line edits inline with direct tools — never spawn a sub-agent for them.",
-			"Use subagent with agent 'explore' for broad or open-ended code search before large changes; a targeted 'where is X' is a direct grep/read.",
-			"Treat explore output as a retrieval index, not authority: re-read load-bearing files before editing or deciding deletion, security, compatibility, persistence, or dynamic reachability. The cheapest model can cost more through rework on complex dynamic, concurrent, migration, or security-sensitive code; choose a stronger model or specialist there.",
-			"Use subagent with agent 'worker' for a self-contained implementation task worth a separate context; it plans internally.",
-			"When cleaner is enabled, use subagent with agent 'cleaner' only for explicit cleanup intent in any language (for example dead code, redundancy, simplification, or over-engineering) or a requested periodic cleanup pass. Audit/find/inspect/report means read-only ranked evidence; apply only for explicit remove/clean/simplify/refactor wording. Generic code review goes to reviewer. Never trigger cleaner from PR count or as a pre-commit gate; send non-trivial cleaner edits to reviewer.",
-			"Use subagent with agent 'reviewer' for the fresh read-only gate before reporting non-trivial work done or committing, including after cleaner edits.",
-			"subagent launches work in the background and ends the current turn; when a result arrives, the main agent is automatically resumed with it.",
-			"Run independent tasks in parallel by passing a tasks array to subagent; parallel worker items default to isolation: worktree so their edits are integrated independently. Pass isolation: shared only when workers intentionally need the caller's live uncommitted tree.",
-			"Use isolation: worktree only for worker, cleaner, or another write-capable agent and only inside a Git repository with a committed HEAD; parallel worker tasks default to worktree, while cleaner must opt in. Setup or integration failures never silently fall back to shared.",
-			"NEVER sleep or poll, and do NOT call subagent_wait to hold the turn — subagent ends the turn immediately and the result arrives as a message that wakes you automatically (even mid-turn). Ending your turn is the default and the only correct way to wait.",
-			"If you must keep the turn for a result, call subagent_wait with an explicit timeoutMs (non-blocking by default) — never bash sleep/timeout to wait for a sub-agent.",
-			"When a sub-agent result arrives it is already shown to the user — do NOT restate, paraphrase, or summarize it; reply with only your own conclusion or next action (often just one line), since duplicating the result wastes tokens for nothing.",
-		],
+			"Dispatch isolated background agents: explorer (recon), worker (implementation), cleaner (authorized cleanup), reviewer (read-only assessment/gate); results resume automatically. Use direct tools for trivial work.",
 		parameters: SubagentParams,
 
 		async execute(_toolCallId, params, _signal, _onUpdate, ctx) {

@@ -44,11 +44,11 @@ describe("formatActiveRunLines", () => {
 
 	it("omits a blank activity line and handles missing model/thinking", () => {
 		const store = new MonitorStore();
-		store.addRun("explore", "Map the cleaner workflow");
+		store.addRun("explorer", "Map the cleaner workflow");
 
 		const lines = formatActiveRunLines(store.getRuns(), theme, 120);
 		expect(lines).toHaveLength(1);
-		expect(lines[0]).toContain("explore · Map the cleaner workflow");
+		expect(lines[0]).toContain("explorer · Map the cleaner workflow");
 		expect(lines[0]).not.toContain("undefined");
 	});
 
@@ -67,12 +67,12 @@ describe("formatActiveRunLines", () => {
 
 	it("keeps adjacent active groups compact with no blank rows", () => {
 		const store = new MonitorStore();
-		store.addRun("explore", "Map config");
+		store.addRun("explorer", "Map config");
 		store.addRun("reviewer", "Review config");
 
 		const lines = formatActiveRunLines(store.getRuns(), theme, 80);
 		expect(lines).toHaveLength(2);
-		expect(lines[0]).toContain("explore · Map config");
+		expect(lines[0]).toContain("explorer · Map config");
 		expect(lines[1]).toContain("reviewer · Review config");
 		expect(lines.every((line) => line.length > 0)).toBe(true);
 	});

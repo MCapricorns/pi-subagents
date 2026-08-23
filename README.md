@@ -6,27 +6,29 @@
 ![platform](https://img.shields.io/badge/platform-Windows%20%7C%20macOS%20%7C%20Linux-lightgrey)
 ![pi](https://img.shields.io/badge/pi-extension-orange)
 
-Focused background delegation for [pi](https://pi.dev): `explore` / `worker` /
+Focused background delegation for [pi](https://pi.dev): `explorer` / `worker` /
 `cleaner` / `reviewer` agents run in **isolated child processes** and hand their
 results back to the main agent automatically. Install it, and the main model
 starts using it on its own — no prompt engineering, no babysitting.
 
-## 2.0.0 — direct model handoff and capability-aware thinking
+## 4.0.0 — consistent agent names and direct cleanup
 
-Version 2 removes backup pools and global thinking strength. Every agent now has
-one optional selected model; any model/provider failure hands its retained session
-directly to the current main model, while ordinary tool/task failures stay put.
-Thinking defaults to Auto and is clamped through Pi's real model capability map.
-The setup menu and normalized config drop the obsolete options instead of carrying
-compatibility aliases.
+Version 4 renames the built-in reconnaissance role from `explore` to `explorer`
+and deliberately removes the old alias. Existing explicit configuration must use
+the new key. `cleaner` is now apply-only: explicit cleanup intent authorizes it to
+prove and perform every safe in-scope cut, while generic or read-only assessments
+go to `reviewer` without triggering auto-fix.
 
-This release also adds semantic routing to a dedicated evidence-first `cleaner`
-and makes the active widget show each run's task, effective model/thinking,
-activity, and elapsed time. Every dispatch has a stable run id, so work can be
-steered while it runs, parked without losing context, resumed after settlement,
-retargeted, or forked into another path. Generation ownership keeps startup-race
-retries and stale child processes from corrupting the logical thread without
-retaining a duplicate event history.
+The main delegation directive is now the single authoritative routing policy;
+duplicated tool guidelines were removed to cut the default parent injection by
+more than half without changing process isolation, worktree rules, retained-session
+fallback, or result handoff. Agent frontmatter model defaults remain because they
+still select a model when no current main model exists; frontmatter comments do not
+enter model context.
+
+Every dispatch retains its stable run id and can be steered, parked, resumed,
+retargeted, or forked. The active widget continues to show task, effective model
+and thinking level, activity, and elapsed time.
 
 The common quality loop now runs end to end without waking the main agent between
 steps:
@@ -35,16 +37,19 @@ steps:
 reviewer (find issues) → worker (fix every finding) → reviewer (verify) → final PASS/FAIL
 ```
 
-Reviews use a single flat findings list — no severity triage. Every reported
+Gate reviews use a single flat findings list — no severity triage. Every reported
 finding is fixed before the change is accepted, and each re-review converges on
 an open-finding set: the worker's explicit rejections are adjudicated once, only
 defects a fix round introduced or exposed are added, and resolved items never
 re-open. `maxFixRounds` stays the hard cap, so a chain always settles and wakes
-the main agent with the full picture.
+the main agent with the full picture. Advisory reviewer requests (generic audits,
+code health, plans, and proposed solutions) return evidence without a machine
+verdict, so they never start auto-fix.
 
-Cleanup stays a separate lifecycle: explicit cleanup intent can dispatch the
-evidence-first `cleaner`; any edits still go through the independent `reviewer`
-gate.
+Cleanup stays a separate lifecycle: only an explicit request authorizing cleanup,
+removal, or simplification edits dispatches the evidence-first `cleaner`. It proves
+candidates, applies every safe in-scope cut end to end, and may validly make zero
+edits; non-trivial changes still go through the independent `reviewer` gate.
 
 Each chain is delivered as one concise completion group whose footer totals the
 aggregate token usage and cost of every included run, while full per-run reports
@@ -58,9 +63,10 @@ index.
 ## Highlights
 
 - **Zero-setup proactive dispatch** — the extension injects a delegation directive
-  into the main system prompt, so the main model sends broad searches to `explore`,
-  self-contained implementations to `worker`, explicit cleanup intent to `cleaner`,
-  and pre-commit reviews to `reviewer`. You just use pi; delegation happens by itself.
+  into the main system prompt, so the main model sends broad searches to `explorer`,
+  self-contained implementations to `worker`, edit-authorizing cleanup to `cleaner`,
+  and generic assessments or pre-commit gates to `reviewer`. You just use pi;
+  delegation happens by itself.
 - **Multimodal work is a model choice, not a mode** — an agent that should see
   screenshots, mockups, or its own rendered pages simply gets a multimodal model
   through `/subagents-setup` (the picker labels each model `vision` or
@@ -88,13 +94,15 @@ index.
   verbatim, and the main agent is told not to paraphrase it back. It replies with
   only its own conclusion or next step, so the same findings are never paid for
   twice in tokens.
-- **Evidence-first cleanup, not deletion by guesswork** — `cleaner` distinguishes
-  read-only audit wording from explicit apply wording, proves consumers and dynamic
-  entrypoints before cutting, and treats finding nothing safe as a valid outcome.
-  It is periodic/intent-driven, never PR-count-driven or an automatic commit gate.
-- **A quality gate that closes the loop** — when a reviewer returns `REVIEW_FAIL`,
-  the extension dispatches a worker briefed with the concrete findings, then a
-  re-review, up to `maxFixRounds` times — and only then wakes the main agent.
+- **Evidence-first cleanup, not deletion by guesswork** — `cleaner` is apply-only:
+  an explicit cleanup request authorizes edits, but each candidate must be proved
+  before every safe in-scope cut is applied and verified. Finding nothing safe and
+  making zero edits remains valid. Generic/read-only assessments go to `reviewer`;
+  cleaner is periodic/intent-driven, never PR-count-driven or an automatic gate.
+- **A quality gate that closes the loop** — when a gate reviewer returns
+  `REVIEW_FAIL`, the extension dispatches a worker briefed with the concrete
+  findings, then a re-review, up to `maxFixRounds` times — and only then wakes the
+  main agent. Advisory reviewer reports omit that verdict and never trigger edits.
   Every reported finding gets fixed (no severity triage), and re-reviews converge
   on an open-finding set instead of ping-ponging: worker rejections are adjudicated
   once, only defects the fix round introduced are added, and resolved items never
@@ -158,7 +166,7 @@ interactive TUI session:
 /subagents-setup
 ```
 
-Fresh installs enable `explore`, `worker`, `cleaner`, and `reviewer` — you can
+Fresh installs enable `explorer`, `worker`, `cleaner`, and `reviewer` — you can
 start delegating immediately. Existing explicit `enabledAgents` lists are never
 silently extended; users upgrading with an existing explicit list get a one-time
 notice to opt into `cleaner` with `/subagents-setup`.
@@ -167,10 +175,10 @@ notice to opt into `cleaner` with `/subagents-setup`.
 
 | Agent | Access | Purpose |
 | --- | --- | --- |
-| `explore` | Read-only | Fast codebase reconnaissance: broad/open-ended search, multi-file lookups, mapping unfamiliar code. Returns compressed, structured findings. |
+| `explorer` | Read-only | Fast codebase reconnaissance: broad/open-ended search, multi-file lookups, mapping unfamiliar code. Returns compressed, structured retrieval leads. |
 | `worker` | Full | Implements, fixes, refactors, and tests a self-contained task end to end, then reports honest verification. |
-| `cleaner` | Full | Evidence-first cleanup. Audits and ranks candidates read-only, or applies the smallest proven cuts when removal is explicit; supports worktree isolation. |
-| `reviewer` | Read-only | Adversarial pre-commit quality gate: independently reviews worker and cleaner edits, plus plans, proposed solutions, codebase health, and PR/issue validation. |
+| `cleaner` | Full | Proves and applies every safe in-scope cleanup authorized by an explicit cleanup/removal/simplification request; zero edits is valid. Supports worktree isolation. |
+| `reviewer` | Read-only | Handles generic audits, code health, plans, proposed solutions, PR/issue validation, and independent pre-commit gates. Advisory reports do not trigger auto-fix. |
 
 Each agent runs in its own isolated `pi` process with a clean context window; it
 has no memory of your conversation, so briefs must be self-contained (goal, exact
@@ -181,11 +189,11 @@ paths, constraints, expected output).
 ### Single task
 
 ```ts
-subagent({ agent: "explore", task: "Map the test setup: which files run what, and how is CI wired? Report exact paths." });
+subagent({ agent: "explorer", task: "Map the test setup: which files run what, and how is CI wired? Report exact paths." });
 subagent({ agent: "worker", task: "Implement X in src/foo.ts, add tests, run npm test." });
-subagent({ agent: "cleaner", task: "Audit src/cache for dead code and redundant state; report ranked evidence only." });
-subagent({ agent: "cleaner", task: "Remove the proven dead cache adapter, update its tests/docs, and verify the smallest then broad checks." });
-subagent({ agent: "reviewer", task: "Review the diff of src/index.ts and tests/load.test.ts for correctness and edge cases." });
+subagent({ agent: "reviewer", task: "Audit src/cache for dead-code candidates and redundant state; report evidence only." });
+subagent({ agent: "cleaner", task: "Clean up src/cache: prove and apply every safe dead-code or redundancy cut, update tests/docs, and verify." });
+subagent({ agent: "reviewer", task: "Gate the diff of src/index.ts and tests/load.test.ts for correctness and edge cases." });
 ```
 
 ### Parallel tasks
@@ -193,7 +201,7 @@ subagent({ agent: "reviewer", task: "Review the diff of src/index.ts and tests/l
 ```ts
 subagent({
   tasks: [
-    { agent: "explore", task: "Where is the selected-to-main handoff logic?" },
+    { agent: "explorer", task: "Where is the selected-to-main handoff logic?" },
     { agent: "worker", task: "Add unit tests for models.ts." },
   ],
 });
@@ -201,25 +209,29 @@ subagent({
 
 ### Cleanup routing and lifecycle
 
-The injected guidance routes `cleaner` by explicit semantic intent in any
-language the conversation uses: **code cleanup**, **dead code**, redundancy,
-simplification, or over-engineering. Requested periodic maintenance passes also
-qualify; PR counts do not, and cleaner is never run automatically as the
-pre-commit gate.
+The injected guidance sends only explicit, edit-authorizing cleanup intent to
+`cleaner` in whatever language the conversation uses: clean up/remove dead code,
+reduce redundancy, simplify, remove over-engineering, or run a maintenance cleanup
+pass. Cleaner first proves reachability, ownership, history, and boundaries, then
+applies every safe in-scope cut end to end and verifies it. No proven safe cut means
+zero edits, not a forced deletion.
 
-- **Audit mode:** audit/find/report/review wording produces read-only ranked
-  evidence.
-- **Apply mode:** explicit remove/clean/simplify/refactor wording permits the
-  smallest proven edits plus narrow-then-broad verification.
+Generic or explicitly read-only **audit**, **inspect**, **report**, **review**,
+**code-health**, **plan**, **proposed-solution**, or cleanup-candidate assessment
+requests go to `reviewer`. Those are advisory reviews: they omit the machine
+`REVIEW_PASS` / `REVIEW_FAIL` marker, cannot start auto-fix, and do not authorize
+the main agent to edit. A follow-up change needs an explicit user request. A
+reviewer emits the marker only for an explicit diff/pre-commit acceptance gate.
 
 ```text
-explicit cleanup intent → cleaner (audit or apply)
-cleaner apply → reviewer gate → worker auto-fix (on REVIEW_FAIL) → reviewer
+explicit edit-authorizing cleanup → cleaner → reviewer gate
+read-only/generic assessment → reviewer advisory report (no auto-fix)
+reviewer gate REVIEW_FAIL → worker auto-fix → reviewer gate
 ```
 
-`reviewer` remains the independent gate for non-trivial cleaner edits. The auto-fix
-portion runs only when enabled by `maxFixRounds`; cleaner itself is not a pre-commit
-hook or a PR-count scheduler.
+Cleaner is never dispatched by PR count and never acts as the commit gate. The
+auto-fix portion runs only for gate verdicts and only when enabled by
+`maxFixRounds`.
 
 ### Image work (screenshots / mockups / designs)
 
@@ -273,7 +285,7 @@ to `isolation: "worktree"`; opt into shared mode only when a worker must see the
 caller's live uncommitted tree. `cleaner` is also write-capable and supports
 worktree mode when explicitly requested (its default remains shared). Worktree
 mode requires a Git repository with a committed `HEAD` and is rejected for the
-read-only `explore` and `reviewer` agents.
+read-only `explorer` and `reviewer` agents.
 
 A parked isolated thread keeps its current worktree. Resume it there; fork is
 available after that isolated checkpoint settles and its seed is integrated.
@@ -305,9 +317,9 @@ direct-file settings.
 
 ```json
 {
-  "enabledAgents": ["explore", "worker", "cleaner", "reviewer"],
+  "enabledAgents": ["explorer", "worker", "cleaner", "reviewer"],
   "agentModels": {
-    "explore": "anthropic/claude-haiku-4-5"
+    "explorer": "anthropic/claude-haiku-4-5"
   },
   "agentThinkingLevels": {
     "reviewer": "high"
@@ -341,8 +353,11 @@ direct-file settings.
 selected agent model → current main-window model
 ```
 
-Without a selected model, current main runs immediately; agent frontmatter model
-is used only when no main model exists. A selection missing from Pi's live
+Without a selected model, current main runs immediately; agent frontmatter `model`
+is used only when no main model exists, so the shipped defaults remain behaviorally
+load-bearing. From an agent Markdown file, only the body after frontmatter becomes
+the child's appended system prompt; model-selection comments inside YAML
+frontmatter are parser comments, not model prompt tokens. A selection missing from Pi's live
 available catalog is skipped. Any model-level runtime failure — rate limit,
 quota, invalid key/auth, missing model, provider error, or idle model stream —
 hands directly to current main, including stream errors that retain partial text.
@@ -361,21 +376,21 @@ timeout before any agent/turn/stream/tool activity. Those transport misses are
 not model-level failures and do not hand the task to the main window. An accepted
 prompt or any activity forbids replay.
 
-Auto thinking starts from the Agent's declared preference (`low` for `explore`,
+Auto thinking starts from the Agent's declared preference (`low` for `explorer`,
 `high` for the other built-ins) and uses Pi's capability map to clamp it to the
 actual model. Non-reasoning models resolve to `off`; `xhigh`/`max` appear in setup
 only when that model explicitly supports them. A selected→main handoff re-clamps
 thinking for the main model.
 
-### Choosing an explore model
+### Choosing an explorer model
 
-Choose a competent fast code model for `explore`, not automatically the cheapest
+Choose a competent fast code model for `explorer`, not automatically the cheapest
 model. Cheap reconnaissance is useful for mechanical symbol/path discovery, but
 a missed dynamic entrypoint or ownership edge can cost more through downstream
 rework. Direct main-model handoff handles provider/runtime failure; it cannot
 detect a plausible but incomplete answer.
 
-`explore` therefore returns an index of exact paths, lines, symbols, and explicit
+`explorer` therefore returns an index of exact paths, lines, symbols, and explicit
 uncertainty. The main agent, worker, or cleaner must re-read load-bearing files
 before editing or deciding deletion, security, compatibility, persistence, or
 dynamic reachability. Prefer a stronger model or direct specialist for complex
@@ -399,14 +414,17 @@ sessions live until the parent Pi session shuts down.
 
 ### Configuration migration
 
-The config file normalizes itself on load — no manual steps after an upgrade.
-Configured non-empty agent names are preserved, while invalid and obsolete keys
-are removed. This release deletes `agentBackupModels` and global `thinkingLevel`
-in addition to older `maxParallelTasks` / `maxSubagentDepth`; per-agent thinking
-preferences remain and are capability-clamped at runtime. A pre-existing explicit
-`enabledAgents` array is still preserved without appending `cleaner`. Existing
-configs without it receive a one-time `/subagents-setup` notice, tracked internally
-in `announcedFeatures`.
+Config loading normalizes schema fields and removes invalid or obsolete keys,
+including `agentBackupModels`, global `thinkingLevel`, `maxParallelTasks`, and
+`maxSubagentDepth`. Per-agent thinking preferences remain capability-clamped.
+
+The built-in reconnaissance role is now `explorer`. There is deliberately no
+`explore` alias and no automatic key migration. Existing configurations must change
+that role name in `enabledAgents`, `agentModels`, and `agentThinkingLevels` (or run
+`/subagents-setup`). Configured non-empty names are otherwise preserved, so a stale
+name is not silently rewritten. A pre-existing explicit `enabledAgents` list is
+also still preserved without appending `cleaner`; configs without cleaner receive
+the existing one-time setup notice.
 
 ## Agent discovery and overrides
 

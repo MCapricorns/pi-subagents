@@ -96,14 +96,14 @@ describe("extension registration", () => {
 		expect(typeof stub.hooks["before_agent_start"]).toBe("function");
 
 		const tool = stub.tools.find((t) => t.name === "subagent");
-		expect(tool.promptGuidelines.length).toBeGreaterThan(0);
-		expect(tool.description).toContain("explore");
-		expect(tool.description).toContain("cleaner (explicit evidence-first cleanup, full/write tools)");
-		expect(tool.description).toContain("Never route cleaner by PR count or as the pre-commit gate");
-		expect(tool.description).toContain("Cleaner is write-capable and can opt into worktree isolation");
-		expect(tool.promptGuidelines.join("\n")).toContain("send non-trivial cleaner edits to reviewer");
-		expect(tool.promptGuidelines.join("\n")).toContain("explore output as a retrieval index, not authority");
-		expect(`${tool.description}\n${tool.promptGuidelines.join("\n")}`).not.toMatch(/[\u4e00-\u9fff]/u);
+		expect(tool.promptGuidelines).toBeUndefined();
+		expect(tool.description).toContain("explorer for broad read-only reconnaissance");
+		expect(tool.description).toContain("cleaner only for explicitly authorized cleanup/removal/simplification edits");
+		expect(tool.description).toContain("reviewer for generic read-only assessments and pre-commit gates");
+		expect(tool.description).toContain("do not poll");
+		expect(tool.description).toContain("continues the retained session on the current main model");
+		expect(tool.promptSnippet).toContain("results resume automatically");
+		expect(`${tool.description}\n${tool.promptSnippet}`).not.toMatch(/[\u4e00-\u9fff]/u);
 		expect(tool.parameters.properties.task).toMatchObject({ minLength: 1, pattern: "\\S" });
 		expect(tool.parameters.properties.tasks.items.properties.task).toMatchObject({ minLength: 1, pattern: "\\S" });
 		expect(tool.parameters.properties.isolation).toBeDefined();
@@ -118,7 +118,7 @@ describe("extension registration", () => {
 		const configPath = join(testAgentDir, "pi-subagents.json");
 		const patchPath = join(testAgentDir, "retained.patch");
 		writeFileSync(configPath, JSON.stringify({
-			enabledAgents: ["explore", "worker", "reviewer"],
+			enabledAgents: ["explorer", "worker", "reviewer"],
 			announcedFeatures: [],
 		}), "utf8");
 		writeFileSync(patchPath, "patch", "utf8");
@@ -142,7 +142,7 @@ describe("extension registration", () => {
 		expect(notify).toHaveBeenCalledWith(expect.stringContaining("recovery for run #41"), "error");
 		expect(notify).toHaveBeenCalledWith(expect.stringMatching(/cleaner agent.*\/subagents-setup/), "info");
 		const savedConfig = JSON.parse(readFileSync(configPath, "utf8"));
-		expect(savedConfig.enabledAgents).toEqual(["explore", "worker", "reviewer"]);
+		expect(savedConfig.enabledAgents).toEqual(["explorer", "worker", "reviewer"]);
 		expect(savedConfig.announcedFeatures).toEqual(expect.arrayContaining(["cleanerAgent"]));
 
 		// Recovery remains visible while its artifact exists, but the feature markers
@@ -240,7 +240,7 @@ describe("delegated task validation", () => {
 			"call-2",
 			{
 				tasks: [
-					{ agent: "explore", task: "Inspect the relevant files" },
+					{ agent: "explorer", task: "Inspect the relevant files" },
 					{ agent: "worker", task: "\n\t" },
 				],
 			},
@@ -1586,8 +1586,8 @@ describe("before_agent_start injection", () => {
 		expect(result).toBeDefined();
 		expect(result.systemPrompt.startsWith("BASE PROMPT")).toBe(true);
 		expect(result.systemPrompt).toContain("Sub-agent delegation");
-		// Fresh-install default enabled set: explore, worker, cleaner, reviewer.
-		expect(result.systemPrompt).toContain("- explore:");
+		// Fresh-install default enabled set: explorer, worker, cleaner, reviewer.
+		expect(result.systemPrompt).toContain("- explorer:");
 		expect(result.systemPrompt).toContain("- worker:");
 		expect(result.systemPrompt).toContain("- cleaner:");
 		expect(result.systemPrompt).toContain("- reviewer:");

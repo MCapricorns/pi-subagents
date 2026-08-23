@@ -22,8 +22,8 @@ import {
 describe("normalizeConfig", () => {
 	it("returns all four built-ins for a fresh config", () => {
 		const config = normalizeConfig(undefined);
-		expect(BUILTIN_AGENT_NAMES).toEqual(["explore", "worker", "cleaner", "reviewer"]);
-		expect(DEFAULT_ENABLED_AGENTS).toEqual(["explore", "worker", "cleaner", "reviewer"]);
+		expect(BUILTIN_AGENT_NAMES).toEqual(["explorer", "worker", "cleaner", "reviewer"]);
+		expect(DEFAULT_ENABLED_AGENTS).toEqual(["explorer", "worker", "cleaner", "reviewer"]);
 		expect(config.enabledAgents).toEqual([...DEFAULT_ENABLED_AGENTS]);
 		expect(config.proactiveInjection).toBe(true);
 		expect(config.agentScope).toBe("user");
@@ -36,12 +36,22 @@ describe("normalizeConfig", () => {
 	});
 
 	it("keeps valid enabledAgents and drops non-strings", () => {
-		const config = normalizeConfig({ enabledAgents: ["explore", "worker", 42, null, "explore"] });
-		expect(config.enabledAgents).toEqual(["explore", "worker"]);
+		const config = normalizeConfig({ enabledAgents: ["explorer", "worker", 42, null, "explorer"] });
+		expect(config.enabledAgents).toEqual(["explorer", "worker"]);
+	});
+
+	it("does not alias or migrate the former built-in role name", () => {
+		const config = normalizeConfig({
+			enabledAgents: ["explore"],
+			agentModels: { explore: "anthropic/legacy" },
+		});
+		expect(config.enabledAgents).toEqual(["explore"]);
+		expect(config.agentModels).toEqual({ explore: "anthropic/legacy" });
+		expect(config.enabledAgents).not.toContain("explorer");
 	});
 
 	it("preserves an existing explicit agent list without injecting cleaner", () => {
-		const existing = ["explore", "worker", "reviewer"];
+		const existing = ["explorer", "worker", "reviewer"];
 		expect(normalizeConfig({ enabledAgents: existing }).enabledAgents).toEqual(existing);
 	});
 
@@ -51,14 +61,14 @@ describe("normalizeConfig", () => {
 
 	it("keeps only valid provider/model references in agentModels", () => {
 		const config = normalizeConfig({
-			agentModels: { explore: "anthropic/claude-haiku-4-5", bad: "noslash", empty: "  " },
+			agentModels: { explorer: "anthropic/claude-haiku-4-5", bad: "noslash", empty: "  " },
 		});
-		expect(config.agentModels).toEqual({ explore: "anthropic/claude-haiku-4-5" });
+		expect(config.agentModels).toEqual({ explorer: "anthropic/claude-haiku-4-5" });
 	});
 
 	it("drops legacy backup-pool and global-thinking keys", () => {
 		const config = normalizeConfig({
-			agentBackupModels: { explore: "anthropic/claude-sonnet-4-5" },
+			agentBackupModels: { explorer: "anthropic/claude-sonnet-4-5" },
 			thinkingLevel: "max",
 		});
 		expect(config).not.toHaveProperty("agentBackupModels");
@@ -78,9 +88,9 @@ describe("normalizeConfig", () => {
 
 	it("keeps only valid thinking levels in agentThinkingLevels", () => {
 		const config = normalizeConfig({
-			agentThinkingLevels: { explore: "high", bad: "ultra", empty: "" },
+			agentThinkingLevels: { explorer: "high", bad: "ultra", empty: "" },
 		});
-		expect(config.agentThinkingLevels).toEqual({ explore: "high" });
+		expect(config.agentThinkingLevels).toEqual({ explorer: "high" });
 	});
 
 	it("defaults notifyOnReviewPass to false and preserves an explicit true", () => {
@@ -181,16 +191,16 @@ describe("loadConfig", () => {
 		const path = join(dir, "pi-subagents.json");
 		// A config written by the old pool/global-thinking schema.
 		writeFileSync(path, JSON.stringify({
-			enabledAgents: ["explore"],
+			enabledAgents: ["explorer"],
 			thinkingLevel: "max",
-			agentBackupModels: { explore: "openai/backup" },
+			agentBackupModels: { explorer: "openai/backup" },
 		}), "utf8");
 
 		const config = await loadConfig(path);
 		expect(config.maxConcurrency).toBe(DEFAULT_MAX_CONCURRENCY);
 
 		const saved = JSON.parse(readFileSync(path, "utf8"));
-		expect(saved.enabledAgents).toEqual(["explore"]);
+		expect(saved.enabledAgents).toEqual(["explorer"]);
 		expect(saved).not.toHaveProperty("agentBackupModels");
 		expect(saved).not.toHaveProperty("thinkingLevel");
 		expect(saved.maxConcurrency).toBe(DEFAULT_MAX_CONCURRENCY);
@@ -201,16 +211,16 @@ describe("loadConfig", () => {
 		const path = join(dir, "pi-subagents.json");
 		writeFileSync(
 			path,
-			JSON.stringify({ enabledAgents: ["explore", 42], agentModels: { bad: "noslash" } }),
+			JSON.stringify({ enabledAgents: ["explorer", 42], agentModels: { bad: "noslash" } }),
 			"utf8",
 		);
 
 		const config = await loadConfig(path);
-		expect(config.enabledAgents).toEqual(["explore"]);
+		expect(config.enabledAgents).toEqual(["explorer"]);
 		expect(config.agentModels).toEqual({});
 
 		const saved = JSON.parse(readFileSync(path, "utf8"));
-		expect(saved.enabledAgents).toEqual(["explore"]);
+		expect(saved.enabledAgents).toEqual(["explorer"]);
 		expect(saved.agentModels).toEqual({});
 	});
 });

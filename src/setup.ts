@@ -58,10 +58,10 @@ function actualAgentThinkingDefault(
 
 /** Short, selection-friendly descriptions for the built-in agents. */
 const MODULE_HINTS: Record<string, string> = {
-	explore: "read-only codebase recon (fast model)",
+	explorer: "read-only codebase recon (fast model)",
 	worker: "implement / fix / refactor / test (full tools)",
-	cleaner: "evidence-first cleanup: audit or verified cuts (full tools)",
-	reviewer: "adversarial pre-commit review (read-only)",
+	cleaner: "prove and apply safe cleanup cuts (full tools)",
+	reviewer: "read-only audits and pre-commit gates",
 };
 
 function moduleLabel(name: string): string {

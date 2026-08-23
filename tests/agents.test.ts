@@ -29,7 +29,7 @@ afterEach(() => {
 });
 
 describe("shipped specialist agents", () => {
-	it("makes cleaner full/write-capable while leaving the pre-commit gate to reviewer", () => {
+	it("makes cleaner apply proven cuts while leaving audits and the gate to reviewer", () => {
 		const cleaner = loadBuiltinAgents().find((agent) => agent.name === "cleaner");
 		expect(cleaner).toBeDefined();
 		expect(cleaner).toMatchObject({
@@ -38,45 +38,70 @@ describe("shipped specialist agents", () => {
 			source: "builtin",
 		});
 		expect(cleaner?.tools).toBeUndefined();
-		expect(cleaner?.description).toContain("code cleanup");
-		expect(cleaner?.description).toContain("in any language");
-		expect(cleaner?.description).toMatch(/Never .*pre-commit gate; reviewer remains the gate/);
-		expect(cleaner?.systemPrompt).toContain("Audit mode");
-		expect(cleaner?.systemPrompt).toContain("Apply mode");
-		expect(cleaner?.systemPrompt).toContain("Never inherit deletion proof from an `explore` report");
+		expect(cleaner?.description).toContain("edit-authorizing cleanup");
+		expect(cleaner?.description).toContain("Read-only audits/reviews go to reviewer");
+		expect(cleaner?.systemPrompt).toContain("apply every safe, proven, in-scope cleanup end to end");
+		expect(cleaner?.systemPrompt).toContain("Finding no safe cut and making zero edits is valid");
+		expect(cleaner?.systemPrompt).toContain("Never inherit deletion proof from an `explorer` report");
+		expect(cleaner?.systemPrompt).not.toContain("Audit mode");
+		expect(cleaner?.systemPrompt).not.toContain("Apply mode");
 	});
 
-	it("keeps explore retrieval-only and requires critical re-reading", () => {
-		const explore = loadBuiltinAgents().find((agent) => agent.name === "explore");
-		expect(explore?.tools).toEqual(["read", "grep", "find", "ls", "bash"]);
-		expect(explore?.systemPrompt).toContain("retrieval lead");
-		expect(explore?.systemPrompt).toContain("re-read load-bearing files");
-		expect(explore?.systemPrompt).toContain("plausible guess is more expensive");
+	it("keeps reviewer advisory reports separate from auto-fix gate verdicts", () => {
+		const reviewer = loadBuiltinAgents().find((agent) => agent.name === "reviewer");
+		expect(reviewer?.description).toContain("generic audits");
+		expect(reviewer?.systemPrompt).toContain("Advisory review");
+		expect(reviewer?.systemPrompt).toContain("do **not** emit `VERDICT: REVIEW_*`");
+		expect(reviewer?.systemPrompt).toContain("Gate review");
+		expect(reviewer?.systemPrompt).toContain("In a gate review, use `VERDICT: REVIEW_FAIL`");
+		expect(reviewer?.systemPrompt).toContain("A `REQUEST_CHANGES` gate verdict starts");
+	});
+
+	it("keeps runtime model defaults while excluding frontmatter comments from child prompts", () => {
+		const agents = loadBuiltinAgents();
+		expect(agents.map((agent) => agent.name)).not.toContain("explore");
+		expect(Object.fromEntries(agents.map((agent) => [agent.name, agent.model]))).toEqual({
+			cleaner: "claude-sonnet-4-5",
+			explorer: "claude-haiku-4-5",
+			reviewer: "claude-sonnet-4-5",
+			worker: "claude-sonnet-4-5",
+		});
+		for (const agent of agents) {
+			expect(agent.systemPrompt).not.toContain("# Model selection:");
+		}
+	});
+
+	it("keeps explorer retrieval-only and requires critical re-reading", () => {
+		const explorer = loadBuiltinAgents().find((agent) => agent.name === "explorer");
+		expect(explorer?.tools).toEqual(["read", "grep", "find", "ls", "bash"]);
+		expect(explorer?.systemPrompt).toContain("retrieval lead");
+		expect(explorer?.systemPrompt).toContain("re-read load-bearing files");
+		expect(explorer?.systemPrompt).toContain("plausible guess is more expensive");
 	});
 });
 
 describe("discoverAgents", () => {
 	it("loads builtin agents and skips malformed files", () => {
-		writeAgent(builtinDir, "explore", "---\nname: explore\ndescription: recon\ntools: read, grep\nmodel: fast\n---\nbody");
+		writeAgent(builtinDir, "explorer", "---\nname: explorer\ndescription: recon\ntools: read, grep\nmodel: fast\n---\nbody");
 		writeAgent(builtinDir, "broken", "---\nname: broken\n---\nno description so skipped");
 		writeAgent(builtinDir, "notfrontmatter", "just prose, no frontmatter");
 
 		const { agents } = discoverAgents(cwd, { scope: "user", builtinDir });
-		expect(agents.map((a) => a.name)).toEqual(["explore"]);
+		expect(agents.map((a) => a.name)).toEqual(["explorer"]);
 		expect(agents[0].tools).toEqual(["read", "grep"]);
 		expect(agents[0].model).toBe("fast");
 		expect(agents[0].systemPrompt.trim()).toBe("body");
 	});
 
 	it("filters by enabledNames", () => {
-		writeAgent(builtinDir, "explore", "---\nname: explore\ndescription: d\n---\nb");
+		writeAgent(builtinDir, "explorer", "---\nname: explorer\ndescription: d\n---\nb");
 		writeAgent(builtinDir, "worker", "---\nname: worker\ndescription: d\n---\nb");
 		const { agents } = discoverAgents(cwd, { scope: "user", builtinDir, enabledNames: ["worker"] });
 		expect(agents.map((a) => a.name)).toEqual(["worker"]);
 	});
 
 	it("treats an explicit empty enabledNames list as disabling every agent", () => {
-		writeAgent(builtinDir, "explore", "---\nname: explore\ndescription: d\n---\nb");
+		writeAgent(builtinDir, "explorer", "---\nname: explorer\ndescription: d\n---\nb");
 		writeAgent(builtinDir, "worker", "---\nname: worker\ndescription: d\n---\nb");
 		const { agents } = discoverAgents(cwd, { scope: "user", builtinDir, enabledNames: [] });
 		expect(agents).toEqual([]);
@@ -110,32 +135,32 @@ describe("discoverAgents", () => {
 	});
 
 	it("parses a valid thinking level and ignores invalid ones", () => {
-		writeAgent(builtinDir, "explore", "---\nname: explore\ndescription: d\nthinking: low\n---\nb");
+		writeAgent(builtinDir, "explorer", "---\nname: explorer\ndescription: d\nthinking: low\n---\nb");
 		writeAgent(builtinDir, "worker", "---\nname: worker\ndescription: d\nthinking: ultra\n---\nb");
 		writeAgent(builtinDir, "reviewer", "---\nname: reviewer\ndescription: d\n---\nb");
 
 		const { agents } = discoverAgents(cwd, { scope: "user", builtinDir });
 		const byName = new Map(agents.map((a) => [a.name, a]));
-		expect(byName.get("explore")?.thinking).toBe("low");
+		expect(byName.get("explorer")?.thinking).toBe("low");
 		expect(byName.get("worker")?.thinking).toBeUndefined();
 		expect(byName.get("reviewer")?.thinking).toBeUndefined();
 	});
 
 	it("ignores non-string frontmatter values instead of throwing", () => {
-		writeAgent(builtinDir, "explore", "---\nname: explore\ndescription: d\nthinking: 5\n---\nb");
+		writeAgent(builtinDir, "explorer", "---\nname: explorer\ndescription: d\nthinking: 5\n---\nb");
 		writeAgent(builtinDir, "worker", "---\nname: worker\ndescription: d\ntools: false\n---\nb");
 		writeAgent(builtinDir, "broken", "---\nname: 123\ndescription: d\n---\nb");
 
 		const { agents } = discoverAgents(cwd, { scope: "user", builtinDir });
 		const byName = new Map(agents.map((a) => [a.name, a]));
-		expect(byName.get("explore")?.thinking).toBeUndefined();
+		expect(byName.get("explorer")?.thinking).toBeUndefined();
 		expect(byName.get("worker")?.tools).toBeUndefined();
 		expect(byName.has("broken")).toBe(false);
 	});
 
 	it("user agents override builtin agents of the same name", () => {
-		writeAgent(builtinDir, "explore", "---\nname: explore\ndescription: builtin version\n---\nb");
-		writeAgent(join(agentDir, "agents"), "explore", "---\nname: explore\ndescription: user version\n---\nb");
+		writeAgent(builtinDir, "explorer", "---\nname: explorer\ndescription: builtin version\n---\nb");
+		writeAgent(join(agentDir, "agents"), "explorer", "---\nname: explorer\ndescription: user version\n---\nb");
 		const { agents } = discoverAgents(cwd, { scope: "user", builtinDir });
 		expect(agents).toHaveLength(1);
 		expect(agents[0].description).toBe("user version");
