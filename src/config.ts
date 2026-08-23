@@ -25,6 +25,13 @@ export const DEFAULT_ENABLED_AGENTS: readonly string[] = ["explorer", "worker", 
 export const AGENT_SCOPE_VALUES = ["user", "project", "both"] as const;
 export type AgentScope = (typeof AGENT_SCOPE_VALUES)[number];
 
+const LEGACY_EXPLORER_NAME = "explore";
+const EXPLORER_NAME = "explorer";
+
+function migrateAgentName(name: string): string {
+	return name === LEGACY_EXPLORER_NAME ? EXPLORER_NAME : name;
+}
+
 /** Thinking levels accepted by pi's `--thinking` option. */
 export const THINKING_LEVEL_VALUES = ["off", "minimal", "low", "medium", "high", "xhigh", "max"] as const;
 export type ThinkingLevel = (typeof THINKING_LEVEL_VALUES)[number];
@@ -156,24 +163,47 @@ export function normalizeConfig(raw: unknown): SubagentsConfig {
 		const names = raw.enabledAgents.filter(
 			(name): name is string => typeof name === "string" && name.trim().length > 0,
 		);
-		// An explicitly empty array is honored (disables all agents); otherwise keep valid names.
-		config.enabledAgents = [...new Set(names.map((name) => name.trim()))];
+		// An explicitly empty array is honored. Rename the former built-in key and
+		// deduplicate when a config already contains both spellings.
+		config.enabledAgents = [...new Set(names.map((name) => migrateAgentName(name.trim())))];
 	}
 
 	if (isRecord(raw.agentModels)) {
-		for (const [key, value] of Object.entries(raw.agentModels)) {
-			if (isModelReference(value)) config.agentModels[key.trim()] = value.trim();
+		const entries = Object.entries(raw.agentModels);
+		// A valid explicit new key wins regardless of JSON property order.
+		for (const [rawKey, value] of entries) {
+			const key = rawKey.trim();
+			if (key !== LEGACY_EXPLORER_NAME && isModelReference(value)) {
+				config.agentModels[key] = value.trim();
+			}
+		}
+		if (!Object.hasOwn(config.agentModels, EXPLORER_NAME)) {
+			const legacy = entries.find(([key, value]) =>
+				key.trim() === LEGACY_EXPLORER_NAME && isModelReference(value)
+			);
+			if (legacy && isModelReference(legacy[1])) config.agentModels[EXPLORER_NAME] = legacy[1].trim();
 		}
 	}
 
 	if (isRecord(raw.agentThinkingLevels)) {
-		for (const [key, value] of Object.entries(raw.agentThinkingLevels)) {
+		const entries = Object.entries(raw.agentThinkingLevels);
+		for (const [rawKey, value] of entries) {
+			const key = rawKey.trim();
 			if (
+				key !== LEGACY_EXPLORER_NAME &&
 				typeof value === "string" &&
 				(THINKING_LEVEL_VALUES as readonly string[]).includes(value)
 			) {
-				config.agentThinkingLevels[key.trim()] = value as ThinkingLevel;
+				config.agentThinkingLevels[key] = value as ThinkingLevel;
 			}
+		}
+		if (!Object.hasOwn(config.agentThinkingLevels, EXPLORER_NAME)) {
+			const legacy = entries.find(([key, value]) =>
+				key.trim() === LEGACY_EXPLORER_NAME &&
+				typeof value === "string" &&
+				(THINKING_LEVEL_VALUES as readonly string[]).includes(value)
+			);
+			if (legacy) config.agentThinkingLevels[EXPLORER_NAME] = legacy[1] as ThinkingLevel;
 		}
 	}
 

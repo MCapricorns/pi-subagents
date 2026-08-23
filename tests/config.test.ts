@@ -40,14 +40,27 @@ describe("normalizeConfig", () => {
 		expect(config.enabledAgents).toEqual(["explorer", "worker"]);
 	});
 
-	it("does not alias or migrate the former built-in role name", () => {
+	it("migrates the former built-in role name across config fields", () => {
 		const config = normalizeConfig({
-			enabledAgents: ["explore"],
+			enabledAgents: ["explore", "worker", "explorer"],
 			agentModels: { explore: "anthropic/legacy" },
+			agentThinkingLevels: { explore: "low" },
 		});
-		expect(config.enabledAgents).toEqual(["explore"]);
-		expect(config.agentModels).toEqual({ explore: "anthropic/legacy" });
-		expect(config.enabledAgents).not.toContain("explorer");
+		expect(config.enabledAgents).toEqual(["explorer", "worker"]);
+		expect(config.agentModels).toEqual({ explorer: "anthropic/legacy" });
+		expect(config.agentThinkingLevels).toEqual({ explorer: "low" });
+	});
+
+	it("prefers valid explicit explorer settings over legacy keys", () => {
+		const config = normalizeConfig({
+			agentModels: {
+				explore: "anthropic/legacy",
+				explorer: "openai/current",
+			},
+			agentThinkingLevels: { explore: "low", explorer: "high" },
+		});
+		expect(config.agentModels).toEqual({ explorer: "openai/current" });
+		expect(config.agentThinkingLevels).toEqual({ explorer: "high" });
 	});
 
 	it("preserves an existing explicit agent list without injecting cleaner", () => {
@@ -186,21 +199,28 @@ describe("loadConfig", () => {
 		expect(config.proactiveInjection).toBe(true);
 	});
 
-	it("persists schema upgrades: missing new fields are filled in and saved back", async () => {
+	it("persists schema upgrades and the explorer key migration", async () => {
 		const dir = mkdtempSync(join(tmpdir(), "pi-subagents-test-"));
 		const path = join(dir, "pi-subagents.json");
-		// A config written by the old pool/global-thinking schema.
+		// A config written before the pool removal and explorer rename.
 		writeFileSync(path, JSON.stringify({
-			enabledAgents: ["explorer"],
+			enabledAgents: ["explore"],
+			agentModels: { explore: "anthropic/legacy" },
+			agentThinkingLevels: { explore: "low" },
 			thinkingLevel: "max",
-			agentBackupModels: { explorer: "openai/backup" },
+			agentBackupModels: { explore: "openai/backup" },
 		}), "utf8");
 
 		const config = await loadConfig(path);
 		expect(config.maxConcurrency).toBe(DEFAULT_MAX_CONCURRENCY);
+		expect(config.enabledAgents).toEqual(["explorer"]);
+		expect(config.agentModels).toEqual({ explorer: "anthropic/legacy" });
+		expect(config.agentThinkingLevels).toEqual({ explorer: "low" });
 
 		const saved = JSON.parse(readFileSync(path, "utf8"));
 		expect(saved.enabledAgents).toEqual(["explorer"]);
+		expect(saved.agentModels).toEqual({ explorer: "anthropic/legacy" });
+		expect(saved.agentThinkingLevels).toEqual({ explorer: "low" });
 		expect(saved).not.toHaveProperty("agentBackupModels");
 		expect(saved).not.toHaveProperty("thinkingLevel");
 		expect(saved.maxConcurrency).toBe(DEFAULT_MAX_CONCURRENCY);

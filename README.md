@@ -11,13 +11,15 @@ Focused background delegation for [pi](https://pi.dev): `explorer` / `worker` /
 results back to the main agent automatically. Install it, and the main model
 starts using it on its own — no prompt engineering, no babysitting.
 
-## 4.0.0 — consistent agent names and direct cleanup
+## 4.0.1 — automatic explorer config migration
 
 Version 4 renames the built-in reconnaissance role from `explore` to `explorer`
-and deliberately removes the old alias. Existing explicit configuration must use
-the new key. `cleaner` is now apply-only: explicit cleanup intent authorizes it to
-prove and perform every safe in-scope cut, while generic or read-only assessments
-go to `reviewer` without triggering auto-fix.
+without retaining a runtime alias. Version 4.0.1 automatically migrates the old
+name in `enabledAgents`, `agentModels`, and `agentThinkingLevels`, then persists
+the normalized configuration; an already configured `explorer` value wins a
+conflict. `cleaner` is apply-only: explicit cleanup intent authorizes it to prove
+and perform every safe in-scope cut, while generic or read-only assessments go to
+`reviewer` without triggering auto-fix.
 
 The main delegation directive is now the single authoritative routing policy;
 duplicated tool guidelines were removed to cut the default parent injection by
@@ -418,13 +420,14 @@ Config loading normalizes schema fields and removes invalid or obsolete keys,
 including `agentBackupModels`, global `thinkingLevel`, `maxParallelTasks`, and
 `maxSubagentDepth`. Per-agent thinking preferences remain capability-clamped.
 
-The built-in reconnaissance role is now `explorer`. There is deliberately no
-`explore` alias and no automatic key migration. Existing configurations must change
-that role name in `enabledAgents`, `agentModels`, and `agentThinkingLevels` (or run
-`/subagents-setup`). Configured non-empty names are otherwise preserved, so a stale
-name is not silently rewritten. A pre-existing explicit `enabledAgents` list is
-also still preserved without appending `cleaner`; configs without cleaner receive
-the existing one-time setup notice.
+The built-in reconnaissance role is now `explorer`, with no runtime `explore`
+alias. Config loading automatically renames the old key in `enabledAgents`,
+`agentModels`, and `agentThinkingLevels`, deduplicates an old/new pair, and persists
+the normalized file. When both model or thinking keys are valid, the explicit
+`explorer` value wins. Other configured non-empty names are preserved. A
+pre-existing explicit `enabledAgents` list is also still preserved without
+appending `cleaner`; configs without cleaner receive the existing one-time setup
+notice.
 
 ## Agent discovery and overrides
 
