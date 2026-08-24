@@ -84,7 +84,9 @@ describe("bounded Git command runner", () => {
 	});
 });
 
-describe("Git worktree isolation lifecycle", () => {
+// Every lifecycle test spawns dozens of git subprocesses; on Windows that alone
+// can exceed the default 5s per test, so the whole block gets a wider ceiling.
+describe("Git worktree isolation lifecycle", { timeout: 30_000 }, () => {
 	it("rejects cwd outside a Git worktree without degrading to shared", async () => {
 		const dir = mkdtempSync(join(tmpdir(), "pi-subagents-not-git-"));
 		repos.push(dir);
