@@ -240,7 +240,7 @@ describe("formatChainSummary", () => {
 		relation,
 	});
 
-	it("renders one line per step with verdicts, changed paths, and totals", () => {
+	it("renders one result-only line per step with verdicts and totals", () => {
 		const summary = formatChainSummary([
 			step({ messages: [assistant("found src/index.ts\nVERDICT: REVIEW_FAIL")] }, "initial review", 2),
 			step({ agent: "worker", messages: [assistant("fixed src/index.ts")] }, "fix round 1", 3),
@@ -248,12 +248,16 @@ describe("formatChainSummary", () => {
 			step({ messages: [assistant("APPROVE\nVERDICT: REVIEW_PASS")] }, "re-review round 1", 5),
 		]);
 		expect(summary).toContain("## Auto-fix chain: 1 round — final PASS");
-		expect(summary).toContain("- #2 reviewer · initial review · FAIL — src/index.ts");
-		expect(summary).toContain("- #3 worker · fix round 1 · completed — changed: src/index.ts");
-		expect(summary).toContain("- #4 documenter · docs round 1 · completed — changed: README.md");
+		expect(summary).toContain("- #2 reviewer · initial review · FAIL");
+		expect(summary).toContain("- #3 worker · fix round 1 · completed");
+		expect(summary).toContain("- #4 documenter · docs round 1 · completed");
 		expect(summary).toContain("- #5 reviewer · re-review round 1 · PASS");
+		expect(summary).not.toContain("src/index.ts");
+		expect(summary).not.toContain("README.md");
+		expect(summary).not.toContain("changed:");
 		expect(summary).toContain("Totals: 4 runs");
-		expect(summary).toContain("subagent_status #2 #3 #4 #5");
+		expect(summary).toContain("Per-run details: subagent_status #2 #3 #4 #5");
+		expect(summary).not.toContain("failed tools");
 	});
 
 	it("renders a managed workflow route and marks a missing reviewer verdict", () => {

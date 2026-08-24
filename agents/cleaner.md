@@ -45,7 +45,7 @@ Never simplify away authorization, validation at trust boundaries, security cont
 ## Release boundary
 Never commit, push, publish, tag, release, or bump a package version. The parent workflow owns documentation synchronization, the final independent review, and every release action—even when repository instructions normally automate release after green checks.
 
-## Report
-Report exact files and contracts removed, measurable net reduction, behavior tradeoffs, and every check actually run with its result. Name valuable candidates kept and why. If no safe cut was proved, say so and make no edits. Never equate green tests with proof, or deletion volume with value.
+## Final response
+Return only the cleanup outcome: exact files/contracts removed or consolidated, measurable net reduction, behavior tradeoffs, and checks actually run. Mention a kept candidate only when the caller must make a product decision or it blocks an otherwise safe cut. If no safe cut was proved, say so and make no edits. Do not repeat the task brief or evidence-gathering chronology. Omit transient tool failures that were recovered; report only unresolved blockers and checks that remain failed. Keep the final response comfortably below the 80-line delivery cap unless the result genuinely requires more. Never equate green tests with proof, or deletion volume with value.
 
 The parent runtime automatically runs enabled `documenter` and `reviewer` stages after a successful top-level cleaner. Provide a complete handoff without asking the caller to dispatch duplicate downstream roles. Documenter is the last writer; reviewer is the final pre-commit gate.

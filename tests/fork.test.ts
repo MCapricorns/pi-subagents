@@ -11,6 +11,7 @@ import { findRetainedSessionFile, forkRetainedSession } from "../src/session-for
 import * as spawnModule from "../src/spawn.ts";
 import * as worktreeModule from "../src/worktree.ts";
 import type { WorktreeIsolation } from "../src/worktree.ts";
+import { makeStub, waitFor, type StubPi } from "./test-helpers.ts";
 
 function assistant(text: string): any {
 	return {
@@ -128,28 +129,6 @@ describe("SessionManager-backed retained branch fork", () => {
 	});
 });
 
-interface StubPi {
-	tools: any[];
-	hooks: Record<string, (event: any, ctx: any) => any>;
-	messages: Array<{ message: any; options: any }>;
-	api: any;
-}
-
-function makeStub(): StubPi {
-	const stub: StubPi = { tools: [], hooks: {}, messages: [], api: undefined };
-	stub.api = {
-		registerTool: (tool: any) => stub.tools.push(tool),
-		registerMessageRenderer: () => {},
-		registerCommand: () => {},
-		registerShortcut: () => {},
-		sendMessage: (message: any, options: any) => stub.messages.push({ message, options }),
-		on: (event: string, handler: any) => {
-			stub.hooks[event] = handler;
-		},
-	};
-	return stub;
-}
-
 function ctx(cwd: string): any {
 	return {
 		cwd,
@@ -256,15 +235,62 @@ function captureQueue(): Array<{ task: BackgroundTask; controller: AbortControll
 	return queued;
 }
 
-async function waitFor(predicate: () => boolean, timeoutMs = 5_000): Promise<void> {
-	const deadline = Date.now() + timeoutMs;
-	while (!predicate()) {
-		if (Date.now() >= deadline) throw new Error("Timed out waiting for condition");
-		await new Promise((resolve) => setTimeout(resolve, 10));
-	}
-}
-
 describe("subagent_control fork", () => {
+	it("re-reads parent shells and plugins for initial dispatch, fork, and retained resume", async () => {
+		writeFileSync(join(agentDir, "pi-subagents.json"), JSON.stringify({
+			enabledAgents: ["explorer"],
+			announcedFeatures: ["cleanerDefaulted", "documenterDefaulted"],
+		}), "utf8");
+		const cwd = mkdtempSync(join(tmpdir(), "pi-subagents-fork-shells-cwd-"));
+		tempPaths.push(cwd);
+		const source = createSession(cwd);
+		tempPaths.push(source.dir);
+		const queued = captureQueue();
+		const run = vi.spyOn(spawnModule, "runSingleAgentWithMainFallback").mockImplementation(async (options: any) =>
+			result(
+				options.task,
+				{ id: options.sessionId ?? source.id, dir: options.sessionDir ?? source.dir },
+				{ agent: "explorer" },
+			),
+		);
+		const { stub, subagent, control } = registered();
+
+		stub.activeTools = ["read", "bash", "custom_extension"];
+		const dispatched = await execute(subagent, { agent: "explorer", task: "source" }, cwd);
+		const sourceRunId = dispatched.details.results[0].runId;
+		await queued[0].task(queued[0].controller.signal);
+
+		stub.activeTools = ["read", "powershell", "custom_extension"];
+		const forked = await execute(control, {
+			action: "fork",
+			id: sourceRunId,
+			objective: "fork objective",
+		}, cwd);
+		expect(forked.details.childRunId).toBeDefined();
+		expect(forked.content[0].text).toContain("appended branch objective: fork objective");
+		expect(forked.content[0].text).toContain("source is unchanged");
+		expect(monitor.findRun(forked.details.childRunId)?.continuationKind).toBe("fork-appended");
+
+		stub.activeTools = ["read", "bash", "powershell", "custom_extension"];
+		const resumed = await execute(control, {
+			action: "resume",
+			id: sourceRunId,
+			objective: "resume objective",
+		}, cwd);
+		expect(resumed.content[0].text).toContain(`Resumed run #${sourceRunId}`);
+		expect(monitor.findRun(sourceRunId)?.continuationKind).toBe("resume-appended");
+		expect(queued).toHaveLength(3);
+		await queued[1].task(queued[1].controller.signal);
+		await queued[2].task(queued[2].controller.signal);
+
+		const calls = run.mock.calls.map(([options]) => options);
+		expect(calls.map((options) => options.agent.tools)).toEqual([
+			["read", "grep", "find", "ls", "bash", "custom_extension"],
+			["read", "grep", "find", "ls", "powershell", "custom_extension"],
+			["read", "grep", "find", "ls", "bash", "powershell", "custom_extension"],
+		]);
+	});
+
 	it("keeps untrusted project agent prompts out of initial, resume, and fork generations", async () => {
 		const cwd = mkdtempSync(join(tmpdir(), "pi-subagents-fork-untrusted-cwd-"));
 		tempPaths.push(cwd);
@@ -391,7 +417,11 @@ describe("subagent_control fork", () => {
 		const forked = await execute(control, { action: "fork", id: sourceRunId }, cwd);
 		const childRunId = forked.details.childRunId;
 		expect(monitor.findRun(sourceRunId)?.status).toBe("parked");
-		expect(monitor.findRun(childRunId)?.status).toBe("queued");
+		expect(monitor.findRun(childRunId)).toMatchObject({
+			status: "queued",
+			continuationKind: "fork-retained",
+		});
+		expect(forked.content[0].text).toContain("continuing current objective: parked task");
 		await queued[1].task(queued[1].controller.signal);
 		expect(childOptions.stdinText).toBe(FORK_CONTINUATION_PROMPT);
 		expect(childOptions.task).toBe("parked task");

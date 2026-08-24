@@ -15,6 +15,7 @@ const theme = {
 
 afterEach(() => {
 	vi.useRealTimers();
+	vi.restoreAllMocks();
 	monitor.clear();
 });
 
@@ -79,14 +80,15 @@ describe("formatActiveRunLines", () => {
 
 	it("nests auto-fix chain children under the triggering reviewer row", () => {
 		const store = new MonitorStore();
-		const parent = store.addRun("reviewer", "Review src/index.ts", "anthropic/claude-sonnet-4-5", "high");
+		const parent = store.addRun("reviewer", "Review src/index.ts", "xai/grok-parent", "xhigh");
 		store.setStatus(parent, "running");
+		store.setManagedWorkflow(parent, true);
 		store.setActivity(parent, "auto-fix chain running");
 		const fix = store.addRun(
 			"worker",
 			"Auto-fix round 1 of 2 (triggered by a failed review).\n- src/index.ts:42 bug",
-			"anthropic/claude-sonnet-4-5",
-			"high",
+			"openai/gpt-worker",
+			"max",
 			{ groupId: `fix-${parent}`, relationLabel: "fix round 1", parentRunId: parent },
 		);
 		store.setStatus(fix, "running");
@@ -94,7 +96,7 @@ describe("formatActiveRunLines", () => {
 		const reReview = store.addRun(
 			"reviewer",
 			"Re-review after auto-fix round 1.",
-			"anthropic/claude-sonnet-4-5",
+			"anthropic/claude-reviewer",
 			"high",
 			{ groupId: `fix-${parent}`, relationLabel: "re-review round 1", parentRunId: parent },
 		);
@@ -102,12 +104,15 @@ describe("formatActiveRunLines", () => {
 
 		const lines = formatActiveRunLines(store.getRuns(), theme, 120);
 		expect(lines).toHaveLength(4);
-		expect(lines[0]).toContain("reviewer · Review src/index.ts");
+		expect(lines[0]).toContain("reviewer workflow · Review src/index.ts");
+		expect(lines[0]).not.toContain("grok-parent");
+		expect(lines[0]).not.toContain("/xhigh");
 		// Live children replace the parent's placeholder activity line.
 		expect(lines.join("\n")).not.toContain("auto-fix chain running");
-		expect(lines[1]).toContain("├ ● worker · fix round 1 · src/index.ts");
+		expect(lines[1]).toContain("├ ● worker · fix round 1 · src/index.ts · gpt-worker/max");
 		expect(lines[2]).toBe("      edit src/index.ts");
 		expect(lines[3]).toContain("└ ○ reviewer · re-review round 1");
+		expect(lines[3]).toContain("claude-reviewer/high");
 		expect(lines.join("\n")).not.toMatch(/#\d+/);
 	});
 
@@ -128,21 +133,50 @@ describe("formatActiveRunLines", () => {
 		expect(lines[0]).not.toContain("└");
 	});
 
-	it("shows an auto-fix parent as running with live elapsed after its review settles", () => {
+	it.each([
+		["retarget", "retarget", undefined, "retarget: replacement objective"],
+		["retained resume", "resume-retained", undefined, "resume: current objective"],
+		["appended resume", "resume-appended", undefined, "resume: appended objective"],
+		["retained fork", "fork-retained", 7, "fork #7: current objective"],
+		["appended fork", "fork-appended", 7, "fork #7: appended objective"],
+	] as const)("keeps %s semantics visible beside a path-heavy task at 80 columns", (_name, kind, sourceRunId, label) => {
+		const store = new MonitorStore();
+		const id = store.addRun("worker", "Original objective");
+		store.removeRun(id);
+		store.restartRun(
+			id,
+			"worker",
+			"Finish the cache invalidation tests in src/cache.ts and verify the retained thread behavior",
+			"anthropic/claude-sonnet-4-5",
+			"high",
+			"shared",
+			{ elapsedMs: 61_000, continuationKind: kind },
+		);
+		store.findRun(id)!.forkedFromRunId = sourceRunId;
+		const [line] = formatActiveRunLines(store.getRuns(), theme, 80, 100_000);
+		expect(visibleWidth(line)).toBeLessThanOrEqual(80);
+		expect(line).toContain(label);
+		expect(line).toContain(".ts");
+		expect(line).toContain("1m01s");
+	});
+
+	it("shows an auto-fix parent as running with cumulative live elapsed after its review settles", () => {
+		const now = vi.spyOn(Date, "now").mockReturnValue(1_000);
 		const store = new MonitorStore();
 		const id = store.addRun("reviewer", "Review the change");
 		store.setStatus(id, "running");
 		const run = store.findRun(id)!;
-		run.startedAt = 1_000;
+		now.mockReturnValue(2_000);
 		store.setStatus(id, "done");
-		expect(run.endedAt).toBeDefined();
+		expect(run.endedAt).toBe(2_000);
 
-		// Auto-fix takes ownership of the same logical run.
+		// Auto-fix takes ownership of the same logical run after a one-second gap.
+		now.mockReturnValue(3_000);
 		store.setStatus(id, "running");
 		store.setActivity(id, "auto-fix chain running");
 		expect(run.endedAt).toBeUndefined();
 
-		const [primary, activity] = formatActiveRunLines(store.getRuns(), theme, 120, 62_000);
+		const [primary, activity] = formatActiveRunLines(store.getRuns(), theme, 120, 63_000);
 		expect(primary).toContain("Review the change");
 		expect(primary).toContain("1m01s");
 		expect(activity).toBe("  auto-fix chain running");
@@ -160,6 +194,7 @@ describe("formatActiveRunLines", () => {
 		store.setStatus(id, "running");
 		store.setActivity(id, `read ${"very/long/path/".repeat(8)}meaningful-file.ts`);
 		store.findRun(id)!.startedAt = 1_000;
+		store.findRun(id)!.activeSince = 1_000;
 
 		const lines = formatActiveRunLines(store.getRuns(), theme, 52, 62_000);
 		expect(lines).toHaveLength(2);
@@ -179,6 +214,7 @@ describe("formatActiveRunLines", () => {
 		);
 		store.setStatus(id, "running");
 		store.findRun(id)!.startedAt = 1_000;
+		store.findRun(id)!.activeSince = 1_000;
 
 		const [line] = formatActiveRunLines(store.getRuns(), theme, 34, 62_000);
 		expect(visibleWidth(line)).toBeLessThanOrEqual(34);

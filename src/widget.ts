@@ -3,6 +3,7 @@
 import type { ExtensionContext, Theme } from "@earendil-works/pi-coding-agent";
 import { truncateToWidth, visibleWidth } from "@earendil-works/pi-tui";
 import {
+	continuationLabel,
 	formatElapsed,
 	formatTaskSummary,
 	isRunActiveStatus,
@@ -25,10 +26,22 @@ function compactLine(left: string, right: string, width: number): string {
 	return `${truncateToWidth(left, leftWidth, "…")}${separator}${right}`;
 }
 
+/** Keep continuation semantics intact while independently compacting the task. */
+function formatContinuationTask(label: string, task: string, width: number): string {
+	if (width <= 0) return "";
+	const labelWidth = visibleWidth(label);
+	if (labelWidth >= width) return truncateToWidth(label, width, "");
+	const separator = " · ";
+	const taskWidth = width - labelWidth - visibleWidth(separator);
+	if (taskWidth <= 0) return label;
+	const summary = formatTaskSummary(task, taskWidth);
+	return summary ? `${label}${separator}${summary}` : label;
+}
+
 /** One compact primary line per genuinely active run, plus an optional indented
- * activity line. The primary line reserves effective model/thinking and elapsed
- * width before truncating the task. Settled and parked threads never appear, so
- * elapsed time cannot keep ticking beside a terminal status. */
+ * activity line. The primary line reserves stage model/thinking when present and
+ * elapsed width before truncating the task. Settled and parked threads never
+ * appear, so elapsed time cannot keep ticking beside a terminal status. */
 function runPrimaryLine(
 	run: RunView,
 	theme: Theme,
@@ -38,22 +51,31 @@ function runPrimaryLine(
 ): string {
 	const dim = (text: string): string => theme.fg("dim", text);
 	const icon = statusIcon(run.status, theme);
-	const name = theme.fg("accent", theme.bold(run.agent));
+	const displayName = run.managedWorkflow ? `${run.agent} workflow` : run.agent;
+	const name = theme.fg("accent", theme.bold(displayName));
 	const identity = `${prefix}${icon} ${name}`;
 	const elapsed = formatElapsed(run, now);
 	// Render only the resolved model id plus thinking level. Provider auth and
 	// other configuration never enter monitor state or this line.
 	const modelId = run.model?.split("/").at(-1);
-	const modelSource = formatTaskSummary(
-		modelId ? `${modelId}${run.thinking ? `/${run.thinking}` : ""}` : run.thinking ? `thinking:${run.thinking}` : "",
-		64,
-		false,
-	);
+	const modelSource = run.managedWorkflow
+		? ""
+		: formatTaskSummary(
+			modelId ? `${modelId}${run.thinking ? `/${run.thinking}` : ""}` : run.thinking ? `thinking:${run.thinking}` : "",
+			64,
+			false,
+		);
 	// A chain child shows its role in the chain plus a task-derived label; the
 	// templated fix brief itself would only repeat the parent review's content.
+	const continuation = run.parentRunId === undefined
+		? continuationLabel(run.continuationKind, run.forkedFromRunId)
+		: undefined;
 	const taskSource = run.parentRunId !== undefined
 		? [run.relationLabel, run.label].filter((part): part is string => Boolean(part)).join(" · ")
 		: formatTaskSummary(run.task, 64);
+	const taskDesiredSource = [continuation, taskSource]
+		.filter((part): part is string => Boolean(part))
+		.join(" · ");
 	const primaryPartCount = 2 + (modelSource ? 1 : 0) + (elapsed ? 1 : 0);
 	const contentWidth = Math.max(
 		0,
@@ -64,15 +86,40 @@ function runPrimaryLine(
 	);
 	const modelDesired = visibleWidth(modelSource);
 	const modelFloor = Math.min(modelDesired, Math.min(12, contentWidth));
-	let modelWidth = modelSource
-		? Math.min(modelDesired, Math.max(modelFloor, contentWidth - 8))
-		: 0;
+	let modelWidth = 0;
+	if (modelSource) {
+		if (continuation) {
+			const continuationWidth = visibleWidth(continuation);
+			// Preserve the full semantic label and the usual eight-column task tail
+			// before giving the remaining space to model/thinking.
+			const taskFloor = Math.min(
+				visibleWidth(taskDesiredSource),
+				continuationWidth +
+					(taskSource ? visibleWidth(" · ") + Math.min(8, visibleWidth(taskSource)) : 0),
+				contentWidth,
+			);
+			const effectiveModelFloor = Math.min(
+				modelFloor,
+				Math.max(0, contentWidth - continuationWidth),
+			);
+			modelWidth = Math.min(
+				modelDesired,
+				Math.max(effectiveModelFloor, contentWidth - taskFloor),
+			);
+		} else {
+			modelWidth = Math.min(modelDesired, Math.max(modelFloor, contentWidth - 8));
+		}
+	}
 	let taskWidth = contentWidth - modelWidth;
-	if (visibleWidth(taskSource) < taskWidth) {
-		modelWidth = Math.min(modelDesired, modelWidth + taskWidth - visibleWidth(taskSource));
+	if (visibleWidth(taskDesiredSource) < taskWidth) {
+		modelWidth = Math.min(modelDesired, modelWidth + taskWidth - visibleWidth(taskDesiredSource));
 		taskWidth = contentWidth - modelWidth;
 	}
-	const task = taskWidth > 0 ? formatTaskSummary(taskSource, taskWidth, run.parentRunId === undefined) : "";
+	const task = taskWidth <= 0
+		? ""
+		: continuation
+			? formatContinuationTask(continuation, taskSource, taskWidth)
+			: formatTaskSummary(taskSource, taskWidth, run.parentRunId === undefined);
 	const modelThinking = modelWidth > 0 ? formatTaskSummary(modelSource, modelWidth, false) : "";
 	const primaryLeft = [
 		identity,
@@ -94,9 +141,8 @@ function runActivityLine(run: RunView, theme: Theme, width: number, indent: stri
 }
 
 /** Render active runs as a tree: main-agent dispatches are roots and managed
- * documenter/reviewer/fix steps nest under the stable parent row. No run ids
- * appear here — the tree and the task label say what each row is, and ids stay
- * available through subagent_status when a thread must be controlled. */
+ * documenter/reviewer/fix steps nest under the stable parent row. Fork labels
+ * include their source id; other control ids remain available through status. */
 export function formatActiveRunLines(
 	runs: readonly RunView[],
 	theme: Theme,
@@ -134,7 +180,7 @@ export function formatActiveRunLines(
 
 function hasTickingRun(): boolean {
 	return monitor.getRuns().some(
-		(run) => isRunActiveStatus(run.status) && run.startedAt !== undefined,
+		(run) => isRunActiveStatus(run.status) && run.activeSince !== undefined,
 	);
 }
 

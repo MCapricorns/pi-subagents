@@ -4,6 +4,7 @@ import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 import { RpcRunControl, getFinalOutput, runSingleAgent } from "../src/spawn.ts";
 import { fakeRpcScript } from "./fake-rpc.ts";
+import { readJsonLines, waitFor } from "./test-helpers.ts";
 
 const agent = {
 	name: "fake",
@@ -13,20 +14,9 @@ const agent = {
 	filePath: "/agents/fake.md",
 };
 
-async function waitFor(predicate: () => boolean, timeoutMs = 5_000): Promise<void> {
-	const deadline = Date.now() + timeoutMs;
-	while (!predicate()) {
-		if (Date.now() >= deadline) throw new Error("Timed out waiting for RPC test condition");
-		await new Promise((resolve) => setTimeout(resolve, 10));
-	}
-}
-
 function readLog(path: string): Array<Record<string, unknown>> {
 	try {
-		return readFileSync(path, "utf8")
-			.split("\n")
-			.filter(Boolean)
-			.map((line) => JSON.parse(line));
+		return readJsonLines(path);
 	} catch {
 		return [];
 	}

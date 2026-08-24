@@ -1,7 +1,7 @@
 /**
  * Thread controls and lookup tools around the subagent runtime:
- * subagent_control (steer/retarget/park/resume), subagent_wait (in-turn result
- * lookup), subagent_status, and destructive subagent_stop.
+ * subagent_control (steer/retarget/park/resume/fork), subagent_wait (in-turn
+ * result lookup), subagent_status, and destructive subagent_stop.
  */
 
 import { StringEnum } from "@earendil-works/pi-ai";
@@ -12,8 +12,7 @@ import { DEFAULT_MAX_RESULT_LINES, loadConfig } from "./config.ts";
 import { formatCompletionBlock, formatUsage, matchRunIds } from "./format.ts";
 import { emptyUsage } from "./rpc-run.ts";
 import {
-	formatElapsed,
-	formatUsageCompact,
+	formatTaskSummary,
 	isRunActiveStatus,
 	monitor,
 	runLabel,
@@ -51,7 +50,7 @@ export function registerLookupTools(pi: ExtensionAPI, runtime: SubagentRuntime):
 			Type.String({ description: "Instruction queued by steer after the current child tool batch." }),
 		),
 		objective: Type.Optional(
-			Type.String({ description: "Replacement objective for retarget, or optional objective for resume/fork." }),
+			Type.String({ description: "Replacement objective for retarget; optional appended objective for resume/fork. Omit on resume/fork to continue the current retained objective." }),
 		),
 	});
 
@@ -64,14 +63,14 @@ export function registerLookupTools(pi: ExtensionAPI, runtime: SubagentRuntime):
 			"retarget replaces the objective in that same active top-level child.",
 			"Managed downstream documenter/reviewer/fix stages are controlled by the parent queue rather than its settled RPC control: use park or stop there, then resume with an objective to redirect retained context.",
 			"park aborts to a stable checkpoint, terminates the child, preserves context, and releases its concurrency slot.",
-			"resume restarts a parked, completed, or failed retained thread with the same run id; objective is optional.",
-			"fork copies a parked/completed/failed retained session branch into a new logical thread and run id; an isolated checkpoint must be settled and integrated first; objective is optional.",
+			"resume restarts a parked, completed, or failed retained thread with the same run id and cumulative active time; omit objective to continue the current goal, or provide one to append it to retained context and make it the displayed current goal.",
+			"fork copies a parked/completed/failed retained session branch into a new logical thread and run id; an isolated checkpoint must be settled and integrated first; omit objective to continue the current goal, or provide one to append a new branch goal.",
 		].join(" "),
 		promptSnippet: "Control a subagent thread: steer/retarget an active top-level child; park/stop a managed downstream stage; resume or fork retained context.",
 		promptGuidelines: [
 			"Use subagent_control steer to refine an active top-level RPC child without restarting it; the instruction is delivered after its current tool batch.",
 			"Use subagent_control retarget only while that top-level child is active. During a managed downstream stage, park it and resume with a replacement objective instead.",
-			"Use subagent_control park to checkpoint useful context while releasing the process/concurrency slot, and resume to continue the same run id later.",
+			"Use subagent_control park to checkpoint useful context while releasing the process/concurrency slot, and resume to continue the same run id later. Resume without objective keeps the current goal; resume with objective appends that goal to retained context.",
 			"Use subagent_control fork only on a parked or settled retained thread; isolated work must settle and integrate before it can fork. Fork creates a new run id while leaving the source untouched.",
 			"Use subagent_stop only for destructive cancellation; it retires that thread's retained session without retiring independent forks.",
 		],
@@ -110,13 +109,15 @@ export function registerLookupTools(pi: ExtensionAPI, runtime: SubagentRuntime):
 							thread.task = objective;
 							thread.control.retargetPending(objective);
 							monitor.setTask(thread.id, objective);
-							return { content: [{ type: "text", text: `Updated queued run #${thread.id} to the new objective; no child was spawned by this control action.` }], details: {} };
+							monitor.setContinuationKind(thread.id, "retarget");
+							return { content: [{ type: "text", text: `Updated queued run #${thread.id} to the replacement objective; no child was spawned by this control action.` }], details: {} };
 						}
 						if (!(["starting", "running", "steering", "interrupting", "retrying"] as const).includes(phase as any)) {
 							return { content: [{ type: "text", text: `Run #${thread.id} is ${thread.state}; use resume with objective to restart retained context.` }], details: {} };
 						}
 						thread.task = objective;
 						monitor.setTask(thread.id, objective);
+						monitor.setContinuationKind(thread.id, "retarget");
 						await thread.control.retarget(objective);
 						return { content: [{ type: "text", text: `Retargeted run #${thread.id} in the same session; the aborted objective will not be delivered as a completion.` }], details: {} };
 					}
@@ -146,11 +147,19 @@ export function registerLookupTools(pi: ExtensionAPI, runtime: SubagentRuntime):
 						if (params.objective !== undefined && !objective) {
 							return { content: [{ type: "text", text: "resume objective must be non-blank when provided." }], details: {} };
 						}
+						const hadRetainedSession = Boolean(thread.sessionId && thread.sessionDir);
 						const pending = await thread.resume(objective, ctx);
 						if (pending.exitCode !== -1) {
 							return { content: [{ type: "text", text: getResultOutput(pending) }], details: {} };
 						}
-						return { content: [{ type: "text", text: `Resumed run #${thread.id}${objective ? " with a new objective" : " from retained context"}; completion will arrive automatically.` }], details: {}, terminate: true };
+						const currentObjective = formatTaskSummary(objective ?? thread.task, 80, false);
+						const mode = objective
+							? `appended objective: ${currentObjective}`
+							: `continuing current objective: ${currentObjective}`;
+						const context = hadRetainedSession
+							? "the same retained session and prior context are preserved"
+							: "no prior child session existed, so only the logical run and objective are continued";
+						return { content: [{ type: "text", text: `Resumed run #${thread.id}, ${mode}; ${context}, and cumulative active time is preserved. Completion will arrive automatically.` }], details: {}, terminate: true };
 					}
 					case "fork": {
 						const objective = params.objective === undefined ? undefined : nonBlank(params.objective);
@@ -164,7 +173,7 @@ export function registerLookupTools(pi: ExtensionAPI, runtime: SubagentRuntime):
 						return {
 							content: [{
 								type: "text",
-								text: `Forked run #${thread.id} into new run #${pending.runId}${objective ? " with a new objective" : " from retained context"}; the source is unchanged and child completion will arrive automatically.`,
+								text: `Forked run #${thread.id} into new run #${pending.runId}; ${objective ? `appended branch objective: ${formatTaskSummary(objective, 80, false)}` : `continuing current objective: ${formatTaskSummary(thread.task, 80, false)}`}. Retained context is copied, the source is unchanged, and child completion will arrive automatically.`,
 							}],
 							details: { sourceRunId: thread.id, childRunId: pending.runId, result: pending },
 							terminate: true,
@@ -352,10 +361,7 @@ export function registerLookupTools(pi: ExtensionAPI, runtime: SubagentRuntime):
 	});
 
 	// Status overview: what is running right now and what finished this session,
-	// with per-run details (id, agent, model, usage, elapsed, activity) so the
-	// main agent can decide whether to wait, stop, or re-dispatch. Learned from
-	// nicobailon/pi-subagents ({action:"status"} + status files): inspect before
-	// you act, and report run ids when handing off.
+	// with per-run details (id, role, model, usage, elapsed, activity).
 	const SubagentStatusParams = Type.Object({
 		id: Type.Optional(
 			Type.String({
@@ -368,7 +374,7 @@ export function registerLookupTools(pi: ExtensionAPI, runtime: SubagentRuntime):
 		name: "subagent_status",
 		label: "Subagent Status",
 		description: [
-			"List active background sub-agent runs (id, agent, model, usage, elapsed, current activity) and recently finished results.",
+			"List active background sub-agent runs (id, role, model, thinking, usage, elapsed, current activity) and recently finished results.",
 			"Pass id to read the full result of a finished run; pass no id for the overview.",
 			"Use it to decide whether to subagent_wait, subagent_stop, or re-dispatch — never to poll: results arrive by themselves.",
 		].join(" "),
@@ -412,20 +418,30 @@ export function registerLookupTools(pi: ExtensionAPI, runtime: SubagentRuntime):
 					const activeThread = runtime.threads.get(active.id);
 					const managedDownstream =
 						activeThread?.state === "running" && activeThread.control.getPhase() === "settled";
+					const activeChild = runs.find((run) =>
+						run.parentRunId === active.id && isRunActiveStatus(run.status)
+					);
+					const owner = active.managedWorkflow ? `${active.agent} workflow` : active.agent;
+					const retainedStage = active.managedWorkflow && activeThread?.agentName !== active.agent
+						? activeThread?.agentName
+						: undefined;
 					const metadata = [
 						activeThread?.isolation === "worktree" ? `worktree ${active.integrationStatus ?? activeThread.worktree?.state ?? "active"}` : undefined,
 						activeThread?.forkedFromRunId !== undefined ? `forked from #${activeThread.forkedFromRunId}` : undefined,
 						(activeThread?.forkChildRunIds.length ?? 0) > 0 ? `forks ${activeThread!.forkChildRunIds.map((id) => `#${id}`).join(",")}` : undefined,
 					].filter(Boolean).join(" · ");
+					const stageStatus = activeChild
+						? monitor.summarize(activeChild)
+						: active.activity ?? statusLabel(active.status);
 					return {
 						content: [
 							{
 								type: "text",
 								text: parked
-									? `Run #${active.id} ${active.agent} is parked with retained context${metadata ? ` (${metadata})` : ""}. Use subagent_control resume to restart it, or subagent_stop to retire it.`
+									? `Run #${active.id} ${owner} is parked with retained${retainedStage ? ` ${retainedStage} stage` : ""} context${metadata ? ` (${metadata})` : ""}. Use subagent_control resume to restart it, or subagent_stop to retire it.`
 									: managedDownstream
-										? `Run #${active.id} ${active.agent} is in a managed downstream stage (${active.activity ?? statusLabel(active.status)}${metadata ? ` · ${metadata}` : ""}). Use subagent_wait for its result, subagent_control park to checkpoint it, or subagent_stop to cancel it. Steer/retarget are unavailable until you park and resume the retained stage.`
-										: `Run #${active.id} ${active.agent} is still active (${active.activity ?? statusLabel(active.status)}${metadata ? ` · ${metadata}` : ""}). Use subagent_wait to block for its result, subagent_control to steer/park it, or subagent_stop to cancel it.`,
+										? `Run #${active.id} ${owner} is in a managed downstream stage (${stageStatus}${metadata ? ` · ${metadata}` : ""}). Use subagent_wait for its result, subagent_control park to checkpoint it, or subagent_stop to cancel it. Steer/retarget are unavailable until you park and resume the retained stage.`
+										: `Run #${active.id} ${owner} is still active (${active.activity ?? statusLabel(active.status)}${metadata ? ` · ${metadata}` : ""}). Use subagent_wait to block for its result, subagent_control to steer/park it, or subagent_stop to cancel it.`,
 							},
 						],
 						details: {},
@@ -434,36 +450,34 @@ export function registerLookupTools(pi: ExtensionAPI, runtime: SubagentRuntime):
 				return { content: [{ type: "text", text: `No subagent run matches "${requested}".` }], details: {} };
 			}
 
-			const now = Date.now();
 			const activeRuns = monitor.getRuns().filter(
 				(run) => isRunActiveStatus(run.status),
 			);
 			const activeLines = activeRuns.map((run) => {
 				const thread = runtime.threads.get(run.id);
-				const model = run.modelFallbackFrom
-					? `${run.model ?? "?"} (main after ${run.modelFallbackFrom} failed)`
-					: (run.model ?? "?");
 				const parts = [
-					`#${run.id} ${run.agent}`,
+					`#${run.id} ${monitor.summarize(run)}`,
 					run.label,
-					model,
-					formatUsageCompact(run.usage),
-					formatElapsed(run, now),
-					thread?.isolation === "worktree" ? `worktree ${run.integrationStatus ?? thread.worktree?.state ?? "active"}` : undefined,
 					thread?.forkedFromRunId !== undefined ? `forked from #${thread.forkedFromRunId}` : undefined,
 					(thread?.forkChildRunIds.length ?? 0) > 0 ? `forks ${thread!.forkChildRunIds.map((id) => `#${id}`).join(",")}` : undefined,
+					run.activity ?? statusLabel(run.status),
 				].filter(Boolean);
-				return `- ${parts.join(" · ")} · ${run.activity ?? statusLabel(run.status)}`;
+				return `- ${parts.join(" · ")}`;
 			});
 			const parkedThreads = [...runtime.threads.values()].filter((thread) => thread.state === "parked");
 			const parkedLines = parkedThreads.map((thread) => {
+				const run = monitor.findRun(thread.id);
+				const owner = run?.managedWorkflow ? `${run.agent} workflow` : run?.agent ?? thread.agentName;
+				const retainedStage = run?.managedWorkflow && thread.agentName !== run.agent
+					? ` · retained stage ${thread.agentName}`
+					: "";
 				const relations = [
 					thread.forkedFromRunId !== undefined ? `forked from #${thread.forkedFromRunId}` : undefined,
 					thread.forkChildRunIds.length > 0 ? `forks ${thread.forkChildRunIds.map((id) => `#${id}`).join(",")}` : undefined,
 				].filter(Boolean);
 				const relation = relations.length > 0 ? ` · ${relations.join(" · ")}` : "";
 				const isolation = thread.isolation === "worktree" ? ` · worktree ${thread.worktree?.state ?? "active"}` : "";
-				return `- #${thread.id} ${thread.agentName} · ${runLabel(thread.task)} · parked${thread.sessionDir ? " · context retained" : " · not started"}${isolation}${relation}`;
+				return `- #${thread.id} ${owner} · ${run?.label ?? runLabel(thread.task)} · parked${thread.sessionDir ? " · context retained" : " · not started"}${retainedStage}${isolation}${relation}`;
 			});
 			const completed = [...runtime.settledRuns.entries()].slice(-5);
 			const completedLines = completed.map(([id, result]) => {

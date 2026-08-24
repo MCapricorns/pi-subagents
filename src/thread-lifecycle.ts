@@ -11,7 +11,12 @@ import type { ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { existsSync } from "node:fs";
 import { rm } from "node:fs/promises";
 import { resolve } from "node:path";
-import { discoverAgents, isWriteCapableAgent, type AgentConfig } from "./agents.ts";
+import {
+	discoverAgents,
+	isWriteCapableAgent,
+	resolveAgentTools,
+	type AgentConfig,
+} from "./agents.ts";
 import { completionTriggersTurn, type CompletionMessageItem } from "./completion.ts";
 import {
 	DEFAULT_THINKING_LEVEL,
@@ -43,7 +48,7 @@ import {
 	resolveAgentModelRoute,
 	resolveThinkingLevel,
 } from "./models.ts";
-import { monitor, sumUsage } from "./monitor.ts";
+import { monitor, sumUsage, type ContinuationKind } from "./monitor.ts";
 import { persistRecoveryRecords, recoveryRecordFromFinalization } from "./recovery.ts";
 import type { SubagentRuntime, SubagentThread, ThreadState } from "./runtime.ts";
 import { forkRetainedSession } from "./session-fork.ts";
@@ -185,6 +190,7 @@ export function createBackgroundDispatcher(options: BackgroundDispatcherOptions)
 		prompt?: string;
 		worktree?: WorktreeIsolation;
 		forkedFromRunId?: number;
+		continuationKind?: ContinuationKind;
 	}
 
 	interface ResumeReservation {
@@ -225,7 +231,7 @@ export function createBackgroundDispatcher(options: BackgroundDispatcherOptions)
 		cwd: string | undefined,
 		isolation: IsolationMode = "shared",
 		existingThread?: SubagentThread,
-		newObjectiveOnResume = false,
+		appendedObjectiveOnResume = false,
 		environment?: DispatchEnvironment,
 		seed?: SessionSeed,
 		resumeReservation?: ResumeReservation,
@@ -239,8 +245,11 @@ export function createBackgroundDispatcher(options: BackgroundDispatcherOptions)
 		const runCtx = environment?.ctx ?? ctx;
 		const runConfig = environment?.config ?? config;
 		const runAgents = environment?.agents ?? agents;
-		const agent = runAgents.find((candidate) => candidate.name === agentName);
-		if (!agent) return failedStartResult(agentName, task, `Unknown agent: "${agentName}".`);
+		const discoveredAgent = runAgents.find((candidate) => candidate.name === agentName);
+		if (!discoveredAgent) return failedStartResult(agentName, task, `Unknown agent: "${agentName}".`);
+		const resolveLiveAgentTools = (candidate: AgentConfig): AgentConfig =>
+			resolveAgentTools({ ...candidate, tools: discoveredAgent.tools }, runtime.getActiveTools());
+		const agent = resolveLiveAgentTools(discoveredAgent);
 		if (isolation === "worktree" && !isWorktreeCapableAgent(agent)) {
 			return {
 				...failedStartResult(agentName, task, `Agent "${agentName}" is read-only; worktree isolation is available only to write-capable agents such as worker, cleaner, or documenter.`),
@@ -288,6 +297,7 @@ export function createBackgroundDispatcher(options: BackgroundDispatcherOptions)
 		const runId = existingThread?.id ?? monitor.addRun(agent.name, task, route.agent.model, thinkingLevel, {
 			isolation,
 			...(seed?.forkedFromRunId !== undefined ? { forkedFromRunId: seed.forkedFromRunId } : {}),
+			...(seed?.continuationKind ? { continuationKind: seed.continuationKind } : {}),
 		});
 		const generation = (existingThread?.generation ?? 0) + 1;
 		const pending: SingleResult = {
@@ -302,7 +312,10 @@ export function createBackgroundDispatcher(options: BackgroundDispatcherOptions)
 			...(seed?.forkedFromRunId !== undefined ? { forkedFromRunId: seed.forkedFromRunId } : {}),
 		};
 		if (existingThread) {
-			monitor.restartRun(runId, agent.name, task, route.agent.model, thinkingLevel, isolation);
+			monitor.restartRun(runId, agent.name, task, route.agent.model, thinkingLevel, isolation, {
+				elapsedMs: existingThread.elapsedMs,
+				continuationKind: appendedObjectiveOnResume ? "resume-appended" : "resume-retained",
+			});
 			runtime.settledRuns.delete(runId);
 		}
 
@@ -367,6 +380,7 @@ export function createBackgroundDispatcher(options: BackgroundDispatcherOptions)
 				control,
 				generationCompletion: Promise.resolve(),
 				lifecycleVersion: 0,
+				elapsedMs: 0,
 				sessionId: seed?.sessionId,
 				sessionDir: seed?.sessionDir,
 				forkedFromRunId: seed?.forkedFromRunId,
@@ -504,6 +518,10 @@ export function createBackgroundDispatcher(options: BackgroundDispatcherOptions)
 			});
 		};
 
+		const persistElapsedTime = (): void => {
+			thread.elapsedMs = monitor.getElapsedMs(runId) ?? thread.elapsedMs;
+		};
+
 		thread.park = async (): Promise<"queued" | "active"> => {
 			if (thread.retired) throw new Error(`Run #${runId} was retired by subagent_stop.`);
 			if (thread.lifecycleOperation) throw new Error(`Run #${runId} is already handling ${thread.lifecycleOperation}.`);
@@ -544,7 +562,14 @@ export function createBackgroundDispatcher(options: BackgroundDispatcherOptions)
 				thread.state = "parked";
 				thread.queueController = undefined;
 				runtime.runControllers.delete(runId);
+				const parkedRun = monitor.findRun(runId);
+				if (parkedRun?.managedWorkflow && parkedRun.task !== thread.task) {
+					// The active child row previously showed this stage objective. Once it
+					// disappears, keep the parked parent aligned with what resume retains.
+					monitor.setTask(runId, thread.task);
+				}
 				monitor.setStatus(runId, "parked");
+				persistElapsedTime();
 				return queued ? "queued" : "active";
 			} finally {
 				if (thread.lifecycleVersion === version && thread.lifecycleOperation === "park") {
@@ -822,6 +847,7 @@ export function createBackgroundDispatcher(options: BackgroundDispatcherOptions)
 						prompt: forkObjective ?? FORK_CONTINUATION_PROMPT,
 						worktree: childWorktree,
 						forkedFromRunId: runId,
+						continuationKind: forkObjective ? "fork-appended" : "fork-retained",
 					},
 				);
 				if (child.exitCode !== -1 || child.runId === undefined) {
@@ -877,6 +903,7 @@ export function createBackgroundDispatcher(options: BackgroundDispatcherOptions)
 						{
 							defaultCwd: executionCwd,
 							agent: route.agent,
+							resolveAgentForAttempt: resolveLiveAgentTools,
 							agentName,
 							task,
 							cwd: executionCwd,
@@ -891,7 +918,7 @@ export function createBackgroundDispatcher(options: BackgroundDispatcherOptions)
 								? {
 									sessionId: priorSessionId,
 									sessionDir: priorSessionDir,
-									stdinText: seed?.prompt ?? (newObjectiveOnResume
+									stdinText: seed?.prompt ?? (appendedObjectiveOnResume
 										? task
 										: buildResumePrompt(priorTask ?? task, "the retained thread was resumed")),
 								}
@@ -955,9 +982,10 @@ export function createBackgroundDispatcher(options: BackgroundDispatcherOptions)
 				const workflowPlan = getManagedWorkflowPlan(result, runConfig, workflowAvailability);
 				if (workflowPlan && runtime.sessionActive) {
 					thread.state = "running";
-					// The stable parent row remains active until every internal writer and
-					// reviewer settles. Internal rows are independently queryable but never
-					// enter this top-level lifecycle or publish completions.
+					// The stable parent row now represents workflow ownership, not whichever
+					// model stage ran most recently. Internal rows own their exact role/model/
+					// thinking/timing telemetry and remain independently queryable.
+					monitor.setManagedWorkflow(runId, true);
 					monitor.setStatus(runId, "running");
 					monitor.setActivity(
 						runId,
@@ -978,8 +1006,10 @@ export function createBackgroundDispatcher(options: BackgroundDispatcherOptions)
 						rememberLatest: (latest) => {
 							if (runtime.threads.get(runId) !== thread || thread.generation !== generation) return;
 							thread.lastResult = latest;
+							// Retained control follows the newest child session, but the live parent
+							// row keeps the original top-level role/model/usage. The active internal
+							// row already owns the current stage's role and telemetry.
 							thread.agentName = latest.agent;
-							monitor.setAgent(runId, latest.agent);
 							thread.task = latest.task;
 							thread.sessionId = latest.sessionId;
 							thread.sessionDir = latest.sessionDir;
@@ -1041,6 +1071,7 @@ export function createBackgroundDispatcher(options: BackgroundDispatcherOptions)
 					// Stamp the terminal monitor state before projecting it. This gives every
 					// path a fixed endedAt even when the row is removed immediately.
 					monitor.setStatus(runId, failed ? "failed" : "done");
+					persistElapsedTime();
 					if (!runtime.sessionActive || !ownsSettlement()) return;
 
 					const modelLevel = failed && isModelLevelFailure(result);
@@ -1175,6 +1206,7 @@ export function createBackgroundDispatcher(options: BackgroundDispatcherOptions)
 					if (!ownsSettlement()) return;
 					thread.state = "failed";
 					monitor.setStatus(runId, "failed");
+					persistElapsedTime();
 					finishRun(runId, "failed", { silent: true });
 					runtime.registerRunResult(runId, crashed);
 					runtime.runControllers.delete(runId);

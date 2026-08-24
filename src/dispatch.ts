@@ -13,7 +13,7 @@ import { Text } from "@earendil-works/pi-tui";
 import { realpath } from "node:fs/promises";
 import { resolve } from "node:path";
 import { Type } from "typebox";
-import { discoverAgents } from "./agents.ts";
+import { discoverAgents, resolveAgentTools, type AgentConfig } from "./agents.ts";
 import { loadConfig } from "./config.ts";
 import { formatUsage, queuedResult } from "./format.ts";
 import {
@@ -203,21 +203,14 @@ export function registerSubagentTool(pi: ExtensionAPI, runtime: SubagentRuntime)
 
 			// Live sub-agent activity → concise one-line status ("thinking",
 			// "read src/index.ts", ...), never a raw args blob. The live handler
-			// only updates monitor state; finishing (removeRun + notify) is owned
-			// by the queue task / launchInWorkflow. That keeps a startup retry —
-			// which fires a transient "failed" status before relaunching — from
-			// ripping the row out early, and lets the queue task decide between
-			// delivering a reviewer's result and starting an auto-fix chain.
+			// only updates monitor state; the queue task / launchInWorkflow owns
+			// terminal removal, notification, and downstream workflow decisions.
 			const makeLiveHandler =
 				(runId: number, generation?: number) =>
 				(e: SubagentLiveEvent): void => {
 					if (generation !== undefined && runtime.threads.get(runId)?.generation !== generation) return;
 					switch (e.kind) {
 						case "status":
-							// Only update monitor status here. Finishing (removeRun + notify) is
-							// owned by the queue task / launchInWorkflow so that a startup retry — which
-							// fires a transient "failed" status before relaunching the child — never
-							// rips the row out from under the retry or emits a premature "✗" toast.
 							monitor.setStatus(runId, e.status);
 							break;
 						case "model":
@@ -305,10 +298,13 @@ export function registerSubagentTool(pi: ExtensionAPI, runtime: SubagentRuntime)
 				task: string,
 				meta: RunChainMeta,
 			): Promise<{ runId: number; result: SingleResult }> => {
-				const agent = request.agents.find((candidate) => candidate.name === agentName);
-				if (!agent) {
+				const discoveredAgent = request.agents.find((candidate) => candidate.name === agentName);
+				if (!discoveredAgent) {
 					throw new Error(`Managed workflow requires enabled agent "${agentName}", but discovery did not provide it.`);
 				}
+				const resolveLiveAgentTools = (candidate: AgentConfig): AgentConfig =>
+					resolveAgentTools({ ...candidate, tools: discoveredAgent.tools }, runtime.getActiveTools());
+				const agent = resolveLiveAgentTools(discoveredAgent);
 				const resolvedRoute = resolveDispatchModelRoute(agent, request.config, request.ctx);
 				const route = request.isolation === "worktree"
 					? { ...resolvedRoute, agent: withWorktreeSystemPrompt(resolvedRoute.agent) }
@@ -325,6 +321,7 @@ export function registerSubagentTool(pi: ExtensionAPI, runtime: SubagentRuntime)
 							defaultCwd: request.executionCwd,
 							cwd: request.executionCwd,
 							agent: route.agent,
+							resolveAgentForAttempt: resolveLiveAgentTools,
 							agentName,
 							task,
 							thinkingLevel,

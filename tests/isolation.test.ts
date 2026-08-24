@@ -13,28 +13,7 @@ import { readRecoveryRecords } from "../src/recovery.ts";
 import * as spawnModule from "../src/spawn.ts";
 import * as worktreeModule from "../src/worktree.ts";
 import type { WorktreeFinalization, WorktreeIsolation } from "../src/worktree.ts";
-
-interface StubPi {
-	tools: any[];
-	hooks: Record<string, (event: any, ctx: any) => any>;
-	messages: Array<{ message: any; options: any }>;
-	api: any;
-}
-
-function makeStub(): StubPi {
-	const stub: StubPi = { tools: [], hooks: {}, messages: [], api: undefined };
-	stub.api = {
-		registerTool: (tool: any) => stub.tools.push(tool),
-		registerMessageRenderer: () => {},
-		registerCommand: () => {},
-		registerShortcut: () => {},
-		sendMessage: (message: any, options: any) => stub.messages.push({ message, options }),
-		on: (event: string, handler: any) => {
-			stub.hooks[event] = handler;
-		},
-	};
-	return stub;
-}
+import { makeStub, waitFor, type StubPi } from "./test-helpers.ts";
 
 function ctx(cwd: string): any {
 	return {
@@ -133,14 +112,6 @@ function fakeWorktree(root: string, final: WorktreeFinalization = {
 		discard: discardMock,
 		discardMock,
 	};
-}
-
-async function waitFor(predicate: () => boolean, timeoutMs = 5_000): Promise<void> {
-	const deadline = Date.now() + timeoutMs;
-	while (!predicate()) {
-		if (Date.now() >= deadline) throw new Error("Timed out waiting for test condition");
-		await new Promise((resolve) => setTimeout(resolve, 10));
-	}
 }
 
 let savedDepth: string | undefined;

@@ -156,6 +156,32 @@ Children have no memory of the parent conversation. A good manual brief includes
 the goal, exact paths, constraints, and expected output. The injected delegation
 guidance does this automatically when the main agent dispatches on your behalf.
 
+### Tool, plugin, skill, and context inheritance
+
+Every initial dispatch, managed stage, retained resume, fork, startup retry,
+and selected-to-main fallback snapshots the parent session's currently active
+tools. Roles without an explicit tool list (such as shipped `worker` and
+`cleaner`) inherit that complete set. An explicit role list remains its Pi
+built-in permission boundary, but its existing shell slot follows the parent
+(`bash`, `powershell`, both, or neither) and parent-active extension/SDK tools
+are appended; inactive plugin names declared in frontmatter are not enabled.
+Therefore `explorer` and `reviewer` never gain Pi's built-in `edit`/`write`;
+`documenter` keeps them for docs/comments; and a custom agent keeps the built-in
+capabilities declared in its own frontmatter. All `subagent*` control tools are
+removed from children so they remain leaves. An empty inherited snapshot starts
+the child with `--no-tools` instead of falling back to Pi's defaults.
+
+`powershell` is the Pi tool name. On Windows, it selects native `pwsh.exe` when
+available and falls back to `powershell.exe`. Parent-active plugin tools such as
+web search or API/documentation lookup are available to every child when that
+plugin also loads there. Global skills and trusted project skills load normally
+inside each child Pi process.
+
+Each child is an independent Pi session and uses Pi's normal global/project
+`compaction` settings. Auto-compaction therefore remains enabled by default when
+a child's model context approaches its limit. Retained resume/fork sessions keep
+their existing conversation and compaction summaries instead of starting over.
+
 ## Everyday workflows
 
 ### Delegate one task
@@ -330,16 +356,24 @@ subagent_control({ action: "resume", id: 7, objective: "Finish the tests." });
 subagent_control({ action: "fork", id: 7, objective: "Try the smaller design instead." });
 ```
 
-Use `steer` or `retarget` only while the top-level RPC child is active. During an
-automatic documenter, reviewer, or fix stage, use `park` or `stop`; park and then
-`resume` with a new objective when you need to redirect retained context. Use
-`park` to preserve the newest active stage and release its process slot; parking
-during documentation retains the
-documenter's partial/session, not an older writer or review. Use `stop` only when
-you want to discard that thread's future continuation. Stop and session shutdown
-abort the active internal stage, suppress stale delivery, and leave worktree
-finalization to the same one-time lifecycle owner. `stop-all` interrupts every
-lane holder before waiting for finalization, avoiding self-deadlock when an
+Use `steer` or `retarget` only while the top-level RPC child is active. `steer`
+queues guidance without changing the displayed objective; `retarget` aborts that
+generation's objective and replaces it in the same session. During an automatic
+documenter, reviewer, or fix stage, use `park` or `stop`. `resume` without an
+`objective` continues the currently displayed goal; supplying one appends that
+explicit goal to the retained conversation and makes it the new displayed goal.
+It never clears prior context. `fork` follows the same objective rule on a copied
+branch while leaving its source unchanged. Widget labels distinguish retained,
+appended, retargeted, and forked objectives.
+
+Use `park` to preserve the newest active stage and release its process slot;
+parking during documentation retains the documenter's partial/session, not an
+older writer or review. A resumed logical run keeps cumulative active elapsed
+time across all generations while excluding the parked interval. Use `stop` only
+when you want to discard that thread's future continuation. Stop and session
+shutdown abort the active internal stage, suppress stale delivery, and leave
+worktree finalization to the same one-time lifecycle owner. `stop-all` interrupts
+every lane holder before waiting for finalization, avoiding self-deadlock when an
 isolated apply is queued behind shared work.
 
 ## Results and live status
@@ -347,18 +381,29 @@ isolated apply is queued behind shared work.
 The active TUI widget shows queued and running work as a compact tree:
 
 ```text
-● reviewer · review diff of src/cache.ts · claude-sonnet-4-5/high · 42s
+● reviewer workflow · review diff of src/cache.ts · 42s
   ├ ● worker · fix round 1 · src/cache.ts · claude-sonnet-4-5/high · 10s
   │    grep cacheKey
   ├ ● documenter · docs round 1 · claude-haiku-4-5/low · 4s
   └ ○ reviewer · re-review round 1 · claude-sonnet-4-5/high · 3s
 ```
 
+A managed root keeps its original top-level role and workflow-wide elapsed
+time, but deliberately omits model/thinking because several model stages own
+that row over its lifetime. The active nested row shows the current stage's
+actual role, selected/fallback model, thinking level, stage elapsed time, and
+activity. Per-stage usage stays attached to that stage; only the final summary
+is labeled and calculated as an aggregate.
+
 Completed internal rows disappear from the widget; a parked parent remains
 queryable. Final messages contain one managed-workflow summary with aggregate
-token/cost totals and every internal id. Long output is truncated in the
-conversation and written to a temporary Markdown artifact; `subagent_status`
-keeps each complete run report available by id.
+token/cost totals and every internal id. Built-in roles author their own
+result-only handoff—outcome, relevant paths, verification, and unresolved
+blockers—without a second summarization layer that could distort the result.
+They omit task/process narration and recovered transient tool failures. The
+80-line delivery cap remains a safety limit; long output is written unchanged to
+a temporary Markdown artifact, and explicit `subagent_status` lookup keeps the
+complete report and failed-tool diagnostics available by id.
 
 The main agent is told not to paraphrase a result you have already seen. It should
 add only its own conclusion or next action instead of charging you twice for the
@@ -420,6 +465,12 @@ auto-fix rounds, and the idle timeout:
 ```text
 /subagents-setup
 ```
+
+In nested setup screens, `Esc` returns one level: thinking → model → agent
+selection → settings. Runtime value pickers return to the Runtime settings menu,
+and other nested pickers return to the main settings menu. Only `Esc` from the
+top-level settings menu exits the wizard; completed agent choices are saved when
+leaving that configuration pass.
 
 Configuration is stored at `~/.pi/agent/pi-subagents.json` and follows
 `PI_CODING_AGENT_DIR` when that environment variable is set.
@@ -486,7 +537,11 @@ tools: read, bash
 ```
 
 The Markdown body becomes the child's additional system prompt. Configuration
-chosen in `/subagents-setup` takes precedence over frontmatter defaults.
+chosen in `/subagents-setup` takes precedence over frontmatter defaults. A
+custom agent's explicit `tools` list remains its Pi built-in capability boundary;
+an existing shell slot follows the parent, and active extension/SDK tools are
+appended as described above. Omitting `tools` inherits the parent's complete
+active set.
 
 ## Development
 

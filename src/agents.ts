@@ -31,9 +31,50 @@ export interface AgentConfig {
 	filePath: string;
 }
 
+const SHELL_TOOL_NAMES = new Set(["bash", "powershell"]);
+const PI_BUILTIN_TOOL_NAMES = new Set(["read", "bash", "powershell", "edit", "write", "grep", "find", "ls"]);
+export const SUBAGENT_TOOL_NAMES = [
+	"subagent",
+	"subagent_control",
+	"subagent_wait",
+	"subagent_status",
+	"subagent_stop",
+] as const;
+const SUBAGENT_TOOL_NAME_SET = new Set<string>(SUBAGENT_TOOL_NAMES);
+
+/** Resolve every child against the parent's live tool selection. Roles without
+ * an allowlist inherit the complete active set. Explicit lists keep only their
+ * declared Pi built-ins, adapt an existing shell slot, and gain active extension/
+ * SDK tools. pi-subagents controls are always removed so children stay leaves. */
+export function resolveAgentTools(
+	agent: AgentConfig,
+	activeToolNames: readonly string[],
+): AgentConfig {
+	const active = [...new Set(activeToolNames)].filter((tool) => !SUBAGENT_TOOL_NAME_SET.has(tool));
+	if (!agent.tools) return { ...agent, tools: active };
+
+	const activeShellTools = active.filter((tool) => SHELL_TOOL_NAMES.has(tool));
+	const tools: string[] = [];
+	let shellAdapted = false;
+	for (const tool of agent.tools) {
+		if (SHELL_TOOL_NAMES.has(tool)) {
+			if (!shellAdapted) tools.push(...activeShellTools);
+			shellAdapted = true;
+		} else if (PI_BUILTIN_TOOL_NAMES.has(tool) && !tools.includes(tool)) {
+			tools.push(tool);
+		}
+	}
+	for (const tool of active) {
+		if (PI_BUILTIN_TOOL_NAMES.has(tool) || tools.includes(tool)) continue;
+		tools.push(tool);
+	}
+	return { ...agent, tools };
+}
+
 /** Filesystem-write capability used by worktree admission and repository-lane
  * safety. Built-in read-only role names remain read-only even when overridden;
- * an omitted tool list means Pi's full tool set. */
+ * an omitted tool list inherits the parent's active set, so it counts as
+ * write-capable unless the parent itself is read-only. */
 export function isWriteCapableAgent(
 	agent: Pick<AgentConfig, "name" | "tools">,
 ): boolean {

@@ -67,6 +67,8 @@ export interface SubagentThread {
 	lifecycleOperation?: ThreadLifecycleOperation;
 	sessionId?: string;
 	sessionDir?: string;
+	/** Active execution time accumulated across retained resume generations. */
+	elapsedMs: number;
 	/** Most recent generation result, retained for parked destructive-stop output. */
 	lastResult?: SingleResult;
 	/** A destructive stop retires context even if the active child settles later. */
@@ -92,6 +94,8 @@ export interface SubagentThread {
 export interface SubagentRuntime {
 	configPath: string;
 	backgroundQueue: BackgroundTaskQueue;
+	/** Live parent tool names from ExtensionAPI, read again for each child launch. */
+	getActiveTools: () => string[];
 	/** False after session_shutdown; guards delivery and queue work. */
 	sessionActive: boolean;
 	/** Deliver a batch of completion messages to the main window, waking it only
@@ -128,6 +132,7 @@ export function createRuntime(pi: ExtensionAPI, configPath: string): SubagentRun
 	const runtime: SubagentRuntime = {
 		configPath,
 		backgroundQueue,
+		getActiveTools: () => pi.getActiveTools(),
 		sessionActive: true,
 		sendCompletionGroup: (items) => {
 			if (!runtime.sessionActive || items.length === 0) return;

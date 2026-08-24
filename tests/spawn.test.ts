@@ -6,6 +6,7 @@ import { registerApiProvider, unregisterApiProviders } from "@earendil-works/pi-
 import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
 import { formatCompletionBlock } from "../src/format.ts";
 import { fakeRpcScript } from "./fake-rpc.ts";
+import { readJsonLines } from "./test-helpers.ts";
 import {
 	addStartupRetryJitter,
 	buildFallbackResumeReason,
@@ -204,6 +205,45 @@ describe("runSingleAgent transport and lifecycle", () => {
 			});
 			expect(getFinalOutput(result.messages)).toBe("Task: hello from stdin");
 			expect(result.exitCode).toBe(0);
+		} finally {
+			process.argv[1] = previousScript;
+			rmSync(dir, { recursive: true, force: true });
+		}
+	});
+
+	it("passes inherited tool allowlists and preserves an explicitly empty active set", async () => {
+		const dir = mkdtempSync(join(tmpdir(), "pi-subagents-spawn-tools-"));
+		const script = join(dir, "tool-args-child.mjs");
+		writeFileSync(
+			script,
+			fakeRpcScript({
+				onPrompt: `send({ type: "message_end", message: { role: "assistant", content: [{ type: "text", text: JSON.stringify(process.argv.slice(2)) }], stopReason: "stop" } });`,
+			}),
+			"utf8",
+		);
+		const previousScript = process.argv[1];
+		process.argv[1] = script;
+		try {
+			for (const [tools, expectedFlag, expectedValue] of [
+				[[], "--no-tools", undefined],
+				[["read", "powershell", "web_search"], "--tools", "read,powershell,web_search"],
+			] as const) {
+				const result = await runSingleAgent({
+					defaultCwd: process.cwd(),
+					agent: { ...agent, tools: [...tools] },
+					agentName: agent.name,
+					task: "inspect tool args",
+					makeDetails: (results) => ({ mode: "single", results }),
+				});
+				const args = JSON.parse(getFinalOutput(result.messages)) as string[];
+				expect(args[args.indexOf("--exclude-tools") + 1]).toBe(
+					"subagent,subagent_control,subagent_wait,subagent_status,subagent_stop",
+				);
+				const flagIndex = args.indexOf(expectedFlag);
+				expect(flagIndex).toBeGreaterThanOrEqual(0);
+				if (expectedValue === undefined) expect(args).not.toContain("--tools");
+				else expect(args[flagIndex + 1]).toBe(expectedValue);
+			}
 		} finally {
 			process.argv[1] = previousScript;
 			rmSync(dir, { recursive: true, force: true });
@@ -690,7 +730,7 @@ describe("session resume helpers", () => {
 
 	it("buildResumePrompt references the task and tells the model not to redo work", () => {
 		const prompt = buildResumePrompt("Implement X in src/foo.ts", "a transient provider error");
-		expect(prompt).toContain("Implement X in src/foo.ts");
+		expect(prompt).toContain("Current objective: Implement X in src/foo.ts");
 		expect(prompt).toContain("Do NOT redo");
 	});
 
@@ -730,16 +770,25 @@ describe("runSingleAgentWithMainFallback session resume", () => {
 }`,
 	});
 
-	it("resumes the session when handing from selected to main model", async () => {
+	it("resumes the session and refreshes tools when handing from selected to main model", async () => {
 		const dir = mkdtempSync(join(tmpdir(), "pi-subagents-resume-"));
 		const script = join(dir, "resume-child.cjs");
 		const log = join(dir, "flags.log");
 		writeFileSync(script, sessionAwareChild(log), "utf8");
 		await withArgv(script, async () => {
+			const toolSnapshots = [
+				["read", "bash", "selected_plugin"],
+				["read", "powershell", "fallback_plugin"],
+			];
+			let snapshotIndex = 0;
 			const result = await runSingleAgentWithMainFallback(
 				{
 					defaultCwd: process.cwd(),
-					agent: { ...agent, model: "openai-codex/gpt-5.6-sol" },
+					agent: { ...agent, model: "openai-codex/gpt-5.6-sol", tools: ["read"] },
+					resolveAgentForAttempt: (candidate) => ({
+						...candidate,
+						tools: toolSnapshots[snapshotIndex++]!,
+					}),
 					agentName: agent.name,
 					task: "review src/index.ts",
 					makeDetails: (results) => ({ mode: "single", results }),
@@ -750,11 +799,13 @@ describe("runSingleAgentWithMainFallback session resume", () => {
 			expect(result.model).toBe("anthropic/main");
 			expect(result.modelFallbackFrom).toBe("openai-codex/gpt-5.6-sol");
 			// The fallback attempt reused the prior session, inheriting its context.
-			const invocations = readFileSync(log, "utf8")
-				.split("\n")
-				.filter(Boolean)
-				.map((line) => JSON.parse(line) as string[]);
+			const invocations = readJsonLines<string[]>(log);
 			expect(invocations).toHaveLength(2);
+			expect(snapshotIndex).toBe(2);
+			expect(invocations.map((invocation) => invocation[invocation.indexOf("--tools") + 1])).toEqual([
+				"read,bash,selected_plugin",
+				"read,powershell,fallback_plugin",
+			]);
 			// First attempt CREATES the session (--session-id, no bare --session);
 			// the fallback RESUMES it (bare --session, no --session-id). Both carry
 			// --session-dir; `arr.includes("--session")` is an exact-token match, so
@@ -1201,10 +1252,12 @@ process.exit(1);`,
 		const dir = mkdtempSync(join(tmpdir(), "pi-subagents-startup-handshake-"));
 		const script = join(dir, "handshake-retry-child.cjs");
 		const log = join(dir, "attempts.log");
+		const argvLog = join(dir, "argv.log");
 		writeFileSync(
 			script,
 			fakeRpcScript({
 				setup: `fs.appendFileSync(process.env.LOG_PATH, "attempt\\n");
+fs.appendFileSync(process.env.ARGV_LOG, JSON.stringify(process.argv) + "\\n");
 const count = fs.readFileSync(process.env.LOG_PATH, "utf8").split("\\n").filter(Boolean).length;`,
 				onGetState: `if (count > 1) respond(command);`,
 				onPrompt: `send({ type: "message_end", message: { role: "assistant", content: [{ type: "text", text: "recovered after handshake timeout" }], stopReason: "stop" } });`,
@@ -1213,14 +1266,23 @@ const count = fs.readFileSync(process.env.LOG_PATH, "utf8").split("\\n").filter(
 		);
 		try {
 			await withArgv(script, async () => {
+				const toolSnapshots = [
+					["read", "bash", "first_plugin"],
+					["read", "powershell", "retry_plugin"],
+				];
+				let snapshotIndex = 0;
 				const result = await runSingleAgentWithMainFallback({
 					defaultCwd: process.cwd(),
-					agent,
+					agent: { ...agent, tools: ["read"] },
+					resolveAgentForAttempt: (candidate) => ({
+						...candidate,
+						tools: toolSnapshots[snapshotIndex++]!,
+					}),
 					agentName: agent.name,
 					task: "survive a handshake timeout",
 					startupRetryDelaysMs: [10],
 					rpcReadyTimeoutMs: 80,
-					env: { ...process.env, LOG_PATH: log },
+					env: { ...process.env, LOG_PATH: log, ARGV_LOG: argvLog },
 					makeDetails: (results) => ({ mode: "single", results }),
 				});
 				expect(result.exitCode).toBe(0);
@@ -1229,6 +1291,13 @@ const count = fs.readFileSync(process.env.LOG_PATH, "utf8").split("\\n").filter(
 				expect(result.dispatchFailed).toBeUndefined();
 				expect(isModelLevelFailure(result)).toBe(false);
 				expect(readFileSync(log, "utf8").split("\n").filter(Boolean)).toHaveLength(2);
+				const invocations = readJsonLines<string[]>(argvLog);
+				expect(invocations).toHaveLength(2);
+				expect(snapshotIndex).toBe(2);
+				expect(invocations.map((invocation) => invocation[invocation.indexOf("--tools") + 1])).toEqual([
+					"read,bash,first_plugin",
+					"read,powershell,retry_plugin",
+				]);
 			});
 		} finally {
 			rmSync(dir, { recursive: true, force: true });

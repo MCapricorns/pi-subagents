@@ -1,4 +1,4 @@
-import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
@@ -7,28 +7,7 @@ import register from "../src/index.ts";
 import { monitor } from "../src/monitor.ts";
 import * as spawn from "../src/spawn.ts";
 import { fakeRpcScript } from "./fake-rpc.ts";
-
-interface StubPi {
-	tools: any[];
-	hooks: Record<string, (event: any, ctx: any) => any>;
-	messages: Array<{ message: any; options: any }>;
-	api: any;
-}
-
-function makeStub(): StubPi {
-	const stub: StubPi = { tools: [], hooks: {}, messages: [], api: undefined };
-	stub.api = {
-		registerTool: (tool: any) => stub.tools.push(tool),
-		registerMessageRenderer: () => {},
-		registerCommand: () => {},
-		registerShortcut: () => {},
-		sendMessage: (message: any, options: any) => stub.messages.push({ message, options }),
-		on: (event: string, handler: any) => {
-			stub.hooks[event] = handler;
-		},
-	};
-	return stub;
-}
+import { makeStub, readJsonLines, waitFor, type StubPi } from "./test-helpers.ts";
 
 function executionContext(): any {
 	return {
@@ -40,19 +19,8 @@ function executionContext(): any {
 	};
 }
 
-async function waitFor(predicate: () => boolean, timeoutMs = 5_000): Promise<void> {
-	const deadline = Date.now() + timeoutMs;
-	while (!predicate()) {
-		if (Date.now() >= deadline) throw new Error("Timed out waiting for test condition");
-		await new Promise((resolve) => setTimeout(resolve, 10));
-	}
-}
-
 function commandLog(path: string): Array<{ type: string; message?: string; argv: string[] }> {
-	return readFileSync(path, "utf8")
-		.split("\n")
-		.filter(Boolean)
-		.map((line) => JSON.parse(line));
+	return readJsonLines(path);
 }
 
 let savedDepth: string | undefined;
@@ -217,7 +185,10 @@ send({ type: "agent_settled" });`,
 		const retarget = execute(control, { action: "retarget", id: runId, objective: "Replacement" });
 		const park = execute(control, { action: "park", id: runId });
 		await Promise.all([retarget, park]);
-		expect(monitor.findRun(runId!)?.status).toBe("parked");
+		expect(monitor.findRun(runId!)).toMatchObject({
+			status: "parked",
+			continuationKind: "retarget",
+		});
 		expect(stub.messages).toHaveLength(0);
 		expect(commandLog(log).map((entry) => entry.type)).toEqual(["prompt", "abort", "prompt", "abort"]);
 	});
@@ -250,6 +221,7 @@ send({ type: "agent_settled" });`,
 		expect(parked.content[0].text).toContain("stable checkpoint");
 		expect(monitor.findRun(runId!)?.status).toBe("parked");
 		expect(stub.messages).toHaveLength(0);
+		const elapsedBeforeResume = monitor.findRun(runId!)?.elapsedMs ?? 0;
 		const first = commandLog(log)[0];
 		const sessionDir = first.argv[first.argv.indexOf("--session-dir") + 1];
 		expect(existsSync(sessionDir)).toBe(true);
@@ -260,7 +232,11 @@ send({ type: "agent_settled" });`,
 			objective: "Finish from checkpoint",
 		});
 		expect(resumed.content[0].text).toContain(`Resumed run #${runId}`);
+		expect(resumed.content[0].text).toContain("appended objective: Finish from checkpoint");
+		expect(resumed.content[0].text).toContain("cumulative active time");
 		expect(monitor.findRun(runId!)?.id).toBe(runId);
+		expect(monitor.findRun(runId!)?.continuationKind).toBe("resume-appended");
+		expect(monitor.findRun(runId!)?.elapsedMs ?? 0).toBeGreaterThanOrEqual(elapsedBeforeResume);
 		await waitFor(() => stub.messages.length === 1);
 		expect(stub.messages[0].message.content).toContain("resumed completion");
 		const prompts = commandLog(log).filter((entry) => entry.type === "prompt");
@@ -446,6 +422,7 @@ send({ type: "message_end", message: { role: "assistant", content: [{ type: "tex
 		expect(stub.messages).toHaveLength(0);
 		const parkedStatus = await execute(status, { id: String(runId) });
 		expect(parkedStatus.content[0].text).toContain("documenter");
+		expect(monitor.findRun(runId)?.task).toContain("Documentation sync after successful top-level worker.");
 
 		const resumed = await execute(control, { action: "resume", id: runId, objective: "Finish documentation" });
 		expect(resumed.content[0].text).toContain(`Resumed run #${runId}`);
@@ -569,6 +546,15 @@ describe("queued controls and stale generations", () => {
 		expect(parked.content[0].text).toContain("never spawned a child or empty session");
 		expect(controllers[0].signal.aborted).toBe(true);
 		expect(monitor.findRun(runId!)?.status).toBe("parked");
+
+		const resumed = await execute(control, { action: "resume", id: runId });
+		expect(resumed.content[0].text).toContain("no prior child session existed");
+		expect(resumed.content[0].text).not.toContain("same retained session");
+		expect(monitor.findRun(runId!)).toMatchObject({
+			status: "queued",
+			continuationKind: "resume-retained",
+		});
+		expect(captured).toHaveLength(2);
 	});
 
 	it("stops a queued resumed generation without publishing the completed generation's result", async () => {
@@ -696,6 +682,8 @@ describe("queued controls and stale generations", () => {
 
 		const resumed = await execute(control, { action: "resume", id: runId });
 		expect(resumed.content[0].text).toContain(`Resumed run #${runId}`);
+		expect(resumed.content[0].text).toContain("continuing current objective: retrying");
+		expect(monitor.findRun(runId)?.continuationKind).toBe("resume-retained");
 		await waitFor(() => runSpy.mock.calls.length === 2);
 		expect(runSpy.mock.calls[1]![0]).toMatchObject({
 			sessionId: "retry-park",

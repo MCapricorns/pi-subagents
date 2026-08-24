@@ -2,7 +2,12 @@ import { mkdtempSync, mkdirSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import { discoverAgents, isWriteCapableAgent, loadBuiltinAgents } from "../src/agents.ts";
+import {
+	discoverAgents,
+	isWriteCapableAgent,
+	loadBuiltinAgents,
+	resolveAgentTools,
+} from "../src/agents.ts";
 
 let builtinDir: string;
 let agentDir: string;
@@ -82,6 +87,19 @@ describe("shipped specialist agents", () => {
 		expect(reviewer?.systemPrompt).toContain("Gate review");
 		expect(reviewer?.systemPrompt).toContain("In a gate review, use `VERDICT: REVIEW_FAIL`");
 		expect(reviewer?.systemPrompt).toContain("A `REQUEST_CHANGES` gate verdict starts");
+		expect(reviewer?.systemPrompt).not.toMatch(/\bBash\b/u);
+	});
+
+	it("requires result-only handoffs without recovered tool noise", () => {
+		for (const agent of loadBuiltinAgents()) {
+			expect(agent.systemPrompt).toContain("Do not repeat the task brief");
+			expect(agent.systemPrompt).toContain("transient tool failures");
+			expect(agent.systemPrompt).toContain("80-line delivery cap");
+		}
+		const explorer = loadBuiltinAgents().find((agent) => agent.name === "explorer");
+		expect(explorer?.systemPrompt).toContain("## Findings");
+		expect(explorer?.systemPrompt).not.toContain("## Files Retrieved");
+		expect(explorer?.systemPrompt).not.toContain("## Architecture");
 	});
 
 	it("keeps runtime model defaults while excluding frontmatter comments from child prompts", () => {
@@ -105,6 +123,60 @@ describe("shipped specialist agents", () => {
 		expect(explorer?.systemPrompt).toContain("retrieval lead");
 		expect(explorer?.systemPrompt).toContain("re-read load-bearing files");
 		expect(explorer?.systemPrompt).toContain("plausible guess is more expensive");
+		expect(explorer?.systemPrompt).not.toMatch(/\bBash\b/u);
+	});
+});
+
+describe("parent tool inheritance", () => {
+	it.each([
+		["powershell only", ["read", "powershell", "edit", "write", "web_search", "query_docs"], ["powershell"]],
+		["bash only", ["read", "bash", "edit", "write", "web_search", "query_docs"], ["bash"]],
+		["both", ["read", "bash", "powershell", "edit", "write", "web_search", "query_docs"], ["bash", "powershell"]],
+		["neither", ["read", "edit", "write", "web_search", "query_docs"], []],
+	] as const)("keeps restricted built-ins while inheriting the parent %s shell and plugins", (_label, activeTools, expectedShells) => {
+		const builtins = loadBuiltinAgents().filter((agent) =>
+			["explorer", "documenter", "reviewer"].includes(agent.name)
+		);
+		expect(builtins).toHaveLength(3);
+		for (const agent of builtins) {
+			const resolved = resolveAgentTools(agent, [...activeTools, "subagent", "subagent_status"]);
+			expect(resolved.tools?.filter((tool) => tool === "bash" || tool === "powershell")).toEqual(expectedShells);
+			expect(resolved.tools).toEqual(expect.arrayContaining(["web_search", "query_docs"]));
+			expect(resolved.tools).not.toContain("subagent");
+			expect(resolved.tools).not.toContain("subagent_status");
+			if (agent.name !== "documenter") {
+				expect(resolved.tools).not.toContain("edit");
+				expect(resolved.tools).not.toContain("write");
+			}
+		}
+	});
+
+	it("preserves a custom agent's built-in boundary while adapting its shell and adding only active plugins", () => {
+		const builtin = loadBuiltinAgents().find((agent) => agent.name === "explorer")!;
+		const custom = {
+			...builtin,
+			source: "project" as const,
+			tools: ["read", "inactive_plugin", "bash"],
+		};
+		const resolved = resolveAgentTools(custom, ["read", "powershell", "write", "web_search", "subagent_control"]);
+		expect(resolved.tools).toEqual(["read", "powershell", "web_search"]);
+		expect(custom.tools).toEqual(["read", "inactive_plugin", "bash"]);
+	});
+
+	it("gives roles without an allowlist the complete active set except recursive controls", () => {
+		const builtins = loadBuiltinAgents();
+		for (const name of ["worker", "cleaner"]) {
+			const agent = builtins.find((candidate) => candidate.name === name)!;
+			expect(agent.tools).toBeUndefined();
+			expect(resolveAgentTools(agent, ["read", "powershell", "edit", "write", "web_search", "subagent_stop"]).tools)
+				.toEqual(["read", "powershell", "edit", "write", "web_search"]);
+			expect(agent.tools).toBeUndefined();
+		}
+	});
+
+	it("represents an empty inherited active set explicitly", () => {
+		const worker = loadBuiltinAgents().find((agent) => agent.name === "worker")!;
+		expect(resolveAgentTools(worker, ["subagent", "subagent_wait"]).tools).toEqual([]);
 	});
 });
 

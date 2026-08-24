@@ -327,7 +327,7 @@ export function getResultOutput(result: SingleResult): string {
 }
 
 export function buildResumePrompt(task: string, reason: string): string {
-	return `You are resuming an earlier sub-agent session after ${reason}. Your earlier work — searches, reads, edits, and reasoning — is preserved in this session's history above; review it before acting. Original task: ${task}. Pick up exactly where you left off and finish it. Do NOT redo searches, reads, or edits you already completed unless a step clearly failed. Continue now.`;
+	return `You are resuming an earlier sub-agent session after ${reason}. Your earlier work — searches, reads, edits, and reasoning — is preserved in this session's history above; review it before acting. Current objective: ${task}. Pick up exactly where you left off and finish it. Do NOT redo searches, reads, or edits you already completed unless a step clearly failed. Continue now.`;
 }
 
 export function buildFallbackResumeReason(fromModel?: string): string {
@@ -351,6 +351,9 @@ export interface RunSingleOptions {
 	sessionId?: string;
 	/** Initial RPC prompt. Kept under the old name to limit caller churn. */
 	stdinText?: string;
+	/** Refresh parent-derived tools immediately before every startup retry and
+	 * selected-to-main fallback process is spawned. */
+	resolveAgentForAttempt?: (agent: AgentConfig) => AgentConfig;
 	signal?: AbortSignal;
 	onLive?: (event: SubagentLiveEvent) => void;
 	makeDetails: (results: SingleResult[]) => SubagentDetails;
@@ -496,7 +499,10 @@ export async function runSingleAgentWithMainFallback(
 			}
 			const start = Date.now();
 			try {
-				lastResult = await runSingleAgent(opts);
+				const attemptOptions = opts.resolveAgentForAttempt
+					? { ...opts, agent: opts.resolveAgentForAttempt(opts.agent) }
+					: opts;
+				lastResult = await runSingleAgent(attemptOptions);
 			} catch (error) {
 				const failed = await dispatchFailure(error);
 				return controlledDisposition(opts, failed) ?? failed;

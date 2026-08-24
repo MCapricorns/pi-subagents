@@ -19,6 +19,7 @@ import type { IsolationMode, WorktreeFinalizationStatus } from "./worktree.ts";
 // ---------------------------------------------------------------------------
 
 export type RunStatus = "queued" | "running" | "steering" | "interrupting" | "parked" | "done" | "failed";
+export type ContinuationKind = "resume-retained" | "resume-appended" | "fork-retained" | "fork-appended" | "retarget";
 
 export function isRunActiveStatus(status: RunStatus): boolean {
 	return status === "queued" || status === "running" || status === "steering" || status === "interrupting";
@@ -45,16 +46,25 @@ export interface RunView {
 	usage: UsageStats;
 	/** Concise current activity ("thinking", "read src/index.ts"); last writer wins. */
 	activity?: string;
-	/** Epoch ms when the run started executing (set on first "running" status). */
+	/** Epoch ms when this logical run first started executing. */
 	startedAt?: number;
-	/** Epoch ms when the run finished (set on "done"/"failed"). */
+	/** Epoch ms when the current active segment started. */
+	activeSince?: number;
+	/** Cumulative active execution time from closed segments; parked time is excluded. */
+	elapsedMs: number;
+	/** Epoch ms when the latest active segment stopped. */
 	endedAt?: number;
+	/** Why this generation reused retained context, shown in the widget/status. */
+	continuationKind?: ContinuationKind;
 	/** When set, this is an internal managed-workflow step. */
 	groupId?: string;
 	/** Human-readable role within a chain, e.g. "fix round 1" or "re-review round 1". */
 	relationLabel?: string;
 	/** Stable owning run whose row represents the whole managed workflow. */
 	parentRunId?: number;
+	/** This stable top-level row currently owns a multi-stage managed workflow.
+	 * Its elapsed time is workflow-wide; active child rows own stage telemetry. */
+	managedWorkflow?: boolean;
 }
 
 /** Optional metadata for documenter/reviewer/fix children of a stable parent run. */
@@ -64,6 +74,7 @@ export interface RunChainMeta {
 	parentRunId?: number;
 	isolation?: IsolationMode;
 	forkedFromRunId?: number;
+	continuationKind?: ContinuationKind;
 }
 
 // ---------------------------------------------------------------------------
@@ -276,10 +287,32 @@ export function formatDuration(ms: number): string {
 	return `${hours}h${String(minutes % 60).padStart(2, "0")}m`;
 }
 
-/** Elapsed wall time of a run: live while running, final once finished. */
+/** Cumulative active time across generations; parked gaps never count. */
+export function elapsedMilliseconds(run: RunView, now: number = Date.now()): number {
+	let elapsed = run.elapsedMs ?? 0;
+	if (run.activeSince !== undefined) elapsed += Math.max(0, now - run.activeSince);
+	// Keep formatting tolerant of older/synthetic RunView values that predate
+	// segmented timing and carry only startedAt/endedAt.
+	if (elapsed === 0 && run.startedAt !== undefined && run.activeSince === undefined) {
+		elapsed = Math.max(0, (run.endedAt ?? now) - run.startedAt);
+	}
+	return elapsed;
+}
+
 export function formatElapsed(run: RunView, now: number = Date.now()): string {
-	if (run.startedAt === undefined) return "";
-	return formatDuration((run.endedAt ?? now) - run.startedAt);
+	if (run.startedAt === undefined && run.elapsedMs <= 0) return "";
+	return formatDuration(elapsedMilliseconds(run, now));
+}
+
+export function continuationLabel(kind: ContinuationKind | undefined, sourceRunId?: number): string | undefined {
+	switch (kind) {
+		case "resume-retained": return "resume: current objective";
+		case "resume-appended": return "resume: appended objective";
+		case "fork-retained": return `fork${sourceRunId === undefined ? "" : ` #${sourceRunId}`}: current objective`;
+		case "fork-appended": return `fork${sourceRunId === undefined ? "" : ` #${sourceRunId}`}: appended objective`;
+		case "retarget": return "retarget: replacement objective";
+		default: return undefined;
+	}
 }
 
 /** Max length of the argument target inside a formatted activity line. */
@@ -409,11 +442,13 @@ export class MonitorStore {
 			thinking,
 			status: "queued",
 			usage: emptyUsage(),
+			elapsedMs: 0,
 			...(meta?.groupId ? { groupId: meta.groupId } : {}),
 			...(meta?.relationLabel ? { relationLabel: meta.relationLabel } : {}),
 			...(meta?.parentRunId !== undefined ? { parentRunId: meta.parentRunId } : {}),
 			...(meta?.isolation ? { isolation: meta.isolation, integrationStatus: meta.isolation === "worktree" ? "pending" : undefined } : {}),
 			...(meta?.forkedFromRunId !== undefined ? { forkedFromRunId: meta.forkedFromRunId } : {}),
+			...(meta?.continuationKind ? { continuationKind: meta.continuationKind } : {}),
 		});
 		this.notify();
 		return id;
@@ -422,17 +457,33 @@ export class MonitorStore {
 	setStatus(id: number, status: RunStatus): void {
 		const run = this.find(id);
 		if (!run) return;
+		const previousStatus = run.status;
+		const wasExecuting = previousStatus === "running" || previousStatus === "steering" || previousStatus === "interrupting";
+		const isExecuting = status === "running" || status === "steering" || status === "interrupting";
+		const now = Date.now();
 		run.status = status;
-		if (status === "running" || status === "steering" || status === "interrupting") {
-			if (run.startedAt === undefined) run.startedAt = Date.now();
-			// A selected-to-main handoff or resumed generation restarts the clock; a
-			// stale endedAt would freeze the elapsed display at the first attempt.
-			if (run.endedAt !== undefined) run.endedAt = undefined;
-		} else if ((status === "parked" || status === "done" || status === "failed") && run.endedAt === undefined) {
-			run.endedAt = Date.now();
+		if (isExecuting && !wasExecuting) {
+			run.startedAt ??= now;
+			run.activeSince = now;
+			run.endedAt = undefined;
+		} else if (!isExecuting && wasExecuting && run.activeSince !== undefined) {
+			run.elapsedMs += Math.max(0, now - run.activeSince);
+			run.activeSince = undefined;
+		}
+		if ((status === "parked" || status === "done" || status === "failed") && run.endedAt === undefined) {
+			run.endedAt = now;
 		}
 		this.notify();
 	}
+	/** Switch a stable top-level row from one model run to workflow ownership.
+	 * The original role remains for identity; child rows show stage telemetry. */
+	setManagedWorkflow(id: number, active: boolean): void {
+		const run = this.find(id);
+		if (!run) return;
+		run.managedWorkflow = active || undefined;
+		this.notify();
+	}
+
 	setUsage(id: number, usage: UsageStats, model?: string): void {
 		const run = this.find(id);
 		if (!run) return;
@@ -503,15 +554,6 @@ export class MonitorStore {
 		this.notify();
 	}
 
-	/** Reflect the currently owned internal stage when a managed parent is parked
-	 * or inspected between children; the stable id and original task stay intact. */
-	setAgent(id: number, agent: string): void {
-		const run = this.find(id);
-		if (!run) return;
-		run.agent = agent;
-		this.notify();
-	}
-
 	/** Update the objective shown for a queued retarget or resumed generation. */
 	setTask(id: number, task: string): void {
 		const run = this.find(id);
@@ -521,8 +563,29 @@ export class MonitorStore {
 		this.notify();
 	}
 
-	/** Reuse a stable logical run id for a resumed generation. */
-	restartRun(id: number, agent: string, task: string, model?: string, thinking?: string, isolation?: IsolationMode): void {
+	setContinuationKind(id: number, kind: ContinuationKind): void {
+		const run = this.find(id);
+		if (!run) return;
+		run.continuationKind = kind;
+		this.notify();
+	}
+
+	getElapsedMs(id: number, now: number = Date.now()): number | undefined {
+		const run = this.find(id);
+		return run ? elapsedMilliseconds(run, now) : undefined;
+	}
+
+	/** Reuse a stable logical run id for a resumed generation without discarding
+	 * active time accumulated by earlier generations. */
+	restartRun(
+		id: number,
+		agent: string,
+		task: string,
+		model?: string,
+		thinking?: string,
+		isolation?: IsolationMode,
+		meta?: { elapsedMs?: number; continuationKind?: ContinuationKind },
+	): void {
 		const run = this.find(id);
 		if (!run) {
 			this.runs.push({
@@ -535,6 +598,8 @@ export class MonitorStore {
 				...(isolation ? { isolation, integrationStatus: isolation === "worktree" ? "pending" as const : undefined } : {}),
 				status: "queued",
 				usage: emptyUsage(),
+				elapsedMs: meta?.elapsedMs ?? 0,
+				continuationKind: meta?.continuationKind,
 			});
 			this.notify();
 			return;
@@ -549,8 +614,11 @@ export class MonitorStore {
 		run.status = "queued";
 		run.usage = emptyUsage();
 		run.activity = undefined;
-		run.startedAt = undefined;
+		run.managedWorkflow = undefined;
+		run.activeSince = undefined;
 		run.endedAt = undefined;
+		run.elapsedMs = Math.max(run.elapsedMs, meta?.elapsedMs ?? 0);
+		run.continuationKind = meta?.continuationKind;
 		this.notify();
 	}
 
@@ -589,12 +657,14 @@ export class MonitorStore {
 
 	summarize(run: RunView): string {
 		const usage = formatUsageCompact(run.usage);
-		const parts = [run.agent];
+		const parts = [run.managedWorkflow ? `${run.agent} workflow` : run.agent];
+		const continuation = continuationLabel(run.continuationKind, run.forkedFromRunId);
+		if (continuation) parts.push(continuation);
 		if (run.relationLabel) parts.push(run.relationLabel);
-		if (run.model) parts.push(run.model);
-		if (run.thinking) parts.push(`thinking ${run.thinking}`);
+		if (!run.managedWorkflow && run.model) parts.push(run.model);
+		if (!run.managedWorkflow && run.thinking) parts.push(`thinking ${run.thinking}`);
 		if (run.isolation === "worktree") parts.push(`worktree ${run.integrationStatus ?? "active"}`);
-		if (usage) parts.push(usage);
+		if (!run.managedWorkflow && usage) parts.push(usage);
 		const elapsed = formatElapsed(run);
 		if (elapsed) parts.push(elapsed);
 		return parts.join(" · ");

@@ -2,9 +2,49 @@ import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "nod
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it, vi } from "vitest";
+import { DEFAULT_CONFIG, type SubagentsConfig } from "../src/config.ts";
 import { CURRENT_MAIN_MODEL, buildModelPickerItems } from "../src/models.ts";
 import { runSetup } from "../src/setup.ts";
 import { pickerItemSearchText } from "../src/ui.ts";
+
+function existingConfig(overrides: Partial<SubagentsConfig> = {}): SubagentsConfig {
+	return {
+		...DEFAULT_CONFIG,
+		enabledAgents: ["explorer"],
+		agentModels: {},
+		agentThinkingLevels: {},
+		announcedFeatures: ["cleanerDefaulted", "documenterDefaulted"],
+		...overrides,
+	};
+}
+
+const TEST_TUI = { requestRender: () => {} };
+const TEST_THEME = { fg: (_color: string, text: string) => text, bold: (text: string) => text };
+const TEST_KEYBINDINGS = {
+	matches(data: string, action: string) {
+		return (data === "enter" && action === "tui.select.confirm")
+			|| (data === "escape" && action === "tui.select.cancel")
+			|| (data === "down" && action === "tui.select.down");
+	},
+};
+
+function pickerDriver(onOpen: (component: any, screen: string) => void): (factory: any) => Promise<unknown> {
+	return (factory) => new Promise((resolve) => {
+		const component = factory(TEST_TUI, TEST_THEME, TEST_KEYBINDINGS, resolve);
+		onOpen(component, component.render(160).join("\n"));
+	});
+}
+
+function setupContext(cwd: string, ui: any, models: any[] = [], model: any = models[0]): any {
+	return {
+		mode: "tui",
+		cwd,
+		isProjectTrusted: () => true,
+		model,
+		modelRegistry: { getAvailable: () => models },
+		ui,
+	};
+}
 
 describe("setup model picker helpers", () => {
 	it("makes model identity, capabilities, and supported thinking searchable", () => {
@@ -66,40 +106,25 @@ describe("configured-agent flow", () => {
 		};
 		const screens: string[] = [];
 		let agentPickerVisits = 0;
-		const keybindings = {
-			matches(data: string, action: string) {
-				return (data === "enter" && action === "tui.select.confirm")
-					|| (data === "escape" && action === "tui.select.cancel");
-			},
-		};
-		const ctx: any = {
-			mode: "tui",
-			cwd: dir,
-			isProjectTrusted: () => true,
-			model,
-			modelRegistry: { getAvailable: () => [model] },
-			ui: {
-				notify: vi.fn(),
-				select: vi.fn(async (_title: string, options: string[]) =>
-					options.find((option) => option.startsWith("Configure an agent"))),
-				custom: (factory: any) => new Promise((resolve) => {
-					const component = factory(
-						{ requestRender: () => {} },
-						{ fg: (_color: string, text: string) => text, bold: (text: string) => text },
-						keybindings,
-						resolve,
-					);
-					const screen = component.render(160).join("\n");
-					screens.push(screen);
-					if (screen.includes("Configure which agent?")) {
-						agentPickerVisits += 1;
-						component.handleInput(agentPickerVisits === 1 ? "enter" : "escape");
-					} else {
-						component.handleInput("enter");
-					}
-				}),
-			},
-		};
+		let settingsMenuVisits = 0;
+		const ctx = setupContext(dir, {
+			notify: vi.fn(),
+			select: vi.fn(async (title: string, options: string[]) => {
+				if (title !== "pi-subagents settings") return undefined;
+				return settingsMenuVisits++ === 0
+					? options.find((option) => option.startsWith("Configure an agent"))
+					: undefined;
+			}),
+			custom: pickerDriver((component, screen) => {
+				screens.push(screen);
+				if (screen.includes("Configure which agent?")) {
+					agentPickerVisits += 1;
+					component.handleInput(agentPickerVisits === 1 ? "enter" : "escape");
+				} else {
+					component.handleInput("enter");
+				}
+			}),
+		}, [model], model);
 		try {
 			await runSetup(ctx, configPath);
 			const thinkingScreen = screens.find((screen) => screen.includes('Thinking for "explorer"?'));
@@ -139,54 +164,38 @@ describe("configured-agent flow", () => {
 		};
 		const screens: string[] = [];
 		let agentPickerVisits = 0;
-		const keybindings = {
-			matches(data: string, action: string) {
-				return (data === "enter" && action === "tui.select.confirm")
-					|| (data === "escape" && action === "tui.select.cancel")
-					|| (data === "down" && action === "tui.select.down");
-			},
-		};
-		const ctx: any = {
-			mode: "tui",
-			cwd: dir,
-			isProjectTrusted: () => true,
-			model: haiku,
-			modelRegistry: { getAvailable: () => [haiku, sonnet] },
-			ui: {
-				notify: vi.fn(),
-				select: vi.fn(async (_title: string, options: string[]) =>
-					options.find((option) => option.startsWith("Configure an agent"))),
-				custom: (factory: any) => new Promise((resolve) => {
-					const component = factory(
-						{ requestRender: () => {} },
-						{ fg: (_color: string, text: string) => text, bold: (text: string) => text },
-						keybindings,
-						resolve,
-					);
-					const screen = component.render(160).join("\n");
-					screens.push(screen);
-					if (screen.includes("Configure which agent?")) {
-						agentPickerVisits += 1;
-						if (agentPickerVisits === 1) component.handleInput("enter");
-						else if (agentPickerVisits === 2) {
-							component.handleInput("down");
-							component.handleInput("enter");
-						} else {
-							component.handleInput("escape");
-						}
-					} else if (screen.includes('Model for "explorer"?')) {
-						component.handleInput("down");
-						component.handleInput("enter");
-					} else if (screen.includes('Model for "worker"?')) {
-						component.handleInput("down");
+		let settingsMenuVisits = 0;
+		const ctx = setupContext(dir, {
+			notify: vi.fn(),
+			select: vi.fn(async (title: string, options: string[]) => {
+				if (title !== "pi-subagents settings") return undefined;
+				return settingsMenuVisits++ === 0
+					? options.find((option) => option.startsWith("Configure an agent"))
+					: undefined;
+			}),
+			custom: pickerDriver((component, screen) => {
+				screens.push(screen);
+				if (screen.includes("Configure which agent?")) {
+					agentPickerVisits += 1;
+					if (agentPickerVisits === 1) component.handleInput("enter");
+					else if (agentPickerVisits === 2) {
 						component.handleInput("down");
 						component.handleInput("enter");
 					} else {
-						component.handleInput("enter");
+						component.handleInput("escape");
 					}
-				}),
-			},
-		};
+				} else if (screen.includes('Model for "explorer"?')) {
+					component.handleInput("down");
+					component.handleInput("enter");
+				} else if (screen.includes('Model for "worker"?')) {
+					component.handleInput("down");
+					component.handleInput("down");
+					component.handleInput("enter");
+				} else {
+					component.handleInput("enter");
+				}
+			}),
+		}, [haiku, sonnet], haiku);
 		try {
 			await runSetup(ctx, configPath);
 			expect(screens.filter((screen) => screen.includes("Configure which agent?")).length).toBe(3);
@@ -196,6 +205,191 @@ describe("configured-agent flow", () => {
 				explorer: "anthropic/haiku",
 				worker: "anthropic/sonnet",
 			});
+		} finally {
+			rmSync(dir, { recursive: true, force: true });
+		}
+	});
+});
+
+describe("setup back navigation", () => {
+	it("walks thinking → model → agent → settings on Esc without changing config", async () => {
+		const dir = mkdtempSync(join(tmpdir(), "pi-subagents-setup-back-stack-"));
+		const configPath = join(dir, "pi-subagents.json");
+		const original = existingConfig({
+			enabledAgents: ["explorer", "documenter"],
+			agentModels: { documenter: "deepseek/deepseek-v4-flash" },
+			agentThinkingLevels: { explorer: "high", documenter: "max" },
+		});
+		writeFileSync(configPath, JSON.stringify(original), "utf8");
+		const model = {
+			provider: "anthropic",
+			id: "reasoning",
+			name: "Reasoning",
+			input: ["text"],
+			reasoning: true,
+		};
+		const screens: string[] = [];
+		let settingsVisits = 0;
+		let agentVisits = 0;
+		let modelVisits = 0;
+		const notify = vi.fn();
+		const ctx = setupContext(dir, {
+			notify,
+			select: vi.fn(async (title: string, options: string[]) => {
+				if (title !== "pi-subagents settings") return undefined;
+				return settingsVisits++ === 0
+					? options.find((option) => option.startsWith("Configure an agent"))
+					: undefined;
+			}),
+			custom: pickerDriver((component, screen) => {
+				screens.push(screen);
+				if (screen.includes("Configure which agent?")) {
+					agentVisits += 1;
+					component.handleInput(agentVisits === 1 ? "enter" : "escape");
+				} else if (screen.includes('Model for "explorer"?')) {
+					modelVisits += 1;
+					component.handleInput(modelVisits === 1 ? "enter" : "escape");
+				} else {
+					component.handleInput("escape");
+				}
+			}),
+		}, [model], model);
+		try {
+			await runSetup(ctx, configPath);
+			expect(screens.map((screen) =>
+				screen.includes("Thinking for") ? "thinking"
+					: screen.includes("Model for") ? "model"
+						: "agent"
+			)).toEqual(["agent", "model", "thinking", "model", "agent"]);
+			expect(JSON.parse(readFileSync(configPath, "utf8"))).toEqual(original);
+			expect(notify).not.toHaveBeenCalled();
+		} finally {
+			rmSync(dir, { recursive: true, force: true });
+		}
+	});
+
+	it("returns an escaped enable picker to the settings menu", async () => {
+		const dir = mkdtempSync(join(tmpdir(), "pi-subagents-setup-enable-back-"));
+		const configPath = join(dir, "pi-subagents.json");
+		const original = existingConfig();
+		writeFileSync(configPath, JSON.stringify(original), "utf8");
+		const menuTitles: string[] = [];
+		let settingsVisits = 0;
+		const ctx = setupContext(dir, {
+			notify: vi.fn(),
+			select: vi.fn(async (title: string, options: string[]) => {
+				menuTitles.push(title);
+				return settingsVisits++ === 0
+					? options.find((option) => option.startsWith("Enable"))
+					: undefined;
+			}),
+			custom: pickerDriver((component) => component.handleInput("escape")),
+		});
+		try {
+			await runSetup(ctx, configPath);
+			expect(menuTitles).toEqual(["pi-subagents settings", "pi-subagents settings"]);
+			expect(JSON.parse(readFileSync(configPath, "utf8"))).toEqual(original);
+		} finally {
+			rmSync(dir, { recursive: true, force: true });
+		}
+	});
+
+	it("returns an escaped runtime value to Runtime settings, then settings", async () => {
+		const dir = mkdtempSync(join(tmpdir(), "pi-subagents-setup-runtime-back-"));
+		const configPath = join(dir, "pi-subagents.json");
+		const original = existingConfig({ maxConcurrency: 4 });
+		writeFileSync(configPath, JSON.stringify(original), "utf8");
+		const titles: string[] = [];
+		let settingsVisits = 0;
+		let runtimeVisits = 0;
+		const ctx = setupContext(dir, {
+			notify: vi.fn(),
+			select: vi.fn(async (title: string, options: string[]) => {
+				titles.push(title);
+				if (title === "pi-subagents settings") {
+					return settingsVisits++ === 0
+						? options.find((option) => option.startsWith("Runtime"))
+						: undefined;
+				}
+				if (title === "Runtime setting") {
+					return runtimeVisits++ === 0
+						? options.find((option) => option.startsWith("Max concurrency"))
+						: undefined;
+				}
+				return undefined;
+			}),
+			custom: vi.fn(),
+		});
+		try {
+			await runSetup(ctx, configPath);
+			expect(titles).toEqual([
+				"pi-subagents settings",
+				"Runtime setting",
+				"Max sub-agents running at once?",
+				"Runtime setting",
+				"pi-subagents settings",
+			]);
+			expect(JSON.parse(readFileSync(configPath, "utf8"))).toEqual(original);
+		} finally {
+			rmSync(dir, { recursive: true, force: true });
+		}
+	});
+
+	it("returns an escaped full re-setup pass to settings without saving", async () => {
+		const dir = mkdtempSync(join(tmpdir(), "pi-subagents-setup-full-back-"));
+		const configPath = join(dir, "pi-subagents.json");
+		const original = existingConfig({ maxConcurrency: 2 });
+		writeFileSync(configPath, JSON.stringify(original), "utf8");
+		let settingsVisits = 0;
+		const ctx = setupContext(dir, {
+			notify: vi.fn(),
+			select: vi.fn(async (title: string, options: string[]) => {
+				if (title !== "pi-subagents settings") return undefined;
+				return settingsVisits++ === 0
+					? options.find((option) => option.startsWith("Full"))
+					: undefined;
+			}),
+			custom: pickerDriver((component) => component.handleInput("escape")),
+		});
+		try {
+			await runSetup(ctx, configPath);
+			expect(settingsVisits).toBe(2);
+			expect(JSON.parse(readFileSync(configPath, "utf8"))).toEqual(original);
+		} finally {
+			rmSync(dir, { recursive: true, force: true });
+		}
+	});
+});
+
+describe("settings preservation", () => {
+	it("keeps unrelated agent model and thinking choices when saving a runtime setting", async () => {
+		const dir = mkdtempSync(join(tmpdir(), "pi-subagents-setup-preserve-agent-"));
+		const configPath = join(dir, "pi-subagents.json");
+		const original = existingConfig({
+			enabledAgents: ["explorer", "documenter"],
+			agentModels: { documenter: "deepseek/deepseek-v4-flash" },
+			agentThinkingLevels: { documenter: "max" },
+		});
+		writeFileSync(configPath, JSON.stringify(original), "utf8");
+		const ctx = setupContext(dir, {
+			notify: vi.fn(),
+			select: vi.fn(async (title: string, options: string[]) => {
+				if (title === "pi-subagents settings") {
+					return options.find((option) => option.startsWith("Runtime"));
+				}
+				if (title === "Runtime setting") {
+					return options.find((option) => option.startsWith("Max concurrency"));
+				}
+				return options.find((option) => option.startsWith("6"));
+			}),
+			custom: vi.fn(),
+		});
+		try {
+			await runSetup(ctx, configPath);
+			const saved = JSON.parse(readFileSync(configPath, "utf8"));
+			expect(saved.maxConcurrency).toBe(6);
+			expect(saved.agentModels.documenter).toBe("deepseek/deepseek-v4-flash");
+			expect(saved.agentThinkingLevels.documenter).toBe("max");
 		} finally {
 			rmSync(dir, { recursive: true, force: true });
 		}
@@ -218,39 +412,18 @@ describe("enable/disable flow", () => {
 			}),
 			"utf8",
 		);
-		const keybindings = {
-			matches(data: string, action: string) {
-				return (data === "enter" && action === "tui.select.confirm")
-					|| (data === "escape" && action === "tui.select.cancel")
-					|| (data === "down" && action === "tui.select.down");
-			},
-		};
-		const ctx: any = {
-			mode: "tui",
-			cwd: dir,
-			isProjectTrusted: () => true,
-			model: undefined,
-			modelRegistry: { getAvailable: () => [] },
-			ui: {
-				notify: vi.fn(),
-				select: vi.fn(async (_title: string, options: string[]) =>
-					options.find((option) => option.startsWith("Enable"))),
-				custom: (factory: any) => new Promise((resolve) => {
-					const component = factory(
-						{ requestRender: () => {} },
-						{ fg: (_color: string, text: string) => text, bold: (text: string) => text },
-						keybindings,
-						resolve,
-					);
-					component.render(160);
-					// Move to cleaner (third row) and toggle it on, then confirm.
-					component.handleInput("down");
-					component.handleInput("down");
-					component.handleInput(" ");
-					component.handleInput("enter");
-				}),
-			},
-		};
+		const ctx = setupContext(dir, {
+			notify: vi.fn(),
+			select: vi.fn(async (_title: string, options: string[]) =>
+				options.find((option) => option.startsWith("Enable"))),
+			custom: pickerDriver((component) => {
+				// Move to cleaner (third row) and toggle it on, then confirm.
+				component.handleInput("down");
+				component.handleInput("down");
+				component.handleInput(" ");
+				component.handleInput("enter");
+			}),
+		});
 		try {
 			await runSetup(ctx, configPath);
 			const saved = JSON.parse(readFileSync(configPath, "utf8"));
@@ -276,40 +449,19 @@ describe("enable/disable flow", () => {
 			}),
 			"utf8",
 		);
-		const keybindings = {
-			matches(data: string, action: string) {
-				return (data === "enter" && action === "tui.select.confirm")
-					|| (data === "escape" && action === "tui.select.cancel")
-					|| (data === "down" && action === "tui.select.down");
-			},
-		};
-		const ctx: any = {
-			mode: "tui",
-			cwd: dir,
-			isProjectTrusted: () => true,
-			model: undefined,
-			modelRegistry: { getAvailable: () => [] },
-			ui: {
-				notify: vi.fn(),
-				select: vi.fn(async (_title: string, options: string[]) =>
-					options.find((option) => option.startsWith("Enable"))),
-				custom: (factory: any) => new Promise((resolve) => {
-					const component = factory(
-						{ requestRender: () => {} },
-						{ fg: (_color: string, text: string) => text, bold: (text: string) => text },
-						keybindings,
-						resolve,
-					);
-					component.render(160);
-					// Documenter is the fourth built-in row.
-					component.handleInput("down");
-					component.handleInput("down");
-					component.handleInput("down");
-					component.handleInput(" ");
-					component.handleInput("enter");
-				}),
-			},
-		};
+		const ctx = setupContext(dir, {
+			notify: vi.fn(),
+			select: vi.fn(async (_title: string, options: string[]) =>
+				options.find((option) => option.startsWith("Enable"))),
+			custom: pickerDriver((component) => {
+				// Documenter is the fourth built-in row.
+				component.handleInput("down");
+				component.handleInput("down");
+				component.handleInput("down");
+				component.handleInput(" ");
+				component.handleInput("enter");
+			}),
+		});
 		try {
 			await runSetup(ctx, configPath);
 			const saved = JSON.parse(readFileSync(configPath, "utf8"));
@@ -327,32 +479,16 @@ describe("full setup flow", () => {
 		const dir = mkdtempSync(join(tmpdir(), "pi-subagents-setup-full-"));
 		const configPath = join(dir, "pi-subagents.json");
 		const screens: string[] = [];
-		const keybindings = {
-			matches(data: string, action: string) {
-				return data === "enter" && action === "tui.select.confirm";
-			},
-		};
 		const notify = vi.fn();
-		const ctx: any = {
-			mode: "tui",
-			model: undefined,
-			modelRegistry: { getAvailable: () => [] },
-			ui: {
-				notify,
-				select: vi.fn(async (_title: string, options: string[]) =>
-					options.find((option) => option.includes("(current)")) ?? options[0]),
-				custom: (factory: any) => new Promise((resolve) => {
-					const component = factory(
-						{ requestRender: () => {} },
-						{ fg: (_color: string, text: string) => text, bold: (text: string) => text },
-						keybindings,
-						resolve,
-					);
-					screens.push(component.render(160).join("\n"));
-					component.handleInput("enter");
-				}),
-			},
-		};
+		const ctx = setupContext(dir, {
+			notify,
+			select: vi.fn(async (_title: string, options: string[]) =>
+				options.find((option) => option.includes("(current)")) ?? options[0]),
+			custom: pickerDriver((component, screen) => {
+				screens.push(screen);
+				component.handleInput("enter");
+			}),
+		});
 		try {
 			await runSetup(ctx, configPath);
 			const config = JSON.parse(readFileSync(configPath, "utf8"));

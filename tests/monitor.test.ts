@@ -1,5 +1,5 @@
 import { visibleWidth } from "@earendil-works/pi-tui";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import {
 	MonitorStore,
 	extractKeyFragments,
@@ -69,6 +69,21 @@ describe("MonitorStore", () => {
 		expect(run.model).toBe("openai/gpt-x");
 		expect(run.usage.input).toBe(10);
 		expect(run.usage.cost).toBe(0.5);
+	});
+
+	it("marks stable workflow ownership without relabeling it as a child model stage", () => {
+		const store = new MonitorStore();
+		const id = store.addRun("worker", "Implement the change", "openai/gpt-worker", "max");
+		store.setUsage(id, { input: 10, output: 5, cacheRead: 0, cacheWrite: 0, cost: 0.5, contextTokens: 0, turns: 1 });
+		store.setManagedWorkflow(id, true);
+		const run = store.findRun(id)!;
+		expect(run.managedWorkflow).toBe(true);
+		expect(run.agent).toBe("worker");
+		expect(store.summarize(run)).toBe("worker workflow");
+
+		store.restartRun(id, "reviewer", "Resume review", "xai/grok-reviewer", "xhigh");
+		expect(run.managedWorkflow).toBeUndefined();
+		expect(store.summarize(run)).toContain("reviewer · xai/grok-reviewer · thinking xhigh");
 	});
 
 	it("setModel records the main handoff and failed selection", () => {
@@ -458,6 +473,46 @@ describe("status labels and timing", () => {
 		const run = store.getRuns()[0];
 		expect(run.endedAt).toBeTypeOf("number");
 		expect(formatElapsed(run)).toBe(formatDuration((run.endedAt as number) - (run.startedAt as number)));
+	});
+
+	it("accumulates active time across resume segments without counting parked gaps", () => {
+		const now = vi.spyOn(Date, "now").mockReturnValue(1_000);
+		try {
+			const store = new MonitorStore();
+			const id = store.addRun("worker", "Implement the change");
+			store.setStatus(id, "running");
+			now.mockReturnValue(4_000);
+			store.setStatus(id, "parked");
+			expect(store.getElapsedMs(id)).toBe(3_000);
+			expect(formatElapsed(store.findRun(id)!)).toBe("3s");
+
+			now.mockReturnValue(10_000);
+			store.restartRun(id, "worker", "Finish the change", undefined, undefined, "shared", {
+				elapsedMs: 3_000,
+				continuationKind: "resume-appended",
+			});
+			expect(formatElapsed(store.findRun(id)!)).toBe("3s");
+			expect(store.summarize(store.findRun(id)!)).toContain("resume: appended objective");
+			store.setStatus(id, "running");
+			now.mockReturnValue(12_000);
+			expect(store.getElapsedMs(id)).toBe(5_000);
+			store.setStatus(id, "done");
+			expect(formatElapsed(store.findRun(id)!)).toBe("5s");
+		} finally {
+			now.mockRestore();
+		}
+	});
+
+	it("restores cumulative time when a completed row is recreated for resume", () => {
+		const store = new MonitorStore();
+		const id = store.addRun("worker", "Initial objective");
+		store.removeRun(id);
+		store.restartRun(id, "worker", "Initial objective", undefined, undefined, "shared", {
+			elapsedMs: 42_000,
+			continuationKind: "resume-retained",
+		});
+		expect(formatElapsed(store.findRun(id)!)).toBe("42s");
+		expect(store.summarize(store.findRun(id)!)).toContain("resume: current objective");
 	});
 
 	it("summarize includes elapsed time once running", () => {

@@ -11,7 +11,7 @@
 
 import { isWriteCapableAgent, type AgentConfig } from "./agents.ts";
 import { getResultOutput, isFailedResult, reviewVerdict, type SingleResult } from "./spawn.ts";
-import { extractKeyFragments, formatUsageCompact, sumUsage } from "./monitor.ts";
+import { formatUsageCompact, sumUsage } from "./monitor.ts";
 import type { SubagentsConfig } from "./config.ts";
 
 /**
@@ -224,16 +224,6 @@ export interface ManagedWorkflowOutcome {
 	steps: ChainStep[];
 }
 
-/** Max distinguishing fragments kept in a one-line chain summary. */
-export const CHAIN_SUMMARY_FRAGMENTS_MAX = 3;
-
-/** The most telling fragments (paths, quoted phrases, symbols) of a run's final
- * output: for a worker these are the paths it changed, for a reviewer the
- * issues it found. Capped so summaries stay one line. */
-export function chainKeyFragments(result: SingleResult): string[] {
-	return extractKeyFragments(getResultOutput(result)).slice(0, CHAIN_SUMMARY_FRAGMENTS_MAX);
-}
-
 function workflowResultStatus(result: SingleResult): string {
 	if (isFailedResult(result)) return "failed";
 	if (result.agent === "reviewer") {
@@ -244,15 +234,8 @@ function workflowResultStatus(result: SingleResult): string {
 }
 
 function workflowStepLine(step: ChainStep): string {
-	const fragments = chainKeyFragments(step.result);
-	const writer = step.result.agent === "worker" || step.result.agent === "cleaner" || step.result.agent === "documenter";
-	const suffix = fragments.length > 0
-		? writer
-			? ` — changed: ${fragments.join(" · ")}`
-			: ` — ${fragments.join(" · ")}`
-		: "";
 	const id = step.runId !== undefined ? `#${step.runId} ` : "";
-	return `- ${id}${step.result.agent} · ${step.relation} · ${workflowResultStatus(step.result)}${suffix}`;
+	return `- ${id}${step.result.agent} · ${step.relation} · ${workflowResultStatus(step.result)}`;
 }
 
 function appendWorkflowFooter(lines: string[], steps: readonly ChainStep[]): void {
@@ -260,7 +243,13 @@ function appendWorkflowFooter(lines: string[], steps: readonly ChainStep[]): voi
 	const usage = formatUsageCompact(total);
 	lines.push("", `Totals: ${steps.length} run${steps.length === 1 ? "" : "s"}${usage ? ` · ${usage}` : ""}`);
 	const ids = steps.filter((step) => step.runId !== undefined).map((step) => `#${step.runId}`);
-	lines.push(`Full per-run reports (output, usage, failed tools): subagent_status ${ids.join(" ")}`);
+	lines.push(`Per-run details: subagent_status ${ids.join(" ")}`);
+}
+
+function formatWorkflowSummary(title: string, steps: readonly ChainStep[]): string {
+	const lines = [title, "", ...steps.map(workflowStepLine)];
+	appendWorkflowFooter(lines, steps);
+	return lines.join("\n");
 }
 
 /** Condensed compatibility summary for a direct REVIEW_FAIL auto-fix chain. */
@@ -269,13 +258,10 @@ export function formatChainSummary(
 	terminalResult: SingleResult = steps[steps.length - 1]!.result,
 ): string {
 	const rounds = steps.filter((step) => step.relation.startsWith("fix round")).length;
-	const lines = [
+	return formatWorkflowSummary(
 		`## Auto-fix chain: ${Math.max(1, rounds)} round${rounds === 1 ? "" : "s"} — final ${workflowResultStatus(terminalResult)}`,
-		"",
-		...steps.map(workflowStepLine),
-	];
-	appendWorkflowFooter(lines, steps);
-	return lines.join("\n");
+		steps,
+	);
 }
 
 /** One clear final delivery for all newly managed writer/documenter workflows. */
@@ -286,13 +272,10 @@ export function formatManagedWorkflowSummary(
 	const route = steps.map((step) => step.result.agent).join(" → ");
 	const fixRounds = steps.filter((step) => step.relation.startsWith("fix round")).length;
 	const roundNote = fixRounds > 0 ? ` · ${fixRounds} fix round${fixRounds === 1 ? "" : "s"}` : "";
-	const lines = [
+	return formatWorkflowSummary(
 		`## Managed workflow: ${route}${roundNote} — final ${workflowResultStatus(terminalResult)}`,
-		"",
-		...steps.map(workflowStepLine),
-	];
-	appendWorkflowFooter(lines, steps);
-	return lines.join("\n");
+		steps,
+	);
 }
 
 /** Build the first independent final gate after a top-level writer or required

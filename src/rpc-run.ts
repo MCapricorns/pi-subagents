@@ -14,7 +14,7 @@ import { tmpdir } from "node:os";
 import { basename, join } from "node:path";
 import { StringDecoder } from "node:string_decoder";
 import type { Message } from "@earendil-works/pi-ai";
-import type { AgentConfig } from "./agents.ts";
+import { SUBAGENT_TOOL_NAMES, type AgentConfig } from "./agents.ts";
 import type { ThinkingLevel } from "./config.ts";
 import type { IsolationMode, WorktreeFinalizationStatus } from "./worktree.ts";
 
@@ -469,7 +469,7 @@ export interface RunRpcAttemptOptions {
 /** Run one persistent RPC child until a stable `agent_settled` or control action. */
 export async function runRpcAgentAttempt(options: RunRpcAttemptOptions): Promise<RpcSingleResult> {
 	const { agent, agentName, task, thinkingLevel, idleTimeoutMs, signal, onLive, control } = options;
-	const args: string[] = ["--mode", "rpc", "--exclude-tools", "subagent,subagent_control"];
+	const args: string[] = ["--mode", "rpc", "--exclude-tools", SUBAGENT_TOOL_NAMES.join(",")];
 	if (options.sessionDir && options.sessionId) {
 		args.push("--session-dir", options.sessionDir);
 		args.push(sessionExists(options.sessionDir, options.sessionId) ? "--session" : "--session-id", options.sessionId);
@@ -478,7 +478,10 @@ export async function runRpcAgentAttempt(options: RunRpcAttemptOptions): Promise
 	}
 	if (agent.model) args.push("--model", agent.model);
 	args.push("--thinking", thinkingLevel);
-	if (agent.tools && agent.tools.length > 0) args.push("--tools", agent.tools.join(","));
+	if (agent.tools) {
+		if (agent.tools.length > 0) args.push("--tools", agent.tools.join(","));
+		else args.push("--no-tools");
+	}
 
 	let tmpPromptDir: string | null = null;
 	let tmpPromptPath: string | null = null;

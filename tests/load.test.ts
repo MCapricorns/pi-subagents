@@ -8,35 +8,7 @@ import { monitor } from "../src/monitor.ts";
 import { persistRecoveryRecords } from "../src/recovery.ts";
 import * as spawn from "../src/spawn.ts";
 import { fakeRpcScript } from "./fake-rpc.ts";
-
-interface StubPi {
-	tools: any[];
-	commands: string[];
-	hooks: Record<string, (event: any, ctx: any) => any>;
-	messages: Array<{ message: any; options: any }>;
-	api: any;
-}
-
-function makeStub(): StubPi {
-	const stub: StubPi = {
-		tools: [],
-		commands: [],
-		hooks: {},
-		messages: [],
-		api: null,
-	};
-	stub.api = {
-		registerTool: (tool: any) => stub.tools.push(tool),
-		registerMessageRenderer: (_type: string, _renderer: any) => {},
-		registerCommand: (name: string) => stub.commands.push(name),
-		registerShortcut: (_key: string, _opts: any) => {},
-		sendMessage: (message: any, options: any) => stub.messages.push({ message, options }),
-		on: (event: string, handler: any) => {
-			stub.hooks[event] = handler;
-		},
-	};
-	return stub;
-}
+import { makeStub } from "./test-helpers.ts";
 
 function executionContext(overrides: { uiNotify?: ReturnType<typeof vi.fn> } = {}): any {
 	return {
@@ -1140,13 +1112,172 @@ send({ type: "message_end", message: { role: "assistant", content: [{ type: "tex
 });
 
 describe("managed post-writer workflows", () => {
-	const makeResult = (agent: string, task: string, text: string): any => ({
+	const makeResult = (agent: string, task: string, text: string, overrides: Record<string, unknown> = {}): any => ({
 		agent,
 		task,
 		exitCode: 0,
 		messages: [{ role: "assistant", content: [{ type: "text", text }], stopReason: "stop" }],
 		stderr: "",
 		usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, cost: 0, contextTokens: 0, turns: 1 },
+		...overrides,
+	});
+
+	it("re-reads parent shells and active plugins for every managed stage", async () => {
+		configureEnabledAgents(["worker", "documenter", "reviewer"], { maxFixRounds: 1 });
+		const stub = makeStub();
+		stub.activeTools = ["read", "powershell", "edit", "write", "custom_extension"];
+		let queued!: BackgroundTask;
+		const controller = new AbortController();
+		vi.spyOn(BackgroundTaskQueue.prototype, "enqueue").mockImplementation((task) => {
+			queued = task;
+			return controller;
+		});
+		let reviewerCalls = 0;
+		const run = vi.spyOn(spawn, "runSingleAgentWithMainFallback").mockImplementation(async (options: any) => {
+			if (options.agentName === "reviewer") {
+				reviewerCalls++;
+				if (reviewerCalls === 1) {
+					stub.activeTools = ["read", "bash", "edit", "write", "custom_extension"];
+					return makeResult("reviewer", options.task, "OPEN FINDING\nVERDICT: REVIEW_FAIL");
+				}
+				return makeResult("reviewer", options.task, "RESOLVED\nVERDICT: REVIEW_PASS");
+			}
+			if (options.agentName === "worker") {
+				stub.activeTools = ["read", "powershell", "edit", "write", "custom_extension"];
+				return makeResult("worker", options.task, "fixed");
+			}
+			stub.activeTools = ["read", "bash", "powershell", "edit", "write", "custom_extension"];
+			return makeResult("documenter", options.task, "docs synchronized");
+		});
+
+		try {
+			register(stub.api);
+			const tool = stub.tools.find((candidate) => candidate.name === "subagent");
+			await tool.execute(
+				"adaptive-tools-chain",
+				{ agent: "reviewer", task: "Gate adaptive tools" },
+				new AbortController().signal,
+				() => {},
+				executionContext(),
+			);
+			await queued(controller.signal);
+
+			const calls = run.mock.calls.map(([options]) => options);
+			expect(calls.map((options) => options.agentName)).toEqual([
+				"reviewer", "worker", "documenter", "reviewer",
+			]);
+			expect(calls[0].agent.tools).toEqual([
+				"read", "grep", "find", "ls", "powershell", "custom_extension",
+			]);
+			expect(calls[1].agent.tools).toEqual([
+				"read", "bash", "edit", "write", "custom_extension",
+			]);
+			expect(calls[2].agent.tools).toEqual([
+				"read", "grep", "find", "ls", "powershell", "edit", "write", "custom_extension",
+			]);
+			expect(calls[3].agent.tools).toEqual([
+				"read", "grep", "find", "ls", "bash", "powershell", "custom_extension",
+			]);
+		} finally {
+			controller.abort();
+			await stub.hooks["session_shutdown"]?.({}, {});
+		}
+	});
+
+	it("keeps parent and active-stage widget telemetry attributed to their actual roles", async () => {
+		configureEnabledAgents(["worker", "documenter", "reviewer"]);
+		const stub = makeStub();
+		let queued!: BackgroundTask;
+		const controller = new AbortController();
+		vi.spyOn(BackgroundTaskQueue.prototype, "enqueue").mockImplementation((task) => {
+			queued = task;
+			return controller;
+		});
+		const workerUsage = { input: 100, output: 10, cacheRead: 0, cacheWrite: 0, cost: 1, contextTokens: 0, turns: 1 };
+		const documenterUsage = { input: 20, output: 2, cacheRead: 0, cacheWrite: 0, cost: 0.01, contextTokens: 0, turns: 1 };
+		const reviewerUsage = { input: 30, output: 3, cacheRead: 0, cacheWrite: 0, cost: 0.2, contextTokens: 0, turns: 1 };
+		let reviewerStarted!: () => void;
+		const atReviewer = new Promise<void>((resolve) => {
+			reviewerStarted = resolve;
+		});
+		let releaseReviewer!: () => void;
+		const reviewerRelease = new Promise<void>((resolve) => {
+			releaseReviewer = resolve;
+		});
+		vi.spyOn(spawn, "runSingleAgentWithMainFallback").mockImplementation(async (options: any) => {
+			const publish = (model: string, thinking: string, usage: typeof workerUsage): void => {
+				options.onLive?.({ kind: "status", status: "running" });
+				options.onLive?.({ kind: "model", model, thinking });
+				options.onLive?.({ kind: "usage", usage, model });
+			};
+			if (options.agentName === "worker") {
+				publish("openai/gpt-worker", "max", workerUsage);
+				return makeResult("worker", options.task, "implemented", {
+					model: "openai/gpt-worker",
+					thinking: "max",
+					usage: workerUsage,
+				});
+			}
+			if (options.agentName === "documenter") {
+				publish("deepseek/ds-doc", "low", documenterUsage);
+				return makeResult("documenter", options.task, "docs synchronized", {
+					model: "deepseek/ds-doc",
+					thinking: "low",
+					usage: documenterUsage,
+				});
+			}
+			publish("xai/grok-reviewer", "xhigh", reviewerUsage);
+			reviewerStarted();
+			await reviewerRelease;
+			return makeResult("reviewer", options.task, "VERDICT: REVIEW_PASS", {
+				model: "xai/grok-reviewer",
+				thinking: "xhigh",
+				usage: reviewerUsage,
+			});
+		});
+
+		try {
+			register(stub.api);
+			const tool = stub.tools.find((candidate) => candidate.name === "subagent");
+			const dispatched = await tool.execute(
+				"widget-attribution",
+				{ agent: "worker", task: "Implement widget attribution" },
+				new AbortController().signal,
+				() => {},
+				executionContext(),
+			);
+			const parentRunId = dispatched.details.results[0].runId as number;
+			const workflow = queued(controller.signal);
+			await atReviewer;
+
+			const parent = monitor.findRun(parentRunId)!;
+			const reviewer = monitor.getRuns().find((run) => run.parentRunId === parentRunId)!;
+			expect(parent).toMatchObject({
+				agent: "worker",
+				managedWorkflow: true,
+				model: "openai/gpt-worker",
+				thinking: "max",
+				usage: workerUsage,
+			});
+			expect(reviewer).toMatchObject({
+				agent: "reviewer",
+				model: "xai/grok-reviewer",
+				thinking: "xhigh",
+				usage: reviewerUsage,
+				relationLabel: "final review",
+			});
+			expect(monitor.getRuns()).not.toContainEqual(expect.objectContaining({
+				agent: "documenter",
+				model: "openai/gpt-worker",
+			}));
+
+			releaseReviewer();
+			await workflow;
+		} finally {
+			releaseReviewer();
+			controller.abort();
+			await stub.hooks["session_shutdown"]?.({}, {});
+		}
 	});
 
 	it.each([

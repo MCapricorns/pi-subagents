@@ -25,7 +25,7 @@ Make the change. Preserve the user's work; limit edits to the request plus requi
 Run the project's format/build/tests when they exist (e.g. `tsc --noEmit`, the test runner). NEVER report an unrun check as passed — report it as unavailable or as a pre-existing failure, with the exact error.
 
 ### Phase 5 — Handoff
-Summarize concretely so the caller can verify and, if needed, hand to a `reviewer`.
+Return only the concrete outcome so the caller can verify it and, if needed, hand it to a `reviewer`. Do not repeat the task brief, plan, root-cause investigation, or tool chronology. Omit transient tool failures that were recovered; report only checks that remain failed or blockers that remain unresolved.
 
 ## Release boundary
 Never commit, push, publish, tag, release, or bump a package version. The parent workflow owns documentation synchronization, the final independent review, and every release action—even when repository instructions normally automate release after green checks.
@@ -43,8 +43,10 @@ What was done, in a few lines.
 - `path/to/file.ts` — what changed.
 ## Verification
 Which checks you ACTUALLY ran and their result (e.g. `tsc --noEmit` clean; `vitest` 12 passed). State explicitly anything you could not run and why.
-## Notes (if any)
-Follow-ups, decisions made, blockers. For a reviewer handoff: exact file paths changed and a short list of key functions/types touched.
+## Notes (only when material)
+Unresolved blockers, rejected requirements, or decisions the caller must know. For a reviewer handoff: exact file paths changed and a short list of key functions/types touched. Omit the section when there is nothing actionable to add.
+
+Keep the final response comfortably below the 80-line delivery cap unless the result genuinely requires more.
 
 ## Quality standards
 Root-cause fixes over patches. No unrelated churn. Honest verification — an unrun check is never a passed check.

@@ -63,7 +63,7 @@ const MODULE_HINTS: Record<string, string> = {
 	explorer: "read-only codebase recon (fast model)",
 	worker: "implement / fix / refactor / test (full tools)",
 	cleaner: "apply proven cleanup and deduplicate code (full tools)",
-	documenter: "sync diff or whole-codebase comments/docs (full tools)",
+	documenter: "sync diff or whole-codebase comments/docs (docs write)",
 	reviewer: "read-only audits and pre-commit gates",
 };
 
@@ -89,7 +89,7 @@ async function pickEnabledAgents(
 	return promptSelectMany(
 		ctx,
 		"Enable which sub-agents?",
-		"Space toggles • Enter confirms • Esc cancels",
+		"Space toggles • Enter confirms • Esc returns to settings",
 		items,
 		current,
 	);
@@ -120,7 +120,7 @@ async function pickAgentModel(
 	ctx: ExtensionCommandContext,
 	agentName: string,
 	currentRef: string | undefined,
-	escNote = "cancels setup",
+	escNote = "cancels this setup pass",
 ): Promise<string | undefined> {
 	return pickConfiguredModel(ctx, `Model for "${agentName}"?`, currentRef, escNote);
 }
@@ -151,7 +151,7 @@ async function pickAgentStrength(
 	model: Model<Api> | undefined,
 	current: ThinkingLevel | undefined,
 	agentDefault: ThinkingLevel,
-	escNote = "cancels setup",
+	escNote = "cancels this setup pass",
 ): Promise<ThinkingLevel | typeof AUTO_THINKING | undefined> {
 	const supported = supportedThinkingLevels(model);
 	const automatic = resolveThinkingLevel(model, agentDefault);
@@ -191,44 +191,48 @@ async function pickAgentToConfigure(
 	return promptSelectOne(
 		ctx,
 		"Configure which agent?",
-		"Type to filter • ↑/↓ • Enter selects • Esc ends this pass",
+		"Type to filter • ↑/↓ • Enter selects • Esc returns to settings",
 		enabledAgents.map((name) => ({ value: name, label: moduleLabel(name) })),
 	);
 }
 
-/** One agent: model, then thinking if the model exposes a choice. Esc at any
- * step ends the caller's pass; earlier agents in that pass stay applied. */
+interface ConfiguredAgentChoice {
+	name: string;
+	model: string;
+	strength: ThinkingLevel | typeof AUTO_THINKING;
+}
+
+/** Configure one agent while preserving the UI back stack: thinking → model →
+ * agent selection. Esc from agent selection ends this configuration pass. */
 async function configureOneAgent(
 	ctx: ExtensionCommandContext,
 	config: SubagentsConfig,
-): Promise<
-	| {
-			name: string;
-			model: string;
-			strength: ThinkingLevel | typeof AUTO_THINKING;
-	  }
-	| undefined
-> {
-	const name = await pickAgentToConfigure(ctx, config.enabledAgents);
-	if (name === undefined) return undefined;
-	const modelChoice = await pickAgentModel(
-		ctx,
-		name,
-		config.agentModels[name],
-		"stops — earlier agent changes are kept",
-	);
-	if (modelChoice === undefined) return undefined;
-	const model = effectiveModelForChoice(ctx, modelChoice);
-	const strength = await pickAgentStrength(
-		ctx,
-		name,
-		model,
-		config.agentThinkingLevels[name],
-		actualAgentThinkingDefault(ctx, config, name),
-		"stops — earlier agent changes are kept",
-	);
-	if (strength === undefined) return undefined;
-	return { name, model: modelChoice, strength };
+): Promise<ConfiguredAgentChoice | undefined> {
+	while (true) {
+		const name = await pickAgentToConfigure(ctx, config.enabledAgents);
+		if (name === undefined) return undefined;
+
+		while (true) {
+			const modelChoice = await pickAgentModel(
+				ctx,
+				name,
+				config.agentModels[name],
+				"returns to agent selection",
+			);
+			if (modelChoice === undefined) break;
+			const model = effectiveModelForChoice(ctx, modelChoice);
+			const strength = await pickAgentStrength(
+				ctx,
+				name,
+				model,
+				config.agentThinkingLevels[name],
+				actualAgentThinkingDefault(ctx, config, name),
+				"returns to model selection",
+			);
+			if (strength === undefined) continue;
+			return { name, model: modelChoice, strength };
+		}
+	}
 }
 
 async function pickInjection(ctx: ExtensionCommandContext, current: boolean): Promise<boolean | undefined> {
@@ -280,21 +284,21 @@ function keepAgentEntries<T>(record: Record<string, T>, enabled: readonly string
 	return Object.fromEntries(Object.entries(record).filter(([name]) => keep.has(name)));
 }
 
-async function runFullSetup(ctx: ExtensionCommandContext, configPath: string, base: SubagentsConfig): Promise<void> {
+async function runFullSetup(ctx: ExtensionCommandContext, configPath: string, base: SubagentsConfig): Promise<boolean> {
 	const enabled = await pickEnabledAgents(ctx, base.enabledAgents);
-	if (enabled === undefined) return notifyCancelled(ctx);
+	if (enabled === undefined) return false;
 
 	let agentModels = keepAgentEntries(base.agentModels, enabled);
 	for (const agentName of enabled) {
 		const choice = await pickAgentModel(ctx, agentName, agentModels[agentName]);
-		if (choice === undefined) return notifyCancelled(ctx);
+		if (choice === undefined) return false;
 		agentModels = applyAgentModelChoice(agentModels, agentName, choice);
 	}
 
 	const injection = await pickInjection(ctx, base.proactiveInjection);
-	if (injection === undefined) return notifyCancelled(ctx);
+	if (injection === undefined) return false;
 	const scope = await pickScope(ctx, base.agentScope);
-	if (scope === undefined) return notifyCancelled(ctx);
+	if (scope === undefined) return false;
 	const maxConcurrency = await pickCount(
 		ctx,
 		"Max sub-agents running at once?",
@@ -302,7 +306,7 @@ async function runFullSetup(ctx: ExtensionCommandContext, configPath: string, ba
 		base.maxConcurrency,
 		DEFAULT_MAX_CONCURRENCY,
 	);
-	if (maxConcurrency === undefined) return notifyCancelled(ctx);
+	if (maxConcurrency === undefined) return false;
 	const maxFixRounds = await pickCount(
 		ctx,
 		"Reviewer worker-fix rounds? (0 = no automatic fixes)",
@@ -310,7 +314,7 @@ async function runFullSetup(ctx: ExtensionCommandContext, configPath: string, ba
 		base.maxFixRounds,
 		DEFAULT_MAX_FIX_ROUNDS,
 	);
-	if (maxFixRounds === undefined) return notifyCancelled(ctx);
+	if (maxFixRounds === undefined) return false;
 	const idleTimeoutSec = await pickCount(
 		ctx,
 		"Idle timeout in seconds? (0 = disabled)",
@@ -318,7 +322,7 @@ async function runFullSetup(ctx: ExtensionCommandContext, configPath: string, ba
 		base.idleTimeoutSec,
 		DEFAULT_IDLE_TIMEOUT_SEC,
 	);
-	if (idleTimeoutSec === undefined) return notifyCancelled(ctx);
+	if (idleTimeoutSec === undefined) return false;
 
 	const next: SubagentsConfig = {
 		enabledAgents: enabled,
@@ -342,114 +346,123 @@ async function runFullSetup(ctx: ExtensionCommandContext, configPath: string, ba
 	};
 	await saveConfig(next, configPath);
 	ctx.ui.notify(`pi-subagents configured with Auto thinking. Saved to ${configPath}`, "info");
+	return true;
 }
 
 async function updateRuntimeSetting(
 	ctx: ExtensionCommandContext,
 	config: SubagentsConfig,
 ): Promise<SubagentsConfig | undefined> {
-	const choice = await ctx.ui.select("Runtime setting", [
-		"Proactive injection",
-		"Agent scope",
-		"Max concurrency",
-		"Reviewer worker-fix rounds",
-		"Idle timeout",
-	]);
-	if (choice === undefined) return undefined;
-	const next = { ...config };
-	if (choice.startsWith("Proactive")) {
-		const value = await pickInjection(ctx, config.proactiveInjection);
-		if (value === undefined) return undefined;
-		next.proactiveInjection = value;
-	} else if (choice.startsWith("Agent scope")) {
-		const value = await pickScope(ctx, config.agentScope);
-		if (value === undefined) return undefined;
-		next.agentScope = value;
-	} else if (choice.startsWith("Max concurrency")) {
-		const value = await pickCount(ctx, "Max sub-agents running at once?", CONCURRENCY_STEPS, config.maxConcurrency, DEFAULT_MAX_CONCURRENCY);
-		if (value === undefined) return undefined;
-		next.maxConcurrency = value;
-	} else if (choice.startsWith("Reviewer")) {
-		const value = await pickCount(ctx, "Reviewer worker-fix rounds?", FIX_ROUNDS_STEPS, config.maxFixRounds, DEFAULT_MAX_FIX_ROUNDS);
-		if (value === undefined) return undefined;
-		next.maxFixRounds = value;
-	} else {
-		const value = await pickCount(ctx, "Idle timeout in seconds?", IDLE_TIMEOUT_STEPS, config.idleTimeoutSec, DEFAULT_IDLE_TIMEOUT_SEC);
-		if (value === undefined) return undefined;
-		next.idleTimeoutSec = value;
+	while (true) {
+		const choice = await ctx.ui.select("Runtime setting", [
+			"Proactive injection",
+			"Agent scope",
+			"Max concurrency",
+			"Reviewer worker-fix rounds",
+			"Idle timeout",
+		]);
+		if (choice === undefined) return undefined;
+		const next = { ...config };
+		if (choice.startsWith("Proactive")) {
+			const value = await pickInjection(ctx, config.proactiveInjection);
+			if (value === undefined) continue;
+			next.proactiveInjection = value;
+		} else if (choice.startsWith("Agent scope")) {
+			const value = await pickScope(ctx, config.agentScope);
+			if (value === undefined) continue;
+			next.agentScope = value;
+		} else if (choice.startsWith("Max concurrency")) {
+			const value = await pickCount(ctx, "Max sub-agents running at once?", CONCURRENCY_STEPS, config.maxConcurrency, DEFAULT_MAX_CONCURRENCY);
+			if (value === undefined) continue;
+			next.maxConcurrency = value;
+		} else if (choice.startsWith("Reviewer")) {
+			const value = await pickCount(ctx, "Reviewer worker-fix rounds?", FIX_ROUNDS_STEPS, config.maxFixRounds, DEFAULT_MAX_FIX_ROUNDS);
+			if (value === undefined) continue;
+			next.maxFixRounds = value;
+		} else {
+			const value = await pickCount(ctx, "Idle timeout in seconds?", IDLE_TIMEOUT_STEPS, config.idleTimeoutSec, DEFAULT_IDLE_TIMEOUT_SEC);
+			if (value === undefined) continue;
+			next.idleTimeoutSec = value;
+		}
+		return next;
 	}
-	return next;
 }
 
 async function runMenu(ctx: ExtensionCommandContext, configPath: string, config: SubagentsConfig): Promise<void> {
-	const choice = await ctx.ui.select("pi-subagents settings", [
-		"Enable/disable agents",
-		"Configure an agent (model + thinking)",
-		"Runtime settings",
-		"Full re-setup",
-	]);
-	if (choice === undefined) return notifyCancelled(ctx);
-	if (choice.startsWith("Full")) return runFullSetup(ctx, configPath, config);
+	while (true) {
+		const choice = await ctx.ui.select("pi-subagents settings", [
+			"Enable/disable agents",
+			"Configure an agent (model + thinking)",
+			"Runtime settings",
+			"Full re-setup",
+		]);
+		if (choice === undefined) return;
+		if (choice.startsWith("Full")) {
+			if (await runFullSetup(ctx, configPath, config)) return;
+			continue;
+		}
 
-	let next: SubagentsConfig = {
-		...config,
-		agentModels: { ...config.agentModels },
-		agentThinkingLevels: { ...config.agentThinkingLevels },
-	};
-	if (choice.startsWith("Enable")) {
-		const enabled = await pickEnabledAgents(ctx, config.enabledAgents);
-		if (enabled === undefined) return notifyCancelled(ctx);
-		next.enabledAgents = enabled;
-		// Newly enabling cleaner inherits the reviewer's configured model and
-		// thinking level, so the file reflects what cleaner will actually run
-		// instead of silently falling back to the current main model.
-		if (!config.enabledAgents.includes("cleaner") && enabled.includes("cleaner")) {
-			if (!next.agentModels.cleaner && config.agentModels.reviewer) {
-				next.agentModels.cleaner = config.agentModels.reviewer;
+		let next: SubagentsConfig = {
+			...config,
+			agentModels: { ...config.agentModels },
+			agentThinkingLevels: { ...config.agentThinkingLevels },
+		};
+		if (choice.startsWith("Enable")) {
+			const enabled = await pickEnabledAgents(ctx, config.enabledAgents);
+			if (enabled === undefined) continue;
+			next.enabledAgents = enabled;
+			// Newly enabling cleaner inherits the reviewer's configured model and
+			// thinking level, so the file reflects what cleaner will actually run
+			// instead of silently falling back to the current main model.
+			if (!config.enabledAgents.includes("cleaner") && enabled.includes("cleaner")) {
+				if (!next.agentModels.cleaner && config.agentModels.reviewer) {
+					next.agentModels.cleaner = config.agentModels.reviewer;
+				}
+				if (!next.agentThinkingLevels.cleaner && config.agentThinkingLevels.reviewer) {
+					next.agentThinkingLevels.cleaner = config.agentThinkingLevels.reviewer;
+				}
 			}
-			if (!next.agentThinkingLevels.cleaner && config.agentThinkingLevels.reviewer) {
-				next.agentThinkingLevels.cleaner = config.agentThinkingLevels.reviewer;
+			// Documenter intentionally follows the faster explorer route. Fresh
+			// installs leave it unselected; enabling it later inherits any explorer
+			// overrides instead of silently choosing a stronger model.
+			if (!config.enabledAgents.includes("documenter") && enabled.includes("documenter")) {
+				if (!next.agentModels.documenter && config.agentModels.explorer) {
+					next.agentModels.documenter = config.agentModels.explorer;
+				}
+				if (!next.agentThinkingLevels.documenter && config.agentThinkingLevels.explorer) {
+					next.agentThinkingLevels.documenter = config.agentThinkingLevels.explorer;
+				}
 			}
+			next.agentModels = keepAgentEntries(next.agentModels, enabled);
+			next.agentThinkingLevels = keepAgentEntries(next.agentThinkingLevels, enabled);
+		} else if (choice.startsWith("Configure")) {
+			// Per-agent loop: thinking Esc returns to that agent's model picker;
+			// model Esc returns to the agent picker; agent-picker Esc saves completed
+			// choices and returns to this settings menu.
+			let configuredAny = false;
+			while (true) {
+				const picked = await configureOneAgent(ctx, next);
+				if (!picked) break;
+				configuredAny = true;
+				next.agentModels = applyAgentModelChoice(next.agentModels, picked.name, picked.model);
+				if (picked.strength === AUTO_THINKING) delete next.agentThinkingLevels[picked.name];
+				else next.agentThinkingLevels[picked.name] = picked.strength;
+			}
+			if (!configuredAny) continue;
+			await saveConfig(next, configPath);
+			ctx.ui.notify(`pi-subagents updated. Saved to ${configPath}`, "info");
+			config = next;
+			continue;
+		} else {
+			const updated = await updateRuntimeSetting(ctx, next);
+			if (updated === undefined) continue;
+			next = updated;
 		}
-		// Documenter intentionally follows the faster explorer route. Fresh
-		// installs leave it unselected; enabling it later inherits any explorer
-		// overrides instead of silently choosing a stronger model.
-		if (!config.enabledAgents.includes("documenter") && enabled.includes("documenter")) {
-			if (!next.agentModels.documenter && config.agentModels.explorer) {
-				next.agentModels.documenter = config.agentModels.explorer;
-			}
-			if (!next.agentThinkingLevels.documenter && config.agentThinkingLevels.explorer) {
-				next.agentThinkingLevels.documenter = config.agentThinkingLevels.explorer;
-			}
-		}
-		next.agentModels = keepAgentEntries(next.agentModels, enabled);
-		next.agentThinkingLevels = keepAgentEntries(next.agentThinkingLevels, enabled);
-	} else if (choice.startsWith("Configure")) {
-		// Per-agent loop: model (+ thinking when the model exposes a choice), then
-		// back to the agent picker so several agents can be set in one pass. Esc
-		// at any step ends the loop; agents already configured in this pass are kept.
-		let configuredAny = false;
-		while (true) {
-			const picked = await configureOneAgent(ctx, next);
-			if (picked === undefined) break;
-			configuredAny = true;
-			next.agentModels = applyAgentModelChoice(next.agentModels, picked.name, picked.model);
-			if (picked.strength === AUTO_THINKING) delete next.agentThinkingLevels[picked.name];
-			else next.agentThinkingLevels[picked.name] = picked.strength;
-		}
-		if (!configuredAny) return notifyCancelled(ctx);
-	} else {
-		const updated = await updateRuntimeSetting(ctx, next);
-		if (updated === undefined) return notifyCancelled(ctx);
-		next = updated;
+
+		await saveConfig(next, configPath);
+		ctx.ui.notify(`pi-subagents updated. Saved to ${configPath}`, "info");
+		return;
 	}
-
-	await saveConfig(next, configPath);
-	ctx.ui.notify(`pi-subagents updated. Saved to ${configPath}`, "info");
-}
-
-function notifyCancelled(ctx: ExtensionCommandContext): void {
-	ctx.ui.notify("pi-subagents setup cancelled.", "info");
 }
 
 /** Entry point for the /subagents-setup command. */
@@ -462,7 +475,9 @@ export async function runSetup(ctx: ExtensionCommandContext, configPath: string 
 		const exists = await configExists(configPath);
 		const config = await loadConfig(configPath);
 		if (exists) await runMenu(ctx, configPath, config);
-		else await runFullSetup(ctx, configPath, { ...DEFAULT_CONFIG, enabledAgents: [...DEFAULT_ENABLED_AGENTS] });
+		else if (!(await runFullSetup(ctx, configPath, { ...DEFAULT_CONFIG, enabledAgents: [...DEFAULT_ENABLED_AGENTS] }))) {
+			ctx.ui.notify("pi-subagents setup cancelled.", "info");
+		}
 	} catch (error) {
 		ctx.ui.notify(`pi-subagents setup failed: ${errorMessage(error)}`, "error");
 	}
