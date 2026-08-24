@@ -53,24 +53,59 @@ describe("buildDelegationDirective", () => {
 
 	it("routes only edit-authorized cleanup to cleaner and generic audits to reviewer", () => {
 		const directive = buildDelegationDirective([agent("cleaner"), agent("reviewer")]);
-		expect(directive).toContain("explicitly authorizes cleanup/removal/simplification edits");
-		expect(directive).toContain("applies every safe proven in-scope cut");
-		expect(directive).toContain("Generic or read-only audit, inspect, report, review, code-health, plan, proposed-solution");
+		expect(directive).toContain("user-authorized cleanup, removal, simplification, duplicate-code consolidation");
+		expect(directive).toContain("applies every safe proven in-scope cut without item-by-item approval");
+		expect(directive).toContain("Generic or read-only audit, review, code-health, plan");
 		expect(directive).toContain("goes to `reviewer`");
-		expect(directive).toContain("Advisory findings do not authorize follow-up edits");
+		expect(directive).toContain("does not authorize follow-up edits");
 		expect(directive).toContain("Never dispatch cleaner by PR count or as the pre-commit gate");
 		expect(directive).not.toContain("Audit mode");
 		expect(directive).not.toContain("Apply mode");
 	});
 
-	it("does not advertise cleaner routing when cleaner is disabled", () => {
+	it("states automatic diff sync and reserves direct documenter for explicit docs work", () => {
+		const directive = buildDelegationDirective([
+			agent("worker"),
+			agent("cleaner"),
+			agent("documenter"),
+			agent("reviewer"),
+		]);
+		expect(directive).toContain("explicit whole-codebase maintenance or standalone documentation work");
+		expect(directive).toContain("worker/cleaner runs already auto-sync the actual diff");
+		expect(directive).toContain("never dispatch a duplicate");
+		expect(directive).toContain("never runtime behavior, versions, release state");
+		expect(directive).toContain("documenter → reviewer");
+		expect(directive).toContain("direct REVIEW_PASS is preliminary");
+	});
+
+	it("advertises auto-fix only when worker exists and rounds are enabled", () => {
+		const roles = [agent("worker"), agent("documenter"), agent("reviewer")];
+		expect(buildDelegationDirective(roles, { maxFixRounds: 1 })).toContain(
+			"direct REVIEW_FAIL keeps auto-fix",
+		);
+		expect(buildDelegationDirective(roles, { maxFixRounds: 0 })).toContain(
+			"cannot start fixes while worker/fix rounds are disabled",
+		);
+		expect(buildDelegationDirective([agent("documenter"), agent("reviewer")])).toContain(
+			"cannot start fixes while worker/fix rounds are disabled",
+		);
+	});
+
+	it("does not advertise cleaner or documenter routing when each role is disabled", () => {
 		const directive = buildDelegationDirective([agent("explorer"), agent("worker"), agent("reviewer")]);
 		expect(directive).not.toContain("`cleaner`");
+		expect(directive).not.toContain("`documenter`");
 	});
 
 	it("preserves worktree constraints and selected-to-main continuation", () => {
-		const directive = buildDelegationDirective([agent("worker"), agent("cleaner"), agent("reviewer")]);
+		const directive = buildDelegationDirective([
+			agent("worker"),
+			agent("cleaner"),
+			agent("documenter"),
+			agent("reviewer"),
+		]);
 		expect(directive).toContain("parallel worker tasks default to detached Git worktrees");
+		expect(directive).toContain("documenter defaults to shared");
 		expect(directive).toContain("committed HEAD");
 		expect(directive).toContain("never falls back silently to shared");
 		expect(directive).toContain("continues the same retained session on the current main model");
@@ -89,7 +124,7 @@ describe("buildDelegationDirective", () => {
 		const withoutReviewer = buildDelegationDirective([agent("explorer"), agent("worker")]);
 		expect(withoutReviewer).not.toContain("multi-model cross-review");
 		const withReviewer = buildDelegationDirective([agent("worker"), agent("reviewer")]);
-		expect(withReviewer).toContain("fresh read-only `reviewer` gate");
+		expect(withReviewer).toContain("fresh read-only reviewer gate");
 		expect(withReviewer).toContain("multi-model cross-review");
 	});
 

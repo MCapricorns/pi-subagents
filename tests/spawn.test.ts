@@ -399,6 +399,29 @@ describe("isModelLevelFailure", () => {
 		).toBe(true);
 	});
 
+	it("is false for an idle timeout while prompt acceptance is ambiguous", () => {
+		expect(
+			isModelLevelFailure(result({
+				exitCode: 1,
+				stopReason: "error",
+				errorMessage: "Subagent idle timeout: no activity for 1 second.",
+				rpcPromptDispatched: true,
+			})),
+		).toBe(false);
+	});
+
+	it("treats an explicit prompt rejection as safe even after dispatch", () => {
+		expect(
+			isModelLevelFailure(result({
+				exitCode: 1,
+				stopReason: "error",
+				errorMessage: "model not found",
+				rpcPromptDispatched: true,
+				rpcPromptRejected: true,
+			})),
+		).toBe(true);
+	});
+
 	it("is false without any evidence of a model/provider error", () => {
 		expect(isModelLevelFailure(result({ exitCode: 1 }))).toBe(false);
 	});
@@ -508,6 +531,48 @@ describe("runSingleAgentWithMainFallback", () => {
 				{ kind: "model", model: "anthropic/main", thinking: "max", fallbackFrom: "openai-codex/gpt-5.6-sol" },
 			]);
 			expect(readFileSync(log, "utf8").split("\n").filter(Boolean)).toHaveLength(2);
+		} finally {
+			process.argv[1] = previousScript;
+			rmSync(dir, { recursive: true, force: true });
+		}
+	});
+
+	it("hands off after an explicit initial prompt rejection", async () => {
+		const dir = mkdtempSync(join(tmpdir(), "pi-subagents-prompt-reject-fallback-"));
+		const script = join(dir, "prompt-reject-child.mjs");
+		const log = join(dir, "attempts.log");
+		writeFileSync(
+			script,
+			fakeRpcScript({
+				setup: `const modelIndex = process.argv.indexOf("--model");
+const model = modelIndex === -1 ? "" : process.argv[modelIndex + 1];
+fs.appendFileSync(${JSON.stringify(log)}, model + "\\n");`,
+				onPromptPreflight: `if (model === "selected/model") {
+	respond(command, false, "model not found");
+	return;
+}
+respond(command);`,
+				onPrompt: `send({ type: "message_end", message: { role: "assistant", content: [{ type: "text", text: "main accepted" }], stopReason: "stop" } });`,
+			}),
+			"utf8",
+		);
+		const previousScript = process.argv[1];
+		process.argv[1] = script;
+		try {
+			const result = await runSingleAgentWithMainFallback(
+				{
+					defaultCwd: process.cwd(),
+					agent: { ...agent, model: "selected/model" },
+					agentName: agent.name,
+					task: "review",
+					makeDetails: (results) => ({ mode: "single", results }),
+				},
+				"main/model",
+			);
+			expect(result.exitCode).toBe(0);
+			expect(getFinalOutput(result.messages)).toBe("main accepted");
+			expect(result.modelFallbackFrom).toBe("selected/model");
+			expect(readFileSync(log, "utf8").trim().split("\n")).toEqual(["selected/model", "main/model"]);
 		} finally {
 			process.argv[1] = previousScript;
 			rmSync(dir, { recursive: true, force: true });
@@ -1206,6 +1271,51 @@ const count = fs.readFileSync(process.env.LOG_PATH, "utf8").split("\\n").filter(
 				expect(result.startupRetries).toBeUndefined();
 				expect(result.dispatchFailed).toBeUndefined();
 				expect(result.errorMessage).toContain("Timed out waiting for RPC response to prompt");
+				expect(isModelLevelFailure(result)).toBe(false);
+				expect(readFileSync(launchLog, "utf8").split("\n").filter(Boolean)).toHaveLength(1);
+				expect(readFileSync(workLog, "utf8").split("\n").filter(Boolean)).toHaveLength(1);
+			});
+		} finally {
+			rmSync(dir, { recursive: true, force: true });
+		}
+	});
+
+	it("does not hand off after idle timeout when a dispatched prompt's ACK is lost", async () => {
+		const dir = mkdtempSync(join(tmpdir(), "pi-subagents-startup-idle-ack-"));
+		const script = join(dir, "lost-prompt-ack-idle.cjs");
+		const launchLog = join(dir, "launches.log");
+		const workLog = join(dir, "work.log");
+		writeFileSync(
+			script,
+			fakeRpcScript({
+				setup: `fs.appendFileSync(process.env.LOG_PATH, "attempt\\n");`,
+				emitAgentStart: false,
+				autoSettle: false,
+				onPromptPreflight: "",
+				onPrompt: `fs.appendFileSync(process.env.WORK_LOG, "model call or edit started\\n");`,
+			}),
+			"utf8",
+		);
+		try {
+			await withArgv(script, async () => {
+				const result = await runSingleAgentWithMainFallback(
+					{
+						defaultCwd: process.cwd(),
+						agent: { ...agent, model: "selected/model" },
+						agentName: agent.name,
+						task: "perform one side effect before going idle",
+						idleTimeoutMs: 500,
+						rpcCommandTimeoutMs: 2_000,
+						env: { ...process.env, LOG_PATH: launchLog, WORK_LOG: workLog },
+						makeDetails: (results) => ({ mode: "single", results }),
+					},
+					"main/fallback",
+				);
+				expect(result.exitCode).toBe(1);
+				expect(result.errorMessage).toContain("idle timeout");
+				expect(result.rpcPromptDispatched).toBe(true);
+				expect(result.rpcPromptAccepted).toBeUndefined();
+				expect(result.modelFallbackFrom).toBeUndefined();
 				expect(isModelLevelFailure(result)).toBe(false);
 				expect(readFileSync(launchLog, "utf8").split("\n").filter(Boolean)).toHaveLength(1);
 				expect(readFileSync(workLog, "utf8").split("\n").filter(Boolean)).toHaveLength(1);

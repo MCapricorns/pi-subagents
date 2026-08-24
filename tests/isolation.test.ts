@@ -154,6 +154,10 @@ beforeEach(() => {
 	delete process.env.PI_SUBAGENT_DEPTH;
 	agentDir = mkdtempSync(join(tmpdir(), "pi-subagents-isolation-agent-"));
 	process.env.PI_CODING_AGENT_DIR = agentDir;
+	writeFileSync(join(agentDir, "pi-subagents.json"), JSON.stringify({
+		enabledAgents: ["explorer", "worker"],
+		announcedFeatures: ["cleanerDefaulted", "documenterDefaulted"],
+	}), "utf8");
 	activeStubs = [];
 });
 
@@ -346,10 +350,13 @@ describe("dispatch isolation selection", () => {
 		rmSync(nonGit, { recursive: true, force: true });
 	});
 
-	it("recognizes cleaner and custom write-capable agents but not explicit read-only agents", () => {
+	it("recognizes cleaner, documenter, and custom writers but not explicit read-only agents", () => {
 		const cleaner = loadBuiltinAgents().find((agent) => agent.name === "cleaner");
 		expect(cleaner?.tools).toBeUndefined();
 		expect(cleaner && isWorktreeCapableAgent(cleaner)).toBe(true);
+		const documenter = loadBuiltinAgents().find((agent) => agent.name === "documenter");
+		expect(documenter?.tools).toContain("edit");
+		expect(documenter && isWorktreeCapableAgent(documenter)).toBe(true);
 
 		const base = {
 			description: "test",
@@ -377,6 +384,10 @@ describe("dispatch isolation selection", () => {
 	});
 
 	it("rejects worktree isolation for explorer/reviewer before enqueue", async () => {
+		writeFileSync(join(agentDir, "pi-subagents.json"), JSON.stringify({
+			enabledAgents: ["explorer", "worker", "reviewer"],
+			announcedFeatures: ["cleanerDefaulted", "documenterDefaulted"],
+		}), "utf8");
 		const root = mkdtempSync(join(tmpdir(), "pi-subagents-isolation-reject-"));
 		const create = vi.spyOn(worktreeModule, "createWorktreeIsolation");
 		const enqueue = vi.spyOn(BackgroundTaskQueue.prototype, "enqueue");
@@ -580,6 +591,198 @@ describe("logical worktree reuse and guarded finalization", () => {
 		rmSync(root, { recursive: true, force: true });
 	});
 
+	it("runs documenter and reviewer inside the worktree before one final integration", async () => {
+		writeFileSync(join(agentDir, "pi-subagents.json"), JSON.stringify({
+			enabledAgents: ["worker", "documenter", "reviewer"],
+			maxFixRounds: 1,
+			announcedFeatures: ["cleanerDefaulted", "documenterDefaulted"],
+		}), "utf8");
+		const root = mkdtempSync(join(tmpdir(), "pi-subagents-isolation-managed-"));
+		const order: string[] = [];
+		const handle = fakeWorktree(root, { status: "integrated", integrated: true, hadChanges: true });
+		handle.finalizeMock.mockImplementation(async () => {
+			order.push("integrate");
+			return { status: "integrated", integrated: true, hadChanges: true };
+		});
+		vi.spyOn(worktreeModule, "createWorktreeIsolation").mockResolvedValue(handle);
+		let queued!: BackgroundTask;
+		const controller = new AbortController();
+		vi.spyOn(BackgroundTaskQueue.prototype, "enqueue").mockImplementation((task) => {
+			queued = task;
+			return controller;
+		});
+		const result = (agent: string, task: string, text: string): any => ({
+			agent,
+			task,
+			exitCode: 0,
+			messages: [{ role: "assistant", content: [{ type: "text", text }], stopReason: "stop" }],
+			stderr: "",
+			usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, cost: 0, contextTokens: 0, turns: 1 },
+		});
+		const run = vi.spyOn(spawnModule, "runSingleAgentWithMainFallback").mockImplementation(async (options: any) => {
+			order.push(options.agentName);
+			expect(options.cwd).toBe(handle.cwd);
+			expect(handle.finalizeMock).not.toHaveBeenCalled();
+			if (options.agentName === "worker") return result("worker", options.task, "worker report src/a.ts");
+			if (options.agentName === "documenter") {
+				expect(options.agent.systemPrompt).toContain("temporary detached Git worktree");
+				return result("documenter", options.task, "docs report README.md");
+			}
+			return result("reviewer", options.task, "APPROVE\nVERDICT: REVIEW_PASS");
+		});
+		const { stub, subagent, status } = registered();
+		const dispatched = await execute(subagent, {
+			agent: "worker",
+			task: "managed isolated writer",
+			isolation: "worktree",
+		}, root);
+		const parentRunId = dispatched.details.results[0].runId;
+		await queued(controller.signal);
+
+		expect(run.mock.calls.map(([options]) => options.agentName)).toEqual(["worker", "documenter", "reviewer"]);
+		expect(order).toEqual(["worker", "documenter", "reviewer", "integrate"]);
+		expect(handle.finalizeMock).toHaveBeenCalledTimes(1);
+		expect(stub.messages).toHaveLength(1);
+		expect(stub.messages[0].message.content).toContain("## Managed workflow:");
+		const full = await execute(status, { id: String(parentRunId) }, root);
+		expect(full.content[0].text).toContain("worktree · changes integrated");
+		rmSync(root, { recursive: true, force: true });
+	});
+
+	it("runs isolated workflow stages in parallel but waits to integrate behind the shared repository lane", async () => {
+		writeFileSync(join(agentDir, "pi-subagents.json"), JSON.stringify({
+			enabledAgents: ["worker", "reviewer"],
+			maxFixRounds: 0,
+			announcedFeatures: ["cleanerDefaulted", "documenterDefaulted"],
+		}), "utf8");
+		const root = mkdtempSync(join(tmpdir(), "pi-subagents-isolation-managed-lane-"));
+		const order: string[] = [];
+		const handle = fakeWorktree(root, { status: "integrated", integrated: true, hadChanges: true });
+		handle.finalizeMock.mockImplementation(async () => {
+			order.push("integrate isolated");
+			return { status: "integrated", integrated: true, hadChanges: true };
+		});
+		vi.spyOn(worktreeModule, "createWorktreeIsolation").mockResolvedValue(handle);
+		const queued: Array<{ task: BackgroundTask; controller: AbortController }> = [];
+		vi.spyOn(BackgroundTaskQueue.prototype, "enqueue").mockImplementation((task) => {
+			const controller = new AbortController();
+			queued.push({ task, controller });
+			return controller;
+		});
+		let releaseSharedReviewer!: () => void;
+		const sharedReviewerGate = new Promise<void>((resolveSharedReviewer) => {
+			releaseSharedReviewer = resolveSharedReviewer;
+		});
+		const result = (agent: string, task: string, text: string): any => ({
+			agent,
+			task,
+			exitCode: 0,
+			messages: [{ role: "assistant", content: [{ type: "text", text }], stopReason: "stop" }],
+			stderr: "",
+			usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, cost: 0, contextTokens: 0, turns: 1 },
+		});
+		vi.spyOn(spawnModule, "runSingleAgentWithMainFallback").mockImplementation(async (options: any) => {
+			if (options.task === "Hold shared repository lane") {
+				order.push("shared reviewer start");
+				await sharedReviewerGate;
+				order.push("shared reviewer end");
+				return result("reviewer", options.task, "advisory only");
+			}
+			if (options.agentName === "worker") {
+				order.push("isolated worker");
+				return result("worker", options.task, "isolated worker report");
+			}
+			order.push("isolated reviewer");
+			return result("reviewer", options.task, "VERDICT: REVIEW_PASS");
+		});
+
+		const { subagent } = registered();
+		try {
+			await execute(subagent, { agent: "reviewer", task: "Hold shared repository lane" }, root);
+			await execute(subagent, {
+				agent: "worker",
+				task: "Run isolated managed workflow",
+				isolation: "worktree",
+			}, root);
+			expect(queued).toHaveLength(2);
+			const sharedRun = queued[0]!.task(queued[0]!.controller.signal);
+			await waitFor(() => order.includes("shared reviewer start"));
+			let isolatedSettled = false;
+			const isolatedRun = queued[1]!.task(queued[1]!.controller.signal).then(() => {
+				isolatedSettled = true;
+			});
+			await waitFor(() => order.includes("isolated reviewer"));
+			await new Promise((resolveDelay) => setTimeout(resolveDelay, 30));
+
+			// Model work is not serialized behind the shared reader, but applying its
+			// completed worktree must wait for that reader's stable-diff lane.
+			expect(order).toEqual([
+				"shared reviewer start",
+				"isolated worker",
+				"isolated reviewer",
+			]);
+			expect(handle.finalizeMock).not.toHaveBeenCalled();
+			expect(isolatedSettled).toBe(false);
+
+			releaseSharedReviewer();
+			await Promise.all([sharedRun, isolatedRun]);
+			expect(order).toEqual([
+				"shared reviewer start",
+				"isolated worker",
+				"isolated reviewer",
+				"shared reviewer end",
+				"integrate isolated",
+			]);
+			expect(handle.finalizeMock).toHaveBeenCalledTimes(1);
+		} finally {
+			releaseSharedReviewer();
+			for (const item of queued) item.controller.abort();
+			rmSync(root, { recursive: true, force: true });
+		}
+	});
+
+	it("aborts a documenter on shutdown without stale delivery and finalizes once", async () => {
+		writeFileSync(join(agentDir, "pi-subagents.json"), JSON.stringify({
+			enabledAgents: ["worker", "documenter", "reviewer"],
+			announcedFeatures: ["cleanerDefaulted", "documenterDefaulted"],
+		}), "utf8");
+		const root = mkdtempSync(join(tmpdir(), "pi-subagents-isolation-doc-shutdown-"));
+		const handle = fakeWorktree(root);
+		vi.spyOn(worktreeModule, "createWorktreeIsolation").mockResolvedValue(handle);
+		const result = (agent: string, task: string, text: string, extra: Record<string, unknown> = {}): any => ({
+			agent,
+			task,
+			exitCode: 0,
+			messages: [{ role: "assistant", content: [{ type: "text", text }], stopReason: "stop" }],
+			stderr: "",
+			usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, cost: 0, contextTokens: 0, turns: 1 },
+			...extra,
+		});
+		let documenterStarted = false;
+		vi.spyOn(spawnModule, "runSingleAgentWithMainFallback").mockImplementation(async (options: any) => {
+			if (options.agentName === "worker") return result("worker", options.task, "OLD WRITER REPORT");
+			documenterStarted = true;
+			await new Promise<void>((resolveAborted) => {
+				if (options.signal.aborted) resolveAborted();
+				else options.signal.addEventListener("abort", () => resolveAborted(), { once: true });
+			});
+			return result("documenter", options.task, "NEWEST DOC PARTIAL", {
+				exitCode: 1,
+				stopReason: "aborted",
+				errorMessage: "Parent session shut down",
+			});
+		});
+		const { stub, subagent } = registered();
+		await execute(subagent, { agent: "worker", task: "shutdown in docs", isolation: "worktree" }, root);
+		await waitFor(() => documenterStarted);
+		await stub.hooks["session_shutdown"]?.({}, {});
+		activeStubs = activeStubs.filter((candidate) => candidate !== stub);
+
+		expect(stub.messages).toHaveLength(0);
+		expect(handle.finalizeMock).toHaveBeenCalledTimes(1);
+		rmSync(root, { recursive: true, force: true });
+	});
+
 	it("ignores a stale generation and finalizes the shared handle exactly once", async () => {
 		const root = mkdtempSync(join(tmpdir(), "pi-subagents-isolation-stale-"));
 		const handle = fakeWorktree(root);
@@ -713,6 +916,84 @@ describe("logical worktree reuse and guarded finalization", () => {
 });
 
 describe("shutdown and destructive-stop integration", () => {
+	it("interrupts every stop-all lane holder before finalizing a parked isolated thread", async () => {
+		writeFileSync(join(agentDir, "pi-subagents.json"), JSON.stringify({
+			enabledAgents: ["worker", "reviewer"],
+			maxConcurrency: 2,
+			maxFixRounds: 0,
+			announcedFeatures: ["cleanerDefaulted", "documenterDefaulted"],
+		}), "utf8");
+		const root = mkdtempSync(join(tmpdir(), "pi-subagents-isolation-stop-all-lane-"));
+		const order: string[] = [];
+		const handle = fakeWorktree(root);
+		handle.finalizeMock.mockImplementation(async () => {
+			order.push("integrate parked");
+			return { status: "no_changes", integrated: false, hadChanges: false };
+		});
+		vi.spyOn(worktreeModule, "createWorktreeIsolation").mockResolvedValue(handle);
+		let releaseSharedReviewer!: () => void;
+		const sharedReviewerGate = new Promise<void>((resolveSharedReviewer) => {
+			releaseSharedReviewer = resolveSharedReviewer;
+		});
+		vi.spyOn(spawnModule, "runSingleAgentWithMainFallback").mockImplementation(async (options: any) => {
+			if (options.task === "Park isolated first") {
+				return emptyResult(options.task, { parked: true });
+			}
+			order.push("shared reviewer start");
+			await Promise.race([
+				sharedReviewerGate,
+				new Promise<void>((resolveAborted) => {
+					if (options.signal.aborted) resolveAborted();
+					else options.signal.addEventListener("abort", () => resolveAborted(), { once: true });
+				}),
+			]);
+			order.push("shared reviewer end");
+			return emptyResult(options.task, {
+				agent: "reviewer",
+				exitCode: options.signal.aborted ? 1 : 0,
+				stopReason: options.signal.aborted ? "aborted" : "stop",
+				errorMessage: options.signal.aborted ? "stopped" : undefined,
+			});
+		});
+
+		const { subagent, stop } = registered();
+		let stopping: Promise<any> | undefined;
+		let stopTimeout: ReturnType<typeof setTimeout> | undefined;
+		try {
+			await execute(subagent, {
+				agent: "worker",
+				task: "Park isolated first",
+				isolation: "worktree",
+			}, root);
+			await waitFor(() => monitor.getRuns().some((run) => run.task === "Park isolated first" && run.status === "parked"));
+			await execute(subagent, { agent: "reviewer", task: "Hold shared lane for stop-all" }, root);
+			await waitFor(() => order.includes("shared reviewer start"));
+
+			stopping = execute(stop, { all: true }, root);
+			const stopped = await Promise.race([
+				stopping,
+				new Promise<never>((_resolve, reject) => {
+					stopTimeout = setTimeout(
+						() => reject(new Error("stop-all deadlocked behind its own shared lane holder")),
+						2_000,
+					);
+				}),
+			]);
+			expect(stopped.content[0].text).toContain("Stopped 2 threads");
+			expect(order).toEqual([
+				"shared reviewer start",
+				"shared reviewer end",
+				"integrate parked",
+			]);
+			expect(handle.finalizeMock).toHaveBeenCalledTimes(1);
+		} finally {
+			if (stopTimeout) clearTimeout(stopTimeout);
+			releaseSharedReviewer();
+			await stopping?.catch(() => undefined);
+			rmSync(root, { recursive: true, force: true });
+		}
+	});
+
 	it("keeps a queued isolated stop active until worktree cleanup and result publication finish", async () => {
 		const root = mkdtempSync(join(tmpdir(), "pi-subagents-isolation-queued-stop-"));
 		writeFileSync(join(agentDir, "pi-subagents.json"), JSON.stringify({ maxConcurrency: 1 }), "utf8");
@@ -727,13 +1008,14 @@ describe("shutdown and destructive-stop integration", () => {
 				else options.signal.addEventListener("abort", () => resolve(), { once: true });
 			});
 			return emptyResult(options.task, {
+				agent: options.agentName,
 				exitCode: 1,
 				stopReason: "aborted",
 				errorMessage: "stopped",
 			});
 		});
 		const { stub, subagent, stop, status } = registered();
-		await execute(subagent, { agent: "worker", task: "occupy slot" }, root);
+		await execute(subagent, { agent: "explorer", task: "occupy slot" }, root);
 		await waitFor(() => monitor.getRuns().some((run) => run.task === "occupy slot" && run.status === "running"));
 		const queued = await execute(subagent, {
 			agent: "worker",

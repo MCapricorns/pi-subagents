@@ -93,8 +93,8 @@ function runActivityLine(run: RunView, theme: Theme, width: number, indent: stri
 	return [truncateToWidth(`${indent}${dim(activitySummary)}`, width, "")];
 }
 
-/** Render active runs as a tree: main-agent dispatches are roots, auto-fix chain
- * rounds nest under the triggering reviewer row that owns the chain. No run ids
+/** Render active runs as a tree: main-agent dispatches are roots and managed
+ * documenter/reviewer/fix steps nest under the stable parent row. No run ids
  * appear here — the tree and the task label say what each row is, and ids stay
  * available through subagent_status when a thread must be controlled. */
 export function formatActiveRunLines(
@@ -120,8 +120,8 @@ export function formatActiveRunLines(
 	for (const root of roots) {
 		const children = childrenOf.get(root.id) ?? [];
 		lines.push(runPrimaryLine(root, theme, width, now, ""));
-		// The parent's "auto-fix chain running" placeholder is redundant while its
-		// child rows show live progress; keep it only between rounds.
+		// The parent's managed-workflow placeholder is redundant while a child
+		// row shows live progress; keep it only between stages.
 		if (children.length === 0) lines.push(...runActivityLine(root, theme, width, "  "));
 		children.forEach((child, index) => {
 			const connector = index === children.length - 1 ? "└ " : "├ ";

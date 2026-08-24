@@ -1,8 +1,10 @@
 /**
- * The `subagent` tool: dispatches explorer/worker/cleaner/reviewer agents as isolated pi
+ * The `subagent` tool: dispatches explorer/worker/cleaner/documenter/reviewer agents as isolated pi
  * child processes, single or parallel. Owns the public dispatch contract,
- * per-run status tracking, the auto-fix chain (REVIEW_FAIL → worker → re-review),
- * and completion delivery. Stable thread generations live in thread-lifecycle.ts.
+ * per-run status tracking, managed writer → documenter → reviewer workflows,
+ * reviewer auto-fix rounds, and internal step launching. Stable thread
+ * generations, final integration, and completion ownership live in
+ * thread-lifecycle.ts.
  */
 
 import { StringEnum } from "@earendil-works/pi-ai";
@@ -13,32 +15,28 @@ import { resolve } from "node:path";
 import { Type } from "typebox";
 import { discoverAgents } from "./agents.ts";
 import { loadConfig } from "./config.ts";
+import { formatUsage, queuedResult } from "./format.ts";
 import {
-	failedStartResult,
-	formatCompletionBlock,
-	formatUsage,
-	modelLevelTakeoverNote,
-	queuedResult,
-} from "./format.ts";
-import {
+	buildDocumenterTaskBrief,
+	buildFinalReviewBrief,
 	buildFixTaskBrief,
+	buildPostWriterDocumenterBrief,
 	buildReReviewBrief,
-	formatChainSummary,
+	buildReviewPassDocumenterBrief,
 	type ChainStep,
+	type ManagedWorkflowOutcome,
 } from "./fixloop.ts";
 import {
 	formatTaskSummary,
 	formatToolActivity,
 	monitor,
 	statusIcon,
-	sumUsage,
 	type RunChainMeta,
 } from "./monitor.ts";
 import type { SubagentRuntime } from "./runtime.ts";
 import {
 	getResultOutput,
 	isFailedResult,
-	isModelLevelFailure,
 	reviewVerdict,
 	runSingleAgentWithMainFallback,
 	type SingleResult,
@@ -48,15 +46,17 @@ import {
 import {
 	createBackgroundDispatcher,
 	resolveDispatchModelRoute,
+	withWorktreeSystemPrompt,
+	type ManagedWorkflowRequest,
 } from "./thread-lifecycle.ts";
-import { resolveWorktreeTarget, type IsolationMode } from "./worktree.ts";
+import { resolveRepositoryRoot, type IsolationMode } from "./worktree.ts";
 
 export { FORK_CONTINUATION_PROMPT, isWorktreeCapableAgent } from "./thread-lifecycle.ts";
 
 const NON_BLANK_TASK_OPTIONS = { minLength: 1, pattern: "\\S" } as const;
 
 const ISOLATION_DESCRIPTION =
-	"Filesystem isolation: shared uses the caller's working tree; worktree creates a detached temporary Git worktree (write-capable agents, including worker and cleaner, only)";
+	"Filesystem isolation: shared uses the caller's working tree; worktree creates a detached temporary Git worktree (write-capable agents, including worker, cleaner, and documenter, only)";
 
 const IsolationSchema = Type.Optional(
 	StringEnum(["shared", "worktree"] as const, { description: ISOLATION_DESCRIPTION }),
@@ -87,11 +87,13 @@ export function defaultIsolationMode(mode: "single" | "parallel", agentName: str
 	return mode === "parallel" && agentName === "worker" ? "worktree" : "shared";
 }
 
-const autoFixRootTails = new Map<string, Promise<void>>();
+const managedRepositoryRootTails = new Map<string, Promise<void>>();
 
-async function canonicalAutoFixRoot(cwd: string): Promise<string> {
+async function canonicalManagedRepositoryRoot(cwd: string): Promise<string> {
 	try {
-		return (await resolveWorktreeTarget(cwd)).originalRoot;
+		// Repository identity does not depend on HEAD: empty repositories must
+		// serialize root and nested cwd requests under the same lane too.
+		return await resolveRepositoryRoot(cwd);
 	} catch {
 		try {
 			return await realpath(resolve(cwd));
@@ -101,32 +103,65 @@ async function canonicalAutoFixRoot(cwd: string): Promise<string> {
 	}
 }
 
-/** Keep the complete worker→review loop exclusive for one canonical repository.
- * Child processes have independent file-mutation queues, so queue concurrency
- * alone cannot make shared-checkout edits safe. */
-function serializeAutoFixChain(
+/** Run one operation under the canonical original-repository lane.
+ *
+ * Shared managed generations use the abortable overload for their complete
+ * writer/reviewer workflow. Isolated generations use the non-abortable overload
+ * only for their final worktree apply, so model work remains parallel while the
+ * original checkout mutation cannot race a shared writer or reviewer snapshot.
+ */
+async function runInManagedRepositoryLane<T>(
 	cwd: string,
-	task: (signal: AbortSignal) => Promise<void>,
-): (signal: AbortSignal) => Promise<void> {
-	return async (signal) => {
-		if (signal.aborted) return;
-		const root = await canonicalAutoFixRoot(cwd);
-		const key = process.platform === "win32" ? root.toLowerCase() : root;
-		const previous = autoFixRootTails.get(key) ?? Promise.resolve();
-		let release!: () => void;
-		const gate = new Promise<void>((resolveGate) => {
-			release = resolveGate;
-		});
-		const tail = previous.catch(() => undefined).then(() => gate);
-		autoFixRootTails.set(key, tail);
-		await previous.catch(() => undefined);
-		try {
-			if (!signal.aborted) await task(signal);
-		} finally {
-			release();
-			if (autoFixRootTails.get(key) === tail) autoFixRootTails.delete(key);
+	task: () => Promise<T>,
+): Promise<T>;
+async function runInManagedRepositoryLane<T>(
+	cwd: string,
+	task: () => Promise<T>,
+	signal: AbortSignal,
+): Promise<T | undefined>;
+async function runInManagedRepositoryLane<T>(
+	cwd: string,
+	task: () => Promise<T>,
+	signal?: AbortSignal,
+): Promise<T | undefined> {
+	if (signal?.aborted) return undefined;
+	const root = await canonicalManagedRepositoryRoot(cwd);
+	const key = process.platform === "win32" ? root.toLowerCase() : root;
+	const previous = managedRepositoryRootTails.get(key) ?? Promise.resolve();
+	let release!: () => void;
+	const gate = new Promise<void>((resolveGate) => {
+		release = resolveGate;
+	});
+	const tail = previous.catch(() => undefined).then(() => gate);
+	managedRepositoryRootTails.set(key, tail);
+	let onAbort: (() => void) | undefined;
+	try {
+		if (signal) {
+			await Promise.race([
+				previous.catch(() => undefined),
+				new Promise<void>((resolveAborted) => {
+					if (signal.aborted) resolveAborted();
+					else {
+						onAbort = resolveAborted;
+						signal.addEventListener("abort", onAbort, { once: true });
+					}
+				}),
+			]);
+		} else {
+			await previous.catch(() => undefined);
 		}
-	};
+		if (signal?.aborted) return undefined;
+		return await task();
+	} finally {
+		if (signal && onAbort) signal.removeEventListener("abort", onAbort);
+		release();
+		// An aborted waiter may finish before the prior owner. Keep its chained
+		// tail installed until that owner also settles, otherwise a newcomer could
+		// observe an empty map and race the still-running workflow.
+		void tail.then(() => {
+			if (managedRepositoryRootTails.get(key) === tail) managedRepositoryRootTails.delete(key);
+		});
+	}
 }
 
 export function registerSubagentTool(pi: ExtensionAPI, runtime: SubagentRuntime): void {
@@ -135,14 +170,14 @@ export function registerSubagentTool(pi: ExtensionAPI, runtime: SubagentRuntime)
 		label: "Subagent",
 		description: [
 			"Dispatch enabled specialized agents as isolated leaf Pi child processes, singly or in parallel.",
-			"Built-ins: explorer for broad read-only reconnaissance; worker for implementation; cleaner only for explicitly authorized cleanup/removal/simplification edits; reviewer for generic read-only assessments and pre-commit gates.",
-			"Work starts in the background; completion automatically resumes the main agent and is already shown to the user, so do not poll or restate it. Give each child a self-contained brief because it has no conversation memory.",
+			"Built-ins: explorer for broad read-only reconnaissance; worker for implementation; cleaner for explicitly authorized cleanup, removal, simplification, and duplicate-code consolidation; documenter for pre-commit diff sync or explicitly requested whole-codebase comment/README/docs maintenance; reviewer for generic read-only assessments and final gates.",
+			"Work starts in the background; successful top-level writers automatically continue through enabled documenter/reviewer stages and return one final completion. Results resume the main agent and are already shown to the user, so do not poll, duplicate downstream roles, or restate them. Give each child a self-contained brief because it has no conversation memory.",
 			"Single tasks default to shared; parallel workers default to detached Git worktrees. Only write-capable agents can use worktree isolation, and failures never fall back silently to shared.",
 			"A selected-model or provider failure continues the retained session on the current main model; ordinary tool/task failures do not.",
-			"Use subagent_control to steer, retarget, park, resume, or fork by stable run id.",
+			"Use subagent_control to steer/retarget an active top-level child, park/stop a managed downstream stage, or resume/fork retained context by stable run id.",
 		].join(" "),
 		promptSnippet:
-			"Dispatch isolated background agents: explorer (recon), worker (implementation), cleaner (authorized cleanup), reviewer (read-only assessment/gate); results resume automatically. Use direct tools for trivial work.",
+			"Dispatch isolated background agents: explorer (recon), worker (implementation), cleaner (authorized cleanup/deduplication), documenter (docs sync), reviewer (read-only assessment/gate); enabled post-writer stages run automatically, results resume automatically, and the workflow delivers once. Use direct tools for trivial work.",
 		parameters: SubagentParams,
 
 		async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
@@ -169,7 +204,7 @@ export function registerSubagentTool(pi: ExtensionAPI, runtime: SubagentRuntime)
 			// Live sub-agent activity → concise one-line status ("thinking",
 			// "read src/index.ts", ...), never a raw args blob. The live handler
 			// only updates monitor state; finishing (removeRun + notify) is owned
-			// by the queue task / launchInLoop. That keeps a startup retry —
+			// by the queue task / launchInWorkflow. That keeps a startup retry —
 			// which fires a transient "failed" status before relaunching — from
 			// ripping the row out early, and lets the queue task decide between
 			// delivering a reviewer's result and starting an auto-fix chain.
@@ -180,7 +215,7 @@ export function registerSubagentTool(pi: ExtensionAPI, runtime: SubagentRuntime)
 					switch (e.kind) {
 						case "status":
 							// Only update monitor status here. Finishing (removeRun + notify) is
-							// owned by the queue task / launchInLoop so that a startup retry — which
+							// owned by the queue task / launchInWorkflow so that a startup retry — which
 							// fires a transient "failed" status before relaunching the child — never
 							// rips the row out from under the retry or emits a premature "✗" toast.
 							monitor.setStatus(runId, e.status);
@@ -261,49 +296,52 @@ export function registerSubagentTool(pi: ExtensionAPI, runtime: SubagentRuntime)
 				};
 			}
 
-			/**
-			 * Dispatch one agent inside an auto-fix chain: tracked in monitor state with a
-			 * groupId/relationLabel, but NOT delivered through the completion flow — the
-			 * chain owner assembles and delivers the whole group at the end.
-			 */
-			const launchInLoop = async (
+			/** Launch one workflow-internal child in a fresh model context. It sees the
+			 * parent's exact repository/worktree state and is registered by its own id,
+			 * but never enters top-level lifecycle policy or completion delivery. */
+			const launchInWorkflow = async (
+				request: ManagedWorkflowRequest,
 				agentName: string,
 				task: string,
-				executionCwd: string,
-				signal: AbortSignal,
 				meta: RunChainMeta,
-			): Promise<{ runId?: number; result: SingleResult }> => {
-				const agent = agents.find((candidate) => candidate.name === agentName);
-				if (!agent) return { result: failedStartResult(agentName, task, `Unknown agent: "${agentName}".`) };
-				const route = resolveDispatchModelRoute(agent, config, ctx);
+			): Promise<{ runId: number; result: SingleResult }> => {
+				const agent = request.agents.find((candidate) => candidate.name === agentName);
+				if (!agent) {
+					throw new Error(`Managed workflow requires enabled agent "${agentName}", but discovery did not provide it.`);
+				}
+				const resolvedRoute = resolveDispatchModelRoute(agent, request.config, request.ctx);
+				const route = request.isolation === "worktree"
+					? { ...resolvedRoute, agent: withWorktreeSystemPrompt(resolvedRoute.agent) }
+					: resolvedRoute;
 				const thinkingLevel = route.thinkingLevel;
-				const runId = monitor.addRun(agent.name, task, route.agent.model, thinkingLevel, meta);
+				const runId = monitor.addRun(agent.name, task, route.agent.model, thinkingLevel, {
+					...meta,
+					isolation: request.isolation,
+				});
 				const onLive = makeLiveHandler(runId);
 				try {
 					const result = await runSingleAgentWithMainFallback(
 						{
-							defaultCwd: executionCwd,
-							cwd: executionCwd,
+							defaultCwd: request.executionCwd,
+							cwd: request.executionCwd,
 							agent: route.agent,
 							agentName,
 							task,
 							thinkingLevel,
 							thinkingLevelForModel: route.thinkingLevelForModel,
-							signal,
+							signal: request.signal,
 							onLive,
 							makeDetails: makeDetails("single", true),
-							idleTimeoutMs: config.idleTimeoutSec * 1000,
+							idleTimeoutMs: request.config.idleTimeoutSec * 1000,
 						},
 						route.mainFallbackRef,
 					);
 					result.runId = runId;
-					result.projectCwd = executionCwd;
-					result.isolation = "shared";
+					result.projectCwd = request.projectCwd;
+					result.isolation = request.isolation;
 					runtime.retainSession(result);
 					monitor.setModel(runId, result.model, result.modelFallbackFrom);
 					monitor.setThinking(runId, result.thinking);
-					// The parent row represents the chain. Internal rounds leave live
-					// status as soon as they settle; their reports remain addressable by id.
 					finishRun(runId, isFailedResult(result) ? "failed" : "done", { silent: true });
 					runtime.registerRunResult(runId, result);
 					return { runId, result };
@@ -313,11 +351,11 @@ export function registerSubagentTool(pi: ExtensionAPI, runtime: SubagentRuntime)
 					const crashed: SingleResult = {
 						...queuedResult(route.agent, task, thinkingLevel),
 						runId,
-						projectCwd: executionCwd,
-						isolation: "shared",
+						projectCwd: request.projectCwd,
+						isolation: request.isolation,
 						exitCode: 1,
 						stderr: errorMessage,
-						stopReason: signal.aborted ? "aborted" : "error",
+						stopReason: request.signal.aborted ? "aborted" : "error",
 						errorMessage,
 						dispatchFailed: true,
 					};
@@ -326,241 +364,135 @@ export function registerSubagentTool(pi: ExtensionAPI, runtime: SubagentRuntime)
 				}
 			};
 
-			/**
-			 * Run the auto-fix chain in the background: worker (briefed with the review's
-			 * findings) → reviewer re-review, up to maxFixRounds times. The main agent is
-			 * not woken mid-loop; the full chain is delivered as one group at the end.
-			 * Failures short-circuit: a crashed worker skips its re-review and delivers.
-			 * The triggering reviewer stays in monitor state until the chain resolves.
-			 */
-			/** Drop any in-flight monitor row belonging to an auto-fix chain; the
-			 * parent is removed separately (it does not carry the groupId). */
-			const removeChainGroup = (groupId: string): void => {
+			/** Drop any in-flight internal row. Normal internal settlement already
+			 * removes rows; this is a cancellation/crash guard. */
+			const removeWorkflowGroup = (groupId: string): void => {
 				for (const run of [...monitor.getRuns()]) {
 					if (run.groupId === groupId) monitor.removeRun(run.id);
 				}
 			};
 
-			const startFixLoop = (
-				initialReviewerResult: SingleResult,
-				parentGroupId: string,
-				parentRunId: number,
-				executionCwd: string,
-			): void => {
-				const parentThreadAtStart = runtime.threads.get(parentRunId);
-				if (!parentThreadAtStart) return;
-				const parentGeneration = parentThreadAtStart.generation;
-				const parentControl = parentThreadAtStart.control;
-				let fixController: AbortController | undefined;
-				const ownsParent = (): boolean => {
-					const current = runtime.threads.get(parentRunId);
-					return fixController !== undefined &&
-						current === parentThreadAtStart &&
-						current.generation === parentGeneration &&
-						current.control === parentControl &&
-						current.queueController === fixController &&
-						runtime.runControllers.get(parentRunId) === fixController;
+			/** Run every downstream role inline under the parent generation's queue
+			 * controller. That gives park/stop/shutdown one lifecycle owner and keeps
+			 * isolated worktrees unintegrated until the final reviewer settles. */
+			const runManagedWorkflow = async (
+				request: ManagedWorkflowRequest,
+			): Promise<ManagedWorkflowOutcome> => {
+				const initialStepRunId = monitor.reserveRunId();
+				const initialStepResult: SingleResult = {
+					...request.initialResult,
+					runId: initialStepRunId,
 				};
-				const clearOwnedController = (): void => {
-					if (!fixController) return;
-					if (runtime.runControllers.get(parentRunId) === fixController) {
-						runtime.runControllers.delete(parentRunId);
+				runtime.registerRunResult(initialStepRunId, initialStepResult);
+				const steps: ChainStep[] = [{
+					runId: initialStepRunId,
+					result: initialStepResult,
+					relation: request.plan.initialRelation,
+				}];
+				const enabled = (name: string): boolean =>
+					request.agents.some((candidate) => candidate.name === name);
+				const canContinue = (): boolean => runtime.sessionActive && !request.signal.aborted;
+				const launchStep = async (
+					agentName: string,
+					task: string,
+					relation: string,
+				): Promise<SingleResult> => {
+					if (!enabled(agentName)) {
+						throw new Error(`Managed workflow cannot launch disabled or missing agent "${agentName}".`);
 					}
-					const current = runtime.threads.get(parentRunId);
-					if (current === parentThreadAtStart && current.queueController === fixController) {
-						current.queueController = undefined;
+					const step = await launchInWorkflow(request, agentName, task, {
+						groupId: request.groupId,
+						relationLabel: relation,
+						parentRunId: request.parentRunId,
+					});
+					request.rememberLatest(step.result);
+					steps.push({ ...step, relation });
+					return step.result;
+				};
+
+				const runFixRounds = async (triggeringReviewer: SingleResult): Promise<void> => {
+					let lastReviewer = triggeringReviewer;
+					for (let round = 1; round <= request.config.maxFixRounds; round++) {
+						if (!canContinue()) break;
+						const workerResult = await launchStep(
+							"worker",
+							buildFixTaskBrief(lastReviewer, round, request.config.maxFixRounds),
+							`fix round ${round}`,
+						);
+						if (!canContinue() || isFailedResult(workerResult)) break;
+
+						let documenterResult: SingleResult | undefined;
+						if (enabled("documenter")) {
+							documenterResult = await launchStep(
+								"documenter",
+								buildDocumenterTaskBrief(workerResult, round, lastReviewer),
+								`docs round ${round}`,
+							);
+							if (!canContinue() || isFailedResult(documenterResult)) break;
+						}
+
+						const reviewResult = await launchStep(
+							"reviewer",
+							buildReReviewBrief(lastReviewer, round, workerResult, documenterResult),
+							`re-review round ${round}`,
+						);
+						if (!canContinue() || isFailedResult(reviewResult)) break;
+						const verdict = reviewVerdict(getResultOutput(reviewResult));
+						// REVIEW_PASS settles. No verdict is advisory/malformed and must never
+						// trigger another writer. Only an explicit REVIEW_FAIL consumes a fix.
+						if (verdict !== "fail") break;
+						lastReviewer = reviewResult;
 					}
 				};
-				fixController = runtime.backgroundQueue.enqueue(
-					serializeAutoFixChain(executionCwd, async (signal) => {
-						if (!ownsParent()) return;
-						// The parent id belongs to the stable logical thread and will point at
-						// the chain outcome. Archive the triggering review under its own id so
-						// every id advertised by the chain summary resolves to that exact step.
-						const initialStepRunId = monitor.reserveRunId();
-						const initialStepResult: SingleResult = {
-							...initialReviewerResult,
-							runId: initialStepRunId,
-						};
-						runtime.registerRunResult(initialStepRunId, initialStepResult);
-						const chain: ChainStep[] = [
-							{ runId: initialStepRunId, result: initialStepResult, relation: "initial review" },
-						];
-						let lastReviewer = initialStepResult;
-						for (let round = 1; round <= config.maxFixRounds; round++) {
-							if (!runtime.sessionActive) break;
-							const fixBrief = buildFixTaskBrief(lastReviewer, round, config.maxFixRounds);
-							const workerStep = await launchInLoop("worker", fixBrief, executionCwd, signal, {
-								groupId: parentGroupId,
-								relationLabel: `fix round ${round}`,
-								parentRunId,
-							});
-							// Preserve the newest sub-step before checking chain ownership. A
-							// destructive stop invalidates ownsParent() while this child is
-							// aborting, and its partial output must become the parent's stopped
-							// result instead of falling back to the old triggering review.
+
+				try {
+					// Park/stop/shutdown may win after the top-level child settles but
+					// before this continuation starts. Preserve that stable checkpoint and
+					// never create an already-aborted downstream child.
+					if (!canContinue()) return { kind: request.plan.kind, steps };
+					if (request.plan.kind === "auto-fix") {
+						await runFixRounds(initialStepResult);
+					} else {
+						let documenterResult: SingleResult | undefined;
+						if (request.plan.kind === "review-pass-sync") {
+							documenterResult = await launchStep(
+								"documenter",
+								buildReviewPassDocumenterBrief(initialStepResult),
+								"documentation sync",
+							);
+						} else if (initialStepResult.agent !== "documenter" && enabled("documenter")) {
+							documenterResult = await launchStep(
+								"documenter",
+								buildPostWriterDocumenterBrief(initialStepResult),
+								"documentation sync",
+							);
+						}
+
+						if (
+							canContinue() &&
+							(!documenterResult || !isFailedResult(documenterResult)) &&
+							enabled("reviewer")
+						) {
+							const reviewResult = await launchStep(
+								"reviewer",
+								buildFinalReviewBrief(initialStepResult, documenterResult),
+								"final review",
+							);
 							if (
-								runtime.threads.get(parentRunId) === parentThreadAtStart &&
-								parentThreadAtStart.generation === parentGeneration
+								canContinue() &&
+								!isFailedResult(reviewResult) &&
+								reviewVerdict(getResultOutput(reviewResult)) === "fail" &&
+								enabled("worker") &&
+								request.config.maxFixRounds > 0
 							) {
-								parentThreadAtStart.lastResult = workerStep.result;
-								parentThreadAtStart.agentName = workerStep.result.agent;
-								parentThreadAtStart.task = workerStep.result.task;
-								parentThreadAtStart.sessionId = workerStep.result.sessionId;
-								parentThreadAtStart.sessionDir = workerStep.result.sessionDir;
-								runtime.retainSession(workerStep.result);
+								await runFixRounds(reviewResult);
 							}
-							if (!ownsParent()) return;
-							chain.push({ ...workerStep, relation: `fix round ${round}` });
-							if (!runtime.sessionActive || isFailedResult(workerStep.result)) break;
-							const reReviewBrief = buildReReviewBrief(lastReviewer, round, workerStep.result);
-							const reviewStep = await launchInLoop("reviewer", reReviewBrief, executionCwd, signal, {
-								groupId: parentGroupId,
-								relationLabel: `re-review round ${round}`,
-								parentRunId,
-							});
-							if (
-								runtime.threads.get(parentRunId) === parentThreadAtStart &&
-								parentThreadAtStart.generation === parentGeneration
-							) {
-								parentThreadAtStart.lastResult = reviewStep.result;
-								parentThreadAtStart.agentName = reviewStep.result.agent;
-								parentThreadAtStart.task = reviewStep.result.task;
-								parentThreadAtStart.sessionId = reviewStep.result.sessionId;
-								parentThreadAtStart.sessionDir = reviewStep.result.sessionDir;
-								runtime.retainSession(reviewStep.result);
-							}
-							if (!ownsParent()) return;
-							chain.push({ ...reviewStep, relation: `re-review round ${round}` });
-							lastReviewer = reviewStep.result;
-							// A crashed re-review must stop the chain like a crashed worker: its
-							// output (if any) is not a verdict, and feeding it to the next fix
-							// round would brief the worker from garbage.
-							if (!runtime.sessionActive || isFailedResult(reviewStep.result)) break;
-							if (reviewVerdict(getResultOutput(reviewStep.result)) === "pass") break;
 						}
-						// Every parent mutation is guarded by the exact generation, control, and
-						// queue controller that started this chain. A parked/resumed generation or
-						// destructive stop must make this old orchestration a no-op.
-						if (!ownsParent()) return;
-						const controlledParent = parentThreadAtStart;
-						if (controlledParent.retired || controlledParent.state === "stopped") {
-							clearOwnedController();
-							removeChainGroup(parentGroupId);
-							return;
-						}
-						// Parking an auto-fix chain aborts its in-flight child but preserves the
-						// parent's checkpoint and suppresses an aborted chain delivery.
-						if (controlledParent.state === "parked") {
-							clearOwnedController();
-							removeChainGroup(parentGroupId);
-							monitor.setStatus(parentRunId, "parked");
-							return;
-						}
-						// The chain is done (success, exhaustion, or abort): drop its monitor
-						// rows, then deliver one condensed
-						// summary. Register the parent's final state (the last chain result)
-						// before removal so subagent_wait can resolve it. Clone instead of
-						// mutating: the internal step remains addressable under its own run id.
-						const last = chain[chain.length - 1];
-						const parentResult: SingleResult = {
-							...last.result,
-							runId: parentRunId,
-						};
-						runtime.registerRunResult(parentRunId, parentResult);
-						removeChainGroup(parentGroupId);
-						monitor.removeRun(parentRunId);
-						runtime.retainSession(parentResult);
-						const parentThread = parentThreadAtStart;
-						parentThread.lastResult = parentResult;
-						parentThread.agentName = last.result.agent;
-						parentThread.task = last.result.task;
-						parentThread.sessionId = last.result.sessionId;
-						parentThread.sessionDir = last.result.sessionDir;
-						parentThread.state = isFailedResult(last.result) ? "failed" : "completed";
-						if (!runtime.sessionActive) {
-							clearOwnedController();
-							return;
-						}
-						// One compact message instead of every round's raw output: the summary
-						// lines cover each step (verdict + what changed/found), and the final
-						// step's full report is appended only when its detail is actionable
-						// (a FAIL verdict, a crash, or a model-level failure the main agent
-						// must take over). Everything else stays one `subagent_status #id`
-						// call away.
-						let block = formatChainSummary(chain);
-						if (isFailedResult(last.result) && isModelLevelFailure(last.result)) {
-							block = `${block}\n\n${formatCompletionBlock(last.result, config.maxResultLines, executionCwd)}\n\n${modelLevelTakeoverNote(last.result, { runId: parentRunId })}`;
-						} else if (isFailedResult(last.result) || reviewVerdict(getResultOutput(last.result)) === "fail") {
-							block = `${block}\n\n${formatCompletionBlock(last.result, config.maxResultLines, executionCwd)}`;
-						}
-						runtime.sendCompletionGroup([
-							{
-								agent: `auto-fix chain (${last.result.agent})`,
-								block,
-								triggerTurn: true,
-								usage: sumUsage(chain.map((step) => step.result.usage)),
-							},
-						]);
-						runtime.completionBatcher.flush();
-						clearOwnedController();
-					}),
-					() => {
-						if (!ownsParent()) return;
-						const controlledParent = parentThreadAtStart;
-						clearOwnedController();
-						removeChainGroup(parentGroupId);
-						if (controlledParent.state === "parked") {
-							monitor.setStatus(parentRunId, "parked");
-							return;
-						}
-						if (!controlledParent.retired) monitor.removeRun(parentRunId);
-					},
-					(error) => {
-						// A crash inside the chain orchestration (failed runs are caught by
-						// launchInLoop and delivered as part of the chain) must not vanish, but
-						// an obsolete generation/controller must never publish it.
-						if (!ownsParent()) return;
-						if (parentThreadAtStart.retired || parentThreadAtStart.state === "stopped") {
-							clearOwnedController();
-							removeChainGroup(parentGroupId);
-							return;
-						}
-						runtime.registerRunResult(parentRunId, initialReviewerResult);
-						removeChainGroup(parentGroupId);
-						monitor.removeRun(parentRunId);
-						if (!runtime.sessionActive) {
-							clearOwnedController();
-							return;
-						}
-						const errorMessage = error instanceof Error ? error.message : String(error);
-						try {
-							ctx.ui.notify(`✗ auto-fix chain dispatch failed: ${errorMessage}`, "error");
-							// Keep the triggering review's findings: the chain crashed before any
-							// fix round ran, and the main agent needs the review to act on it.
-							runtime.sendCompletionGroup([
-								{
-									agent: initialReviewerResult.agent,
-									block: `${formatCompletionBlock(initialReviewerResult, config.maxResultLines, executionCwd)}\n\nAuto-fix chain crashed before completion: ${errorMessage}. The planned fix rounds did not run; the review above is the triggering reviewer's full output.`,
-									triggerTurn: true,
-									usage: initialReviewerResult.usage,
-								},
-							]);
-							runtime.completionBatcher.flush();
-						} catch {
-							/* a second delivery failure must not throw through the queue */
-						} finally {
-							clearOwnedController();
-						}
-					},
-				);
-				runtime.runControllers.set(parentRunId, fixController);
-				parentThreadAtStart.queueController = fixController;
-				const priorCompletion = parentThreadAtStart.generationCompletion;
-				parentThreadAtStart.generationCompletion = Promise.all([
-					priorCompletion,
-					runtime.backgroundQueue.waitForTask(fixController),
-				]).then(() => undefined);
+					}
+					return { kind: request.plan.kind, steps };
+				} finally {
+					removeWorkflowGroup(request.groupId);
+				}
 			};
 
 			const startBackground = createBackgroundDispatcher({
@@ -571,7 +503,8 @@ export function registerSubagentTool(pi: ExtensionAPI, runtime: SubagentRuntime)
 				finishRun,
 				makeLiveHandler,
 				makeDetails,
-				startFixLoop,
+				runManagedWorkflow,
+				runInManagedRepositoryLane,
 			});
 
 			// Sub-agents intentionally detach from the foreground turn. This makes the

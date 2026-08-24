@@ -49,15 +49,15 @@ export interface RunView {
 	startedAt?: number;
 	/** Epoch ms when the run finished (set on "done"/"failed"). */
 	endedAt?: number;
-	/** When set, this run belongs to an auto-fix chain (e.g. worker fixing a reviewer's findings). */
+	/** When set, this is an internal managed-workflow step. */
 	groupId?: string;
 	/** Human-readable role within a chain, e.g. "fix round 1" or "re-review round 1". */
 	relationLabel?: string;
-	/** Owning run for chain children: the triggering reviewer whose row represents the chain. */
+	/** Stable owning run whose row represents the whole managed workflow. */
 	parentRunId?: number;
 }
 
-/** Optional chain metadata for runs spawned by an auto-fix loop. */
+/** Optional metadata for documenter/reviewer/fix children of a stable parent run. */
 export interface RunChainMeta {
 	groupId?: string;
 	relationLabel?: string;
@@ -500,6 +500,15 @@ export class MonitorStore {
 		}
 		const child = this.find(childRunId);
 		if (child) child.forkedFromRunId = sourceRunId;
+		this.notify();
+	}
+
+	/** Reflect the currently owned internal stage when a managed parent is parked
+	 * or inspected between children; the stable id and original task stay intact. */
+	setAgent(id: number, agent: string): void {
+		const run = this.find(id);
+		if (!run) return;
+		run.agent = agent;
 		this.notify();
 	}
 

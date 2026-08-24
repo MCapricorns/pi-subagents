@@ -11,22 +11,42 @@ function bullets(lines: readonly string[]): string {
 	return lines.map((line) => `- ${line}`).join("\n");
 }
 
-export function buildDelegationDirective(agents: AgentConfig[]): string {
+export function buildDelegationDirective(
+	agents: AgentConfig[],
+	options: { maxFixRounds?: number } = {},
+): string {
 	if (agents.length === 0) return "";
 
 	const catalog = agents.map(formatCatalogEntry).join("\n");
 	const hasExplorer = agents.some((agent) => agent.name === "explorer");
 	const hasWorker = agents.some((agent) => agent.name === "worker");
 	const hasCleaner = agents.some((agent) => agent.name === "cleaner");
+	const hasDocumenter = agents.some((agent) => agent.name === "documenter");
 	const hasReviewer = agents.some((agent) => agent.name === "reviewer");
 	const hasMultiple = agents.length > 1;
-	const worktreeTargets = hasWorker && hasCleaner
-		? "worker, cleaner, or another"
-		: hasWorker
-			? "worker or another"
-			: hasCleaner
-				? "cleaner or another"
-				: "a";
+	const autoFixEnabled = hasWorker && (options.maxFixRounds ?? 1) > 0;
+	const codeWriterNames = [
+		...(hasWorker ? ["worker"] : []),
+		...(hasCleaner ? ["cleaner"] : []),
+	];
+	const reviewedWriterNames = [
+		...codeWriterNames,
+		...(hasDocumenter ? ["documenter"] : []),
+	];
+	const automaticWriterRoute = [
+		...(hasDocumenter ? ["documenter"] : []),
+		...(hasReviewer ? ["reviewer"] : []),
+	].join(" → ");
+	const namedWorktreeTargets = [
+		...(hasWorker ? ["worker"] : []),
+		...(hasCleaner ? ["cleaner"] : []),
+		...(hasDocumenter ? ["documenter"] : []),
+	];
+	const worktreeTargets = namedWorktreeTargets.length === 0
+		? "a"
+		: namedWorktreeTargets.length === 1
+			? `${namedWorktreeTargets[0]} or another`
+			: `${namedWorktreeTargets.slice(0, -1).join(", ")}, ${namedWorktreeTargets.at(-1)}, or another`;
 
 	const dispatchRules = [
 		"Handle simple work inline with direct tools: one-line lookups, known-target reads/edits, and quick questions do not justify a child process.",
@@ -40,12 +60,17 @@ export function buildDelegationDirective(agents: AgentConfig[]): string {
 			: []),
 		...(hasCleaner
 			? [
-				`Use \`cleaner\` only when the user explicitly authorizes cleanup/removal/simplification edits, including a requested maintenance pass. It gathers evidence, then applies every safe proven in-scope cut; zero edits is valid. Generic or read-only audit, inspect, report, review, code-health, plan, proposed-solution, or cleanup-candidate assessment goes to ${hasReviewer ? "`reviewer`" : "direct main-context inspection because `reviewer` is disabled"}. Never dispatch cleaner by PR count or as the pre-commit gate.`,
+				`Use \`cleaner\` only for user-authorized cleanup, removal, simplification, duplicate-code consolidation, or maintenance. Once dispatched, it applies every safe proven in-scope cut without item-by-item approval; zero edits is valid only if none is proved. Generic or read-only audit, review, code-health, plan, or cleanup-candidate assessment goes to ${hasReviewer ? "`reviewer`" : "direct main-context inspection because `reviewer` is disabled"}. Never dispatch cleaner by PR count or as the pre-commit gate.`,
+			]
+			: []),
+		...(hasDocumenter
+			? [
+				`Use \`documenter\` directly for explicit whole-codebase maintenance or standalone documentation work.${codeWriterNames.length > 0 ? ` Successful ${codeWriterNames.join("/")} runs already auto-sync the actual diff; never dispatch a duplicate.` : ""} Zero edits is valid and broad mode is never inferred. It changes docs/comments only and never runtime behavior, versions, release state, or ${hasReviewer ? "the final reviewer gate" : "direct final verification"}.`,
 			]
 			: []),
 		...(hasReviewer
 			? [
-				`Use \`reviewer\` for generic/read-only assessments and as the fresh independent pre-commit gate for non-trivial diffs${hasCleaner ? ", including cleaner edits" : ""}. Advisory findings do not authorize follow-up edits; only gate verdicts can enter auto-fix.`,
+				`Use \`reviewer\` for read-only assessments or an explicit gate.${reviewedWriterNames.length > 0 ? ` Successful ${reviewedWriterNames.join("/")} runs already get a fresh read-only reviewer gate.` : ""} Advisory output has no VERDICT: it stays read-only and does not authorize follow-up edits.`,
 			]
 			: []),
 		"Brief every child with the complete goal, exact paths, constraints, and expected output. It has no memory of this conversation.",
@@ -55,7 +80,7 @@ export function buildDelegationDirective(agents: AgentConfig[]): string {
 				"Dispatch independent work in one `tasks` array and let the resumed main agent start dependent work only after prerequisites finish.",
 			]
 			: []),
-		`Filesystem isolation: single tasks default to shared${hasWorker ? "; parallel worker tasks default to detached Git worktrees" : ""}${hasCleaner ? "; cleaner defaults to shared" : ""}. Request \`isolation: "worktree"\` only for ${worktreeTargets} write-capable agent in a Git repository with committed HEAD. Read-only agents reject it, and setup/integration failure never falls back silently to shared.`,
+		`Filesystem isolation: single tasks default to shared${hasWorker ? "; parallel worker tasks default to detached Git worktrees" : ""}${hasCleaner ? "; cleaner defaults to shared" : ""}${hasDocumenter ? "; documenter defaults to shared" : ""}. Request \`isolation: "worktree"\` only for ${worktreeTargets} write-capable agent in a Git repository with committed HEAD. Read-only agents reject it, and setup/integration failure never falls back silently to shared.`,
 		"A configured child model/provider failure automatically continues the same retained session on the current main model; do not redispatch. Ordinary tool/task failures stay on the selected model.",
 		"Trust but verify: inspect actual changes/results before reporting completion.",
 	];
@@ -69,9 +94,19 @@ export function buildDelegationDirective(agents: AgentConfig[]): string {
 
 	const verificationRules = [
 		"Never report an unrun check as passed; identify unavailable checks and pre-existing failures honestly.",
+		...(automaticWriterRoute && reviewedWriterNames.length > 0
+			? [
+				`Successful top-level write roles automatically continue through enabled downstream roles (${automaticWriterRoute}) to one final delivery; never duplicate stages.`,
+			]
+			: []),
 		...(hasReviewer
 			? [
-				"Send every non-trivial diff through one fresh read-only `reviewer` gate before reporting done. Resolve every finding; do not bypass the configured auto-fix/re-review cap.",
+				...(hasDocumenter
+					? [
+						`A direct REVIEW_PASS is preliminary: runtime runs documenter on the pending diff, then a fresh reviewer. A direct REVIEW_FAIL ${autoFixEnabled ? "keeps auto-fix; maxFixRounds limits worker fixes only, not initial docs/review." : "cannot start fixes while worker/fix rounds are disabled."}`,
+					]
+					: []),
+				"Resolve every gate finding; do not bypass the configured auto-fix/re-review cap. A reviewer report without a standalone VERDICT is advisory and cannot trigger writes.",
 				"Use multi-model cross-review only when explicitly requested or for genuinely high-risk security, unsafe/FFI, persistence-migration, or concurrency changes.",
 			]
 			: []),

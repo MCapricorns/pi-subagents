@@ -13,6 +13,7 @@ import { join, relative, resolve } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import {
 	createWorktreeIsolation,
+	resolveRepositoryRoot,
 	resolveWorktreeTarget,
 	runCommand,
 	type CommandRunner,
@@ -92,6 +93,19 @@ describe("Git worktree isolation lifecycle", { timeout: 30_000 }, () => {
 		repos.push(dir);
 		await expect(resolveWorktreeTarget(dir)).rejects.toThrow(/inside a Git worktree\/repository/i);
 		await expect(createWorktreeIsolation(dir)).rejects.toThrow(/inside a Git worktree\/repository/i);
+	});
+
+	it("canonicalizes root and nested paths in an empty repository without requiring HEAD", async () => {
+		const repo = mkdtempSync(join(tmpdir(), "pi-subagents-empty-repo-"));
+		repos.push(repo);
+		git(repo, ["init"]);
+		const nested = join(repo, "nested");
+		mkdirSync(nested, { recursive: true });
+
+		const rootIdentity = await resolveRepositoryRoot(repo);
+		const nestedIdentity = await resolveRepositoryRoot(nested);
+		expect(nestedIdentity).toBe(rootIdentity);
+		await expect(resolveWorktreeTarget(nested)).rejects.toThrow(/committed HEAD/i);
 	});
 
 	it("creates a detached worktree and mirrors a requested subdirectory", async () => {

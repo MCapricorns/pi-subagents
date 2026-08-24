@@ -13,6 +13,9 @@ import {
 	DEFAULT_MAX_FIX_ROUNDS,
 	DEFAULT_MAX_RESULT_LINES,
 	DEFAULT_THINKING_LEVEL,
+	DOCUMENTER_AUTO_ENABLED_FEATURE,
+	DOCUMENTER_DEFAULTED_FEATURE,
+	DOCUMENTER_INHERITED_FEATURE,
 	IDLE_TIMEOUT_SEC_LIMIT,
 	MAX_CONCURRENCY_LIMIT,
 	MAX_FIX_ROUNDS_LIMIT,
@@ -22,10 +25,12 @@ import {
 	saveConfig,
 } from "../src/config.ts";
 
+const ROLE_MIGRATIONS_PROCESSED = [CLEANER_DEFAULTED_FEATURE, DOCUMENTER_DEFAULTED_FEATURE];
+
 describe("normalizeConfig", () => {
-	it("returns all four built-ins for a fresh config", () => {
+	it("ships five built-ins but keeps documenter opt-in on a fresh install", () => {
 		const config = normalizeConfig(undefined);
-		expect(BUILTIN_AGENT_NAMES).toEqual(["explorer", "worker", "cleaner", "reviewer"]);
+		expect(BUILTIN_AGENT_NAMES).toEqual(["explorer", "worker", "cleaner", "documenter", "reviewer"]);
 		expect(DEFAULT_ENABLED_AGENTS).toEqual(["explorer", "worker", "cleaner", "reviewer"]);
 		expect(config.enabledAgents).toEqual([...DEFAULT_ENABLED_AGENTS]);
 		expect(config.proactiveInjection).toBe(true);
@@ -41,7 +46,7 @@ describe("normalizeConfig", () => {
 	it("keeps valid enabledAgents and drops non-strings", () => {
 		const config = normalizeConfig({
 			enabledAgents: ["explorer", "worker", 42, null, "explorer"],
-			announcedFeatures: [CLEANER_DEFAULTED_FEATURE],
+			announcedFeatures: ROLE_MIGRATIONS_PROCESSED,
 		});
 		expect(config.enabledAgents).toEqual(["explorer", "worker"]);
 	});
@@ -51,7 +56,7 @@ describe("normalizeConfig", () => {
 			enabledAgents: ["explore", "worker", "explorer"],
 			agentModels: { explore: "anthropic/legacy" },
 			agentThinkingLevels: { explore: "low" },
-			announcedFeatures: [CLEANER_DEFAULTED_FEATURE],
+			announcedFeatures: ROLE_MIGRATIONS_PROCESSED,
 		});
 		expect(config.enabledAgents).toEqual(["explorer", "worker"]);
 		expect(config.agentModels).toEqual({ explorer: "anthropic/legacy" });
@@ -65,6 +70,7 @@ describe("normalizeConfig", () => {
 				explorer: "openai/current",
 			},
 			agentThinkingLevels: { explore: "low", explorer: "high" },
+			announcedFeatures: ROLE_MIGRATIONS_PROCESSED,
 		});
 		expect(config.agentModels).toEqual({ explorer: "openai/current" });
 		expect(config.agentThinkingLevels).toEqual({ explorer: "high" });
@@ -75,6 +81,7 @@ describe("normalizeConfig", () => {
 			enabledAgents: ["explorer", "worker", "reviewer"],
 			agentModels: { reviewer: "anthropic/claude-sonnet-4-5" },
 			agentThinkingLevels: { reviewer: "low" },
+			announcedFeatures: [DOCUMENTER_DEFAULTED_FEATURE],
 		});
 		expect(config.enabledAgents).toEqual(["explorer", "worker", "cleaner", "reviewer"]);
 		expect(config.agentModels).toEqual({
@@ -83,6 +90,7 @@ describe("normalizeConfig", () => {
 		});
 		expect(config.agentThinkingLevels).toEqual({ reviewer: "low", cleaner: "low" });
 		expect(config.announcedFeatures).toEqual([
+			DOCUMENTER_DEFAULTED_FEATURE,
 			CLEANER_DEFAULTED_FEATURE,
 			CLEANER_AUTO_ENABLED_FEATURE,
 			CLEANER_INHERITED_FEATURE,
@@ -95,6 +103,7 @@ describe("normalizeConfig", () => {
 		const modelOnly = normalizeConfig({
 			enabledAgents: ["worker", "reviewer"],
 			agentModels: { reviewer: "anthropic/claude-sonnet-4-5" },
+			announcedFeatures: [DOCUMENTER_DEFAULTED_FEATURE],
 		});
 		expect(modelOnly.agentModels).toEqual({
 			reviewer: "anthropic/claude-sonnet-4-5",
@@ -102,6 +111,7 @@ describe("normalizeConfig", () => {
 		});
 		expect(modelOnly.agentThinkingLevels).toEqual({});
 		expect(modelOnly.announcedFeatures).toEqual([
+			DOCUMENTER_DEFAULTED_FEATURE,
 			CLEANER_DEFAULTED_FEATURE,
 			CLEANER_AUTO_ENABLED_FEATURE,
 			CLEANER_INHERITED_FEATURE,
@@ -109,48 +119,115 @@ describe("normalizeConfig", () => {
 
 		// Reviewer enabled but no overrides to copy: injection still happens, but
 		// the inheritance stamp (and the notice's inheritance claim) must not.
-		const noOverrides = normalizeConfig({ enabledAgents: ["worker", "reviewer"] });
+		const noOverrides = normalizeConfig({
+			enabledAgents: ["worker", "reviewer"],
+			announcedFeatures: [DOCUMENTER_DEFAULTED_FEATURE],
+		});
 		expect(noOverrides.agentModels).toEqual({});
 		expect(noOverrides.agentThinkingLevels).toEqual({});
 		expect(noOverrides.announcedFeatures).toEqual([
+			DOCUMENTER_DEFAULTED_FEATURE,
 			CLEANER_DEFAULTED_FEATURE,
 			CLEANER_AUTO_ENABLED_FEATURE,
 		]);
 	});
 
 	it("appends cleaner when an old explicit list has no reviewer to inherit from", () => {
-		const config = normalizeConfig({ enabledAgents: ["worker"] });
+		const config = normalizeConfig({
+			enabledAgents: ["worker"],
+			announcedFeatures: [DOCUMENTER_DEFAULTED_FEATURE],
+		});
 		expect(config.enabledAgents).toEqual(["worker", "cleaner"]);
 		expect(config.agentModels).toEqual({});
 		expect(config.agentThinkingLevels).toEqual({});
-		expect(config.announcedFeatures).toEqual([CLEANER_DEFAULTED_FEATURE, CLEANER_AUTO_ENABLED_FEATURE]);
+		expect(config.announcedFeatures).toEqual([
+			DOCUMENTER_DEFAULTED_FEATURE,
+			CLEANER_DEFAULTED_FEATURE,
+			CLEANER_AUTO_ENABLED_FEATURE,
+		]);
 	});
 
 	it("stamps a config that already enables cleaner without injecting", () => {
-		const config = normalizeConfig({ enabledAgents: ["explorer", "worker", "cleaner", "reviewer"] });
+		const config = normalizeConfig({
+			enabledAgents: ["explorer", "worker", "cleaner", "reviewer"],
+			announcedFeatures: [DOCUMENTER_DEFAULTED_FEATURE],
+		});
 		expect(config.enabledAgents).toEqual(["explorer", "worker", "cleaner", "reviewer"]);
-		expect(config.announcedFeatures).toEqual([CLEANER_DEFAULTED_FEATURE]);
+		expect(config.announcedFeatures).toEqual([DOCUMENTER_DEFAULTED_FEATURE, CLEANER_DEFAULTED_FEATURE]);
 	});
 
 	it("respects a deliberate cleaner disable once the upgrade is stamped", () => {
 		const existing = ["explorer", "worker", "reviewer"];
 		const config = normalizeConfig({
 			enabledAgents: existing,
-			announcedFeatures: [CLEANER_DEFAULTED_FEATURE],
+			announcedFeatures: ROLE_MIGRATIONS_PROCESSED,
 		});
 		expect(config.enabledAgents).toEqual(existing);
-		expect(config.announcedFeatures).toEqual([CLEANER_DEFAULTED_FEATURE]);
+		expect(config.announcedFeatures).toEqual(ROLE_MIGRATIONS_PROCESSED);
+	});
+
+	it("enables documenter for existing configs and inherits explorer routing", () => {
+		const config = normalizeConfig({
+			enabledAgents: ["explorer", "worker", "cleaner", "reviewer"],
+			agentModels: { explorer: "anthropic/claude-haiku-4-5" },
+			agentThinkingLevels: { explorer: "low" },
+			announcedFeatures: [CLEANER_DEFAULTED_FEATURE],
+		});
+		expect(config.enabledAgents).toEqual(["explorer", "worker", "cleaner", "documenter", "reviewer"]);
+		expect(config.agentModels).toEqual({
+			explorer: "anthropic/claude-haiku-4-5",
+			documenter: "anthropic/claude-haiku-4-5",
+		});
+		expect(config.agentThinkingLevels).toEqual({ explorer: "low", documenter: "low" });
+		expect(config.announcedFeatures).toEqual([
+			CLEANER_DEFAULTED_FEATURE,
+			DOCUMENTER_DEFAULTED_FEATURE,
+			DOCUMENTER_AUTO_ENABLED_FEATURE,
+			DOCUMENTER_INHERITED_FEATURE,
+		]);
+	});
+
+	it("does not claim documenter inheritance when explorer has no overrides", () => {
+		const config = normalizeConfig({
+			enabledAgents: ["worker", "reviewer"],
+			announcedFeatures: [CLEANER_DEFAULTED_FEATURE],
+		});
+		expect(config.enabledAgents).toEqual(["worker", "documenter", "reviewer"]);
+		expect(config.agentModels).toEqual({});
+		expect(config.agentThinkingLevels).toEqual({});
+		expect(config.announcedFeatures).toEqual([
+			CLEANER_DEFAULTED_FEATURE,
+			DOCUMENTER_DEFAULTED_FEATURE,
+			DOCUMENTER_AUTO_ENABLED_FEATURE,
+		]);
+	});
+
+	it("stamps existing documenter configs and respects a later disable", () => {
+		const alreadyEnabled = normalizeConfig({
+			enabledAgents: ["worker", "documenter", "reviewer"],
+			announcedFeatures: [CLEANER_DEFAULTED_FEATURE],
+		});
+		expect(alreadyEnabled.enabledAgents).toEqual(["worker", "documenter", "reviewer"]);
+		expect(alreadyEnabled.announcedFeatures).toEqual(ROLE_MIGRATIONS_PROCESSED);
+
+		const disabled = normalizeConfig({
+			enabledAgents: ["worker", "reviewer"],
+			announcedFeatures: ROLE_MIGRATIONS_PROCESSED,
+		});
+		expect(disabled.enabledAgents).toEqual(["worker", "reviewer"]);
+		expect(disabled.announcedFeatures).toEqual(ROLE_MIGRATIONS_PROCESSED);
 	});
 
 	it("honors an explicitly empty enabledAgents array", () => {
 		const config = normalizeConfig({ enabledAgents: [] });
 		expect(config.enabledAgents).toEqual([]);
-		expect(config.announcedFeatures).toEqual([CLEANER_DEFAULTED_FEATURE]);
+		expect(config.announcedFeatures).toEqual(ROLE_MIGRATIONS_PROCESSED);
 	});
 
 	it("keeps only valid provider/model references in agentModels", () => {
 		const config = normalizeConfig({
 			agentModels: { explorer: "anthropic/claude-haiku-4-5", bad: "noslash", empty: "  " },
+			announcedFeatures: ROLE_MIGRATIONS_PROCESSED,
 		});
 		expect(config.agentModels).toEqual({ explorer: "anthropic/claude-haiku-4-5" });
 	});
@@ -178,6 +255,7 @@ describe("normalizeConfig", () => {
 	it("keeps only valid thinking levels in agentThinkingLevels", () => {
 		const config = normalizeConfig({
 			agentThinkingLevels: { explorer: "high", bad: "ultra", empty: "" },
+			announcedFeatures: ROLE_MIGRATIONS_PROCESSED,
 		});
 		expect(config.agentThinkingLevels).toEqual({ explorer: "high" });
 	});
@@ -239,8 +317,14 @@ describe("normalizeConfig", () => {
 		expect(normalizeConfig({ announcedFeatures: ["visionModel", 42, ""] }).announcedFeatures).toEqual([
 			"visionModel",
 			CLEANER_DEFAULTED_FEATURE,
+			DOCUMENTER_DEFAULTED_FEATURE,
+			DOCUMENTER_AUTO_ENABLED_FEATURE,
 		]);
-		expect(normalizeConfig({}).announcedFeatures).toEqual([CLEANER_DEFAULTED_FEATURE]);
+		expect(normalizeConfig({}).announcedFeatures).toEqual([
+			CLEANER_DEFAULTED_FEATURE,
+			DOCUMENTER_DEFAULTED_FEATURE,
+			DOCUMENTER_AUTO_ENABLED_FEATURE,
+		]);
 	});
 });
 
@@ -290,14 +374,20 @@ describe("loadConfig", () => {
 
 		const config = await loadConfig(path);
 		expect(config.maxConcurrency).toBe(DEFAULT_MAX_CONCURRENCY);
-		expect(config.enabledAgents).toEqual(["explorer", "cleaner"]);
-		expect(config.agentModels).toEqual({ explorer: "anthropic/legacy" });
-		expect(config.agentThinkingLevels).toEqual({ explorer: "low" });
+		expect(config.enabledAgents).toEqual(["explorer", "cleaner", "documenter"]);
+		expect(config.agentModels).toEqual({
+			explorer: "anthropic/legacy",
+			documenter: "anthropic/legacy",
+		});
+		expect(config.agentThinkingLevels).toEqual({ explorer: "low", documenter: "low" });
 
 		const saved = JSON.parse(readFileSync(path, "utf8"));
-		expect(saved.enabledAgents).toEqual(["explorer", "cleaner"]);
-		expect(saved.agentModels).toEqual({ explorer: "anthropic/legacy" });
-		expect(saved.agentThinkingLevels).toEqual({ explorer: "low" });
+		expect(saved.enabledAgents).toEqual(["explorer", "cleaner", "documenter"]);
+		expect(saved.agentModels).toEqual({
+			explorer: "anthropic/legacy",
+			documenter: "anthropic/legacy",
+		});
+		expect(saved.agentThinkingLevels).toEqual({ explorer: "low", documenter: "low" });
 		expect(saved).not.toHaveProperty("agentBackupModels");
 		expect(saved).not.toHaveProperty("thinkingLevel");
 		expect(saved.maxConcurrency).toBe(DEFAULT_MAX_CONCURRENCY);
@@ -313,11 +403,11 @@ describe("loadConfig", () => {
 		);
 
 		const config = await loadConfig(path);
-		expect(config.enabledAgents).toEqual(["explorer", "cleaner"]);
+		expect(config.enabledAgents).toEqual(["explorer", "cleaner", "documenter"]);
 		expect(config.agentModels).toEqual({});
 
 		const saved = JSON.parse(readFileSync(path, "utf8"));
-		expect(saved.enabledAgents).toEqual(["explorer", "cleaner"]);
+		expect(saved.enabledAgents).toEqual(["explorer", "cleaner", "documenter"]);
 		expect(saved.agentModels).toEqual({});
 	});
 });

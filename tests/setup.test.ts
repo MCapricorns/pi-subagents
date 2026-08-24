@@ -214,7 +214,7 @@ describe("enable/disable flow", () => {
 				agentThinkingLevels: { reviewer: "low" },
 				// Stamped: the load-time upgrade already ran and the user disabled
 				// cleaner deliberately, so it stays off until re-enabled here.
-				announcedFeatures: ["cleanerDefaulted"],
+				announcedFeatures: ["cleanerDefaulted", "documenterDefaulted"],
 			}),
 			"utf8",
 		);
@@ -257,7 +257,65 @@ describe("enable/disable flow", () => {
 			expect(saved.enabledAgents).toEqual(["explorer", "worker", "reviewer", "cleaner"]);
 			expect(saved.agentModels).toEqual({ reviewer: "anthropic/sonnet", cleaner: "anthropic/sonnet" });
 			expect(saved.agentThinkingLevels).toEqual({ reviewer: "low", cleaner: "low" });
-			expect(saved.announcedFeatures).toEqual(["cleanerDefaulted"]);
+			expect(saved.announcedFeatures).toEqual(["cleanerDefaulted", "documenterDefaulted"]);
+		} finally {
+			rmSync(dir, { recursive: true, force: true });
+		}
+	});
+
+	it("newly enabling documenter inherits the explorer model and thinking", async () => {
+		const dir = mkdtempSync(join(tmpdir(), "pi-subagents-setup-documenter-"));
+		const configPath = join(dir, "pi-subagents.json");
+		writeFileSync(
+			configPath,
+			JSON.stringify({
+				enabledAgents: ["explorer", "worker", "cleaner", "reviewer"],
+				agentModels: { explorer: "anthropic/haiku" },
+				agentThinkingLevels: { explorer: "low" },
+				announcedFeatures: ["cleanerDefaulted", "documenterDefaulted"],
+			}),
+			"utf8",
+		);
+		const keybindings = {
+			matches(data: string, action: string) {
+				return (data === "enter" && action === "tui.select.confirm")
+					|| (data === "escape" && action === "tui.select.cancel")
+					|| (data === "down" && action === "tui.select.down");
+			},
+		};
+		const ctx: any = {
+			mode: "tui",
+			cwd: dir,
+			isProjectTrusted: () => true,
+			model: undefined,
+			modelRegistry: { getAvailable: () => [] },
+			ui: {
+				notify: vi.fn(),
+				select: vi.fn(async (_title: string, options: string[]) =>
+					options.find((option) => option.startsWith("Enable"))),
+				custom: (factory: any) => new Promise((resolve) => {
+					const component = factory(
+						{ requestRender: () => {} },
+						{ fg: (_color: string, text: string) => text, bold: (text: string) => text },
+						keybindings,
+						resolve,
+					);
+					component.render(160);
+					// Documenter is the fourth built-in row.
+					component.handleInput("down");
+					component.handleInput("down");
+					component.handleInput("down");
+					component.handleInput(" ");
+					component.handleInput("enter");
+				}),
+			},
+		};
+		try {
+			await runSetup(ctx, configPath);
+			const saved = JSON.parse(readFileSync(configPath, "utf8"));
+			expect(saved.enabledAgents).toContain("documenter");
+			expect(saved.agentModels.documenter).toBe("anthropic/haiku");
+			expect(saved.agentThinkingLevels.documenter).toBe("low");
 		} finally {
 			rmSync(dir, { recursive: true, force: true });
 		}
@@ -299,13 +357,17 @@ describe("full setup flow", () => {
 			await runSetup(ctx, configPath);
 			const config = JSON.parse(readFileSync(configPath, "utf8"));
 			expect(config.enabledAgents).toEqual(["explorer", "worker", "cleaner", "reviewer"]);
+			expect(config.enabledAgents).not.toContain("documenter");
 			expect(config.agentModels).toEqual({});
 			expect(config.agentThinkingLevels).toEqual({});
 			expect(config).not.toHaveProperty("agentBackupModels");
 			expect(config).not.toHaveProperty("thinkingLevel");
+			expect(screens.some((screen) => screen.includes("cleaner — apply proven cleanup and deduplicate"))).toBe(true);
+			expect(screens.some((screen) => screen.includes("documenter — sync diff"))).toBe(true);
 			for (const agent of ["explorer", "worker", "cleaner", "reviewer"]) {
 				expect(screens.some((screen) => screen.includes(`Model for "${agent}"?`))).toBe(true);
 			}
+			expect(screens.some((screen) => screen.includes('Model for "documenter"?'))).toBe(false);
 			expect(screens.some((screen) => screen.includes("Primary/Backup"))).toBe(false);
 			expect(screens.some((screen) => screen.includes("Thinking strength"))).toBe(false);
 			expect(notify).toHaveBeenCalledWith(expect.stringContaining("Auto thinking"), "info");

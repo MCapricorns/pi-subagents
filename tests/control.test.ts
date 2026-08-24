@@ -68,6 +68,10 @@ beforeEach(() => {
 	delete process.env.PI_SUBAGENT_DEPTH;
 	testDir = mkdtempSync(join(tmpdir(), "pi-subagents-control-"));
 	process.env.PI_CODING_AGENT_DIR = testDir;
+	writeFileSync(join(testDir, "pi-subagents.json"), JSON.stringify({
+		enabledAgents: ["worker"],
+		announcedFeatures: ["cleanerDefaulted", "documenterDefaulted"],
+	}), "utf8");
 });
 
 afterEach(async () => {
@@ -311,41 +315,197 @@ send({ type: "message_end", message: { role: "assistant", content: [{ type: "tex
 		expect(existsSync(retainedDir)).toBe(false);
 	});
 
-	it("parks an auto-fix generation before resume so the old chain cannot publish", async () => {
-		const log = join(testDir, "auto-fix-commands.log");
-		const script = join(testDir, "auto-fix-park-child.mjs");
-		writeFileSync(
-			script,
-			fakeRpcScript({
-				setup: `const commandLog = ${JSON.stringify(log)}; const resumedProcess = process.argv.includes("--session");`,
-				onPrompt: `fs.appendFileSync(commandLog, JSON.stringify({ type: "prompt", message: input, argv: process.argv }) + "\\n");
-if (!input.includes("Auto-fix round")) {
-	const text = resumedProcess ? "APPROVE\\nVERDICT: REVIEW_PASS" : "REQUEST_CHANGES\\nVERDICT: REVIEW_FAIL";
-	send({ type: "message_end", message: { role: "assistant", content: [{ type: "text", text }], stopReason: "stop" } });
-	send({ type: "agent_settled" });
-}`,
-				onAbort: `fs.appendFileSync(commandLog, JSON.stringify({ type: "abort" }) + "\\n");
-send({ type: "message_end", message: { role: "assistant", content: [], stopReason: "aborted" } });
-send({ type: "agent_settled" });`,
-				autoSettle: false,
-			}),
-			"utf8",
-		);
-		const { stub, subagent, control } = registerWithScript(script);
-		const dispatched = await execute(subagent, { agent: "reviewer", task: "Review the change" });
+	it("does not launch downstream work when park wins after top-level RPC settlement", async () => {
+		writeFileSync(join(testDir, "pi-subagents.json"), JSON.stringify({
+			enabledAgents: ["worker", "documenter", "reviewer"],
+			announcedFeatures: ["cleanerDefaulted", "documenterDefaulted"],
+		}), "utf8");
+		const script = join(testDir, "unused-post-settle-park.mjs");
+		writeFileSync(script, "", "utf8");
+		let releaseTopLevel!: () => void;
+		const topLevelGate = new Promise<void>((resolveTopLevel) => {
+			releaseTopLevel = resolveTopLevel;
+		});
+		let topLevelSettled = false;
+		let topSignalAborted = false;
+		const calls: string[] = [];
+		vi.spyOn(spawn, "runSingleAgentWithMainFallback").mockImplementation(async (options: any) => {
+			calls.push(options.agentName);
+			if (options.agentName !== "worker") throw new Error("downstream child must not start after park");
+			const token = options.control.beginAttempt();
+			options.control.attach(token, {
+				steer: async () => {},
+				retarget: async () => {},
+				park: async () => {},
+				stop: async () => {},
+			});
+			options.control.updateAttemptPhase(token, "running");
+			options.control.markSettled();
+			topLevelSettled = true;
+			const aborted = new Promise<void>((resolveAborted) => {
+				options.signal.addEventListener("abort", () => {
+					topSignalAborted = true;
+					resolveAborted();
+				}, { once: true });
+			});
+			await Promise.race([topLevelGate, aborted]);
+			return {
+				agent: "worker",
+				task: options.task,
+				exitCode: 0,
+				messages: [{ role: "assistant", content: [{ type: "text", text: "STABLE WRITER RESULT" }], stopReason: "stop" }],
+				stderr: "",
+				usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, cost: 0, contextTokens: 0, turns: 1 },
+			} as any;
+		});
+
+		const { stub, subagent, control, stop, status } = registerWithScript(script);
+		const dispatched = await execute(subagent, { agent: "worker", task: "Park after settlement" });
 		const runId = dispatched.details.results[0].runId;
-		await waitFor(() => monitor.findRun(runId)?.activity === "auto-fix chain running");
-		await waitFor(() => commandLog(log).some((entry) => entry.message?.includes("Auto-fix round")));
+		await waitFor(() => topLevelSettled);
+		const parking = execute(control, { action: "park", id: runId });
+		await waitFor(() => topSignalAborted);
+		releaseTopLevel();
+		const parked = await parking;
+
+		expect(parked.content[0].text).toContain("stable checkpoint");
+		expect(calls).toEqual(["worker"]);
+		expect(stub.messages).toHaveLength(0);
+		const parkedStatus = await execute(status, { id: String(runId) });
+		expect(parkedStatus.content[0].text).toContain("worker");
+		await execute(stop, { id: String(runId) });
+		expect(stub.messages).toHaveLength(1);
+		expect(stub.messages[0].message.content).toContain("STABLE WRITER RESULT");
+		expect(stub.messages[0].message.content).not.toContain("documenter");
+	});
+
+	it("parks during documenter, retains its newest session, and resumes to a fresh reviewer", async () => {
+		writeFileSync(join(testDir, "pi-subagents.json"), JSON.stringify({
+			enabledAgents: ["worker", "documenter", "reviewer"],
+			maxFixRounds: 1,
+			announcedFeatures: ["cleanerDefaulted", "documenterDefaulted"],
+		}), "utf8");
+		const sessionDir = mkdtempSync(join(testDir, "doc-session-"));
+		writeFileSync(join(sessionDir, "now_doc-session.jsonl"), "", "utf8");
+		const script = join(testDir, "unused-doc-park.mjs");
+		writeFileSync(script, "", "utf8");
+		const result = (agent: string, task: string, text: string, extra: Record<string, unknown> = {}): any => ({
+			agent,
+			task,
+			exitCode: 0,
+			messages: [{ role: "assistant", content: [{ type: "text", text }], stopReason: "stop" }],
+			stderr: "",
+			usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, cost: 0, contextTokens: 0, turns: 1 },
+			...extra,
+		});
+		let documenterAttempts = 0;
+		let documenterStarted = false;
+		const run = vi.spyOn(spawn, "runSingleAgentWithMainFallback").mockImplementation(async (options: any) => {
+			options.onLive?.({ kind: "status", status: "running" });
+			if (options.agentName === "worker") {
+				options.control?.markSettled();
+				return result("worker", options.task, "OLD WRITER REPORT");
+			}
+			if (options.agentName === "documenter") {
+				documenterAttempts++;
+				if (documenterAttempts === 1) {
+					documenterStarted = true;
+					await new Promise<void>((resolveAborted) => {
+						if (options.signal.aborted) resolveAborted();
+						else options.signal.addEventListener("abort", () => resolveAborted(), { once: true });
+					});
+					return result("documenter", options.task, "NEWEST DOC PARTIAL", {
+						exitCode: 1,
+						stopReason: "aborted",
+						errorMessage: "parked",
+						sessionId: "doc-session",
+						sessionDir,
+					});
+				}
+				expect(options.sessionId).toBe("doc-session");
+				expect(options.sessionDir).toBe(sessionDir);
+				options.control?.markSettled();
+				return result("documenter", options.task, "DOCS FINISHED README.md", {
+					sessionId: "doc-session",
+					sessionDir,
+				});
+			}
+			return result("reviewer", options.task, "APPROVE\nVERDICT: REVIEW_PASS");
+		});
+
+		const { stub, subagent, control, status } = registerWithScript(script);
+		const dispatched = await execute(subagent, { agent: "worker", task: "Implement then document" });
+		const runId = dispatched.details.results[0].runId;
+		await waitFor(() => documenterStarted);
+		const activeStatus = await execute(status, { id: String(runId) });
+		expect(activeStatus.content[0].text).toContain("managed downstream stage");
+		expect(activeStatus.content[0].text).toContain("Steer/retarget are unavailable");
 
 		const parked = await execute(control, { action: "park", id: runId });
 		expect(parked.content[0].text).toContain("stable checkpoint");
 		expect(stub.messages).toHaveLength(0);
-		const resumed = await execute(control, { action: "resume", id: runId, objective: "Re-review now" });
+		const parkedStatus = await execute(status, { id: String(runId) });
+		expect(parkedStatus.content[0].text).toContain("documenter");
+
+		const resumed = await execute(control, { action: "resume", id: runId, objective: "Finish documentation" });
 		expect(resumed.content[0].text).toContain(`Resumed run #${runId}`);
 		await waitFor(() => stub.messages.length === 1);
-		expect(stub.messages[0].message.content).toContain("VERDICT: REVIEW_PASS");
-		expect(stub.messages[0].message.content).not.toContain("Auto-fix chain:");
-		expect(commandLog(log).filter((entry) => entry.type === "prompt")).toHaveLength(3);
+		expect(run.mock.calls.map(([options]) => options.agentName)).toEqual([
+			"worker", "documenter", "documenter", "reviewer",
+		]);
+		const completion = stub.messages[0].message.content as string;
+		expect(completion).toContain("documenter · documentation pass · completed");
+		expect(completion).not.toContain("OLD WRITER REPORT");
+		const documenterStepId = /- #(\d+) documenter/.exec(completion)?.[1];
+		expect(documenterStepId).toBeTruthy();
+		const documenterReport = await execute(status, { id: documenterStepId });
+		expect(documenterReport.content[0].text).toContain("DOCS FINISHED README.md");
+	});
+
+	it("stops during documenter and publishes its partial instead of the old writer", async () => {
+		writeFileSync(join(testDir, "pi-subagents.json"), JSON.stringify({
+			enabledAgents: ["worker", "documenter", "reviewer"],
+			announcedFeatures: ["cleanerDefaulted", "documenterDefaulted"],
+		}), "utf8");
+		const script = join(testDir, "unused-doc-stop.mjs");
+		writeFileSync(script, "", "utf8");
+		const result = (agent: string, task: string, text: string, extra: Record<string, unknown> = {}): any => ({
+			agent,
+			task,
+			exitCode: 0,
+			messages: [{ role: "assistant", content: [{ type: "text", text }], stopReason: "stop" }],
+			stderr: "",
+			usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, cost: 0, contextTokens: 0, turns: 1 },
+			...extra,
+		});
+		let documenterStarted = false;
+		vi.spyOn(spawn, "runSingleAgentWithMainFallback").mockImplementation(async (options: any) => {
+			options.onLive?.({ kind: "status", status: "running" });
+			if (options.agentName === "worker") {
+				options.control?.markSettled();
+				return result("worker", options.task, "OLD WRITER OUTPUT");
+			}
+			documenterStarted = true;
+			await new Promise<void>((resolveAborted) => {
+				if (options.signal.aborted) resolveAborted();
+				else options.signal.addEventListener("abort", () => resolveAborted(), { once: true });
+			});
+			return result("documenter", options.task, "CURRENT DOCUMENTER PARTIAL", {
+				exitCode: 1,
+				stopReason: "aborted",
+				errorMessage: "stopped",
+			});
+		});
+
+		const { stub, subagent, stop } = registerWithScript(script);
+		const dispatched = await execute(subagent, { agent: "worker", task: "Stop in documentation" });
+		const runId = dispatched.details.results[0].runId;
+		await waitFor(() => documenterStarted);
+		await execute(stop, { id: String(runId) });
+
+		expect(stub.messages).toHaveLength(1);
+		expect(stub.messages[0].message.content).toContain("CURRENT DOCUMENTER PARTIAL");
+		expect(stub.messages[0].message.content).not.toContain("OLD WRITER OUTPUT");
 	});
 
 	it("destructive stop retires a parked retained session", async () => {
@@ -412,7 +572,11 @@ describe("queued controls and stale generations", () => {
 	});
 
 	it("stops a queued resumed generation without publishing the completed generation's result", async () => {
-		writeFileSync(join(testDir, "pi-subagents.json"), JSON.stringify({ maxConcurrency: 1 }), "utf8");
+		writeFileSync(join(testDir, "pi-subagents.json"), JSON.stringify({
+			maxConcurrency: 1,
+			enabledAgents: ["worker"],
+			announcedFeatures: ["cleanerDefaulted", "documenterDefaulted"],
+		}), "utf8");
 		const oldSessionDir = mkdtempSync(join(testDir, "completed-session-"));
 		writeFileSync(join(oldSessionDir, "retained.txt"), "old retained context", "utf8");
 		vi.spyOn(spawn, "runSingleAgentWithMainFallback").mockImplementation(async (options: any) => {

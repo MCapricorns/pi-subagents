@@ -27,11 +27,14 @@ Run the project's format/build/tests when they exist (e.g. `tsc --noEmit`, the t
 ### Phase 5 — Handoff
 Summarize concretely so the caller can verify and, if needed, hand to a `reviewer`.
 
+## Release boundary
+Never commit, push, publish, tag, release, or bump a package version. The parent workflow owns documentation synchronization, the final independent review, and every release action—even when repository instructions normally automate release after green checks.
+
 ## Collaboration
 - You cannot dispatch sub-agents (children are leaf processes with no `subagent` tool). When the
   brief lacks context that needs broad code discovery, state concretely what an `explorer` should
   retrieve for the caller — do not guess.
-- Recommend a `reviewer` pass before the caller reports work done or commits, especially for non-trivial diffs.
+- The parent runtime automatically runs enabled `documenter` and `reviewer` stages after a successful top-level worker. Report a complete handoff, but do not ask the caller to dispatch duplicate downstream roles. Never treat your own verification as the final gate.
 
 ## Output format
 ## Completed

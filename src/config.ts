@@ -17,9 +17,10 @@ import { dirname, join } from "node:path";
 import { getAgentDir, withFileMutationQueue } from "@earendil-works/pi-coding-agent";
 
 /** Full catalog of agents shipped with the package (selectable in /subagents-setup). */
-export const BUILTIN_AGENT_NAMES = ["explorer", "worker", "cleaner", "reviewer"] as const;
+export const BUILTIN_AGENT_NAMES = ["explorer", "worker", "cleaner", "documenter", "reviewer"] as const;
 
-/** Agents enabled out of the box on a fresh install. Explicit configured lists are preserved. */
+/** Agents enabled out of the box on a fresh install. Documenter remains an
+ * explicit setup choice; existing non-empty configs receive it via migration. */
 export const DEFAULT_ENABLED_AGENTS: readonly string[] = ["explorer", "worker", "cleaner", "reviewer"];
 
 export const AGENT_SCOPE_VALUES = ["user", "project", "both"] as const;
@@ -28,6 +29,7 @@ export type AgentScope = (typeof AGENT_SCOPE_VALUES)[number];
 const LEGACY_EXPLORER_NAME = "explore";
 const EXPLORER_NAME = "explorer";
 const CLEANER_NAME = "cleaner";
+const DOCUMENTER_NAME = "documenter";
 const REVIEWER_NAME = "reviewer";
 
 /**
@@ -41,6 +43,13 @@ const REVIEWER_NAME = "reviewer";
 export const CLEANER_DEFAULTED_FEATURE = "cleanerDefaulted";
 export const CLEANER_AUTO_ENABLED_FEATURE = "cleanerAutoEnabled";
 export const CLEANER_INHERITED_FEATURE = "cleanerInheritedReviewer";
+
+/** One-time upgrade stamps for the pre-commit documenter role. Existing
+ * non-empty configs gain it before reviewer and inherit explorer routing; fresh
+ * installs keep it off until setup explicitly enables it. */
+export const DOCUMENTER_DEFAULTED_FEATURE = "documenterDefaulted";
+export const DOCUMENTER_AUTO_ENABLED_FEATURE = "documenterAutoEnabled";
+export const DOCUMENTER_INHERITED_FEATURE = "documenterInheritedExplorer";
 
 function migrateAgentName(name: string): string {
 	return name === LEGACY_EXPLORER_NAME ? EXPLORER_NAME : name;
@@ -63,9 +72,9 @@ export const DEFAULT_MAX_CONCURRENCY = 4;
 /** Upper bound accepted for maxConcurrency (defensive clamp). */
 export const MAX_CONCURRENCY_LIMIT = 16;
 /**
- * How many automatic worker→reviewer fix rounds run when a reviewer returns
- * REVIEW_FAIL before waking the main agent. 0 disables the auto-fix loop
- * (the main agent is woken to dispatch fixes itself). Default: 2.
+ * Maximum worker fixes after REVIEW_FAIL. Each fix is followed by optional
+ * documenter and reviewer; this cap does not suppress the initial post-writer
+ * documentation/final-review workflow. 0 disables fixes. Default: 2.
  */
 export const DEFAULT_MAX_FIX_ROUNDS = 2;
 /** Upper bound accepted for maxFixRounds (defensive clamp). 0 disables the loop. */
@@ -88,8 +97,8 @@ export interface SubagentsConfig {
 	/** Optional per-agent thinking preference. Runtime clamps it to the effective model's supported levels. */
 	agentThinkingLevels: Record<string, ThinkingLevel>;
 	/**
-	 * When a review passes (REVIEW_PASS verdict), deliver it without waking the
-	 * main agent. Disabled by default so passing reviews still resume orchestration.
+	 * When a standalone review passes (REVIEW_PASS verdict), deliver it without
+	 * waking the main agent. Managed workflows always wake once at final delivery.
 	 */
 	notifyOnReviewPass: boolean;
 	/**
@@ -106,11 +115,9 @@ export interface SubagentsConfig {
 	 * one parallel `subagent` call may contain. Default: 4. */
 	maxConcurrency: number;
 	/**
-	 * Auto-fix rounds when a reviewer returns REVIEW_FAIL: the extension dispatches
-	 * a worker (briefed with the review's concrete findings) then a reviewer
-	 * re-review, repeating up to this many times before waking the main agent with
-	 * the full chain. 0 disables it (the main agent handles fixes itself).
-	 * Default: 2.
+	 * Maximum worker fixes after REVIEW_FAIL. Every fix receives the full review,
+	 * then enabled documenter/reviewer stages run. Initial post-writer docs/review
+	 * do not consume this budget. 0 disables fixes. Default: 2.
 	 */
 	maxFixRounds: number;
 	/**
@@ -240,7 +247,7 @@ export function normalizeConfig(raw: unknown): SubagentsConfig {
 	const maxConcurrency = clampCount(raw.maxConcurrency, MAX_CONCURRENCY_LIMIT);
 	if (maxConcurrency !== undefined) config.maxConcurrency = maxConcurrency;
 
-	// 0 disables the auto-fix loop (main agent handles fixes itself).
+	// 0 disables worker fixes, not the initial managed docs/review workflow.
 	if (typeof raw.maxFixRounds === "number" && Number.isFinite(raw.maxFixRounds)) {
 		config.maxFixRounds = Math.max(0, Math.min(MAX_FIX_ROUNDS_LIMIT, Math.round(raw.maxFixRounds)));
 	}
@@ -279,6 +286,29 @@ export function normalizeConfig(raw: unknown): SubagentsConfig {
 			// An old explicit list may have no reviewer overrides to copy; only the
 			// copied case is stamped so the one-time notice stays accurate.
 			if (inherited) config.announcedFeatures.push(CLEANER_INHERITED_FEATURE);
+		}
+	}
+
+	if (!config.announcedFeatures.includes(DOCUMENTER_DEFAULTED_FEATURE)) {
+		config.announcedFeatures.push(DOCUMENTER_DEFAULTED_FEATURE);
+		if (config.enabledAgents.length > 0 && !config.enabledAgents.includes(DOCUMENTER_NAME)) {
+			const reviewerIndex = config.enabledAgents.indexOf(REVIEWER_NAME);
+			config.enabledAgents.splice(
+				reviewerIndex === -1 ? config.enabledAgents.length : reviewerIndex,
+				0,
+				DOCUMENTER_NAME,
+			);
+			config.announcedFeatures.push(DOCUMENTER_AUTO_ENABLED_FEATURE);
+			let inherited = false;
+			if (!config.agentModels[DOCUMENTER_NAME] && config.agentModels[EXPLORER_NAME]) {
+				config.agentModels[DOCUMENTER_NAME] = config.agentModels[EXPLORER_NAME];
+				inherited = true;
+			}
+			if (!config.agentThinkingLevels[DOCUMENTER_NAME] && config.agentThinkingLevels[EXPLORER_NAME]) {
+				config.agentThinkingLevels[DOCUMENTER_NAME] = config.agentThinkingLevels[EXPLORER_NAME];
+				inherited = true;
+			}
+			if (inherited) config.announcedFeatures.push(DOCUMENTER_INHERITED_FEATURE);
 		}
 	}
 

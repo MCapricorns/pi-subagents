@@ -12,20 +12,25 @@
 not just a way to launch another prompt.
 
 Your main agent can send research to `explorer`, implementation to `worker`,
-intentional maintenance to `cleaner`, and independent checks to `reviewer`. Each
-role runs in its own child process with a clean context, works in the background,
-and returns its result automatically. Long-running work can be steered, parked,
-resumed, retargeted, or forked without losing what the agent already learned.
+intentional cleanup and duplicate-code consolidation to `cleaner`, documentation
+synchronization to `documenter`, and independent checks to `reviewer`. Each role
+runs in its own child process with a clean context, works in the background, and
+returns its result automatically. Active top-level work can be steered or
+retargeted; managed stages can be parked, resumed, stopped, or forked without
+losing retained context.
 
 ```text
 You
  └─ pi main agent
-     ├─ explorer ── maps the codebase
-     ├─ worker ──── implements and verifies the change
-     └─ reviewer ── checks the diff
-          └─ REVIEW_FAIL → worker fixes → reviewer checks again
+     ├─ explorer ─── maps the codebase
+     ├─ worker ───── implements ─┬─▶ documenter ─▶ reviewer
+     ├─ cleaner ──── cleans up ──┘       (enabled roles only)
+     ├─ documenter ─ synchronizes docs ─▶ reviewer
+     └─ reviewer ─── advisory report (no VERDICT), or managed gate
+          ├─ REVIEW_PASS + documenter → documenter → fresh reviewer
+          └─ REVIEW_FAIL → worker → optional documenter → reviewer
 
-The main agent receives one useful result when the work is ready.
+The stable parent run returns one final result when the complete workflow settles.
 ```
 
 Install it once and keep using pi normally. The extension teaches the main model
@@ -40,10 +45,15 @@ more of it.
   and review have separate roles, tools, and operating rules.
 - **You do not babysit background work.** Results wake the main agent automatically;
   there is no polling loop and no “go check whether it finished” step.
-- **Parallel edits stay safe.** Parallel workers use detached Git worktrees by
-  default, then apply their changes back without touching your index.
+- **Parallel edits stay safe.** Parallel workers use temporary, isolated Git
+  checkouts (worktrees) by default, then apply their changes back without
+  touching your index.
+- **Documentation stops drifting.** Enabled `documenter` runs automatically
+  after successful workers/cleaners and before the final reviewer. It can also
+  run an explicitly requested whole-codebase maintenance pass.
 - **Review can close the loop.** A failed gate can automatically dispatch a worker,
-  run another independent review, and repeat up to a hard limit.
+  run documentation sync, request another independent review, and repeat up to a
+  hard limit.
 - **Agents remain controllable.** Every run has a stable id and retained session,
   so you can change direction or continue later without starting from zero.
 - **Failures are handled, not hidden.** Model failures can hand the same session to
@@ -54,10 +64,10 @@ more of it.
 
 | A basic launcher often gives you… | pi-subagents gives you… |
 | --- | --- |
-| One generic child role | Four focused engineering roles |
+| One generic child role | Five focused engineering roles |
 | A one-shot prompt | Retained, steerable, resumable, forkable threads |
 | Concurrent writers in one checkout | Git worktree isolation for parallel workers |
-| A review report you must act on manually | An optional reviewer → fix → re-review loop |
+| A review report you must act on manually | Automatic writer → documenter → reviewer delivery and bounded fix rounds |
 | Manual polling or follow-up | Automatic result delivery that resumes the main agent |
 | A hard failure when the selected model is unavailable | Direct handoff to the current main model |
 | Synchronized retries during startup contention | Extended jittered backoff that reduces retry collisions |
@@ -76,8 +86,10 @@ Open pi and run the setup wizard:
 /subagents-setup
 ```
 
-Fresh installs enable all four built-in agents. You can keep the current main
-model for every role or choose a different model and thinking level per agent.
+Fresh installs enable `explorer`, `worker`, `cleaner`, and `reviewer`.
+`documenter` is available in the wizard but stays off until you select it. You
+can keep the current main model for every role or choose a different model and
+thinking level per agent.
 
 Then ask for work in plain language:
 
@@ -98,16 +110,37 @@ explicitly when you want exact control.
 
 ## What changed in 4.1.2
 
-Startup contention is now much harder to exhaust. A child that exits or fails its
-RPC readiness handshake before the initial prompt is dispatched is retried through
-a longer backoff window. Each default delay also gets additive jitter, reducing the
+### Documentation sync as a real workflow stage
+
+The new `documenter` is a write-capable, explorer-class role with two modes:
+
+1. **Pre-commit diff sync** — after the last code edit and before the final
+   reviewer, it compares the actual diff with comments, README/docs, examples,
+   commands, config, defaults, and lifecycle descriptions.
+2. **Whole-codebase maintenance** — when explicitly requested, it scans an
+   existing project for stale comments and documentation and applies every safe,
+   verified correction in scope.
+
+It never changes runtime behavior, commits, pushes, publishes, or bumps versions.
+When enabled, runtime now treats it as a managed stage: successful top-level
+`worker`/`cleaner` runs continue through `documenter → reviewer`, a successful
+whole-codebase `documenter` continues through reviewer, and auto-fix rounds use
+`worker → documenter → reviewer`. Existing non-empty configs receive `documenter`
+once and inherit the configured `explorer` model and thinking level; fresh
+installs leave it as an explicit setup choice.
+
+### Safer startup contention recovery
+
+Startup contention is much harder to exhaust. A child that exits or fails its RPC
+readiness handshake before the initial prompt is dispatched is retried through a
+longer backoff window. Each default delay also gets additive jitter, reducing the
 chance that several children retry in the same lockstep waves. The base window
 covers stale startup locks and leaves headroom beyond the default four-way fan-out.
 
 Only a failure known to precede prompt dispatch qualifies. Once the parent sends a
-prompt command, pi-subagents will not replay it—even if the ACK is lost—because Pi
-may already have started the model or tools. This recovery therefore cannot
-repeat model calls or edits.
+prompt command, pi-subagents will not replay it—even if the ACK is lost or an idle
+watchdog wins the race—because Pi may already have started the model or tools.
+This recovery therefore cannot repeat model calls or edits.
 
 ## Meet the team
 
@@ -115,8 +148,9 @@ repeat model calls or edits.
 | --- | --- | --- |
 | `explorer` | Read-only | Broad codebase search, unfamiliar-area mapping, symbol and dependency tracing, and multi-file reconnaissance. |
 | `worker` | Full | A self-contained implementation, bug fix, refactor, or test task carried through verification. |
-| `cleaner` | Full | Explicitly authorized cleanup, removal, simplification, and maintenance. It must prove each cut; zero edits is a valid result. |
-| `reviewer` | Read-only | Audits, code-health checks, plans, PR or issue validation, and fresh pre-commit gates. |
+| `cleaner` | Full | Explicitly authorized cleanup, removal, simplification, and duplicate-code consolidation. Dispatch authorizes every safe in-scope cut; it must prove each one. |
+| `documenter` | Docs/comments | Pre-commit diff sync or explicitly requested whole-codebase documentation maintenance. Uses an explorer-class model, may make zero edits, and never changes runtime behavior. |
+| `reviewer` | Read-only | Audits, code-health checks, plans, PR or issue validation, documentation-drift checks, and fresh pre-commit gates. |
 
 Children have no memory of the parent conversation. A good manual brief includes
 the goal, exact paths, constraints, and expected output. The injected delegation
@@ -165,47 +199,108 @@ subagent({
 });
 ```
 
-A gate reviewer ends with `REVIEW_PASS` or `REVIEW_FAIL`. On failure, pi-subagents
-can run this loop without waking the main agent between steps:
+A gate reviewer ends with `REVIEW_PASS` or `REVIEW_FAIL`. A direct pass is not
+accepted as the final gate while `documenter` is enabled: runtime first syncs the
+actual pending diff, then starts a fresh reviewer. A failure uses the bounded loop:
 
 ```text
-reviewer → worker fixes every open finding → reviewer checks again → PASS/FAIL
+reviewer → worker fixes every open finding → optional documenter sync → reviewer checks again → PASS/FAIL
 ```
 
-`maxFixRounds` is a hard cap, so the chain always settles. Generic audits and
-read-only reviews are advisory: they do not emit a gate verdict and never trigger
-edits.
+Each step gets a fresh model context. The chain shares the same code state and
+passes every full reviewer, worker, and documenter report forward; it does not
+reuse one context window. Internal children bypass top-level lifecycle policy, so
+they cannot recursively start another chain.
+
+`maxFixRounds` limits worker fix attempts only. Initial post-writer documentation
+and final review still run when it is `0`. Generic audits and read-only reviews
+are advisory: they omit `VERDICT`, remain read-only, and never trigger edits.
 
 ### Clean up without guessing
 
-`cleaner` is only for requests that explicitly authorize cleanup edits. It checks
-reachability, ownership, history, and boundaries before removing or simplifying
-anything, then applies every safe in-scope cut and verifies the result.
+`cleaner` is only for requests that authorize cleanup edits. Once dispatched,
+that authorization covers every safe, proven in-scope cut without another
+item-by-item confirmation. It checks reachability, ownership, history, and
+boundaries before removing, simplifying, or consolidating anything, then verifies
+the result.
+
+Repeated code is a first-class cleanup target. Cleaner compares contracts,
+invariants, side effects, ownership, and reasons to change—not just matching
+text—then extracts the smallest stable shared implementation and migrates all
+in-scope callers. It keeps similar code separate when domains or future change
+axes genuinely differ, avoiding a generic abstraction that is worse than the
+duplication.
 
 ```text
-explicit cleanup request → cleaner applies proven cuts → reviewer gates the diff
+explicit cleanup request → cleaner applies proven cuts → documenter syncs docs → reviewer gates the diff
 read-only cleanup audit   → reviewer reports candidates only
 ```
 
 This separation matters: asking for an audit does not silently authorize code
 changes, and asking for cleanup does not reward speculative deletion.
 
+### Keep comments and README/docs synchronized
+
+`documenter` has two deliberate launch paths.
+
+**For a pending worker or cleaner change**, enable the role. Runtime schedules it
+automatically against the actual diff before the final reviewer; do not dispatch
+a duplicate manual sync. If reviewer is disabled, documenter becomes the final
+managed stage. If documenter is disabled, reviewer follows the writer directly.
+
+**For an existing project**, explicitly authorize a broad maintenance pass:
+
+```ts
+subagent({
+  agent: "documenter",
+  task: "Run a whole-codebase documentation maintenance pass. Verify comments, docstrings, README files, docs, and examples against the implementation; update every safe stale statement in scope.",
+});
+```
+
+A successful explicit whole-codebase documenter also continues automatically to
+reviewer when enabled. A generic or read-only documentation audit still belongs
+to `reviewer`. `documenter` is the last writer, never the approver:
+
+```text
+worker / cleaner / documenter / auto-fix worker → enabled downstream roles → one final delivery
+```
+
 ## Safe parallel editing
+
+A Git worktree is a temporary second checkout of the same repository. It shares
+Git history with your main checkout but has its own files, so two workers do not
+overwrite each other while they run.
 
 Every child has process and context isolation. Write-capable tasks can also have
 filesystem isolation:
 
 - A single task defaults to `isolation: "shared"`.
 - Parallel `worker` tasks default to `isolation: "worktree"`.
-- `cleaner` supports worktree mode when explicitly requested.
+- `cleaner` and `documenter` support worktree mode when explicitly requested;
+  their default remains shared.
 - Read-only `explorer` and `reviewer` tasks reject worktree mode because they do
   not need a writable checkout.
 
-Worktree mode requires a Git repository with a committed `HEAD`. Tracked,
-deleted, untracked, and binary changes are carried back to the original checkout
-without staging or modifying the parent index. If setup or integration fails,
-pi-subagents keeps the useful patch or worktree when possible and records recovery
-information in:
+Worktree mode requires a Git repository with a committed `HEAD`. For an isolated
+writer, automatic documenter/reviewer children run inside that same worktree.
+Those isolated stages can still run in parallel; writer and documentation changes
+are integrated only after the final reviewer settles. Tracked, deleted, untracked,
+and binary changes are then carried back to the original checkout without staging
+or modifying the parent index.
+
+Repository-lane discovery uses the Git top-level even in an empty repository, so
+root and nested paths share one lane before the first commit. Every shared
+`worker`, `cleaner`, and `documenter` writer—and each shared `reviewer` snapshot
+when managed writers are enabled—uses that lane. Standalone documentation,
+writer-only configurations, and workflows without reviewer cannot race another
+writer or documentation sync. Isolated agents keep doing model work in parallel,
+but their final apply waits for the same lane.
+
+Normal completion, stop, and shutdown share one finalization result, so isolated
+state is applied at most once. If park, stop, or shutdown wins after the top-level
+child settles, no downstream role starts and the stable top-level session remains
+the checkpoint. If setup or integration fails, pi-subagents keeps the useful
+patch or worktree when possible and records recovery information in:
 
 ```text
 ~/.pi/agent/pi-subagents-recovery.json
@@ -216,7 +311,10 @@ isolated checkpoint is available after that checkpoint has settled and integrate
 
 ## Follow, redirect, or stop a run
 
-Dispatch confirmations and completion messages include a stable `#id`.
+Dispatch confirmations and completion messages include a stable `#id`. That
+parent id represents the whole managed workflow; each internal documenter,
+reviewer, and fix step gets a separate queryable id in the final summary. No
+internal completion wakes the main agent.
 
 | Tool | What it does |
 | --- | --- |
@@ -232,10 +330,17 @@ subagent_control({ action: "resume", id: 7, objective: "Finish the tests." });
 subagent_control({ action: "fork", id: 7, objective: "Try the smaller design instead." });
 ```
 
-Use `steer` to add guidance to active work. Use `retarget` when the current
-objective is obsolete. Use `park` to preserve a checkpoint while releasing its
-process slot. Use `stop` only when you want to discard that thread's future
-continuation.
+Use `steer` or `retarget` only while the top-level RPC child is active. During an
+automatic documenter, reviewer, or fix stage, use `park` or `stop`; park and then
+`resume` with a new objective when you need to redirect retained context. Use
+`park` to preserve the newest active stage and release its process slot; parking
+during documentation retains the
+documenter's partial/session, not an older writer or review. Use `stop` only when
+you want to discard that thread's future continuation. Stop and session shutdown
+abort the active internal stage, suppress stale delivery, and leave worktree
+finalization to the same one-time lifecycle owner. `stop-all` interrupts every
+lane holder before waiting for finalization, avoiding self-deadlock when an
+isolated apply is queued behind shared work.
 
 ## Results and live status
 
@@ -245,13 +350,15 @@ The active TUI widget shows queued and running work as a compact tree:
 ● reviewer · review diff of src/cache.ts · claude-sonnet-4-5/high · 42s
   ├ ● worker · fix round 1 · src/cache.ts · claude-sonnet-4-5/high · 10s
   │    grep cacheKey
+  ├ ● documenter · docs round 1 · claude-haiku-4-5/low · 4s
   └ ○ reviewer · re-review round 1 · claude-sonnet-4-5/high · 3s
 ```
 
-Completed and parked rows disappear from the widget. Final messages include the
-result plus aggregate token and cost totals. Long output is truncated in the
+Completed internal rows disappear from the widget; a parked parent remains
+queryable. Final messages contain one managed-workflow summary with aggregate
+token/cost totals and every internal id. Long output is truncated in the
 conversation and written to a temporary Markdown artifact; `subagent_status`
-keeps the complete run report available by id.
+keeps each complete run report available by id.
 
 The main agent is told not to paraphrase a result you have already seen. It should
 add only its own conclusion or next action instead of charging you twice for the
@@ -275,7 +382,9 @@ handoff.
 
 Thinking defaults to **Auto**. pi-subagents starts from the role's preference and
 chooses only a level the effective model actually supports. A fallback re-checks
-the level for the main model.
+the level for the main model. `documenter` deliberately ships with the same fast,
+low-thinking profile as `explorer`; migration and manual enablement copy any
+configured explorer route, and you can still override it independently.
 
 There is no separate vision mode. Assign a multimodal model to the agent and name
 the image paths in the task:
@@ -317,11 +426,13 @@ Configuration is stored at `~/.pi/agent/pi-subagents.json` and follows
 
 ```json
 {
-  "enabledAgents": ["explorer", "worker", "cleaner", "reviewer"],
+  "enabledAgents": ["explorer", "worker", "cleaner", "documenter", "reviewer"],
   "agentModels": {
-    "explorer": "anthropic/claude-haiku-4-5"
+    "explorer": "anthropic/claude-haiku-4-5",
+    "documenter": "anthropic/claude-haiku-4-5"
   },
   "agentThinkingLevels": {
+    "documenter": "low",
     "reviewer": "high"
   },
   "notifyOnReviewPass": false,
@@ -339,17 +450,20 @@ Configuration is stored at `~/.pi/agent/pi-subagents.json` and follows
 | `enabledAgents` | Agent names available for discovery and delegation. `[]` disables all agents. |
 | `agentModels` | Optional `provider/model-id` per agent. Missing means use the current main model. |
 | `agentThinkingLevels` | Optional manual level per agent. Missing means Auto. |
-| `notifyOnReviewPass` | When `true`, a passing gate is delivered without waking the main agent. Default `false`. |
+| `notifyOnReviewPass` | When `true`, a standalone passing gate is delivered without waking the main agent. Managed workflows still wake once at final delivery. Default `false`. |
 | `maxResultLines` | Lines kept in a completion message before the full result moves to a temporary artifact. Default `80`. |
 | `proactiveInjection` | Teach the main model when and how to delegate. Default `true`. |
 | `agentScope` | Discover `user`, `project`, or `both` agent directories. Default `user`. |
 | `maxConcurrency` | Running process limit and maximum tasks in one parallel call, from `1` to `16`. Default `4`. |
-| `maxFixRounds` | Worker → reviewer rounds after `REVIEW_FAIL`. `0` disables auto-fix. Default `2`. |
+| `maxFixRounds` | Maximum worker fixes after `REVIEW_FAIL`; each fix is followed by optional documenter and reviewer. `0` disables fixes but not initial post-writer docs/review. Default `2`. |
 | `idleTimeoutSec` | Seconds without RPC output before termination. `0` disables the watchdog. Default `90`. |
 
 Invalid values fall back safely. Older configs are normalized automatically. The
 former built-in name `explore` migrates to `explorer`, and pre-cleaner non-empty
-agent lists receive `cleaner` once; a later deliberate disable is respected.
+agent lists receive `cleaner` once. Existing non-empty configs also receive
+`documenter` once, inserted before `reviewer`, with any configured `explorer`
+model and thinking copied across. Fresh installs do not enable `documenter`
+until the user selects it. Later deliberate disables are respected.
 
 ## Custom and overridden agents
 
@@ -383,9 +497,9 @@ npm test
 ```
 
 The package has no bundled runtime dependencies; it uses pi and TypeBox as peer
-packages. Source is split by responsibility: dispatch and auto-fix, retained
-thread lifecycle, RPC transport, worktree integration, completion delivery,
-tools, and TUI status.
+packages. Source is split by responsibility: managed dispatch/workflow policy,
+retained thread lifecycle, RPC transport, worktree integration, completion
+delivery, tools, and TUI status.
 
 ## License
 

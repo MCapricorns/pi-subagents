@@ -14,6 +14,7 @@ import {
 	AGENT_SCOPE_VALUES,
 	BUILTIN_AGENT_NAMES,
 	CLEANER_DEFAULTED_FEATURE,
+	DOCUMENTER_DEFAULTED_FEATURE,
 	DEFAULT_CONFIG,
 	DEFAULT_ENABLED_AGENTS,
 	DEFAULT_IDLE_TIMEOUT_SEC,
@@ -61,7 +62,8 @@ function actualAgentThinkingDefault(
 const MODULE_HINTS: Record<string, string> = {
 	explorer: "read-only codebase recon (fast model)",
 	worker: "implement / fix / refactor / test (full tools)",
-	cleaner: "prove and apply safe cleanup cuts (full tools)",
+	cleaner: "apply proven cleanup and deduplicate code (full tools)",
+	documenter: "sync diff or whole-codebase comments/docs (full tools)",
 	reviewer: "read-only audits and pre-commit gates",
 };
 
@@ -303,7 +305,7 @@ async function runFullSetup(ctx: ExtensionCommandContext, configPath: string, ba
 	if (maxConcurrency === undefined) return notifyCancelled(ctx);
 	const maxFixRounds = await pickCount(
 		ctx,
-		"Reviewer auto-fix rounds? (0 = main agent handles fixes)",
+		"Reviewer worker-fix rounds? (0 = no automatic fixes)",
 		FIX_ROUNDS_STEPS,
 		base.maxFixRounds,
 		DEFAULT_MAX_FIX_ROUNDS,
@@ -330,9 +332,13 @@ async function runFullSetup(ctx: ExtensionCommandContext, configPath: string, ba
 		maxConcurrency,
 		maxFixRounds,
 		idleTimeoutSec,
-		// Full setup is an explicit decision point: mark the cleaner
-		// default-enable upgrade as processed so the saved list is kept as-is.
-		announcedFeatures: [...new Set([...base.announcedFeatures, CLEANER_DEFAULTED_FEATURE])],
+		// Full setup is an explicit decision point: mark role-enable migrations as
+		// processed so the user's saved selection is kept as-is.
+		announcedFeatures: [...new Set([
+			...base.announcedFeatures,
+			CLEANER_DEFAULTED_FEATURE,
+			DOCUMENTER_DEFAULTED_FEATURE,
+		])],
 	};
 	await saveConfig(next, configPath);
 	ctx.ui.notify(`pi-subagents configured with Auto thinking. Saved to ${configPath}`, "info");
@@ -346,7 +352,7 @@ async function updateRuntimeSetting(
 		"Proactive injection",
 		"Agent scope",
 		"Max concurrency",
-		"Reviewer auto-fix rounds",
+		"Reviewer worker-fix rounds",
 		"Idle timeout",
 	]);
 	if (choice === undefined) return undefined;
@@ -364,7 +370,7 @@ async function updateRuntimeSetting(
 		if (value === undefined) return undefined;
 		next.maxConcurrency = value;
 	} else if (choice.startsWith("Reviewer")) {
-		const value = await pickCount(ctx, "Reviewer auto-fix rounds?", FIX_ROUNDS_STEPS, config.maxFixRounds, DEFAULT_MAX_FIX_ROUNDS);
+		const value = await pickCount(ctx, "Reviewer worker-fix rounds?", FIX_ROUNDS_STEPS, config.maxFixRounds, DEFAULT_MAX_FIX_ROUNDS);
 		if (value === undefined) return undefined;
 		next.maxFixRounds = value;
 	} else {
@@ -403,6 +409,17 @@ async function runMenu(ctx: ExtensionCommandContext, configPath: string, config:
 			}
 			if (!next.agentThinkingLevels.cleaner && config.agentThinkingLevels.reviewer) {
 				next.agentThinkingLevels.cleaner = config.agentThinkingLevels.reviewer;
+			}
+		}
+		// Documenter intentionally follows the faster explorer route. Fresh
+		// installs leave it unselected; enabling it later inherits any explorer
+		// overrides instead of silently choosing a stronger model.
+		if (!config.enabledAgents.includes("documenter") && enabled.includes("documenter")) {
+			if (!next.agentModels.documenter && config.agentModels.explorer) {
+				next.agentModels.documenter = config.agentModels.explorer;
+			}
+			if (!next.agentThinkingLevels.documenter && config.agentThinkingLevels.explorer) {
+				next.agentThinkingLevels.documenter = config.agentThinkingLevels.explorer;
 			}
 		}
 		next.agentModels = keepAgentEntries(next.agentModels, enabled);

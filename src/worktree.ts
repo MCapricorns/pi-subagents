@@ -298,11 +298,18 @@ export function isPathInside(root: string, candidate: string): boolean {
 	return rel === "" || (!rel.startsWith("..") && !isAbsolute(rel));
 }
 
-/** Resolve and validate the Git repository/worktree that contains cwd. */
-export async function resolveWorktreeTarget(
+interface RepositoryLocation {
+	originalCwd: string;
+	originalRoot: string;
+}
+
+/** Resolve the canonical repository root without requiring a committed HEAD.
+ * Managed repository lanes use this for empty repositories as well as normal
+ * worktrees; worktree creation validates HEAD separately below. */
+async function resolveRepositoryLocation(
 	cwd: string,
-	runner: CommandRunner = runCommand,
-): Promise<WorktreeTarget> {
+	runner: CommandRunner,
+): Promise<RepositoryLocation> {
 	const requested = resolve(cwd);
 	try {
 		if (!(await stat(requested)).isDirectory()) throw new Error("not a directory");
@@ -335,6 +342,22 @@ export async function resolveWorktreeTarget(
 			`Requested cwd ${originalCwd} is not inside Git worktree root ${originalRoot}.`,
 		);
 	}
+	return { originalCwd, originalRoot };
+}
+
+export async function resolveRepositoryRoot(
+	cwd: string,
+	runner: CommandRunner = runCommand,
+): Promise<string> {
+	return (await resolveRepositoryLocation(cwd, runner)).originalRoot;
+}
+
+/** Resolve and validate the Git repository/worktree that contains cwd. */
+export async function resolveWorktreeTarget(
+	cwd: string,
+	runner: CommandRunner = runCommand,
+): Promise<WorktreeTarget> {
+	const { originalCwd, originalRoot } = await resolveRepositoryLocation(cwd, runner);
 	let headResult: CommandResult;
 	try {
 		headResult = await runGit(

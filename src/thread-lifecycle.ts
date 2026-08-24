@@ -1,16 +1,17 @@
 /**
  * Stable logical-thread generation lifecycle for background sub-agents.
  *
- * Dispatch owns the public tool contract and auto-fix policy; this module owns
- * one thread generation end to end: worktree setup/finalization, queue/process
- * ownership, retained-session resume/fork, and guarded terminal publication.
+ * Dispatch owns workflow policy and internal role briefs; this module owns one
+ * stable parent generation end to end: managed-repository lane use,
+ * worktree setup/finalization after downstream review, queue/process ownership,
+ * retained-session resume/fork, and guarded one-time terminal publication.
  */
 
 import type { ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { existsSync } from "node:fs";
 import { rm } from "node:fs/promises";
 import { resolve } from "node:path";
-import { discoverAgents, type AgentConfig } from "./agents.ts";
+import { discoverAgents, isWriteCapableAgent, type AgentConfig } from "./agents.ts";
 import { completionTriggersTurn, type CompletionMessageItem } from "./completion.ts";
 import {
 	DEFAULT_THINKING_LEVEL,
@@ -25,7 +26,15 @@ import {
 	modelLevelTakeoverNote,
 	queuedResult,
 } from "./format.ts";
-import { shouldTriggerFixLoop } from "./fixloop.ts";
+import {
+	canStartManagedWorkflow,
+	formatChainSummary,
+	formatManagedWorkflowSummary,
+	getManagedWorkflowPlan,
+	workflowAgentAvailability,
+	type ManagedWorkflowOutcome,
+	type ManagedWorkflowPlan,
+} from "./fixloop.ts";
 import {
 	availableModelsInScope,
 	currentModelRef,
@@ -34,15 +43,17 @@ import {
 	resolveAgentModelRoute,
 	resolveThinkingLevel,
 } from "./models.ts";
-import { monitor } from "./monitor.ts";
+import { monitor, sumUsage } from "./monitor.ts";
 import { persistRecoveryRecords, recoveryRecordFromFinalization } from "./recovery.ts";
 import type { SubagentRuntime, SubagentThread, ThreadState } from "./runtime.ts";
 import { forkRetainedSession } from "./session-fork.ts";
 import {
 	buildResumePrompt,
+	getResultOutput,
 	RpcRunControl,
 	isFailedResult,
 	isModelLevelFailure,
+	reviewVerdict,
 	runSingleAgentWithMainFallback,
 	type SingleResult,
 	type SubagentDetails,
@@ -61,7 +72,7 @@ export const FORK_CONTINUATION_PROMPT =
 const WORKTREE_ISOLATION_INSTRUCTIONS =
 	"You are running in a temporary detached Git worktree. Work only in the current cwd; do not create another worktree or manually copy/apply changes to the original checkout. The parent dispatcher will integrate your tracked, deleted, and untracked changes when this thread finally settles.";
 
-function withWorktreeSystemPrompt(agent: AgentConfig): AgentConfig {
+export function withWorktreeSystemPrompt(agent: AgentConfig): AgentConfig {
 	return {
 		...agent,
 		systemPrompt: `${agent.systemPrompt.trimEnd()}\n\n${WORKTREE_ISOLATION_INSTRUCTIONS}`.trim(),
@@ -69,10 +80,7 @@ function withWorktreeSystemPrompt(agent: AgentConfig): AgentConfig {
 }
 
 export function isWorktreeCapableAgent(agent: AgentConfig): boolean {
-	if (agent.name === "explorer" || agent.name === "reviewer") return false;
-	if (agent.name === "worker") return true;
-	if (!agent.tools) return true;
-	return agent.tools.includes("edit") || agent.tools.includes("write");
+	return isWriteCapableAgent(agent);
 }
 
 interface DispatchEnvironment {
@@ -116,6 +124,23 @@ export function resolveDispatchModelRoute(
 	};
 }
 
+export interface ManagedWorkflowRequest extends DispatchEnvironment {
+	plan: ManagedWorkflowPlan;
+	initialResult: SingleResult;
+	groupId: string;
+	parentRunId: number;
+	executionCwd: string;
+	projectCwd: string;
+	isolation: IsolationMode;
+	signal: AbortSignal;
+	rememberLatest: (result: SingleResult) => void;
+}
+
+interface ManagedRepositoryLaneRunner {
+	<T>(cwd: string, task: () => Promise<T>): Promise<T>;
+	<T>(cwd: string, task: () => Promise<T>, signal: AbortSignal): Promise<T | undefined>;
+}
+
 interface BackgroundDispatcherOptions extends DispatchEnvironment {
 	runtime: SubagentRuntime;
 	finishRun: (
@@ -131,12 +156,8 @@ interface BackgroundDispatcherOptions extends DispatchEnvironment {
 		mode: "single" | "parallel",
 		background?: boolean,
 	) => (results: SingleResult[]) => SubagentDetails;
-	startFixLoop: (
-		initialReviewerResult: SingleResult,
-		parentGroupId: string,
-		parentRunId: number,
-		executionCwd: string,
-	) => void;
+	runManagedWorkflow: (request: ManagedWorkflowRequest) => Promise<ManagedWorkflowOutcome>;
+	runInManagedRepositoryLane: ManagedRepositoryLaneRunner;
 }
 
 type BackgroundStarter = (
@@ -155,7 +176,8 @@ export function createBackgroundDispatcher(options: BackgroundDispatcherOptions)
 		finishRun,
 		makeLiveHandler,
 		makeDetails,
-		startFixLoop,
+		runManagedWorkflow,
+		runInManagedRepositoryLane,
 	} = options;
 	interface SessionSeed {
 		sessionId?: string;
@@ -221,7 +243,7 @@ export function createBackgroundDispatcher(options: BackgroundDispatcherOptions)
 		if (!agent) return failedStartResult(agentName, task, `Unknown agent: "${agentName}".`);
 		if (isolation === "worktree" && !isWorktreeCapableAgent(agent)) {
 			return {
-				...failedStartResult(agentName, task, `Agent "${agentName}" is read-only; worktree isolation is available only to write-capable agents such as worker or cleaner.`),
+				...failedStartResult(agentName, task, `Agent "${agentName}" is read-only; worktree isolation is available only to write-capable agents such as worker, cleaner, or documenter.`),
 				isolation,
 			};
 		}
@@ -365,13 +387,22 @@ export function createBackgroundDispatcher(options: BackgroundDispatcherOptions)
 				"error",
 			);
 		};
+		const generationWorktree = worktree;
+		let generationFinalization: Promise<WorktreeFinalization> | undefined;
 		thread.finalizeIsolation = async (
 			expectedGeneration: number,
 			result?: SingleResult,
 		): Promise<WorktreeFinalization | undefined> => {
-			if (thread.isolation !== "worktree" || !thread.worktree) return undefined;
-			if (thread.generation !== expectedGeneration) return undefined;
-			const finalization = await thread.worktree.finalize();
+			if (thread.isolation !== "worktree" || !generationWorktree) return undefined;
+			if (thread.generation !== expectedGeneration || thread.worktree !== generationWorktree) return undefined;
+			// All normal, destructive-stop, and shutdown owners converge here. Cache
+			// the lane-protected apply itself so superseding lifecycle paths can project
+			// the same finalization onto their own result without acquiring twice.
+			generationFinalization ??= runInManagedRepositoryLane(
+				generationWorktree.originalRoot,
+				() => generationWorktree.finalize(),
+			);
+			const finalization = await generationFinalization;
 			monitor.setIsolation(runId, "worktree", finalization.status);
 			if (result) {
 				result.runId = runId;
@@ -498,8 +529,8 @@ export function createBackgroundDispatcher(options: BackgroundDispatcherOptions)
 					runtime.backgroundQueue.cancel(controller);
 				} else {
 					await thread.control.park();
-					// Auto-fix orchestration has no live RPC attempt once its parent
-					// review settled, so cancel its queue owner explicitly.
+					// A managed downstream child does not attach to the top-level RPC
+					// control after that child settles, so cancel its queue owner explicitly.
 					if (phase === "settled") runtime.backgroundQueue.cancel(controller);
 				}
 				await completion;
@@ -835,8 +866,10 @@ export function createBackgroundDispatcher(options: BackgroundDispatcherOptions)
 		};
 
 		const onLive = makeLiveHandler(runId, generation);
-		const queueController = runtime.backgroundQueue.enqueue(
-			async (backgroundSignal) => {
+		const workflowAvailability = workflowAgentAvailability(runAgents);
+		const reserveManagedLane =
+			isolation === "shared" && canStartManagedWorkflow(agent, workflowAvailability);
+		const runGeneration = async (backgroundSignal: AbortSignal): Promise<void> => {
 				if (runtime.threads.get(runId)?.generation !== generation) return;
 				let result: SingleResult;
 				try {
@@ -887,8 +920,6 @@ export function createBackgroundDispatcher(options: BackgroundDispatcherOptions)
 				result.isolation = isolation;
 				result.forkedFromRunId = thread.forkedFromRunId;
 				result.forkChildRunIds = [...thread.forkChildRunIds];
-				thread.queueController = undefined;
-				runtime.runControllers.delete(runId);
 				thread.task = result.task;
 				thread.sessionId = result.sessionId;
 				thread.sessionDir = result.sessionDir;
@@ -897,6 +928,11 @@ export function createBackgroundDispatcher(options: BackgroundDispatcherOptions)
 				monitor.setModel(runId, result.model, result.modelFallbackFrom);
 				monitor.setThinking(runId, result.thinking);
 
+				const lifecycleInterrupted = (): boolean =>
+					thread.lifecycleOperation === "park" ||
+					thread.lifecycleOperation === "stop" ||
+					thread.state === "parked" ||
+					thread.state === "stopped";
 				// Destructive stop owns publication once it has synchronously claimed
 				// the lifecycle. Leave the partial result/session on the thread; the
 				// stop path waits for this queue task, finalizes isolation, and emits
@@ -909,17 +945,68 @@ export function createBackgroundDispatcher(options: BackgroundDispatcherOptions)
 					runtime.settledRuns.delete(runId);
 					return;
 				}
+				// A park/shutdown can win in the microtask gap after the top-level RPC
+				// settles. Do not launch an obsolete documenter/reviewer or replace the
+				// stable top-level session with an aborted downstream attempt.
+				if (backgroundSignal.aborted || lifecycleInterrupted() || !runtime.sessionActive) return;
 
 				if (thread.retireOnSettle) runtime.retireThreadSession(thread);
-				const wantsFixLoop = shouldTriggerFixLoop(result, runConfig);
-				if (wantsFixLoop && isolation === "shared" && runtime.sessionActive) {
+				let workflowOutcome: ManagedWorkflowOutcome | undefined;
+				const workflowPlan = getManagedWorkflowPlan(result, runConfig, workflowAvailability);
+				if (workflowPlan && runtime.sessionActive) {
 					thread.state = "running";
-					// The review being done does not mean the logical run is over:
-					// the same row now represents the chain until it resolves.
+					// The stable parent row remains active until every internal writer and
+					// reviewer settles. Internal rows are independently queryable but never
+					// enter this top-level lifecycle or publish completions.
 					monitor.setStatus(runId, "running");
-					monitor.setActivity(runId, "auto-fix chain running");
-					startFixLoop(result, `fix-${runId}`, runId, thread.executionCwd);
-					return;
+					monitor.setActivity(
+						runId,
+						workflowPlan.kind === "auto-fix" ? "auto-fix chain running" : "managed workflow running",
+					);
+					workflowOutcome = await runManagedWorkflow({
+						plan: workflowPlan,
+						initialResult: result,
+						groupId: `workflow-${runId}`,
+						parentRunId: runId,
+						executionCwd: thread.executionCwd,
+						projectCwd: originalCwd,
+						isolation,
+						signal: backgroundSignal,
+						ctx: runCtx,
+						config: runConfig,
+						agents: runAgents,
+						rememberLatest: (latest) => {
+							if (runtime.threads.get(runId) !== thread || thread.generation !== generation) return;
+							thread.lastResult = latest;
+							thread.agentName = latest.agent;
+							monitor.setAgent(runId, latest.agent);
+							thread.task = latest.task;
+							thread.sessionId = latest.sessionId;
+							thread.sessionDir = latest.sessionDir;
+							runtime.retainSession(latest);
+						},
+					});
+
+					// Park/stop/shutdown owns this generation once it cancels the queue
+					// signal. The newest internal partial is already on thread.lastResult;
+					// never replace it with the old top-level result or publish stale output.
+					if (backgroundSignal.aborted || lifecycleInterrupted() || !runtime.sessionActive) return;
+
+					const finalStep = workflowOutcome.steps[workflowOutcome.steps.length - 1]!;
+					result = {
+						...finalStep.result,
+						runId,
+						projectCwd: originalCwd,
+						isolation,
+						forkedFromRunId: thread.forkedFromRunId,
+						forkChildRunIds: [...thread.forkChildRunIds],
+					};
+					thread.lastResult = result;
+					thread.agentName = result.agent;
+					thread.task = result.task;
+					thread.sessionId = result.sessionId;
+					thread.sessionDir = result.sessionDir;
+					runtime.retainSession(result);
 				}
 				// Claim terminal settlement synchronously before the first slow await.
 				// Park therefore either wins while RPC is still active, or is rejected
@@ -934,12 +1021,20 @@ export function createBackgroundDispatcher(options: BackgroundDispatcherOptions)
 					thread.lifecycleOperation === "settle" &&
 					!thread.retired;
 				try {
-					// Worktree isolation is rejected for reviewers, the only role that can
-					// trigger auto-fix. Keep that invariant explicit: an isolated result is
-					// finalized once here and can never start a chain that would integrate
-					// the same worktree early.
+					// For isolated writers this is deliberately after the managed documenter
+					// and reviewer stages: every child sees the same worktree, then one
+					// lifecycle owner integrates the complete writer+docs state exactly once.
 					await thread.finalizeIsolation(generation, result);
 					if (!ownsSettlement()) return;
+					if (workflowOutcome && isolation === "worktree") {
+						for (const step of workflowOutcome.steps) {
+							step.result.integrationStatus = result.integrationStatus;
+							step.result.integrationApplied = result.integrationApplied;
+							step.result.integrationError = result.integrationError;
+							step.result.integrationWorktreePath = result.integrationWorktreePath;
+							step.result.integrationPatchPath = result.integrationPatchPath;
+						}
+					}
 
 					const failed = isFailedResult(result);
 					thread.state = failed ? "failed" : "completed";
@@ -950,8 +1045,39 @@ export function createBackgroundDispatcher(options: BackgroundDispatcherOptions)
 
 					const modelLevel = failed && isModelLevelFailure(result);
 					const dispatchFailed = result.dispatchFailed === true;
-					finishRun(runId, failed ? "failed" : "done", modelLevel || dispatchFailed ? { silent: true } : undefined);
+					const ownedController = thread.queueController;
+					if (runtime.runControllers.get(runId) === ownedController) runtime.runControllers.delete(runId);
+					thread.queueController = undefined;
+					finishRun(
+						runId,
+						failed ? "failed" : "done",
+						workflowOutcome || modelLevel || dispatchFailed ? { silent: true } : undefined,
+					);
 					runtime.registerRunResult(runId, result);
+
+					if (workflowOutcome) {
+						const lastStep = workflowOutcome.steps[workflowOutcome.steps.length - 1]!;
+						let block = workflowOutcome.kind === "auto-fix"
+							? formatChainSummary(workflowOutcome.steps, result)
+							: formatManagedWorkflowSummary(workflowOutcome.steps, result);
+						const finalVerdict = lastStep.result.agent === "reviewer"
+							? reviewVerdict(getResultOutput(lastStep.result))
+							: undefined;
+						const needsFullFinal = failed || (lastStep.result.agent === "reviewer" && finalVerdict !== "pass");
+						if (needsFullFinal) {
+							block += `\n\n${formatCompletionBlock(result, runConfig.maxResultLines, originalCwd)}`;
+						}
+						if (modelLevel) block += `\n\n${modelLevelTakeoverNote(result, { runId })}`;
+						runtime.sendCompletionGroup([{
+							agent: `${workflowOutcome.kind === "auto-fix" ? "auto-fix chain" : "managed workflow"} (${result.agent})`,
+							block,
+							triggerTurn: true,
+							usage: sumUsage(workflowOutcome.steps.map((step) => step.result.usage)),
+						}]);
+						runtime.completionBatcher.flush();
+						return;
+					}
+
 					const completion: CompletionMessageItem = {
 						agent: result.agent,
 						block: modelLevel
@@ -975,7 +1101,18 @@ export function createBackgroundDispatcher(options: BackgroundDispatcherOptions)
 				} finally {
 					if (ownsSettlement()) thread.lifecycleOperation = undefined;
 				}
-			},
+			};
+		const queuedGeneration = reserveManagedLane
+			? async (backgroundSignal: AbortSignal): Promise<void> => {
+				await runInManagedRepositoryLane(
+					originalCwd,
+					() => runGeneration(backgroundSignal),
+					backgroundSignal,
+				);
+			}
+			: runGeneration;
+		const queueController = runtime.backgroundQueue.enqueue(
+			queuedGeneration,
 			() => {
 				if (runtime.threads.get(runId)?.generation !== generation) return;
 				// Queued park/stop owns publication and may still be finalizing an
@@ -1011,12 +1148,29 @@ export function createBackgroundDispatcher(options: BackgroundDispatcherOptions)
 					thread.lifecycleOperation === "settle" &&
 					!thread.retired;
 				try {
-					const crashed: SingleResult = {
-						...dispatchFailedResult(route.agent, control.getObjective(), error, thinkingLevel),
-						runId,
-						isolation,
-						forkedFromRunId: thread.forkedFromRunId,
-					};
+					const errorMessage = error instanceof Error ? error.message : String(error);
+					const latest = thread.lastResult;
+					const crashed: SingleResult = latest
+						? {
+							...latest,
+							runId,
+							projectCwd: originalCwd,
+							isolation,
+							exitCode: 1,
+							stopReason: "error",
+							errorMessage: `Managed workflow dispatch failed: ${errorMessage}`,
+							dispatchFailed: true,
+							forkedFromRunId: thread.forkedFromRunId,
+						}
+						: {
+							...dispatchFailedResult(route.agent, control.getObjective(), error, thinkingLevel),
+							runId,
+							projectCwd: originalCwd,
+							isolation,
+							forkedFromRunId: thread.forkedFromRunId,
+						};
+					thread.lastResult = crashed;
+					runtime.retainSession(crashed);
 					await thread.finalizeIsolation(generation, crashed);
 					if (!ownsSettlement()) return;
 					thread.state = "failed";
@@ -1027,10 +1181,10 @@ export function createBackgroundDispatcher(options: BackgroundDispatcherOptions)
 					thread.queueController = undefined;
 					if (!runtime.sessionActive || !ownsSettlement()) return;
 					try {
-						runCtx.ui.notify(`✗ ${agent.name} dispatch failed: ${crashed.errorMessage}`, "error");
+						runCtx.ui.notify(`✗ ${crashed.agent} dispatch failed: ${crashed.errorMessage}`, "error");
 						runtime.sendCompletionGroup([
 							{
-								agent: agent.name,
+								agent: crashed.agent,
 								block: formatCompletionBlock(crashed, runConfig.maxResultLines, crashed.projectCwd ?? originalCwd),
 								triggerTurn: true,
 								usage: crashed.usage,

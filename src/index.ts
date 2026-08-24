@@ -3,8 +3,8 @@
  *
  * Assembly point: builds the shared runtime and registers everything.
  * The heavy lifting lives in focused modules:
- *   - dispatch.ts         — the `subagent` tool contract and auto-fix chain
- *   - thread-lifecycle.ts — queued generations, resume/fork, isolation settlement
+ *   - dispatch.ts         — tool contract, managed role policy, internal steps
+ *   - thread-lifecycle.ts — stable generations, controls, final integration/delivery
  *   - tools.ts            — subagent_control / subagent_wait / status / stop
  *   - announcements.ts — session-start recovery, notices, and widget install
  *   - widget.ts        — active-only TUI run status
@@ -86,7 +86,7 @@ export default function (pi: ExtensionAPI): void {
 			enabledNames: config.enabledAgents,
 			projectTrusted: ctx.isProjectTrusted?.() === true,
 		});
-		const directive = buildDelegationDirective(agents);
+		const directive = buildDelegationDirective(agents, { maxFixRounds: config.maxFixRounds });
 		if (!directive) return undefined;
 		return { systemPrompt: `${event.systemPrompt}\n${directive}` };
 	});

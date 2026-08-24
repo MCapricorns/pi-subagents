@@ -2,7 +2,7 @@ import { mkdtempSync, mkdirSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import { discoverAgents, loadBuiltinAgents } from "../src/agents.ts";
+import { discoverAgents, isWriteCapableAgent, loadBuiltinAgents } from "../src/agents.ts";
 
 let builtinDir: string;
 let agentDir: string;
@@ -42,9 +42,36 @@ describe("shipped specialist agents", () => {
 		expect(cleaner?.description).toContain("Read-only audits/reviews go to reviewer");
 		expect(cleaner?.systemPrompt).toContain("apply every safe, proven, in-scope cleanup end to end");
 		expect(cleaner?.systemPrompt).toContain("Finding no safe cut and making zero edits is valid");
+		expect(cleaner?.systemPrompt).toContain("without asking for approval item by item");
+		expect(cleaner?.systemPrompt).toContain("proactively extract the smallest stable shared");
+		expect(cleaner?.systemPrompt).toContain("Do not merely report a safe consolidation");
+		expect(cleaner?.systemPrompt).toContain("different domain boundaries");
 		expect(cleaner?.systemPrompt).toContain("Never inherit deletion proof from an `explorer` report");
 		expect(cleaner?.systemPrompt).not.toContain("Audit mode");
 		expect(cleaner?.systemPrompt).not.toContain("Apply mode");
+		expect(cleaner?.systemPrompt).toContain("Never commit, push, publish, tag, release, or bump");
+	});
+
+	it("keeps release ownership out of implementation children", () => {
+		const worker = loadBuiltinAgents().find((agent) => agent.name === "worker");
+		expect(worker?.systemPrompt).toContain("Never commit, push, publish, tag, release, or bump");
+		expect(worker?.systemPrompt).toContain("parent workflow owns documentation synchronization");
+	});
+
+	it("ships documenter as a low-cost write-capable two-mode documentation specialist", () => {
+		const documenter = loadBuiltinAgents().find((agent) => agent.name === "documenter");
+		expect(documenter).toMatchObject({
+			model: "claude-haiku-4-5",
+			thinking: "low",
+			source: "builtin",
+		});
+		expect(documenter?.tools).toEqual(["read", "grep", "find", "ls", "bash", "edit", "write"]);
+		expect(documenter?.description).toContain("two modes");
+		expect(documenter?.systemPrompt).toContain("Pre-commit diff sync");
+		expect(documenter?.systemPrompt).toContain("Whole-codebase maintenance");
+		expect(documenter?.systemPrompt).toContain("never change runtime behavior");
+		expect(documenter?.systemPrompt).toContain("Never commit, push, publish, tag, or release");
+		expect(documenter?.systemPrompt).toContain("zero edits is valid");
 	});
 
 	it("keeps reviewer advisory reports separate from auto-fix gate verdicts", () => {
@@ -62,6 +89,7 @@ describe("shipped specialist agents", () => {
 		expect(agents.map((agent) => agent.name)).not.toContain("explore");
 		expect(Object.fromEntries(agents.map((agent) => [agent.name, agent.model]))).toEqual({
 			cleaner: "claude-sonnet-4-5",
+			documenter: "claude-haiku-4-5",
 			explorer: "claude-haiku-4-5",
 			reviewer: "claude-sonnet-4-5",
 			worker: "claude-sonnet-4-5",
@@ -77,6 +105,16 @@ describe("shipped specialist agents", () => {
 		expect(explorer?.systemPrompt).toContain("retrieval lead");
 		expect(explorer?.systemPrompt).toContain("re-read load-bearing files");
 		expect(explorer?.systemPrompt).toContain("plausible guess is more expensive");
+	});
+});
+
+describe("agent write capability", () => {
+	it("classifies custom writers while preserving built-in read-only roles", () => {
+		expect(isWriteCapableAgent({ name: "custom", tools: ["read", "write"] })).toBe(true);
+		expect(isWriteCapableAgent({ name: "custom" })).toBe(true);
+		expect(isWriteCapableAgent({ name: "custom", tools: ["read", "grep"] })).toBe(false);
+		expect(isWriteCapableAgent({ name: "reviewer", tools: ["write"] })).toBe(false);
+		expect(isWriteCapableAgent({ name: "explorer" })).toBe(false);
 	});
 });
 

@@ -219,10 +219,17 @@ export function isModelLevelFailure(result: SingleResult): boolean {
 	if (result.stopReason === "aborted") return false;
 	if (result.dispatchFailed) return false;
 	if (result.rpcStartupFailed) return false;
+	// A negative RPC response proves Pi rejected the prompt before execution. It
+	// remains safe to hand off even though dispatch was attempted; local write,
+	// close, timeout, and lost-ACK failures never set this explicit flag.
+	if (result.rpcPromptRejected) return true;
+	// The prompt write completed but its ACK never arrived. With no later activity
+	// we cannot know whether Pi started the model or tools, so neither startup
+	// retry nor selected→main fallback may replay this objective.
+	if (result.rpcPromptDispatched && !result.rpcPromptAccepted && !result.rpcActivity) return false;
 	if (isRpcCommandTimeoutError(result.errorMessage)) return false;
 	if (result.integrationStatus === "retained") return false;
 	if (result.errorMessage?.includes("idle timeout")) return true;
-	if (result.rpcPromptRejected) return true;
 
 	// Classification belongs to the final assistant turn, not the whole attempt.
 	// Earlier useful text or failed tool calls are retained session history and

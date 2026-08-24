@@ -2,7 +2,14 @@
 
 import { stat } from "node:fs/promises";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
-import { CLEANER_AUTO_ENABLED_FEATURE, CLEANER_INHERITED_FEATURE, loadConfig, saveConfig } from "./config.ts";
+import {
+	CLEANER_AUTO_ENABLED_FEATURE,
+	CLEANER_INHERITED_FEATURE,
+	DOCUMENTER_AUTO_ENABLED_FEATURE,
+	DOCUMENTER_INHERITED_FEATURE,
+	loadConfig,
+	saveConfig,
+} from "./config.ts";
 import { announceRecoveryRecords } from "./recovery.ts";
 import type { SubagentRuntime } from "./runtime.ts";
 import { pruneResultArtifacts } from "./spawn.ts";
@@ -28,6 +35,16 @@ const ANNOUNCEMENTS: Array<{
 			config.announcedFeatures.includes(CLEANER_INHERITED_FEATURE)
 				? "pi-subagents: the built-in cleaner agent was enabled by default and inherited your reviewer model/thinking settings. Run /subagents-setup to adjust or disable it."
 				: "pi-subagents: the built-in cleaner agent was enabled by default. Run /subagents-setup to adjust or disable it.",
+	},
+	{
+		key: "documenterAutoEnabledNotice",
+		condition: (config) =>
+			config.announcedFeatures.includes(DOCUMENTER_AUTO_ENABLED_FEATURE) &&
+			config.enabledAgents.includes("documenter"),
+		message: (config) =>
+			config.announcedFeatures.includes(DOCUMENTER_INHERITED_FEATURE)
+				? "pi-subagents: the new documenter agent was enabled for your existing config and inherited your explorer model/thinking settings. It synchronizes comments and README/docs before commit; run /subagents-setup to adjust or disable it."
+				: "pi-subagents: the new documenter agent was enabled for your existing config. It synchronizes comments and README/docs before commit; run /subagents-setup to adjust or disable it.",
 	},
 ];
 

@@ -9,11 +9,17 @@ global rule differ, treat the one here as the intended behavior for this repo.
 After finishing a code change in this repo, once `npm run check` and `npm test`
 both pass, finalize the work without waiting to be asked:
 
-1. Bump the version in both `package.json` and `package-lock.json` (the root
-   `version` field and the top `"packages": { "": { "version" } }` entry).
-   - patch (`0.20.0` → `0.20.1`) for bug fixes
-   - minor (`0.20.0` → `0.21.0`) for features / enhancements (default when unsure)
-   - major only for breaking changes
+1. Choose the smallest release version and keep `package.json` plus
+   `package-lock.json` synchronized (the root `version` field and the top
+   `"packages": { "": { "version" } }` entry).
+   - Reuse the current package version when it is already greater than the npm
+     release and belongs to the same unpublished body of work; never bump the
+     same pending release twice.
+   - Otherwise use a patch bump (`0.20.0` → `0.20.1`) by default for every
+     backward-compatible fix, feature, and enhancement. This repo intentionally
+     does not raise the minor version merely because a change is labeled `feat`.
+   - Use a minor bump only for an explicitly planned broader release or when the
+     user requests it; use major only for intentional breaking changes.
 2. Commit the change and the version bump together (one logical change per
    commit; `type(scope): imperative English`). Stage only paths from this task.
 3. Push to the current branch's upstream.

@@ -58,9 +58,9 @@ export interface SubagentThread {
 	state: ThreadState;
 	control: RpcRunControl;
 	queueController?: AbortController;
-	/** Resolves only after the current generation's queue work has fully
-	 * quiesced and released its concurrency slot. Auto-fix orchestration is part
-	 * of the parent generation and replaces/extends this promise. */
+	/** Resolves only after the current generation's top-level child, downstream
+	 * managed workflow, and queue work have fully quiesced and released their
+	 * concurrency slot. */
 	generationCompletion: Promise<void>;
 	/** Synchronous CAS used by lifecycle controls across their async preflight. */
 	lifecycleVersion: number;
@@ -81,7 +81,8 @@ export interface SubagentThread {
 	fork: (objective?: string, ctx?: ExtensionContext) => Promise<SingleResult>;
 	forkedFromRunId?: number;
 	forkChildRunIds: number[];
-	/** Dispatch-owned, generation-guarded worktree settlement hook. */
+	/** Dispatch-owned, generation-guarded worktree settlement hook. Its apply
+	 * runs under the canonical original-repository lane. */
 	finalizeIsolation: (generation: number, result?: SingleResult) => Promise<WorktreeFinalization | undefined>;
 	/** Best-effort shutdown notification for retained integration artifacts. */
 	notifyIsolationFailure?: (finalization: WorktreeFinalization) => void;
@@ -110,7 +111,7 @@ export interface SubagentRuntime {
 	 * next generation. Shutdown invalidates these claims and waits for cleanup. */
 	preflightOperations: Set<Promise<void>>;
 	/** Every session directory retained for this parent session, including
-	 * auto-fix internals that are not directly controllable. */
+	 * managed-workflow internals that are not directly controllable. */
 	sessionDirs: Set<string>;
 	retainSession: (result: Pick<SingleResult, "sessionDir">) => void;
 	retireThreadSession: (thread: SubagentThread) => void;
@@ -134,8 +135,8 @@ export function createRuntime(pi: ExtensionAPI, configPath: string): SubagentRun
 			// Computing this at delivery (emit) time — not when the item was
 			// pushed — reflects the current monitor state, since finishing runs
 			// are removed from the monitor before their completion is pushed.
-			// Auto-fix parents are flipped back to "running" while their chain
-			// owns the logical run, so they are included without a special case.
+			// Managed-workflow parents remain "running" through documenter,
+			// reviewer, and any fix rounds, so they are included without a special case.
 			const active = monitor
 				.getRuns()
 				.filter((run) => isRunActiveStatus(run.status))

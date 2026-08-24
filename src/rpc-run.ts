@@ -418,6 +418,13 @@ interface RpcResponse {
 	data?: unknown;
 }
 
+class RpcCommandRejectedError extends Error {
+	constructor(message: string) {
+		super(message);
+		this.name = "RpcCommandRejectedError";
+	}
+}
+
 interface PendingRequest {
 	resolve: (response: RpcResponse) => void;
 	reject: (error: Error) => void;
@@ -645,7 +652,9 @@ export async function runRpcAgentAttempt(options: RunRpcAttemptOptions): Promise
 				},
 			);
 		}).then((response) => {
-			if (!response.success) throw new Error(response.error || `RPC ${response.command} failed.`);
+			if (!response.success) {
+				throw new RpcCommandRejectedError(response.error || `RPC ${response.command} failed.`);
+			}
 			return response;
 		});
 	};
@@ -737,7 +746,7 @@ export async function runRpcAgentAttempt(options: RunRpcAttemptOptions): Promise
 				result.exitCode = 1;
 				result.stopReason = "error";
 				result.errorMessage = `Replacement prompt was rejected: ${promptError.message}`;
-				if (!isRpcCommandTimeoutError(promptError.message)) result.rpcPromptRejected = true;
+				if (promptError instanceof RpcCommandRejectedError) result.rpcPromptRejected = true;
 				finish();
 				terminate();
 				if (!closed) await processClosed.promise;
@@ -1079,7 +1088,7 @@ export async function runRpcAgentAttempt(options: RunRpcAttemptOptions): Promise
 				result.stopReason = "error";
 				result.errorMessage = error.message;
 				if (startup) result.rpcStartupFailed = true;
-				else if (!isRpcCommandTimeoutError(error.message)) result.rpcPromptRejected = true;
+				else if (error instanceof RpcCommandRejectedError) result.rpcPromptRejected = true;
 				finish();
 				terminate();
 			};

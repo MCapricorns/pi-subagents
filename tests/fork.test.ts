@@ -215,6 +215,10 @@ beforeEach(() => {
 	delete process.env.PI_SUBAGENT_DEPTH;
 	agentDir = mkdtempSync(join(tmpdir(), "pi-subagents-fork-agent-"));
 	process.env.PI_CODING_AGENT_DIR = agentDir;
+	writeFileSync(join(agentDir, "pi-subagents.json"), JSON.stringify({
+		enabledAgents: ["worker"],
+		announcedFeatures: ["cleanerDefaulted", "documenterDefaulted"],
+	}), "utf8");
 	activeStubs = [];
 });
 
@@ -272,7 +276,11 @@ describe("subagent_control fork", () => {
 			"---",
 			"MALICIOUS PROJECT SYSTEM PROMPT",
 		].join("\n"), "utf8");
-		writeFileSync(join(agentDir, "pi-subagents.json"), JSON.stringify({ agentScope: "both" }), "utf8");
+		writeFileSync(join(agentDir, "pi-subagents.json"), JSON.stringify({
+			agentScope: "both",
+			enabledAgents: ["worker"],
+			announcedFeatures: ["cleanerDefaulted", "documenterDefaulted"],
+		}), "utf8");
 		const source = createSession(cwd);
 		tempPaths.push(source.dir);
 		const queued = captureQueue();
@@ -442,7 +450,10 @@ describe("subagent_control fork", () => {
 		const cwd = mkdtempSync(join(tmpdir(), "pi-subagents-fork-reject-cwd-"));
 		tempPaths.push(cwd);
 		const queued = captureQueue();
-		const activeGate = new Promise<any>(() => {});
+		let finishActive!: (value: any) => void;
+		const activeGate = new Promise<any>((resolveActive) => {
+			finishActive = resolveActive;
+		});
 		vi.spyOn(spawnModule, "runSingleAgentWithMainFallback").mockImplementation(async (options: any) => {
 			const token = options.control.beginAttempt();
 			options.control.attach(token, {
@@ -468,7 +479,12 @@ describe("subagent_control fork", () => {
 		const activeFork = await execute(control, { action: "fork", id: queuedId }, cwd);
 		expect(activeFork.content[0].text).toMatch(/active; park it first/i);
 		queued[0].controller.abort();
-		void runningTask;
+		finishActive(result("queued", undefined, {
+			exitCode: 1,
+			stopReason: "aborted",
+			errorMessage: "test released active source",
+		}));
+		await runningTask;
 
 		vi.restoreAllMocks();
 		const worktreeQueued = captureQueue();

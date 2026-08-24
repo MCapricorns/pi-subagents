@@ -1,5 +1,19 @@
 import { describe, expect, it } from "vitest";
-import { buildFixTaskBrief, buildReReviewBrief, formatChainSummary, shouldTriggerFixLoop, type ChainStep } from "../src/fixloop.ts";
+import {
+	buildDocumenterTaskBrief,
+	buildFinalReviewBrief,
+	buildFixTaskBrief,
+	buildPostWriterDocumenterBrief,
+	buildReReviewBrief,
+	buildReviewPassDocumenterBrief,
+	canStartManagedWorkflow,
+	formatChainSummary,
+	formatManagedWorkflowSummary,
+	getManagedWorkflowPlan,
+	shouldTriggerFixLoop,
+	workflowAgentAvailability,
+	type ChainStep,
+} from "../src/fixloop.ts";
 import { DEFAULT_CONFIG, type SubagentsConfig } from "../src/config.ts";
 import type { SingleResult } from "../src/spawn.ts";
 
@@ -47,6 +61,57 @@ describe("shouldTriggerFixLoop", () => {
 	});
 });
 
+describe("managed workflow planning", () => {
+	const role = (name: string, tools?: string[]) => ({ name, tools });
+	const available = (...names: string[]) => workflowAgentAvailability(names.map((name) => role(name)));
+
+	it.each(["worker", "cleaner"])("routes a successful %s through whichever downstream role exists", (agent) => {
+		const result = reviewResult("done", { agent });
+		expect(getManagedWorkflowPlan(result, config(0), available("documenter", "reviewer"))?.kind).toBe("post-writer");
+		expect(getManagedWorkflowPlan(result, config(0), available("reviewer"))?.kind).toBe("post-writer");
+		expect(getManagedWorkflowPlan(result, config(0), available("documenter"))?.kind).toBe("post-writer");
+		expect(getManagedWorkflowPlan(result, config(0), available())).toBeUndefined();
+	});
+
+	it("routes a successful top-level documenter only to reviewer", () => {
+		const result = reviewResult("docs done", { agent: "documenter" });
+		expect(getManagedWorkflowPlan(result, config(0), available("reviewer"))?.kind).toBe("post-writer");
+		expect(getManagedWorkflowPlan(result, config(0), available("documenter"))).toBeUndefined();
+	});
+
+	it("forces a direct pass through documenter/fresh review independent of maxFixRounds", () => {
+		const result = reviewResult("APPROVE\nVERDICT: REVIEW_PASS");
+		expect(getManagedWorkflowPlan(result, config(0), available("worker", "documenter", "reviewer"))?.kind)
+			.toBe("review-pass-sync");
+	});
+
+	it("never turns advisory or failed reviewer output into writes", () => {
+		const roles = available("worker", "documenter", "reviewer");
+		expect(getManagedWorkflowPlan(reviewResult("advisory only"), config(2), roles)).toBeUndefined();
+		expect(getManagedWorkflowPlan(reviewResult("VERDICT: REVIEW_FAIL", { exitCode: 1 }), config(2), roles)).toBeUndefined();
+	});
+
+	it("starts direct auto-fix only with an enabled worker and positive fix budget", () => {
+		const failedGate = reviewResult("VERDICT: REVIEW_FAIL");
+		expect(getManagedWorkflowPlan(failedGate, config(1), available("worker", "reviewer"))?.kind).toBe("auto-fix");
+		expect(getManagedWorkflowPlan(failedGate, config(0), available("worker", "reviewer"))).toBeUndefined();
+		expect(getManagedWorkflowPlan(failedGate, config(2), available("reviewer"))).toBeUndefined();
+	});
+
+	it("reserves shared lanes for writers and reviewers that need a stable diff", () => {
+		expect(canStartManagedWorkflow(role("worker"), available())).toBe(true);
+		expect(canStartManagedWorkflow(role("cleaner"), available())).toBe(true);
+		expect(canStartManagedWorkflow(role("documenter", ["edit"]), available())).toBe(true);
+		expect(canStartManagedWorkflow(role("custom-writer", ["write"]), available())).toBe(true);
+		expect(canStartManagedWorkflow(role("custom-reader", ["read"]), available())).toBe(false);
+		expect(canStartManagedWorkflow(role("reviewer", ["read"]), available("documenter"))).toBe(true);
+		expect(canStartManagedWorkflow(role("reviewer", ["read"]), available("worker"))).toBe(true);
+		expect(canStartManagedWorkflow(role("reviewer", ["read"]), available("cleaner"))).toBe(true);
+		expect(canStartManagedWorkflow(role("reviewer", ["read"]), available("custom-writer"))).toBe(true);
+		expect(canStartManagedWorkflow(role("explorer", ["read"]), available("worker", "documenter", "reviewer"))).toBe(false);
+	});
+});
+
 describe("buildFixTaskBrief", () => {
 	it("embeds the reviewer's findings and the round number", () => {
 		const brief = buildFixTaskBrief(reviewResult("## Critical\n- file.ts:42 bug\nVERDICT: REVIEW_FAIL"), 1, 2);
@@ -70,6 +135,51 @@ describe("buildFixTaskBrief", () => {
 	it("notes a re-review will follow when rounds remain", () => {
 		const brief = buildFixTaskBrief(reviewResult("VERDICT: REVIEW_FAIL"), 1, 2);
 		expect(brief).toContain("re-review your changes automatically");
+		expect(brief).toContain("Do NOT commit, push, publish, tag, or release");
+	});
+});
+
+describe("buildDocumenterTaskBrief", () => {
+	it("hands the actual diff and worker report to a non-releasing docs sync", () => {
+		const brief = buildDocumenterTaskBrief(
+			reviewResult("Fixed src/cache.ts", { agent: "worker" }),
+			2,
+			reviewResult("Original finding in src/cache.ts\nVERDICT: REVIEW_FAIL"),
+		);
+		expect(brief).toContain("Documentation sync after auto-fix round 2");
+		expect(brief).toContain("Fixed src/cache.ts");
+		expect(brief).toContain("Original finding in src/cache.ts");
+		expect(brief).toContain("Inspect the actual git diff");
+		expect(brief).toContain("Change documentation surfaces only");
+		expect(brief).toContain("Do NOT commit, push, publish, tag, or release");
+		expect(brief).toContain("Make zero edits");
+	});
+});
+
+describe("managed handoff briefs", () => {
+	it("passes full writer and preliminary-review reports without permitting release actions", () => {
+		const writer = reviewResult("worker full report src/a.ts", { agent: "worker" });
+		const postWriter = buildPostWriterDocumenterBrief(writer);
+		const postPass = buildReviewPassDocumenterBrief(reviewResult("preliminary pass\nVERDICT: REVIEW_PASS"));
+		for (const brief of [postWriter, postPass]) {
+			expect(brief).toContain("Inspect the actual git diff");
+			expect(brief).toContain("Do NOT commit, push, publish, tag, or release");
+			expect(brief).toContain("do not bump versions");
+		}
+		expect(postWriter).toContain("worker full report src/a.ts");
+		expect(postPass).toContain("preliminary pass");
+	});
+
+	it("gives the final reviewer every full upstream report and an explicit gate contract", () => {
+		const brief = buildFinalReviewBrief(
+			reviewResult("worker report", { agent: "worker" }),
+			reviewResult("documenter report", { agent: "documenter" }),
+		);
+		expect(brief).toContain("worker report");
+		expect(brief).toContain("documenter report");
+		expect(brief).toContain("actual pending code and documentation");
+		expect(brief).toContain("Remain read-only");
+		expect(brief).toContain("VERDICT: REVIEW_PASS");
 	});
 });
 
@@ -87,6 +197,17 @@ describe("buildReReviewBrief", () => {
 		expect(brief).toContain("file.ts:42 bug");
 		expect(brief).toContain("guarding the null case");
 		expect(brief).toContain("VERDICT: REVIEW_PASS / REVIEW_FAIL");
+	});
+
+	it("includes the optional documenter report before final review", () => {
+		const brief = buildReReviewBrief(
+			reviewResult("README drift\nVERDICT: REVIEW_FAIL"),
+			1,
+			workerResult("Fixed runtime behavior."),
+			reviewResult("Updated README.md and cache comments.", { agent: "documenter" }),
+		);
+		expect(brief).toContain("documenter's pre-commit sync report");
+		expect(brief).toContain("Updated README.md and cache comments");
 	});
 
 	it("requires every finding resolved, including warnings", () => {
@@ -123,14 +244,41 @@ describe("formatChainSummary", () => {
 		const summary = formatChainSummary([
 			step({ messages: [assistant("found src/index.ts\nVERDICT: REVIEW_FAIL")] }, "initial review", 2),
 			step({ agent: "worker", messages: [assistant("fixed src/index.ts")] }, "fix round 1", 3),
-			step({ messages: [assistant("APPROVE\nVERDICT: REVIEW_PASS")] }, "re-review round 1", 4),
+			step({ agent: "documenter", messages: [assistant("updated README.md")] }, "docs round 1", 4),
+			step({ messages: [assistant("APPROVE\nVERDICT: REVIEW_PASS")] }, "re-review round 1", 5),
 		]);
 		expect(summary).toContain("## Auto-fix chain: 1 round — final PASS");
 		expect(summary).toContain("- #2 reviewer · initial review · FAIL — src/index.ts");
 		expect(summary).toContain("- #3 worker · fix round 1 · completed — changed: src/index.ts");
-		expect(summary).toContain("- #4 reviewer · re-review round 1 · PASS");
-		expect(summary).toContain("Totals: 3 runs");
-		expect(summary).toContain("subagent_status #2 #3 #4");
+		expect(summary).toContain("- #4 documenter · docs round 1 · completed — changed: README.md");
+		expect(summary).toContain("- #5 reviewer · re-review round 1 · PASS");
+		expect(summary).toContain("Totals: 4 runs");
+		expect(summary).toContain("subagent_status #2 #3 #4 #5");
+	});
+
+	it("renders a managed workflow route and marks a missing reviewer verdict", () => {
+		const steps = [
+			step({ agent: "worker", messages: [assistant("changed src/a.ts")] }, "initial implementation", 10),
+			step({ agent: "documenter", messages: [assistant("updated README.md")] }, "documentation sync", 11),
+			step({ messages: [assistant("advisory-shaped final output")] }, "final review", 12),
+		];
+		const summary = formatManagedWorkflowSummary(steps);
+		expect(summary).toContain("worker → documenter → reviewer");
+		expect(summary).toContain("final NO_VERDICT");
+		expect(summary).toContain("reviewer · final review · NO_VERDICT");
+	});
+
+	it("lets terminal integration/process failure override a stray reviewer pass", () => {
+		const steps = [
+			step({ agent: "worker", messages: [assistant("changed src/a.ts")] }, "initial implementation", 20),
+			step({ messages: [assistant("VERDICT: REVIEW_PASS")] }, "final review", 21),
+		];
+		const terminal = reviewResult("VERDICT: REVIEW_PASS", {
+			exitCode: 1,
+			stopReason: "error",
+			errorMessage: "worktree integration failed",
+		});
+		expect(formatManagedWorkflowSummary(steps, terminal)).toContain("final failed");
 	});
 
 	it("counts rounds from fix steps and flags a failed final step", () => {

@@ -1,7 +1,7 @@
 {
   "name": "@ferris1225/pi-subagents",
   "version": "4.1.2",
-  "description": "Controllable background sub-agent threads for pi: specialized roles, capability-aware thinking, direct main-model fallback, auto-fix chains, and Git worktree isolation.",
+  "description": "A managed sub-agent team for pi: specialized roles, pre-commit documentation sync, retained threads, auto-fix chains, model fallback, and Git worktree isolation.",
   "type": "module",
   "license": "MIT",
   "publishConfig": {
