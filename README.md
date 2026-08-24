@@ -169,9 +169,11 @@ interactive TUI session:
 ```
 
 Fresh installs enable `explorer`, `worker`, `cleaner`, and `reviewer` — you can
-start delegating immediately. Existing explicit `enabledAgents` lists are never
-silently extended; users upgrading with an existing explicit list get a one-time
-notice to opt into `cleaner` with `/subagents-setup`.
+start delegating immediately. Configs written before `cleaner` shipped are
+upgraded on load: `cleaner` is defaulted into the existing `enabledAgents` list
+and inherits your configured `reviewer` model and thinking level, with a
+one-time notice at the next session start. Disabling it again in
+`/subagents-setup` is respected and never undone.
 
 ## The agents
 
@@ -425,9 +427,10 @@ alias. Config loading automatically renames the old key in `enabledAgents`,
 `agentModels`, and `agentThinkingLevels`, deduplicates an old/new pair, and persists
 the normalized file. When both model or thinking keys are valid, the explicit
 `explorer` value wins. Other configured non-empty names are preserved. A
-pre-existing explicit `enabledAgents` list is also still preserved without
-appending `cleaner`; configs without cleaner receive the existing one-time setup
-notice.
+pre-existing non-empty `enabledAgents` list also gains `cleaner` exactly once
+(inserted before `reviewer`, inheriting the configured `reviewer` model and
+thinking level); an explicit empty list is honored, and a later deliberate
+disable is remembered via a stamp in `announcedFeatures`.
 
 ## Agent discovery and overrides
 

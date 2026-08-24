@@ -13,6 +13,7 @@ import type { ExtensionCommandContext } from "@earendil-works/pi-coding-agent";
 import {
 	AGENT_SCOPE_VALUES,
 	BUILTIN_AGENT_NAMES,
+	CLEANER_DEFAULTED_FEATURE,
 	DEFAULT_CONFIG,
 	DEFAULT_ENABLED_AGENTS,
 	DEFAULT_IDLE_TIMEOUT_SEC,
@@ -329,7 +330,9 @@ async function runFullSetup(ctx: ExtensionCommandContext, configPath: string, ba
 		maxConcurrency,
 		maxFixRounds,
 		idleTimeoutSec,
-		announcedFeatures: base.announcedFeatures,
+		// Full setup is an explicit decision point: mark the cleaner
+		// default-enable upgrade as processed so the saved list is kept as-is.
+		announcedFeatures: [...new Set([...base.announcedFeatures, CLEANER_DEFAULTED_FEATURE])],
 	};
 	await saveConfig(next, configPath);
 	ctx.ui.notify(`pi-subagents configured with Auto thinking. Saved to ${configPath}`, "info");
@@ -391,6 +394,17 @@ async function runMenu(ctx: ExtensionCommandContext, configPath: string, config:
 		const enabled = await pickEnabledAgents(ctx, config.enabledAgents);
 		if (enabled === undefined) return notifyCancelled(ctx);
 		next.enabledAgents = enabled;
+		// Newly enabling cleaner inherits the reviewer's configured model and
+		// thinking level, so the file reflects what cleaner will actually run
+		// instead of silently falling back to the current main model.
+		if (!config.enabledAgents.includes("cleaner") && enabled.includes("cleaner")) {
+			if (!next.agentModels.cleaner && config.agentModels.reviewer) {
+				next.agentModels.cleaner = config.agentModels.reviewer;
+			}
+			if (!next.agentThinkingLevels.cleaner && config.agentThinkingLevels.reviewer) {
+				next.agentThinkingLevels.cleaner = config.agentThinkingLevels.reviewer;
+			}
+		}
 		next.agentModels = keepAgentEntries(next.agentModels, enabled);
 		next.agentThinkingLevels = keepAgentEntries(next.agentThinkingLevels, enabled);
 	} else if (choice.startsWith("Configure")) {

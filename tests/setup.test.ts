@@ -202,6 +202,68 @@ describe("configured-agent flow", () => {
 	});
 });
 
+describe("enable/disable flow", () => {
+	it("newly enabling cleaner inherits the reviewer's model and thinking", async () => {
+		const dir = mkdtempSync(join(tmpdir(), "pi-subagents-setup-enable-"));
+		const configPath = join(dir, "pi-subagents.json");
+		writeFileSync(
+			configPath,
+			JSON.stringify({
+				enabledAgents: ["explorer", "worker", "reviewer"],
+				agentModels: { reviewer: "anthropic/sonnet" },
+				agentThinkingLevels: { reviewer: "low" },
+				// Stamped: the load-time upgrade already ran and the user disabled
+				// cleaner deliberately, so it stays off until re-enabled here.
+				announcedFeatures: ["cleanerDefaulted"],
+			}),
+			"utf8",
+		);
+		const keybindings = {
+			matches(data: string, action: string) {
+				return (data === "enter" && action === "tui.select.confirm")
+					|| (data === "escape" && action === "tui.select.cancel")
+					|| (data === "down" && action === "tui.select.down");
+			},
+		};
+		const ctx: any = {
+			mode: "tui",
+			cwd: dir,
+			isProjectTrusted: () => true,
+			model: undefined,
+			modelRegistry: { getAvailable: () => [] },
+			ui: {
+				notify: vi.fn(),
+				select: vi.fn(async (_title: string, options: string[]) =>
+					options.find((option) => option.startsWith("Enable"))),
+				custom: (factory: any) => new Promise((resolve) => {
+					const component = factory(
+						{ requestRender: () => {} },
+						{ fg: (_color: string, text: string) => text, bold: (text: string) => text },
+						keybindings,
+						resolve,
+					);
+					component.render(160);
+					// Move to cleaner (third row) and toggle it on, then confirm.
+					component.handleInput("down");
+					component.handleInput("down");
+					component.handleInput(" ");
+					component.handleInput("enter");
+				}),
+			},
+		};
+		try {
+			await runSetup(ctx, configPath);
+			const saved = JSON.parse(readFileSync(configPath, "utf8"));
+			expect(saved.enabledAgents).toEqual(["explorer", "worker", "reviewer", "cleaner"]);
+			expect(saved.agentModels).toEqual({ reviewer: "anthropic/sonnet", cleaner: "anthropic/sonnet" });
+			expect(saved.agentThinkingLevels).toEqual({ reviewer: "low", cleaner: "low" });
+			expect(saved.announcedFeatures).toEqual(["cleanerDefaulted"]);
+		} finally {
+			rmSync(dir, { recursive: true, force: true });
+		}
+	});
+});
+
 describe("full setup flow", () => {
 	it("uses one model choice per agent and Auto thinking without pool/strength menus", async () => {
 		const dir = mkdtempSync(join(tmpdir(), "pi-subagents-setup-full-"));

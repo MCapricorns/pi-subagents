@@ -27,6 +27,20 @@ export type AgentScope = (typeof AGENT_SCOPE_VALUES)[number];
 
 const LEGACY_EXPLORER_NAME = "explore";
 const EXPLORER_NAME = "explorer";
+const CLEANER_NAME = "cleaner";
+const REVIEWER_NAME = "reviewer";
+
+/**
+ * Stamps recorded in `announcedFeatures` by the one-time upgrade that defaults
+ * cleaner on for configs written before it shipped. The first marks a config as
+ * processed, so a later deliberate disable is not undone; the second records
+ * that cleaner was actually injected, so session start can tell the user once;
+ * the third records that reviewer model/thinking settings were actually copied,
+ * so that notice never claims an inheritance that did not happen.
+ */
+export const CLEANER_DEFAULTED_FEATURE = "cleanerDefaulted";
+export const CLEANER_AUTO_ENABLED_FEATURE = "cleanerAutoEnabled";
+export const CLEANER_INHERITED_FEATURE = "cleanerInheritedReviewer";
 
 function migrateAgentName(name: string): string {
 	return name === LEGACY_EXPLORER_NAME ? EXPLORER_NAME : name;
@@ -106,8 +120,9 @@ export interface SubagentsConfig {
 	 */
 	idleTimeoutSec: number;
 	/**
-	 * One-time feature announcements already shown to the user. Persisted so
-	 * the notice never nags again.
+	 * One-time feature announcements already shown to the user, plus schema
+	 * upgrade stamps (e.g. the cleaner default-enable upgrade). Persisted so
+	 * notices and migrations never repeat.
 	 */
 	announcedFeatures: string[];
 }
@@ -239,6 +254,32 @@ export function normalizeConfig(raw: unknown): SubagentsConfig {
 		config.announcedFeatures = raw.announcedFeatures.filter(
 			(feature): feature is string => typeof feature === "string" && feature.trim().length > 0,
 		);
+	}
+
+	// One-time upgrade for configs written before cleaner shipped: a non-empty
+	// explicit enabledAgents list gets cleaner defaulted on (inserted before
+	// reviewer, matching the fresh-install order) and inherits the reviewer's
+	// configured model and thinking level — its closest peer. The stamps make
+	// the upgrade idempotent and keep a later deliberate disable from being undone.
+	if (!config.announcedFeatures.includes(CLEANER_DEFAULTED_FEATURE)) {
+		config.announcedFeatures.push(CLEANER_DEFAULTED_FEATURE);
+		if (config.enabledAgents.length > 0 && !config.enabledAgents.includes(CLEANER_NAME)) {
+			const reviewerIndex = config.enabledAgents.indexOf(REVIEWER_NAME);
+			config.enabledAgents.splice(reviewerIndex === -1 ? config.enabledAgents.length : reviewerIndex, 0, CLEANER_NAME);
+			config.announcedFeatures.push(CLEANER_AUTO_ENABLED_FEATURE);
+			let inherited = false;
+			if (!config.agentModels[CLEANER_NAME] && config.agentModels[REVIEWER_NAME]) {
+				config.agentModels[CLEANER_NAME] = config.agentModels[REVIEWER_NAME];
+				inherited = true;
+			}
+			if (!config.agentThinkingLevels[CLEANER_NAME] && config.agentThinkingLevels[REVIEWER_NAME]) {
+				config.agentThinkingLevels[CLEANER_NAME] = config.agentThinkingLevels[REVIEWER_NAME];
+				inherited = true;
+			}
+			// An old explicit list may have no reviewer overrides to copy; only the
+			// copied case is stamped so the one-time notice stays accurate.
+			if (inherited) config.announcedFeatures.push(CLEANER_INHERITED_FEATURE);
+		}
 	}
 
 	return config;

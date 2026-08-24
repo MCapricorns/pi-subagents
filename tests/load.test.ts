@@ -140,10 +140,21 @@ describe("extension registration", () => {
 
 		expect(setWidget).toHaveBeenCalledWith("pi-subagents", expect.any(Function), { placement: "aboveEditor" });
 		expect(notify).toHaveBeenCalledWith(expect.stringContaining("recovery for run #41"), "error");
-		expect(notify).toHaveBeenCalledWith(expect.stringMatching(/cleaner agent.*\/subagents-setup/), "info");
+		// No reviewer model/thinking overrides were configured, so the upgrade
+		// injected cleaner without inheriting anything and the notice says so.
+		expect(notify).toHaveBeenCalledWith(
+			"pi-subagents: the built-in cleaner agent was enabled by default. Run /subagents-setup to adjust or disable it.",
+			"info",
+		);
 		const savedConfig = JSON.parse(readFileSync(configPath, "utf8"));
-		expect(savedConfig.enabledAgents).toEqual(["explorer", "worker", "reviewer"]);
-		expect(savedConfig.announcedFeatures).toEqual(expect.arrayContaining(["cleanerAgent"]));
+		// The load-time upgrade defaulted cleaner into the old explicit list and
+		// stamped the config so the migration and the notice never repeat.
+		expect(savedConfig.enabledAgents).toEqual(["explorer", "worker", "cleaner", "reviewer"]);
+		expect(savedConfig.announcedFeatures).toEqual(expect.arrayContaining([
+			"cleanerDefaulted",
+			"cleanerAutoEnabled",
+			"cleanerAutoEnabledNotice",
+		]));
 
 		// Recovery remains visible while its artifact exists, but the feature markers
 		// prevent repeated informational notices on later session starts.
@@ -174,6 +185,58 @@ describe("extension registration", () => {
 		expect(notify).toHaveBeenCalledWith(expect.stringContaining("recovery for run #42"), "error");
 		expect(notify.mock.calls.some((call) => call[1] === "info")).toBe(false);
 		expect(JSON.parse(readFileSync(configPath, "utf8")).announcedFeatures).toEqual([]);
+	});
+
+	it("states reviewer inheritance in the cleaner notice only when settings were copied", async () => {
+		if (!testAgentDir) throw new Error("test agent directory was not initialized");
+		const configPath = join(testAgentDir, "pi-subagents.json");
+		// A pre-cleaner config whose reviewer carries model and thinking overrides.
+		writeFileSync(configPath, JSON.stringify({
+			enabledAgents: ["explorer", "worker", "reviewer"],
+			agentModels: { reviewer: "anthropic/claude-sonnet-4-5" },
+			agentThinkingLevels: { reviewer: "low" },
+			announcedFeatures: [],
+		}), "utf8");
+
+		const stub = makeStub();
+		register(stub.api);
+		const notify = vi.fn();
+		const setWidget = vi.fn();
+		await stub.hooks["session_start"]({}, { mode: "tui", hasUI: true, ui: { notify, setWidget } });
+
+		expect(notify).toHaveBeenCalledWith(
+			"pi-subagents: the built-in cleaner agent was enabled by default and inherited your reviewer model/thinking settings. Run /subagents-setup to adjust or disable it.",
+			"info",
+		);
+		const savedConfig = JSON.parse(readFileSync(configPath, "utf8"));
+		expect(savedConfig.announcedFeatures).toEqual(expect.arrayContaining([
+			"cleanerDefaulted",
+			"cleanerAutoEnabled",
+			"cleanerInheritedReviewer",
+			"cleanerAutoEnabledNotice",
+		]));
+	});
+
+	it("skips the cleaner notice when cleaner was disabled before it could fire", async () => {
+		if (!testAgentDir) throw new Error("test agent directory was not initialized");
+		const configPath = join(testAgentDir, "pi-subagents.json");
+		// The upgrade ran and stamped the injection, but the user then disabled
+		// cleaner (e.g. via full setup) before the async announcement save landed.
+		writeFileSync(configPath, JSON.stringify({
+			enabledAgents: ["explorer", "worker", "reviewer"],
+			announcedFeatures: ["cleanerDefaulted", "cleanerAutoEnabled"],
+		}), "utf8");
+
+		const stub = makeStub();
+		register(stub.api);
+		const notify = vi.fn();
+		const setWidget = vi.fn();
+		await stub.hooks["session_start"]({}, { mode: "tui", hasUI: true, ui: { notify, setWidget } });
+
+		expect(notify.mock.calls.some((call) => call[1] === "info")).toBe(false);
+		const savedConfig = JSON.parse(readFileSync(configPath, "utf8"));
+		expect(savedConfig.enabledAgents).toEqual(["explorer", "worker", "reviewer"]);
+		expect(savedConfig.announcedFeatures).not.toContain("cleanerAutoEnabledNotice");
 	});
 
 	it("does not register the tool inside any child sub-agent process", () => {

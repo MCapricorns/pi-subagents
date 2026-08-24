@@ -2,7 +2,7 @@
 
 import { stat } from "node:fs/promises";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
-import { loadConfig, saveConfig } from "./config.ts";
+import { CLEANER_AUTO_ENABLED_FEATURE, CLEANER_INHERITED_FEATURE, loadConfig, saveConfig } from "./config.ts";
 import { announceRecoveryRecords } from "./recovery.ts";
 import type { SubagentRuntime } from "./runtime.ts";
 import { pruneResultArtifacts } from "./spawn.ts";
@@ -11,13 +11,23 @@ import { installActiveRunsWidget } from "./widget.ts";
 const ANNOUNCEMENTS: Array<{
 	key: string;
 	condition: (config: Awaited<ReturnType<typeof loadConfig>>) => boolean;
-	message: string;
+	message: (config: Awaited<ReturnType<typeof loadConfig>>) => string;
 }> = [
 	{
-		key: "cleanerAgent",
-		condition: (config) => !config.enabledAgents.includes("cleaner"),
-		message:
-			"pi-subagents: new built-in cleaner agent is available for evidence-first code cleanup. Run /subagents-setup to enable it; your existing enabledAgents selection was left unchanged.",
+		// Fires once after the load-time upgrade injected cleaner into an older
+		// config (the injection stamp only exists in that case). The extra
+		// enabledAgents check keeps the notice silent when the user already
+		// disabled cleaner (e.g. via full setup) before it could fire.
+		key: "cleanerAutoEnabledNotice",
+		condition: (config) =>
+			config.announcedFeatures.includes(CLEANER_AUTO_ENABLED_FEATURE) &&
+			config.enabledAgents.includes("cleaner"),
+		// The inheritance clause matches reality: its stamp is only set when the
+		// upgrade actually copied reviewer model/thinking settings.
+		message: (config) =>
+			config.announcedFeatures.includes(CLEANER_INHERITED_FEATURE)
+				? "pi-subagents: the built-in cleaner agent was enabled by default and inherited your reviewer model/thinking settings. Run /subagents-setup to adjust or disable it."
+				: "pi-subagents: the built-in cleaner agent was enabled by default. Run /subagents-setup to adjust or disable it.",
 	},
 ];
 
@@ -47,7 +57,7 @@ async function announceNewFeatures(
 			},
 			runtime.configPath,
 		);
-		for (const announcement of pending) ctx.ui.notify(announcement.message, "info");
+		for (const announcement of pending) ctx.ui.notify(announcement.message(config), "info");
 	} catch {
 		/* announcement failures are non-fatal */
 	}
