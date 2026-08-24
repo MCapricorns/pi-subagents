@@ -6,318 +6,314 @@
 ![platform](https://img.shields.io/badge/platform-Windows%20%7C%20macOS%20%7C%20Linux-lightgrey)
 ![pi](https://img.shields.io/badge/pi-extension-orange)
 
-Focused background delegation for [pi](https://pi.dev): `explorer` / `worker` /
-`cleaner` / `reviewer` agents run in **isolated child processes** and hand their
-results back to the main agent automatically. Install it, and the main model
-starts using it on its own — no prompt engineering, no babysitting.
+## Give pi a dependable engineering team
 
-## 4.0.1 — automatic explorer config migration
+**pi-subagents** turns delegation in [pi](https://pi.dev) into a complete workflow,
+not just a way to launch another prompt.
 
-Version 4 renames the built-in reconnaissance role from `explore` to `explorer`
-without retaining a runtime alias. Version 4.0.1 automatically migrates the old
-name in `enabledAgents`, `agentModels`, and `agentThinkingLevels`, then persists
-the normalized configuration; an already configured `explorer` value wins a
-conflict. `cleaner` is apply-only: explicit cleanup intent authorizes it to prove
-and perform every safe in-scope cut, while generic or read-only assessments go to
-`reviewer` without triggering auto-fix.
-
-The main delegation directive is now the single authoritative routing policy;
-duplicated tool guidelines were removed to cut the default parent injection by
-more than half without changing process isolation, worktree rules, retained-session
-fallback, or result handoff. Agent frontmatter model defaults remain because they
-still select a model when no current main model exists; frontmatter comments do not
-enter model context.
-
-Every dispatch retains its stable run id and can be steered, parked, resumed,
-retargeted, or forked. The active widget continues to show task, effective model
-and thinking level, activity, and elapsed time.
-
-The common quality loop now runs end to end without waking the main agent between
-steps:
+Your main agent can send research to `explorer`, implementation to `worker`,
+intentional maintenance to `cleaner`, and independent checks to `reviewer`. Each
+role runs in its own child process with a clean context, works in the background,
+and returns its result automatically. Long-running work can be steered, parked,
+resumed, retargeted, or forked without losing what the agent already learned.
 
 ```text
-reviewer (find issues) → worker (fix every finding) → reviewer (verify) → final PASS/FAIL
+You
+ └─ pi main agent
+     ├─ explorer ── maps the codebase
+     ├─ worker ──── implements and verifies the change
+     └─ reviewer ── checks the diff
+          └─ REVIEW_FAIL → worker fixes → reviewer checks again
+
+The main agent receives one useful result when the work is ready.
 ```
 
-Gate reviews use a single flat findings list — no severity triage. Every reported
-finding is fixed before the change is accepted, and each re-review converges on
-an open-finding set: the worker's explicit rejections are adjudicated once, only
-defects a fix round introduced or exposed are added, and resolved items never
-re-open. `maxFixRounds` stays the hard cap, so a chain always settles and wakes
-the main agent with the full picture. Advisory reviewer requests (generic audits,
-code health, plans, and proposed solutions) return evidence without a machine
-verdict, so they never start auto-fix.
+Install it once and keep using pi normally. The extension teaches the main model
+when to delegate, so most users do not need custom prompts or manual orchestration.
 
-Cleanup stays a separate lifecycle: only an explicit request authorizing cleanup,
-removal, or simplification edits dispatches the evidence-first `cleaner`. It proves
-candidates, applies every safe in-scope cut end to end, and may validly make zero
-edits; non-trivial changes still go through the independent `reviewer` gate.
+## Why use pi-subagents?
 
-Each chain is delivered as one concise completion group whose footer totals the
-aggregate token usage and cost of every included run, while full per-run reports
-remain available through `subagent_status`. Its parent stays `running`
-until the whole chain settles; completed internal rounds leave active status
-immediately, so no `done` row keeps accumulating elapsed time. Selected-to-main
-model handoffs keep the same retained context, and isolated parallel workers use
-detached Git worktrees whose changes are applied back without touching the parent
-index.
+Use pi-subagents when delegation should **remove coordination work**, not create
+more of it.
 
-## Highlights
+- **The right specialist gets the right job.** Research, implementation, cleanup,
+  and review have separate roles, tools, and operating rules.
+- **You do not babysit background work.** Results wake the main agent automatically;
+  there is no polling loop and no “go check whether it finished” step.
+- **Parallel edits stay safe.** Parallel workers use detached Git worktrees by
+  default, then apply their changes back without touching your index.
+- **Review can close the loop.** A failed gate can automatically dispatch a worker,
+  run another independent review, and repeat up to a hard limit.
+- **Agents remain controllable.** Every run has a stable id and retained session,
+  so you can change direction or continue later without starting from zero.
+- **Failures are handled, not hidden.** Model failures can hand the same session to
+  the current main model; pre-prompt startup races retry safely; process and
+  integration failures are reported with recovery details.
 
-- **Zero-setup proactive dispatch** — the extension injects a delegation directive
-  into the main system prompt, so the main model sends broad searches to `explorer`,
-  self-contained implementations to `worker`, edit-authorizing cleanup to `cleaner`,
-  and generic assessments or pre-commit gates to `reviewer`. You just use pi;
-  delegation happens by itself.
-- **Multimodal work is a model choice, not a mode** — an agent that should see
-  screenshots, mockups, or its own rendered pages simply gets a multimodal model
-  through `/subagents-setup` (the picker labels each model `vision` or
-  `text-only`). The agent reads images with its `read` tool on whatever model it
-  runs; no per-task flag, no separate vision override.
-- **Results come back on their own** — completions are delivered as messages that
-  wake the main agent automatically, even mid-turn. No polling, no `sleep`, no
-  "go check" step. `subagent_wait` is a **non-blocking** in-turn lookup by default
-  (pass `timeoutMs` to block); `subagent_status` inspects runs; `subagent_stop`
-  cancels one and delivers its partial output.
-- **Active-only live widget, as a tree** — each queued or running sub-agent gets one compact
-  width-aware primary line with task, effective model/thinking, and elapsed time; current
-  activity appears only when present on an indented second line. Auto-fix rounds nest under
-  the triggering reviewer row that owns the chain, so it is always visible who dispatched
-  what; no run ids appear here — the tree and the task label identify each row:
-  ```text
-  ● reviewer · review diff of src/foo.ts · claude-sonnet-4-5/high · 42s
-    ├ ● worker · fix round 1 · src/foo.ts · claude-sonnet-4-5/high · 10s
-    │    grep cacheKey
-    └ ○ reviewer · re-review round 1 · claude-sonnet-4-5/high · 3s
-  ```
-  Long tasks and activity paths truncate first (preserving a useful path tail when
-  possible), groups have no blank rows, and settled/parked runs disappear immediately.
-- **Results are not re-narrated** — a sub-agent's completion is shown to you
-  verbatim, and the main agent is told not to paraphrase it back. It replies with
-  only its own conclusion or next step, so the same findings are never paid for
-  twice in tokens.
-- **Evidence-first cleanup, not deletion by guesswork** — `cleaner` is apply-only:
-  an explicit cleanup request authorizes edits, but each candidate must be proved
-  before every safe in-scope cut is applied and verified. Finding nothing safe and
-  making zero edits remains valid. Generic/read-only assessments go to `reviewer`;
-  cleaner is periodic/intent-driven, never PR-count-driven or an automatic gate.
-- **A quality gate that closes the loop** — when a gate reviewer returns
-  `REVIEW_FAIL`, the extension dispatches a worker briefed with the concrete
-  findings, then a re-review, up to `maxFixRounds` times — and only then wakes the
-  main agent. Advisory reviewer reports omit that verdict and never trigger edits.
-  Every reported finding gets fixed (no severity triage), and re-reviews converge
-  on an open-finding set instead of ping-ponging: worker rejections are adjudicated
-  once, only defects the fix round introduced are added, and resolved items never
-  re-open. Every round stays in the triggering reviewer's cwd, and chains that target the
-  same repository are serialized so shared-checkout edits cannot race.
-- **Direct fallback with real thinking capabilities** — each agent has at most
-  one selected model. An unavailable selection, rate limit, invalid key, quota,
-  missing model, or provider failure hands directly to the current main model.
-  A child-only provider adapter forces inner request retries to zero; transient
-  stream drops still use Pi's outer turn retry, and only a settled model-level
-  failure hands off, without changing user settings. Auto thinking clamps the
-  agent preference to the
-  effective model's real `thinkingLevelMap`; manual setup shows only levels that
-  model supports.
-- **Resumes, retargets, and forks preserve context** — every run is session-backed.
-  `subagent_control` can steer active work, retarget it after a stable abort,
-  park/resume it under the same run id, or fork a parked/settled checkpoint into
-  a new independent run. Concurrent resume calls are serialized.
-- **Concise but honest completions** — group completions end with aggregate token
-  and cost totals across every included run; failed-tool diagnostics stay out of the
-  delivered message and remain one `subagent_status` call away. Actual process,
-  model, and integration failures still surface as failures.
-- **Parallel fan-out with filesystem isolation** — independent tasks run up to a
-  configurable limit (default 4). Parallel workers default to detached Git
-  worktrees; tracked, deleted, untracked, and binary changes are applied back
-  without touching the parent index. Failed integration keeps recovery artifacts.
-- **Recursion is structurally impossible** — children are leaf processes; the
-  `subagent` tool is excluded from their toolset.
-- **Zero runtime dependencies** — agents are plain Markdown files; overriding or
-  adding one is writing a file.
-- **Update announcements** — when a new configurable feature ships, you are told
-  about it once (a persisted marker stops the notice from nagging).
+### More than a basic sub-agent launcher
 
-## What this adds beyond generic subagent dispatch
+| A basic launcher often gives you… | pi-subagents gives you… |
+| --- | --- |
+| One generic child role | Four focused engineering roles |
+| A one-shot prompt | Retained, steerable, resumable, forkable threads |
+| Concurrent writers in one checkout | Git worktree isolation for parallel workers |
+| A review report you must act on manually | An optional reviewer → fix → re-review loop |
+| Manual polling or follow-up | Automatic result delivery that resumes the main agent |
+| A hard failure when the selected model is unavailable | Direct handoff to the current main model |
+| Synchronized retries during startup contention | Extended jittered backoff that reduces retry collisions |
 
-This package combines several concrete runtime behaviors rather than only exposing
-an undifferentiated child-agent launcher:
+## Quick start
 
-- language-agnostic semantic role guidance for cleanup intent;
-- a dedicated evidence-first cleaner, with cleanup kept separate from the
-  independent reviewer gate;
-- isolated, retained threads that can be steered, parked, resumed, retargeted, or
-  forked under stable run ids;
-- the reviewer → worker auto-fix → reviewer loop, fixing every finding under a
-  convergence contract with a hard round cap;
-- failed-tool diagnostics available by run id through `subagent_status`;
-- direct selected→main fallback plus capability-aware Auto thinking;
-- detached Git worktree isolation for parallel workers and opt-in write-capable
-  cleaner runs.
-
-## Install
+Requires **pi >= 0.83.0** and **Node.js >= 22.19.0**.
 
 ```bash
 pi install npm:@ferris1225/pi-subagents
 ```
 
-Requires pi **>= 0.83.0**. After installation, open the setup wizard in an
-interactive TUI session:
+Open pi and run the setup wizard:
 
 ```text
 /subagents-setup
 ```
 
-Fresh installs enable `explorer`, `worker`, `cleaner`, and `reviewer` — you can
-start delegating immediately. Configs written before `cleaner` shipped are
-upgraded on load: `cleaner` is defaulted into the existing `enabledAgents` list
-and inherits your configured `reviewer` model and thinking level, with a
-one-time notice at the next session start. Disabling it again in
-`/subagents-setup` is respected and never undone.
+Fresh installs enable all four built-in agents. You can keep the current main
+model for every role or choose a different model and thinking level per agent.
 
-## The agents
+Then ask for work in plain language:
 
-| Agent | Access | Purpose |
-| --- | --- | --- |
-| `explorer` | Read-only | Fast codebase reconnaissance: broad/open-ended search, multi-file lookups, mapping unfamiliar code. Returns compressed, structured retrieval leads. |
-| `worker` | Full | Implements, fixes, refactors, and tests a self-contained task end to end, then reports honest verification. |
-| `cleaner` | Full | Proves and applies every safe in-scope cleanup authorized by an explicit cleanup/removal/simplification request; zero edits is valid. Supports worktree isolation. |
-| `reviewer` | Read-only | Handles generic audits, code health, plans, proposed solutions, PR/issue validation, and independent pre-commit gates. Advisory reports do not trigger auto-fix. |
-
-Each agent runs in its own isolated `pi` process with a clean context window; it
-has no memory of your conversation, so briefs must be self-contained (goal, exact
-paths, constraints, expected output).
-
-## Usage
-
-### Single task
-
-```ts
-subagent({ agent: "explorer", task: "Map the test setup: which files run what, and how is CI wired? Report exact paths." });
-subagent({ agent: "worker", task: "Implement X in src/foo.ts, add tests, run npm test." });
-subagent({ agent: "reviewer", task: "Audit src/cache for dead-code candidates and redundant state; report evidence only." });
-subagent({ agent: "cleaner", task: "Clean up src/cache: prove and apply every safe dead-code or redundancy cut, update tests/docs, and verify." });
-subagent({ agent: "reviewer", task: "Gate the diff of src/index.ts and tests/load.test.ts for correctness and edge cases." });
+```text
+Map how authentication works, fix the refresh race, run the tests, and review the diff.
 ```
 
-### Parallel tasks
+```text
+Clean up src/cache. Remove only code you can prove is dead, then verify the result.
+```
+
+```text
+Compare screenshots/settings.png with design.png and report every visual mismatch.
+```
+
+The main agent decides when delegation is useful. You can also call the tools
+explicitly when you want exact control.
+
+## What changed in 4.1.2
+
+Startup contention is now much harder to exhaust. A child that exits or fails its
+RPC readiness handshake before the initial prompt is dispatched is retried through
+a longer backoff window. Each default delay also gets additive jitter, reducing the
+chance that several children retry in the same lockstep waves. The base window
+covers stale startup locks and leaves headroom beyond the default four-way fan-out.
+
+Only a failure known to precede prompt dispatch qualifies. Once the parent sends a
+prompt command, pi-subagents will not replay it—even if the ACK is lost—because Pi
+may already have started the model or tools. This recovery therefore cannot
+repeat model calls or edits.
+
+## Meet the team
+
+| Agent | Access | Best for |
+| --- | --- | --- |
+| `explorer` | Read-only | Broad codebase search, unfamiliar-area mapping, symbol and dependency tracing, and multi-file reconnaissance. |
+| `worker` | Full | A self-contained implementation, bug fix, refactor, or test task carried through verification. |
+| `cleaner` | Full | Explicitly authorized cleanup, removal, simplification, and maintenance. It must prove each cut; zero edits is a valid result. |
+| `reviewer` | Read-only | Audits, code-health checks, plans, PR or issue validation, and fresh pre-commit gates. |
+
+Children have no memory of the parent conversation. A good manual brief includes
+the goal, exact paths, constraints, and expected output. The injected delegation
+guidance does this automatically when the main agent dispatches on your behalf.
+
+## Everyday workflows
+
+### Delegate one task
+
+```ts
+subagent({
+  agent: "explorer",
+  task: "Map the test setup. Report exact files, commands, and CI entry points.",
+});
+```
+
+```ts
+subagent({
+  agent: "worker",
+  task: "Fix the cache invalidation bug in src/cache, add regression tests, and run the relevant checks.",
+});
+```
+
+### Fan out independent work
 
 ```ts
 subagent({
   tasks: [
-    { agent: "explorer", task: "Where is the selected-to-main handoff logic?" },
-    { agent: "worker", task: "Add unit tests for models.ts." },
+    { agent: "explorer", task: "Trace model fallback from dispatch to completion." },
+    { agent: "worker", task: "Add edge-case tests for config migration." },
   ],
 });
 ```
 
-### Cleanup routing and lifecycle
+Independent tasks run up to `maxConcurrency` (default `4`). One parallel call may
+contain at most that many tasks and is rejected if it exceeds the limit. Accepted
+background work from separate calls waits in the shared queue when all slots are
+busy.
 
-The injected guidance sends only explicit, edit-authorizing cleanup intent to
-`cleaner` in whatever language the conversation uses: clean up/remove dead code,
-reduce redundancy, simplify, remove over-engineering, or run a maintenance cleanup
-pass. Cleaner first proves reachability, ownership, history, and boundaries, then
-applies every safe in-scope cut end to end and verifies it. No proven safe cut means
-zero edits, not a forced deletion.
-
-Generic or explicitly read-only **audit**, **inspect**, **report**, **review**,
-**code-health**, **plan**, **proposed-solution**, or cleanup-candidate assessment
-requests go to `reviewer`. Those are advisory reviews: they omit the machine
-`REVIEW_PASS` / `REVIEW_FAIL` marker, cannot start auto-fix, and do not authorize
-the main agent to edit. A follow-up change needs an explicit user request. A
-reviewer emits the marker only for an explicit diff/pre-commit acceptance gate.
-
-```text
-explicit edit-authorizing cleanup → cleaner → reviewer gate
-read-only/generic assessment → reviewer advisory report (no auto-fix)
-reviewer gate REVIEW_FAIL → worker auto-fix → reviewer gate
-```
-
-Cleaner is never dispatched by PR count and never acts as the commit gate. The
-auto-fix portion runs only for gate verdicts and only when enabled by
-`maxFixRounds`.
-
-### Image work (screenshots / mockups / designs)
-
-There is no vision flag or separate vision model. Give the agent a multimodal
-model in `/subagents-setup` and name the exact image paths in the task:
+### Run an independent quality gate
 
 ```ts
 subagent({
   agent: "reviewer",
-  task: "Compare the UI in screenshots/settings.png against the mockup design.png; list every visual mismatch.",
+  task: "Gate the current diff for correctness, regressions, and missing tests.",
 });
 ```
 
-The sub-agent reads images with its `read` tool on its configured model; the
-setup picker labels each model `vision` or `text-only` so the choice is visible.
-The live widget line, dispatch result row, and `subagent_status` all show each
-run's effective model id, and a selected→main handoff is labeled with its
-origin.
+A gate reviewer ends with `REVIEW_PASS` or `REVIEW_FAIL`. On failure, pi-subagents
+can run this loop without waking the main agent between steps:
 
-### Controlling and stopping
+```text
+reviewer → worker fixes every open finding → reviewer checks again → PASS/FAIL
+```
 
-Dispatch confirmations, tool result rows, and completion blocks all show the
-stable `#id`, so a thread remains directly controllable after its live UI is gone
-(the widget itself identifies rows by tree position and task instead of ids).
+`maxFixRounds` is a hard cap, so the chain always settles. Generic audits and
+read-only reviews are advisory: they do not emit a gate verdict and never trigger
+edits.
 
-- `subagent_control` — `steer`, `retarget`, `park`, `resume`, or `fork` a logical
-  thread by stable run id. Resume accepts an optional replacement objective;
-  fork creates a new id and leaves the source unchanged. Park active work before
-  forking it.
-- `subagent_wait` — in-turn result lookup. **Non-blocking by default**: a settled
-  run returns immediately; an active run tells the model to end its turn. Pass
-  `timeoutMs` only when you must stay in the turn.
-- `subagent_status` — active/parked/finished runs and full result by run id.
-- `subagent_stop` — destructive cancellation. It retires that thread's retained
-  session (independent forks survive) and delivers exactly one aborted partial
-  result after the run and any worktree integration have quiesced.
+### Clean up without guessing
 
-Examples:
+`cleaner` is only for requests that explicitly authorize cleanup edits. It checks
+reachability, ownership, history, and boundaries before removing or simplifying
+anything, then applies every safe in-scope cut and verifies the result.
+
+```text
+explicit cleanup request → cleaner applies proven cuts → reviewer gates the diff
+read-only cleanup audit   → reviewer reports candidates only
+```
+
+This separation matters: asking for an audit does not silently authorize code
+changes, and asking for cleanup does not reward speculative deletion.
+
+## Safe parallel editing
+
+Every child has process and context isolation. Write-capable tasks can also have
+filesystem isolation:
+
+- A single task defaults to `isolation: "shared"`.
+- Parallel `worker` tasks default to `isolation: "worktree"`.
+- `cleaner` supports worktree mode when explicitly requested.
+- Read-only `explorer` and `reviewer` tasks reject worktree mode because they do
+  not need a writable checkout.
+
+Worktree mode requires a Git repository with a committed `HEAD`. Tracked,
+deleted, untracked, and binary changes are carried back to the original checkout
+without staging or modifying the parent index. If setup or integration fails,
+pi-subagents keeps the useful patch or worktree when possible and records recovery
+information in:
+
+```text
+~/.pi/agent/pi-subagents-recovery.json
+```
+
+A parked isolated thread keeps its worktree. Resume continues there. Forking an
+isolated checkpoint is available after that checkpoint has settled and integrated.
+
+## Follow, redirect, or stop a run
+
+Dispatch confirmations and completion messages include a stable `#id`.
+
+| Tool | What it does |
+| --- | --- |
+| `subagent_control` | `steer`, `retarget`, `park`, `resume`, or `fork` a logical thread. |
+| `subagent_status` | Show active and recent runs, or return the full result for one id. |
+| `subagent_wait` | Look up a result in the current turn. It is non-blocking by default; use `timeoutMs` only when you must wait in-turn. |
+| `subagent_stop` | Destructively cancel work, deliver partial output, and retire that thread's retained session. Independent forks survive. |
 
 ```ts
 subagent_control({ action: "steer", id: 7, instruction: "Check the Windows path too." });
 subagent_control({ action: "park", id: 7 });
 subagent_control({ action: "resume", id: 7, objective: "Finish the tests." });
-subagent_control({ action: "fork", id: 7, objective: "Try the smaller alternative." });
+subagent_control({ action: "fork", id: 7, objective: "Try the smaller design instead." });
 ```
 
-### Worktree isolation
+Use `steer` to add guidance to active work. Use `retarget` when the current
+objective is obsolete. Use `park` to preserve a checkpoint while releasing its
+process slot. Use `stop` only when you want to discard that thread's future
+continuation.
 
-Single tasks default to `isolation: "shared"`. Parallel `worker` tasks default
-to `isolation: "worktree"`; opt into shared mode only when a worker must see the
-caller's live uncommitted tree. `cleaner` is also write-capable and supports
-worktree mode when explicitly requested (its default remains shared). Worktree
-mode requires a Git repository with a committed `HEAD` and is rejected for the
-read-only `explorer` and `reviewer` agents.
+## Results and live status
 
-A parked isolated thread keeps its current worktree. Resume it there; fork is
-available after that isolated checkpoint settles and its seed is integrated.
-Resuming or forking a settled isolated thread creates a fresh worktree, merges a
-recorded checkpoint onto the current `HEAD` (including when the seed was already
-committed), and clones the Pi session with the new cwd. Forks then integrate only
-their unique follow-on edits, so a shared seed is applied once. A run remains
-active while final Git integration is in progress and becomes `done` only after
-that boundary finishes.
+The active TUI widget shows queued and running work as a compact tree:
 
-Every Git operation has a 120-second deadline and process-tree cleanup; captured
-Git output and binary patches are capped at 64 MiB. Setup/bound failures surface
-instead of hanging. Finalization failures retain the patch/worktree when
-available and are recorded in `~/.pi/agent/pi-subagents-recovery.json`; later
-sessions show the recovery paths again until the artifacts are removed.
+```text
+● reviewer · review diff of src/cache.ts · claude-sonnet-4-5/high · 42s
+  ├ ● worker · fix round 1 · src/cache.ts · claude-sonnet-4-5/high · 10s
+  │    grep cacheKey
+  └ ○ reviewer · re-review round 1 · claude-sonnet-4-5/high · 3s
+```
+
+Completed and parked rows disappear from the widget. Final messages include the
+result plus aggregate token and cost totals. Long output is truncated in the
+conversation and written to a temporary Markdown artifact; `subagent_status`
+keeps the complete run report available by id.
+
+The main agent is told not to paraphrase a result you have already seen. It should
+add only its own conclusion or next action instead of charging you twice for the
+same explanation.
+
+## Models, thinking, and image work
+
+Each agent can use the current main model or one selected in `/subagents-setup`.
+The setup picker shows authenticated models and labels them `vision` or
+`text-only`.
+
+```text
+selected agent model → current main model
+```
+
+If the selected model is missing, unavailable, rate-limited, out of quota, or
+fails at the provider level, the current main model continues the same retained
+session. Searches, reads, reasoning, and edits already completed are preserved.
+Ordinary tool and test failures remain task failures and do not trigger a model
+handoff.
+
+Thinking defaults to **Auto**. pi-subagents starts from the role's preference and
+chooses only a level the effective model actually supports. A fallback re-checks
+the level for the main model.
+
+There is no separate vision mode. Assign a multimodal model to the agent and name
+the image paths in the task:
+
+```ts
+subagent({
+  agent: "reviewer",
+  task: "Compare screenshots/settings.png with design.png and list every visual mismatch.",
+});
+```
+
+## Reliability without duplicate work
+
+- **Startup recovery:** silent, zero-activity failures before prompt dispatch
+  retry with extended jittered backoff. A dispatched prompt is never replayed,
+  even when its ACK is lost.
+- **Idle watchdog:** a run with no RPC output for `idleTimeoutSec` is terminated;
+  selected-model failures can continue on the current main model.
+- **Retained context:** model handoff, park/resume, retarget, and fork build on the
+  same session history instead of repeating discovery.
+- **Visible failures:** process crashes, partial parallel starts, model failures,
+  and Git integration failures are returned as failures rather than silent hangs.
+- **Safe status text:** live tool activity is credential-redacted and stripped of
+  terminal control characters.
+- **No runaway trees:** child processes are leaves; they cannot dispatch more
+  sub-agents.
 
 ## Configuration
 
-Stored at `~/.pi/agent/pi-subagents.json` (follows `PI_CODING_AGENT_DIR` when
-set). `/subagents-setup` has four top-level choices: enable agents, configure one
-agent's model/thinking, runtime settings, or full setup.
-After one agent's model + thinking picks, the wizard returns to the agent picker
-so several agents can be configured in one pass; Esc at any step ends the pass
-and keeps every agent already configured. There is no backup pool or global thinking menu. Model pickers show only in-scope
-models with configured authentication and display their real supported thinking
-levels. Thinking defaults to **Auto**; manual overrides show only levels supported
-by that agent's effective model. `notifyOnReviewPass` and `maxResultLines` remain
-direct-file settings.
+The wizard covers enabled agents, per-agent models and thinking, concurrency,
+auto-fix rounds, and the idle timeout:
+
+```text
+/subagents-setup
+```
+
+Configuration is stored at `~/.pi/agent/pi-subagents.json` and follows
+`PI_CODING_AGENT_DIR` when that environment variable is set.
 
 ```json
 {
@@ -338,127 +334,45 @@ direct-file settings.
 }
 ```
 
-| Field | Description |
+| Field | Meaning |
 | --- | --- |
-| `enabledAgents` | Agent names exposed to discovery and prompt injection. An empty array disables all agents. |
-| `agentModels` | Optional selected `provider/model-id` per agent. Missing = current main model. Model-level failure hands directly to current main. |
-| `agentThinkingLevels` | Optional manual preference per agent. Missing = Auto (agent frontmatter preference, or `high`, clamped to the effective model's supported levels). |
-| `notifyOnReviewPass` | When `true`, a passing reviewer result is delivered without waking the main agent (default `false`). |
-| `maxResultLines` | Max lines of a sub-agent result carried in the completion message (default `80`). Longer results are truncated; full text is written to an extension-named temporary `.md`. At session start and on each write, only recognized result files older than 7 days are removed; each canonical project path has its own newest-50 bucket. |
-| `proactiveInjection` | Whether to add the delegation directive to the main system prompt. |
-| `agentScope` | `user`, `project`, or `both`; controls which user/project agent directories are discovered. |
-| `maxConcurrency` | Max sub-agent processes running at once (1–16, default 4), and the max tasks one parallel `subagent` call accepts. Extra work waits in the queue. |
-| `maxFixRounds` | Auto-fix rounds when a reviewer returns `REVIEW_FAIL` (default 2; `0` disables the loop). Hard cap: the chain always settles, delivers its condensed summary, and wakes the main agent. |
-| `idleTimeoutSec` | Idle watchdog: a sub-agent whose stdout goes silent for this long is terminated; a selected model then hands to current main. `0` disables it. Default 90. |
+| `enabledAgents` | Agent names available for discovery and delegation. `[]` disables all agents. |
+| `agentModels` | Optional `provider/model-id` per agent. Missing means use the current main model. |
+| `agentThinkingLevels` | Optional manual level per agent. Missing means Auto. |
+| `notifyOnReviewPass` | When `true`, a passing gate is delivered without waking the main agent. Default `false`. |
+| `maxResultLines` | Lines kept in a completion message before the full result moves to a temporary artifact. Default `80`. |
+| `proactiveInjection` | Teach the main model when and how to delegate. Default `true`. |
+| `agentScope` | Discover `user`, `project`, or `both` agent directories. Default `user`. |
+| `maxConcurrency` | Running process limit and maximum tasks in one parallel call, from `1` to `16`. Default `4`. |
+| `maxFixRounds` | Worker → reviewer rounds after `REVIEW_FAIL`. `0` disables auto-fix. Default `2`. |
+| `idleTimeoutSec` | Seconds without RPC output before termination. `0` disables the watchdog. Default `90`. |
 
-### Model routing and thinking
+Invalid values fall back safely. Older configs are normalized automatically. The
+former built-in name `explore` migrates to `explorer`, and pre-cleaner non-empty
+agent lists receive `cleaner` once; a later deliberate disable is respected.
 
-```text
-selected agent model → current main-window model
+## Custom and overridden agents
+
+Built-ins ship in the package. You can add or replace agents with Markdown files:
+
+- User agents: `~/.pi/agent/agents/`
+- Project agents: nearest `.pi/agents/` directory in a trusted project
+- Precedence: project overrides user, user overrides built-in
+
+To replace a built-in, use the same filename and `name`. Optional frontmatter:
+
+```yaml
+---
+name: explorer
+description: Fast read-only codebase reconnaissance
+model: anthropic/claude-haiku-4-5
+thinking: low
+tools: read, bash
+---
 ```
 
-Without a selected model, current main runs immediately; agent frontmatter `model`
-is used only when no main model exists, so the shipped defaults remain behaviorally
-load-bearing. From an agent Markdown file, only the body after frontmatter becomes
-the child's appended system prompt; model-selection comments inside YAML
-frontmatter are parser comments, not model prompt tokens. A selection missing from Pi's live
-available catalog is skipped. Any model-level runtime failure — rate limit,
-quota, invalid key/auth, missing model, provider error, or idle model stream —
-hands directly to current main, including stream errors that retain partial text.
-A child-only Pi extension wraps the selected provider's registered API stream
-with `maxRetries: 0` so a deterministic auth/quota miss fails fast. Transient
-stream drops such as xAI `terminated` still use Pi's outer turn retry — the
-parent does not `abort_retry` them — and only a settled model-level failure
-hands off to current main. This uses supported extension/RPC surfaces in Node
-and standalone/Bun builds, never rewrites global or project settings, and does
-not alter descendant tool environments. Tool/test failures stay on the same
-model because they are task failures, not model availability failures. A child is
-probed with RPC `get_state` before the first prompt so the 30s command ACK clock
-does not include process boot. Only a zero-activity startup miss can retry — a
-silent fast exit, a `get_state` handshake timeout, or an initial prompt ACK
-timeout before any agent/turn/stream/tool activity. Those transport misses are
-not model-level failures and do not hand the task to the main window. An accepted
-prompt or any activity forbids replay.
-
-Auto thinking starts from the Agent's declared preference (`low` for `explorer`,
-`high` for the other built-ins) and uses Pi's capability map to clamp it to the
-actual model. Non-reasoning models resolve to `off`; `xhigh`/`max` appear in setup
-only when that model explicitly supports them. A selected→main handoff re-clamps
-thinking for the main model.
-
-### Choosing an explorer model
-
-Choose a competent fast code model for `explorer`, not automatically the cheapest
-model. Cheap reconnaissance is useful for mechanical symbol/path discovery, but
-a missed dynamic entrypoint or ownership edge can cost more through downstream
-rework. Direct main-model handoff handles provider/runtime failure; it cannot
-detect a plausible but incomplete answer.
-
-`explorer` therefore returns an index of exact paths, lines, symbols, and explicit
-uncertainty. The main agent, worker, or cleaner must re-read load-bearing files
-before editing or deciding deletion, security, compatibility, persistence, or
-dynamic reachability. Prefer a stronger model or direct specialist for complex
-dynamic loading, concurrency, migrations, and security-sensitive code.
-
-### Resuming retained context
-
-Every run stores its Pi session in a private temp directory. A selected→main
-handoff resumes that same session, so searches, reads, reasoning, and edits remain
-in context. A parked, completed, or failed thread can later be resumed under its
-stable id:
-
-```ts
-subagent_control({ action: "resume", id: 7 });
-subagent_control({ action: "resume", id: 7, objective: "Continue with the repaired credentials." });
-```
-
-Use `fork` when both paths should remain available. `subagent_stop` is the
-explicit destructive operation that retires a retained session; otherwise
-sessions live until the parent Pi session shuts down.
-
-### Configuration migration
-
-Config loading normalizes schema fields and removes invalid or obsolete keys,
-including `agentBackupModels`, global `thinkingLevel`, `maxParallelTasks`, and
-`maxSubagentDepth`. Per-agent thinking preferences remain capability-clamped.
-
-The built-in reconnaissance role is now `explorer`, with no runtime `explore`
-alias. Config loading automatically renames the old key in `enabledAgents`,
-`agentModels`, and `agentThinkingLevels`, deduplicates an old/new pair, and persists
-the normalized file. When both model or thinking keys are valid, the explicit
-`explorer` value wins. Other configured non-empty names are preserved. A
-pre-existing non-empty `enabledAgents` list also gains `cleaner` exactly once
-(inserted before `reviewer`, inheriting the configured `reviewer` model and
-thinking level); an explicit empty list is honored, and a later deliberate
-disable is remembered via a stamp in `announcedFeatures`.
-
-## Agent discovery and overrides
-
-- Built-in agents ship with the package; user agents live in `~/.pi/agent/agents/`;
-  project agents in the nearest `.pi/agents/` directory are loaded only when Pi
-  trusts that project.
-- For duplicate names: project overrides user overrides built-in. Keep the
-  matching filename and `name` field to replace a built-in agent.
-- Optional frontmatter: `model` (default model reference), `thinking` (default
-  thinking strength), `tools` (comma-separated tool allow-list; absent = all
-  tools). Config overrides win at spawn.
-
-## How it stays reliable
-
-- **Direct model recovery** — unavailable selections skip immediately; any
-  selected-model provider/auth/quota/rate-limit failure hands directly to current
-  main with thinking re-clamped to the main model.
-- **Startup-race retries** — a silent zero-activity child exit (concurrent pi
-  startup lock contention) is relaunched with backoff; only clean silent exits
-  qualify, so real work is never duplicated.
-- **Idle watchdog** — a stalled selected-model stream (no output for
-  `idleTimeoutSec`) terminates the child and hands the retained session to current
-  main.
-- **Dispatch failures surface** — partial parallel startup reports every failed
-  item and reason; if none start, the tool throws so Pi records a real tool error.
-  Dispatch crashes likewise produce a failed result instead of a silent hang.
-- **Safe live status** — tool activity is credential-redacted and stripped of terminal control sequences before `subagent_status` can return it.
-- **Leaf children** — no nested delegation, no runaway trees.
+The Markdown body becomes the child's additional system prompt. Configuration
+chosen in `/subagents-setup` takes precedence over frontmatter defaults.
 
 ## Development
 
@@ -468,14 +382,11 @@ npm run check
 npm test
 ```
 
-The source is modular: `dispatch.ts` (public dispatch contract + auto-fix),
-`thread-lifecycle.ts` (queued generations, resume/fork, and isolation settlement),
-`rpc-run.ts` / `spawn.ts` (persistent child transport + selected→main handoff),
-`worktree.ts` / `session-fork.ts` (filesystem/session branching), `tools.ts`
-(wait/status/control/stop), `widget.ts` (active-only TUI status), `announcements.ts`
-(recovery and feature notices), and `runtime.ts` (session-scoped ownership). No runtime
-dependencies beyond pi peer dependencies.
+The package has no bundled runtime dependencies; it uses pi and TypeBox as peer
+packages. Source is split by responsibility: dispatch and auto-fix, retained
+thread lifecycle, RPC transport, worktree integration, completion delivery,
+tools, and TUI status.
 
 ## License
 
-MIT
+[MIT](./LICENSE)

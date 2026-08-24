@@ -49,8 +49,23 @@ export type { SubagentLiveEvent, UsageStats };
 export const SUBAGENT_THINKING_LEVEL: ThinkingLevel = DEFAULT_THINKING_LEVEL;
 /** 0 disables the watchdog; dispatch supplies the configured timeout. */
 export const SUBAGENT_DEFAULT_IDLE_TIMEOUT_MS = 0;
-export const SUBAGENT_STARTUP_RETRY_DELAYS_MS = [250, 750, 1500] as const;
+/** Base delays cover Pi's stale-lock window and leave headroom beyond the
+ * default four-way launch fan-out. Additive jitter below reduces the chance
+ * that contenders retry in the same lockstep waves. */
+export const SUBAGENT_STARTUP_RETRY_DELAYS_MS = [250, 750, 1500, 3000, 6000] as const;
 export const MAX_SUBAGENT_STARTUP_FAILURE_DURATION_MS = 2000;
+export const MAX_SUBAGENT_STARTUP_RETRY_JITTER_MS = 1000;
+
+function normalizeStartupRetryDelay(delayMs: number): number {
+	return Number.isFinite(delayMs) && delayMs > 0 ? delayMs : 0;
+}
+
+export function addStartupRetryJitter(delayMs: number, randomValue = Math.random()): number {
+	const baseDelay = Math.floor(normalizeStartupRetryDelay(delayMs));
+	if (baseDelay === 0) return 0;
+	const boundedRandom = Number.isFinite(randomValue) ? Math.max(0, Math.min(1, randomValue)) : 0;
+	return baseDelay + Math.floor(Math.min(baseDelay, MAX_SUBAGENT_STARTUP_RETRY_JITTER_MS) * boundedRandom);
+}
 
 export interface SingleResult extends RpcSingleResult {}
 
@@ -236,7 +251,7 @@ export function isRetryableStartupFailure(result: SingleResult, durationMs: numb
 	if (result.exitCode === 0) return false;
 	if (result.stopReason === "aborted") return false;
 	if (result.dispatchFailed) return false;
-	if (result.rpcPromptAccepted || result.rpcActivity) return false;
+	if (result.rpcPromptDispatched || result.rpcPromptAccepted || result.rpcActivity) return false;
 	if (result.errorMessage?.includes("idle timeout")) return false;
 	if (getFinalOutput(result.messages)) return false;
 	if (result.messages.length > 0) return false;
@@ -250,14 +265,15 @@ export function isRetryableStartupFailure(result: SingleResult, durationMs: numb
 }
 
 export function formatStartupRetryExhaustedError(model: string, attempts: number): string {
-	return `Subagent failed to start after ${attempts} attempt${attempts === 1 ? "" : "s"} on ${model}: the child never accepted its initial RPC prompt or produced any model, tool, output, or usage activity. This is typically a concurrent pi startup race (several sub-agents starting at once). Retry the dispatch, or temporarily lower maxConcurrency in /subagents-setup.`;
+	return `Subagent failed to start after ${attempts} attempt${attempts === 1 ? "" : "s"} on ${model}: the child failed before its initial RPC prompt was dispatched and produced no model, tool, output, or usage activity. This is typically a concurrent pi startup race (several sub-agents starting at once). Retry the dispatch, or temporarily lower maxConcurrency in /subagents-setup.`;
 }
 
 export async function waitForStartupRetry(delayMs: number, signal?: AbortSignal): Promise<boolean> {
-	if (delayMs <= 0) return !signal?.aborted;
+	const normalizedDelay = normalizeStartupRetryDelay(delayMs);
+	if (normalizedDelay === 0) return !signal?.aborted;
 	if (!signal) {
 		return new Promise<boolean>((resolve) => {
-			const timer = setTimeout(() => resolve(true), delayMs);
+			const timer = setTimeout(() => resolve(true), normalizedDelay);
 			if (typeof timer.unref === "function") timer.unref();
 		});
 	}
@@ -272,7 +288,7 @@ export async function waitForStartupRetry(delayMs: number, signal?: AbortSignal)
 			resolve(shouldRetry);
 		};
 		const onAbort = (): void => finish(false);
-		const timer = setTimeout(() => finish(true), delayMs);
+		const timer = setTimeout(() => finish(true), normalizedDelay);
 		if (typeof timer.unref === "function") timer.unref();
 		signal.addEventListener("abort", onAbort, { once: true });
 	});
@@ -283,7 +299,7 @@ async function waitForControlledRetry(
 	signal: AbortSignal | undefined,
 	control: RpcRunControl | undefined,
 ): Promise<boolean> {
-	let remaining = delayMs;
+	let remaining = normalizeStartupRetryDelay(delayMs);
 	while (remaining > 0) {
 		if (control?.isParkRequested() || control?.isStopRequested()) return false;
 		const slice = Math.min(remaining, 50);
@@ -368,6 +384,15 @@ function controlledDisposition(options: RunSingleOptions, base?: SingleResult): 
 	return result;
 }
 
+function signalAbortDisposition(options: RunSingleOptions, base: SingleResult): SingleResult | undefined {
+	if (!options.signal?.aborted) return undefined;
+	base.parked = undefined;
+	base.exitCode = 1;
+	base.stopReason = "aborted";
+	base.errorMessage = "Subagent was aborted";
+	return base;
+}
+
 /** Spawn one RPC attempt and wait for stable settlement. */
 export async function runSingleAgent(options: RunSingleOptions): Promise<SingleResult> {
 	const {
@@ -420,7 +445,8 @@ export async function runSingleAgentWithMainFallback(
 ): Promise<SingleResult> {
 	const agent = options.agent;
 	const launchedRef = agent?.model;
-	const startupDelays = options.startupRetryDelaysMs ?? SUBAGENT_STARTUP_RETRY_DELAYS_MS;
+	const customStartupDelays = options.startupRetryDelaysMs;
+	const startupDelays = customStartupDelays ?? SUBAGENT_STARTUP_RETRY_DELAYS_MS;
 
 	const sessionId = options.sessionId ?? randomUUID();
 	const sessionDir = options.sessionDir ?? (await mkdtemp(join(tmpdir(), "pi-subagent-session-")));
@@ -492,8 +518,9 @@ export async function runSingleAgentWithMainFallback(
 			} catch {
 				/* never throw from event handling */
 			}
-			if (!(await waitForControlledRetry(delay, opts.signal, opts.control))) {
-				return controlledDisposition(opts, lastResult) ?? lastResult;
+			const retryDelay = customStartupDelays ? delay : addStartupRetryJitter(delay);
+			if (!(await waitForControlledRetry(retryDelay, opts.signal, opts.control))) {
+				return controlledDisposition(opts, lastResult) ?? signalAbortDisposition(opts, lastResult) ?? lastResult;
 			}
 			retries++;
 		}

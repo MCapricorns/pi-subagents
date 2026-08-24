@@ -3,10 +3,11 @@ import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { pathToFileURL } from "node:url";
 import { registerApiProvider, unregisterApiProviders } from "@earendil-works/pi-ai/compat";
-import { afterAll, beforeAll, describe, expect, it } from "vitest";
+import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
 import { formatCompletionBlock } from "../src/format.ts";
 import { fakeRpcScript } from "./fake-rpc.ts";
 import {
+	addStartupRetryJitter,
 	buildFallbackResumeReason,
 	buildResumePrompt,
 	currentSubagentDepth,
@@ -19,12 +20,14 @@ import {
 	pruneResultArtifacts,
 	resultArtifactProjectKey,
 	RESULT_ARTIFACT_MAX_AGE_MS,
+	RpcRunControl,
 	RESULT_ARTIFACT_MAX_FILES_PER_PROJECT,
 	RESULT_LINE_MAX,
 	reviewVerdict,
 	runSingleAgent,
 	runSingleAgentWithMainFallback,
 	sessionExists,
+	SUBAGENT_STARTUP_RETRY_DELAYS_MS,
 	truncateResultOutput,
 	writeChildRetryPolicyExtension,
 	writeResultArtifact,
@@ -434,7 +437,7 @@ describe("isModelLevelFailure", () => {
 				exitCode: 1,
 				stopReason: "error",
 				errorMessage: "Timed out waiting for RPC response to prompt.",
-				rpcStartupFailed: true,
+				rpcPromptDispatched: true,
 			})),
 		).toBe(false);
 		expect(
@@ -747,7 +750,7 @@ describe("runSingleAgentWithMainFallback startup retry", () => {
 	// Child that records each launch to LOG_PATH: it exits silently (no stdout, no
 	// stderr) on the first `failTimes` launches, then emits a normal success.
 	const retryThenSucceedScript = (failTimes: number): string => fakeRpcScript({
-		setup: `const log = process.env.LOG_PATH;\nfs.appendFileSync(log, "attempt\\n");\nconst count = fs.readFileSync(log, "utf8").split("\\n").filter(Boolean).length;\nif (count <= ${failTimes}) process.exit(1);`,
+		setup: `const log = process.env.LOG_PATH;\nfs.appendFileSync(log, Date.now() + "\\n");\nconst count = fs.readFileSync(log, "utf8").split("\\n").filter(Boolean).length;\nif (count <= ${failTimes}) process.exit(1);`,
 		onPrompt: `send({ type: "message_end", message: { role: "assistant", content: [{ type: "text", text: "recovered after startup retry" }], stopReason: "stop" } });`,
 	});
 
@@ -759,8 +762,122 @@ describe("runSingleAgentWithMainFallback startup retry", () => {
 		});
 	};
 
-	it("retries a silent zero-activity startup failure, then succeeds", async () => {
+	it("uses an extended finite jittered default retry window", () => {
+		expect(SUBAGENT_STARTUP_RETRY_DELAYS_MS).toHaveLength(5);
+		expect(SUBAGENT_STARTUP_RETRY_DELAYS_MS.reduce((total, delay) => total + delay, 0)).toBeGreaterThan(10_000);
+		expect(addStartupRetryJitter(250, 0)).toBe(250);
+		expect(addStartupRetryJitter(250, 1)).toBe(500);
+		expect(addStartupRetryJitter(3000, 1)).toBe(4000);
+		expect(addStartupRetryJitter(Number.NaN, 1)).toBe(0);
+		expect(addStartupRetryJitter(Number.POSITIVE_INFINITY, 1)).toBe(0);
+		expect(addStartupRetryJitter(Number.NEGATIVE_INFINITY, 1)).toBe(0);
+		expect(addStartupRetryJitter(250, Number.NaN)).toBe(250);
+	});
+
+	it("keeps a custom retry delay unjittered, then succeeds", async () => {
 		const dir = mkdtempSync(join(tmpdir(), "pi-subagents-startup-retry-"));
+		const script = join(dir, "retry-child.cjs");
+		const log = join(dir, "attempts.log");
+		const random = vi.spyOn(Math, "random").mockImplementation(() => {
+			throw new Error("custom retry delays must not use jitter");
+		});
+		writeFileSync(script, retryThenSucceedScript(1), "utf8");
+		try {
+			await withArgv(script, async () => {
+				const result = await runSingleAgentWithMainFallback({
+					defaultCwd: process.cwd(),
+					agent,
+					agentName: agent.name,
+					task: "survive a startup race",
+					startupRetryDelaysMs: [80],
+					env: { ...process.env, LOG_PATH: log },
+					makeDetails: (results) => ({ mode: "single", results }),
+				});
+				expect(result.exitCode).toBe(0);
+				expect(getFinalOutput(result.messages)).toBe("recovered after startup retry");
+				expect(result.startupRetries).toBe(1);
+				expect(result.dispatchFailed).toBeUndefined();
+				const attempts = readFileSync(log, "utf8").split("\n").filter(Boolean).map(Number);
+				expect(attempts).toHaveLength(2);
+				expect(attempts[1] - attempts[0]).toBeGreaterThanOrEqual(60);
+				expect(random).not.toHaveBeenCalled();
+			});
+		} finally {
+			random.mockRestore();
+			rmSync(dir, { recursive: true, force: true });
+		}
+	});
+
+	it("applies default jitter to four concurrent startup contenders", async () => {
+		const dir = mkdtempSync(join(tmpdir(), "pi-subagents-startup-contention-"));
+		const script = join(dir, "retry-child.cjs");
+		const log = join(dir, "attempts.log");
+		let randomCalls = 0;
+		const random = vi.spyOn(Math, "random").mockImplementation(() => {
+			randomCalls++;
+			if (randomCalls <= 4) return 0;
+			return randomCalls === 5 ? 0 : 1;
+		});
+		writeFileSync(
+			script,
+			fakeRpcScript({
+				setup: `const log = process.env.LOG_PATH;
+const contender = process.env.CONTENDER_ID;
+const readAttempts = () => fs.existsSync(log) ? fs.readFileSync(log, "utf8").split("\\n").filter(Boolean) : [];
+const attempt = readAttempts().filter((line) => line.startsWith(contender + "|")).length + 1;
+fs.appendFileSync(log, contender + "|" + attempt + "|" + Date.now() + "\\n");
+if (attempt <= 2) {
+	const deadline = Date.now() + 5000;
+	while (Date.now() < deadline) {
+		const wave = readAttempts().filter((line) => line.split("|")[1] === String(attempt));
+		if (new Set(wave.map((line) => line.split("|")[0])).size === 4) process.exit(1);
+	}
+	process.stderr.write("concurrent launch barrier timed out\\n");
+	process.exit(2);
+}`,
+				onPrompt: `send({ type: "message_end", message: { role: "assistant", content: [{ type: "text", text: "recovered after startup retry" }], stopReason: "stop" } });`,
+			}),
+			"utf8",
+		);
+		try {
+			await withArgv(script, async () => {
+				const results = await Promise.all(Array.from({ length: 4 }, (_, index) =>
+					runSingleAgentWithMainFallback({
+						defaultCwd: process.cwd(),
+						agent,
+						agentName: agent.name,
+						task: `contender ${index + 1}`,
+						env: { ...process.env, LOG_PATH: log, CONTENDER_ID: String(index + 1) },
+						makeDetails: (items) => ({ mode: "single", results: items }),
+					})
+				));
+				for (const result of results) {
+					expect(result.exitCode).toBe(0);
+					expect(getFinalOutput(result.messages)).toBe("recovered after startup retry");
+					expect(result.startupRetries).toBe(2);
+				}
+				const attempts = readFileSync(log, "utf8").split("\n").filter(Boolean);
+				expect(attempts).toHaveLength(12);
+				for (let contender = 1; contender <= 4; contender++) {
+					expect(attempts.filter((line) => line.startsWith(`${contender}|`))).toHaveLength(3);
+				}
+				const thirdWaveTimes = attempts
+					.filter((line) => line.split("|")[1] === "3")
+					.map((line) => Number(line.split("|")[2]));
+				expect(thirdWaveTimes).toHaveLength(4);
+				// The second default delay is 750ms. One contender gets no jitter and
+				// three get +750ms, so their third launches must visibly separate.
+				expect(Math.max(...thirdWaveTimes) - Math.min(...thirdWaveTimes)).toBeGreaterThan(400);
+				expect(random).toHaveBeenCalledTimes(8);
+			});
+		} finally {
+			random.mockRestore();
+			rmSync(dir, { recursive: true, force: true });
+		}
+	}, 15_000);
+
+	it("normalizes a non-finite custom delay instead of waiting forever", async () => {
+		const dir = mkdtempSync(join(tmpdir(), "pi-subagents-startup-infinite-delay-"));
 		const script = join(dir, "retry-child.cjs");
 		const log = join(dir, "attempts.log");
 		writeFileSync(script, retryThenSucceedScript(1), "utf8");
@@ -770,21 +887,148 @@ describe("runSingleAgentWithMainFallback startup retry", () => {
 					defaultCwd: process.cwd(),
 					agent,
 					agentName: agent.name,
-					task: "survive a startup race",
-					startupRetryDelaysMs: [10],
+					task: "do not hang on an invalid delay",
+					startupRetryDelaysMs: [Number.POSITIVE_INFINITY],
 					env: { ...process.env, LOG_PATH: log },
 					makeDetails: (results) => ({ mode: "single", results }),
 				});
 				expect(result.exitCode).toBe(0);
-				expect(getFinalOutput(result.messages)).toBe("recovered after startup retry");
 				expect(result.startupRetries).toBe(1);
-				expect(result.dispatchFailed).toBeUndefined();
 				expect(readFileSync(log, "utf8").split("\n").filter(Boolean)).toHaveLength(2);
 			});
 		} finally {
 			rmSync(dir, { recursive: true, force: true });
 		}
 	});
+
+	it("returns an aborted result when only the signal cancels a long retry wait", async () => {
+		const dir = mkdtempSync(join(tmpdir(), "pi-subagents-startup-signal-"));
+		const script = join(dir, "silent-child.cjs");
+		const log = join(dir, "attempts.log");
+		writeFileSync(script, `const fs = require("node:fs");\nfs.appendFileSync(process.env.LOG_PATH, "attempt\\n");\nprocess.exit(1);`, "utf8");
+		let sessionDir: string | undefined;
+		try {
+			await withArgv(script, async () => {
+				const abortController = new AbortController();
+				let notifyRetry: (() => void) | undefined;
+				const retrying = new Promise<void>((resolve) => {
+					notifyRetry = resolve;
+				});
+				const running = runSingleAgentWithMainFallback({
+					defaultCwd: process.cwd(),
+					agent,
+					agentName: agent.name,
+					task: "abort during retry",
+					startupRetryDelaysMs: [10_000],
+					signal: abortController.signal,
+					onLive: (event) => {
+						if (event.kind === "status" && event.status === "running") notifyRetry?.();
+					},
+					env: { ...process.env, LOG_PATH: log },
+					makeDetails: (results) => ({ mode: "single", results }),
+				});
+				await retrying;
+				const cancelledAt = Date.now();
+				abortController.abort();
+				const result = await running;
+				sessionDir = result.sessionDir;
+				expect(Date.now() - cancelledAt).toBeLessThan(1_000);
+				expect(result.exitCode).toBe(1);
+				expect(result.stopReason).toBe("aborted");
+				expect(result.errorMessage).toBe("Subagent was aborted");
+				expect(readFileSync(log, "utf8").split("\n").filter(Boolean)).toHaveLength(1);
+			});
+		} finally {
+			if (sessionDir) rmSync(sessionDir, { recursive: true, force: true });
+			rmSync(dir, { recursive: true, force: true });
+		}
+	}, 10_000);
+
+	it("parks promptly during a long retry wait", async () => {
+		const dir = mkdtempSync(join(tmpdir(), "pi-subagents-startup-park-"));
+		const script = join(dir, "silent-child.cjs");
+		const log = join(dir, "attempts.log");
+		writeFileSync(script, `const fs = require("node:fs");\nfs.appendFileSync(process.env.LOG_PATH, "attempt\\n");\nprocess.exit(1);`, "utf8");
+		let sessionDir: string | undefined;
+		try {
+			await withArgv(script, async () => {
+				const control = new RpcRunControl("park during retry", 1);
+				let notifyRetry: (() => void) | undefined;
+				const retrying = new Promise<void>((resolve) => {
+					notifyRetry = resolve;
+				});
+				const running = runSingleAgentWithMainFallback({
+					defaultCwd: process.cwd(),
+					agent,
+					agentName: agent.name,
+					task: "park during retry",
+					startupRetryDelaysMs: [10_000],
+					control,
+					onLive: (event) => {
+						if (event.kind === "status" && event.status === "running") notifyRetry?.();
+					},
+					env: { ...process.env, LOG_PATH: log },
+					makeDetails: (results) => ({ mode: "single", results }),
+				});
+				await retrying;
+				const parkedAt = Date.now();
+				await control.park();
+				const result = await running;
+				sessionDir = result.sessionDir;
+				expect(Date.now() - parkedAt).toBeLessThan(1_000);
+				expect(result.parked).toBe(true);
+				expect(result.exitCode).toBe(0);
+				expect(result.stopReason).toBeUndefined();
+				expect(readFileSync(log, "utf8").split("\n").filter(Boolean)).toHaveLength(1);
+			});
+		} finally {
+			if (sessionDir) rmSync(sessionDir, { recursive: true, force: true });
+			rmSync(dir, { recursive: true, force: true });
+		}
+	}, 10_000);
+
+	it("stops promptly during a long retry wait", async () => {
+		const dir = mkdtempSync(join(tmpdir(), "pi-subagents-startup-stop-"));
+		const script = join(dir, "silent-child.cjs");
+		const log = join(dir, "attempts.log");
+		writeFileSync(script, `const fs = require("node:fs");\nfs.appendFileSync(process.env.LOG_PATH, "attempt\\n");\nprocess.exit(1);`, "utf8");
+		let sessionDir: string | undefined;
+		try {
+			await withArgv(script, async () => {
+				const control = new RpcRunControl("stop during retry", 1);
+				let notifyRetry: (() => void) | undefined;
+				const retrying = new Promise<void>((resolve) => {
+					notifyRetry = resolve;
+				});
+				const running = runSingleAgentWithMainFallback({
+					defaultCwd: process.cwd(),
+					agent,
+					agentName: agent.name,
+					task: "stop during retry",
+					startupRetryDelaysMs: [10_000],
+					control,
+					onLive: (event) => {
+						if (event.kind === "status" && event.status === "running") notifyRetry?.();
+					},
+					env: { ...process.env, LOG_PATH: log },
+					makeDetails: (results) => ({ mode: "single", results }),
+				});
+				await retrying;
+				const stoppedAt = Date.now();
+				await control.stop("cancelled during startup retry");
+				const result = await running;
+				sessionDir = result.sessionDir;
+				expect(Date.now() - stoppedAt).toBeLessThan(1_000);
+				expect(result.exitCode).toBe(1);
+				expect(result.stopReason).toBe("aborted");
+				expect(result.errorMessage).toBe("cancelled during startup retry");
+				expect(readFileSync(log, "utf8").split("\n").filter(Boolean)).toHaveLength(1);
+			});
+		} finally {
+			if (sessionDir) rmSync(sessionDir, { recursive: true, force: true });
+			rmSync(dir, { recursive: true, force: true });
+		}
+	}, 10_000);
 
 	it("surfaces a dispatch failure after exhausting startup retries", async () => {
 		const dir = mkdtempSync(join(tmpdir(), "pi-subagents-startup-exhaust-"));
@@ -926,60 +1170,19 @@ const count = fs.readFileSync(process.env.LOG_PATH, "utf8").split("\\n").filter(
 		}
 	});
 
-	it("retries an initial prompt ACK timeout, then succeeds", async () => {
+	it("does not replay an initial prompt when work starts but its ACK is lost", async () => {
 		const dir = mkdtempSync(join(tmpdir(), "pi-subagents-startup-prompt-ack-"));
-		const script = join(dir, "prompt-ack-retry-child.cjs");
-		const log = join(dir, "attempts.log");
-		writeFileSync(
-			script,
-			fakeRpcScript({
-				setup: `fs.appendFileSync(process.env.LOG_PATH, "attempt\\n");
-const count = fs.readFileSync(process.env.LOG_PATH, "utf8").split("\\n").filter(Boolean).length;`,
-				emitAgentStart: false,
-				autoSettle: false,
-				onPromptPreflight: `if (count > 1) respond(command);`,
-				onPrompt: `if (count === 1) return;
-send({ type: "agent_start" });
-send({ type: "message_end", message: { role: "assistant", content: [{ type: "text", text: "recovered after prompt ack timeout" }], stopReason: "stop" } });
-send({ type: "agent_settled" });`,
-			}),
-			"utf8",
-		);
-		try {
-			await withArgv(script, async () => {
-				const result = await runSingleAgentWithMainFallback({
-					defaultCwd: process.cwd(),
-					agent,
-					agentName: agent.name,
-					task: "survive a prompt ack timeout",
-					startupRetryDelaysMs: [10],
-					rpcCommandTimeoutMs: 80,
-					env: { ...process.env, LOG_PATH: log },
-					makeDetails: (results) => ({ mode: "single", results }),
-				});
-				expect(result.exitCode).toBe(0);
-				expect(getFinalOutput(result.messages)).toBe("recovered after prompt ack timeout");
-				expect(result.startupRetries).toBe(1);
-				expect(result.dispatchFailed).toBeUndefined();
-				expect(isModelLevelFailure(result)).toBe(false);
-				expect(readFileSync(log, "utf8").split("\n").filter(Boolean)).toHaveLength(2);
-			});
-		} finally {
-			rmSync(dir, { recursive: true, force: true });
-		}
-	});
-
-	it("surfaces a dispatch failure after exhausting prompt ACK timeouts", async () => {
-		const dir = mkdtempSync(join(tmpdir(), "pi-subagents-startup-ack-exhaust-"));
-		const script = join(dir, "never-ack.cjs");
-		const log = join(dir, "attempts.log");
+		const script = join(dir, "lost-prompt-ack.cjs");
+		const launchLog = join(dir, "launches.log");
+		const workLog = join(dir, "work.log");
 		writeFileSync(
 			script,
 			fakeRpcScript({
 				setup: `fs.appendFileSync(process.env.LOG_PATH, "attempt\\n");`,
-				onGetState: "",
-				onPrompt: "",
+				emitAgentStart: false,
 				autoSettle: false,
+				onPromptPreflight: "",
+				onPrompt: `fs.appendFileSync(process.env.WORK_LOG, "model call or edit started\\n");`,
 			}),
 			"utf8",
 		);
@@ -989,18 +1192,23 @@ send({ type: "agent_settled" });`,
 					defaultCwd: process.cwd(),
 					agent,
 					agentName: agent.name,
-					task: "never acks",
-					startupRetryDelaysMs: [10],
-					rpcReadyTimeoutMs: 50,
-					env: { ...process.env, LOG_PATH: log },
+					task: "perform one side effect",
+					startupRetryDelaysMs: [10, 10],
+					rpcCommandTimeoutMs: 80,
+					env: { ...process.env, LOG_PATH: launchLog, WORK_LOG: workLog },
 					makeDetails: (results) => ({ mode: "single", results }),
 				});
 				expect(result.exitCode).toBe(1);
-				expect(result.dispatchFailed).toBe(true);
-				expect(result.rpcStartupFailed).toBe(true);
+				expect(result.rpcPromptDispatched).toBe(true);
+				expect(result.rpcPromptAccepted).toBeUndefined();
+				expect(result.rpcStartupFailed).toBeUndefined();
+				expect(result.rpcPromptRejected).toBeUndefined();
+				expect(result.startupRetries).toBeUndefined();
+				expect(result.dispatchFailed).toBeUndefined();
+				expect(result.errorMessage).toContain("Timed out waiting for RPC response to prompt");
 				expect(isModelLevelFailure(result)).toBe(false);
-				expect(result.errorMessage).toContain("failed to start after 2 attempts");
-				expect(readFileSync(log, "utf8").split("\n").filter(Boolean)).toHaveLength(2);
+				expect(readFileSync(launchLog, "utf8").split("\n").filter(Boolean)).toHaveLength(1);
+				expect(readFileSync(workLog, "utf8").split("\n").filter(Boolean)).toHaveLength(1);
 			});
 		} finally {
 			rmSync(dir, { recursive: true, force: true });
@@ -1071,7 +1279,8 @@ describe("isRetryableStartupFailure (unit)", () => {
 		expect(isRetryableStartupFailure(base({ dispatchFailed: true }), 120)).toBe(false);
 	});
 
-	it("is not retryable after an accepted prompt or agent activity", () => {
+	it("is not retryable after a prompt was dispatched, accepted, or produced activity", () => {
+		expect(isRetryableStartupFailure(base({ rpcPromptDispatched: true }), 120)).toBe(false);
 		expect(isRetryableStartupFailure(base({ rpcPromptAccepted: true }), 120)).toBe(false);
 		expect(isRetryableStartupFailure(base({ rpcActivity: true }), 120)).toBe(false);
 	});

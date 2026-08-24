@@ -66,10 +66,13 @@ export interface RpcSingleResult {
 	 * model execution. This remains main-model handoff eligible even when an
 	 * earlier, aborted objective left assistant text in the session. */
 	rpcPromptRejected?: boolean;
-	/** Handshake or initial prompt ACK never came back. This is a startup/
-	 * transport miss, not a model/provider failure. */
+	/** Startup handshake failed before the initial prompt was dispatched. This
+	 * transport miss is safe to retry and is not a model/provider failure. */
 	rpcStartupFailed?: boolean;
-	/** The child accepted a prompt; startup retries must never duplicate it. */
+	/** The parent dispatched the initial prompt command. Until its response is
+	 * observed, Pi may already be running it, so startup retries must not replay it. */
+	rpcPromptDispatched?: boolean;
+	/** The child confirmed prompt acceptance (or emitted agent activity). */
 	rpcPromptAccepted?: boolean;
 	/** Pi emitted agent/turn/model/tool activity for this attempt. */
 	rpcActivity?: boolean;
@@ -1076,7 +1079,7 @@ export async function runRpcAgentAttempt(options: RunRpcAttemptOptions): Promise
 				result.stopReason = "error";
 				result.errorMessage = error.message;
 				if (startup) result.rpcStartupFailed = true;
-				else result.rpcPromptRejected = true;
+				else if (!isRpcCommandTimeoutError(error.message)) result.rpcPromptRejected = true;
 				finish();
 				terminate();
 			};
@@ -1091,11 +1094,15 @@ export async function runRpcAgentAttempt(options: RunRpcAttemptOptions): Promise
 				}
 			}
 			if (!finished && !initialPromptResolved && !control?.isParkRequested() && !control?.isStopRequested()) {
+				// Pi starts the agent immediately after prompt preflight, before its
+				// success response necessarily reaches stdout. From this point on, a
+				// missing ACK is ambiguous and must never be recovered by replay.
+				result.rpcPromptDispatched = true;
 				void send({ type: "prompt", message: asPlainTextRpcPrompt(options.prompt) }).then(
 					() => resolveInitialPrompt(true),
 					(error) => {
 						const promptError = error instanceof Error ? error : new Error(String(error));
-						failBeforePrompt(promptError, isRpcCommandTimeoutError(promptError.message));
+						failBeforePrompt(promptError, false);
 					},
 				);
 			}
