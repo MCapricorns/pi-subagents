@@ -1281,7 +1281,10 @@ const count = fs.readFileSync(process.env.LOG_PATH, "utf8").split("\\n").filter(
 					agentName: agent.name,
 					task: "survive a handshake timeout",
 					startupRetryDelaysMs: [10],
-					rpcReadyTimeoutMs: 80,
+					// The ready timer starts when the command is written, so this must
+					// cover the retry child's full node boot on a cold/slow Windows FS,
+					// not just its (immediate) response once booted.
+					rpcReadyTimeoutMs: 1500,
 					env: { ...process.env, LOG_PATH: log, ARGV_LOG: argvLog },
 					makeDetails: (results) => ({ mode: "single", results }),
 				});
