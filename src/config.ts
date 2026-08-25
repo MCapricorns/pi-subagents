@@ -72,9 +72,9 @@ export const DEFAULT_MAX_CONCURRENCY = 4;
 /** Upper bound accepted for maxConcurrency (defensive clamp). */
 export const MAX_CONCURRENCY_LIMIT = 16;
 /**
- * Maximum worker fixes after REVIEW_FAIL. Each fix is followed by optional
- * documenter and reviewer; this cap does not suppress the initial post-writer
- * documentation/final-review workflow. 0 disables fixes. Default: 2.
+ * Maximum worker fixes after REVIEW_FAIL. Each fix is followed by a reviewer
+ * re-review; this cap does not suppress the post-writer review gate or the
+ * final documentation sync. 0 disables fixes. Default: 2.
  */
 export const DEFAULT_MAX_FIX_ROUNDS = 2;
 /** Upper bound accepted for maxFixRounds (defensive clamp). 0 disables the loop. */
@@ -116,8 +116,8 @@ export interface SubagentsConfig {
 	maxConcurrency: number;
 	/**
 	 * Maximum worker fixes after REVIEW_FAIL. Every fix receives the full review,
-	 * then enabled documenter/reviewer stages run. Initial post-writer docs/review
-	 * do not consume this budget. 0 disables fixes. Default: 2.
+	 * then a re-review runs; one final documentation sync follows the settled
+	 * chain and does not consume this budget. 0 disables fixes. Default: 2.
 	 */
 	maxFixRounds: number;
 	/**

@@ -71,11 +71,11 @@ describe("buildDelegationDirective", () => {
 			agent("reviewer"),
 		]);
 		expect(directive).toContain("explicit whole-codebase maintenance or standalone documentation work");
-		expect(directive).toContain("worker/cleaner runs already auto-sync the actual diff");
+		expect(directive).toContain("worker/cleaner runs already auto-sync the actual diff once after the review gate");
 		expect(directive).toContain("never dispatch a duplicate");
-		expect(directive).toContain("never runtime behavior, versions, release state");
-		expect(directive).toContain("documenter → reviewer");
-		expect(directive).toContain("direct REVIEW_PASS is preliminary");
+		expect(directive).toContain("never runtime behavior, versions, or release state");
+		expect(directive).toContain("reviewer → documenter");
+		expect(directive).toContain("direct REVIEW_PASS is final for code");
 	});
 
 	it("advertises auto-fix only when worker exists and rounds are enabled", () => {

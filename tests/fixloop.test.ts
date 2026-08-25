@@ -1,11 +1,9 @@
 import { describe, expect, it } from "vitest";
 import {
-	buildDocumenterTaskBrief,
+	buildFinalDocumenterBrief,
 	buildFinalReviewBrief,
 	buildFixTaskBrief,
-	buildPostWriterDocumenterBrief,
 	buildReReviewBrief,
-	buildReviewPassDocumenterBrief,
 	canStartManagedWorkflow,
 	formatChainSummary,
 	formatManagedWorkflowSummary,
@@ -79,10 +77,13 @@ describe("managed workflow planning", () => {
 		expect(getManagedWorkflowPlan(result, config(0), available("documenter"))).toBeUndefined();
 	});
 
-	it("forces a direct pass through documenter/fresh review independent of maxFixRounds", () => {
+	it("runs one final documentation sync after a direct pass independent of maxFixRounds", () => {
 		const result = reviewResult("APPROVE\nVERDICT: REVIEW_PASS");
 		expect(getManagedWorkflowPlan(result, config(0), available("worker", "documenter", "reviewer"))?.kind)
 			.toBe("review-pass-sync");
+		expect(getManagedWorkflowPlan(result, config(0), available("documenter"))?.kind)
+			.toBe("review-pass-sync");
+		expect(getManagedWorkflowPlan(result, config(0), available("worker", "reviewer"))).toBeUndefined();
 	});
 
 	it("never turns advisory or failed reviewer output into writes", () => {
@@ -139,47 +140,54 @@ describe("buildFixTaskBrief", () => {
 	});
 });
 
-describe("buildDocumenterTaskBrief", () => {
-	it("hands the actual diff and worker report to a non-releasing docs sync", () => {
-		const brief = buildDocumenterTaskBrief(
+describe("buildFinalDocumenterBrief", () => {
+	it("hands the terminal writer and gate review to a non-releasing final sync", () => {
+		const brief = buildFinalDocumenterBrief(
 			reviewResult("Fixed src/cache.ts", { agent: "worker" }),
-			2,
-			reviewResult("Original finding in src/cache.ts\nVERDICT: REVIEW_FAIL"),
+			reviewResult("## Documentation notes\n- README stale\nAPPROVE\nVERDICT: REVIEW_PASS"),
 		);
-		expect(brief).toContain("Documentation sync after auto-fix round 2");
+		expect(brief).toContain("Final documentation sync");
 		expect(brief).toContain("Fixed src/cache.ts");
-		expect(brief).toContain("Original finding in src/cache.ts");
+		expect(brief).toContain("README stale");
+		expect(brief).toContain("Apply every documentation note");
 		expect(brief).toContain("Inspect the actual git diff");
 		expect(brief).toContain("Change documentation surfaces only");
 		expect(brief).toContain("Do NOT commit, push, publish, tag, or release");
 		expect(brief).toContain("Make zero edits");
+		expect(brief).toContain("no fresh reviewer runs");
+	});
+
+	it("accepts a single lead: review-only for a direct pass, writer-only when reviewer is disabled", () => {
+		const reviewOnly = buildFinalDocumenterBrief(undefined, reviewResult("pass report\nVERDICT: REVIEW_PASS"));
+		expect(reviewOnly).toContain("pass report");
+		expect(reviewOnly).not.toContain("The last writer");
+		const writerOnly = buildFinalDocumenterBrief(reviewResult("writer report", { agent: "worker" }), undefined);
+		expect(writerOnly).toContain("writer report");
+		expect(writerOnly).not.toContain("final gate review");
 	});
 });
 
 describe("managed handoff briefs", () => {
-	it("passes full writer and preliminary-review reports without permitting release actions", () => {
-		const writer = reviewResult("worker full report src/a.ts", { agent: "worker" });
-		const postWriter = buildPostWriterDocumenterBrief(writer);
-		const postPass = buildReviewPassDocumenterBrief(reviewResult("preliminary pass\nVERDICT: REVIEW_PASS"));
-		for (const brief of [postWriter, postPass]) {
-			expect(brief).toContain("Inspect the actual git diff");
-			expect(brief).toContain("Do NOT commit, push, publish, tag, or release");
-			expect(brief).toContain("do not bump versions");
-		}
-		expect(postWriter).toContain("worker full report src/a.ts");
-		expect(postPass).toContain("preliminary pass");
-	});
-
-	it("gives the final reviewer every full upstream report and an explicit gate contract", () => {
+	it("gives the gate reviewer the writer report and an explicit verdict contract", () => {
 		const brief = buildFinalReviewBrief(
 			reviewResult("worker report", { agent: "worker" }),
-			reviewResult("documenter report", { agent: "documenter" }),
+			{ documenterPending: false },
 		);
 		expect(brief).toContain("worker report");
-		expect(brief).toContain("documenter report");
-		expect(brief).toContain("actual pending code and documentation");
+		expect(brief).toContain("actual pending code");
 		expect(brief).toContain("Remain read-only");
 		expect(brief).toContain("VERDICT: REVIEW_PASS");
+		expect(brief).not.toContain("Documentation notes");
+	});
+
+	it("routes documentation drift to the pending final documenter instead of the gate", () => {
+		const brief = buildFinalReviewBrief(
+			reviewResult("worker report", { agent: "worker" }),
+			{ documenterPending: true },
+		);
+		expect(brief).toContain("Documentation sync runs AFTER this gate");
+		expect(brief).toContain("## Documentation notes");
+		expect(brief).toContain("not a gate finding");
 	});
 });
 
@@ -199,15 +207,21 @@ describe("buildReReviewBrief", () => {
 		expect(brief).toContain("VERDICT: REVIEW_PASS / REVIEW_FAIL");
 	});
 
-	it("includes the optional documenter report before final review", () => {
+	it("asks the reviewer to carry documentation notes forward when the final documenter is pending", () => {
 		const brief = buildReReviewBrief(
 			reviewResult("README drift\nVERDICT: REVIEW_FAIL"),
 			1,
 			workerResult("Fixed runtime behavior."),
-			reviewResult("Updated README.md and cache comments.", { agent: "documenter" }),
+			{ documenterPending: true },
 		);
-		expect(brief).toContain("documenter's pre-commit sync report");
-		expect(brief).toContain("Updated README.md and cache comments");
+		expect(brief).toContain("Documentation notes");
+		expect(brief).toContain("forward verbatim");
+		const noDocumenter = buildReReviewBrief(
+			reviewResult("README drift\nVERDICT: REVIEW_FAIL"),
+			1,
+			workerResult("Fixed runtime behavior."),
+		);
+		expect(noDocumenter).not.toContain("Documentation notes");
 	});
 
 	it("requires every finding resolved, including warnings", () => {
@@ -244,14 +258,14 @@ describe("formatChainSummary", () => {
 		const summary = formatChainSummary([
 			step({ messages: [assistant("found src/index.ts\nVERDICT: REVIEW_FAIL")] }, "initial review", 2),
 			step({ agent: "worker", messages: [assistant("fixed src/index.ts")] }, "fix round 1", 3),
-			step({ agent: "documenter", messages: [assistant("updated README.md")] }, "docs round 1", 4),
-			step({ messages: [assistant("APPROVE\nVERDICT: REVIEW_PASS")] }, "re-review round 1", 5),
+			step({ messages: [assistant("APPROVE\nVERDICT: REVIEW_PASS")] }, "re-review round 1", 4),
+			step({ agent: "documenter", messages: [assistant("updated README.md")] }, "final documentation sync", 5),
 		]);
-		expect(summary).toContain("## Auto-fix chain: 1 round — final PASS");
+		expect(summary).toContain("## Auto-fix chain: 1 round — final completed");
 		expect(summary).toContain("- #2 reviewer · initial review · FAIL");
 		expect(summary).toContain("- #3 worker · fix round 1 · completed");
-		expect(summary).toContain("- #4 documenter · docs round 1 · completed");
-		expect(summary).toContain("- #5 reviewer · re-review round 1 · PASS");
+		expect(summary).toContain("- #4 reviewer · re-review round 1 · PASS");
+		expect(summary).toContain("- #5 documenter · final documentation sync · completed");
 		expect(summary).not.toContain("src/index.ts");
 		expect(summary).not.toContain("README.md");
 		expect(summary).not.toContain("changed:");
@@ -263,13 +277,26 @@ describe("formatChainSummary", () => {
 	it("renders a managed workflow route and marks a missing reviewer verdict", () => {
 		const steps = [
 			step({ agent: "worker", messages: [assistant("changed src/a.ts")] }, "initial implementation", 10),
-			step({ agent: "documenter", messages: [assistant("updated README.md")] }, "documentation sync", 11),
-			step({ messages: [assistant("advisory-shaped final output")] }, "final review", 12),
+			step({ messages: [assistant("advisory-shaped final output")] }, "final review", 11),
 		];
 		const summary = formatManagedWorkflowSummary(steps);
-		expect(summary).toContain("worker → documenter → reviewer");
+		expect(summary).toContain("worker → reviewer");
 		expect(summary).toContain("final NO_VERDICT");
 		expect(summary).toContain("reviewer · final review · NO_VERDICT");
+	});
+
+	it("shows the reviewer gate before the final documentation sync", () => {
+		const steps = [
+			step({ agent: "worker", messages: [assistant("changed src/a.ts")] }, "initial implementation", 12),
+			step({ messages: [assistant("APPROVE\nVERDICT: REVIEW_PASS")] }, "final review", 13),
+			step({ agent: "documenter", messages: [assistant("updated README.md")] }, "final documentation sync", 14),
+		];
+		const summary = formatManagedWorkflowSummary(steps);
+		expect(summary).toContain("worker → reviewer → documenter");
+		expect(summary).toContain("final completed");
+		expect(summary.indexOf("final review · PASS")).toBeLessThan(
+			summary.indexOf("final documentation sync · completed"),
+		);
 	});
 
 	it("lets terminal integration/process failure override a stray reviewer pass", () => {

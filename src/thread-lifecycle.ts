@@ -1051,9 +1051,9 @@ export function createBackgroundDispatcher(options: BackgroundDispatcherOptions)
 					thread.lifecycleOperation === "settle" &&
 					!thread.retired;
 				try {
-					// For isolated writers this is deliberately after the managed documenter
-					// and reviewer stages: every child sees the same worktree, then one
-					// lifecycle owner integrates the complete writer+docs state exactly once.
+					// For isolated writers this is deliberately after the managed reviewer
+					// and documentation stages: every child sees the same worktree, then one
+					// lifecycle owner integrates the complete writer+fixes+docs state exactly once.
 					await thread.finalizeIsolation(generation, result);
 					if (!ownsSettlement()) return;
 					if (workflowOutcome && isolation === "worktree") {

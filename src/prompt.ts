@@ -34,8 +34,8 @@ export function buildDelegationDirective(
 		...(hasDocumenter ? ["documenter"] : []),
 	];
 	const automaticWriterRoute = [
-		...(hasDocumenter ? ["documenter"] : []),
 		...(hasReviewer ? ["reviewer"] : []),
+		...(hasDocumenter ? ["documenter"] : []),
 	].join(" → ");
 	const namedWorktreeTargets = [
 		...(hasWorker ? ["worker"] : []),
@@ -65,7 +65,7 @@ export function buildDelegationDirective(
 			: []),
 		...(hasDocumenter
 			? [
-				`Use \`documenter\` directly for explicit whole-codebase maintenance or standalone documentation work.${codeWriterNames.length > 0 ? ` Successful ${codeWriterNames.join("/")} runs already auto-sync the actual diff; never dispatch a duplicate.` : ""} Zero edits is valid and broad mode is never inferred. It changes docs/comments only and never runtime behavior, versions, release state, or ${hasReviewer ? "the final reviewer gate" : "direct final verification"}.`,
+				`Use \`documenter\` directly for explicit whole-codebase maintenance or standalone documentation work.${codeWriterNames.length > 0 ? ` Successful ${codeWriterNames.join("/")} runs already auto-sync the actual diff once after the review gate; never dispatch a duplicate.` : ""} Zero edits is valid and broad mode is never inferred. It changes docs/comments only and never runtime behavior, versions, or release state.`,
 			]
 			: []),
 		...(hasReviewer
@@ -103,7 +103,7 @@ export function buildDelegationDirective(
 			? [
 				...(hasDocumenter
 					? [
-						`A direct REVIEW_PASS is preliminary: runtime runs documenter on the pending diff, then a fresh reviewer. A direct REVIEW_FAIL ${autoFixEnabled ? "keeps auto-fix; maxFixRounds limits worker fixes only, not initial docs/review." : "cannot start fixes while worker/fix rounds are disabled."}`,
+						`A direct REVIEW_PASS is final for code: runtime runs the final documentation sync once and delivers. A direct REVIEW_FAIL ${autoFixEnabled ? "keeps auto-fix; maxFixRounds limits worker fixes only, not the final documentation sync." : "cannot start fixes while worker/fix rounds are disabled."}`,
 					]
 					: []),
 				"Resolve every gate finding; do not bypass the configured auto-fix/re-review cap. A reviewer report without a standalone VERDICT is advisory and cannot trigger writes.",

@@ -562,7 +562,7 @@ describe("logical worktree reuse and guarded finalization", () => {
 		rmSync(root, { recursive: true, force: true });
 	});
 
-	it("runs documenter and reviewer inside the worktree before one final integration", async () => {
+	it("runs reviewer and documenter inside the worktree before one final integration", async () => {
 		writeFileSync(join(agentDir, "pi-subagents.json"), JSON.stringify({
 			enabledAgents: ["worker", "documenter", "reviewer"],
 			maxFixRounds: 1,
@@ -595,11 +595,9 @@ describe("logical worktree reuse and guarded finalization", () => {
 			expect(options.cwd).toBe(handle.cwd);
 			expect(handle.finalizeMock).not.toHaveBeenCalled();
 			if (options.agentName === "worker") return result("worker", options.task, "worker report src/a.ts");
-			if (options.agentName === "documenter") {
-				expect(options.agent.systemPrompt).toContain("temporary detached Git worktree");
-				return result("documenter", options.task, "docs report README.md");
-			}
-			return result("reviewer", options.task, "APPROVE\nVERDICT: REVIEW_PASS");
+			if (options.agentName === "reviewer") return result("reviewer", options.task, "APPROVE\nVERDICT: REVIEW_PASS");
+			expect(options.agent.systemPrompt).toContain("temporary detached Git worktree");
+			return result("documenter", options.task, "docs report README.md");
 		});
 		const { stub, subagent, status } = registered();
 		const dispatched = await execute(subagent, {
@@ -610,8 +608,8 @@ describe("logical worktree reuse and guarded finalization", () => {
 		const parentRunId = dispatched.details.results[0].runId;
 		await queued(controller.signal);
 
-		expect(run.mock.calls.map(([options]) => options.agentName)).toEqual(["worker", "documenter", "reviewer"]);
-		expect(order).toEqual(["worker", "documenter", "reviewer", "integrate"]);
+		expect(run.mock.calls.map(([options]) => options.agentName)).toEqual(["worker", "reviewer", "documenter"]);
+		expect(order).toEqual(["worker", "reviewer", "documenter", "integrate"]);
 		expect(handle.finalizeMock).toHaveBeenCalledTimes(1);
 		expect(stub.messages).toHaveLength(1);
 		expect(stub.messages[0].message.content).toContain("## Managed workflow:");
@@ -732,6 +730,9 @@ describe("logical worktree reuse and guarded finalization", () => {
 		let documenterStarted = false;
 		vi.spyOn(spawnModule, "runSingleAgentWithMainFallback").mockImplementation(async (options: any) => {
 			if (options.agentName === "worker") return result("worker", options.task, "OLD WRITER REPORT");
+			if (options.agentName === "reviewer") {
+				return result("reviewer", options.task, "APPROVE\nVERDICT: REVIEW_PASS");
+			}
 			documenterStarted = true;
 			await new Promise<void>((resolveAborted) => {
 				if (options.signal.aborted) resolveAborted();

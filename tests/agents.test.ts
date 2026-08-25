@@ -60,7 +60,7 @@ describe("shipped specialist agents", () => {
 	it("keeps release ownership out of implementation children", () => {
 		const worker = loadBuiltinAgents().find((agent) => agent.name === "worker");
 		expect(worker?.systemPrompt).toContain("Never commit, push, publish, tag, release, or bump");
-		expect(worker?.systemPrompt).toContain("parent workflow owns documentation synchronization");
+		expect(worker?.systemPrompt).toContain("parent workflow owns the independent review gate");
 	});
 
 	it("ships documenter as a low-cost write-capable two-mode documentation specialist", () => {

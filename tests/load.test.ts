@@ -1164,7 +1164,7 @@ describe("managed post-writer workflows", () => {
 
 			const calls = run.mock.calls.map(([options]) => options);
 			expect(calls.map((options) => options.agentName)).toEqual([
-				"reviewer", "worker", "documenter", "reviewer",
+				"reviewer", "worker", "reviewer", "documenter",
 			]);
 			expect(calls[0].agent.tools).toEqual([
 				"read", "grep", "find", "ls", "powershell", "custom_extension",
@@ -1173,10 +1173,10 @@ describe("managed post-writer workflows", () => {
 				"read", "bash", "edit", "write", "custom_extension",
 			]);
 			expect(calls[2].agent.tools).toEqual([
-				"read", "grep", "find", "ls", "powershell", "edit", "write", "custom_extension",
+				"read", "grep", "find", "ls", "powershell", "custom_extension",
 			]);
 			expect(calls[3].agent.tools).toEqual([
-				"read", "grep", "find", "ls", "bash", "powershell", "custom_extension",
+				"read", "grep", "find", "ls", "powershell", "edit", "write", "custom_extension",
 			]);
 		} finally {
 			controller.abort();
@@ -1281,8 +1281,8 @@ describe("managed post-writer workflows", () => {
 	});
 
 	it.each([
-		["worker", ["worker", "documenter", "reviewer"]],
-		["cleaner", ["cleaner", "documenter", "reviewer"]],
+		["worker", ["worker", "reviewer", "documenter"]],
+		["cleaner", ["cleaner", "reviewer", "documenter"]],
 		["documenter", ["documenter", "reviewer"]],
 	] as const)("runs successful top-level %s through enabled downstream roles", async (topAgent, expectedOrder) => {
 		configureEnabledAgents(["explorer", "worker", "cleaner", "documenter", "reviewer"], { maxFixRounds: 1 });
@@ -1300,6 +1300,7 @@ describe("managed post-writer workflows", () => {
 			if (options.task === topTask) return makeResult(topAgent, options.task, `${topAgent} report src/change.ts`);
 			if (options.agentName === "documenter") {
 				expect(options.task).toContain(`${topAgent} report src/change.ts`);
+				if (topAgent !== "documenter") expect(options.task).toContain("VERDICT: REVIEW_PASS");
 				expect(options.task).toContain("Inspect the actual git diff");
 				expect(options.task).toContain("Do NOT commit, push, publish, tag, or release");
 				expect(options.task).toContain("do not bump versions");
@@ -1307,7 +1308,7 @@ describe("managed post-writer workflows", () => {
 			}
 			expect(options.agentName).toBe("reviewer");
 			expect(options.task).toContain(`${topAgent} report src/change.ts`);
-			if (topAgent !== "documenter") expect(options.task).toContain("documentation report README.md");
+			expect(options.task).not.toContain("documentation report README.md");
 			return makeResult("reviewer", options.task, "APPROVE\nVERDICT: REVIEW_PASS");
 		});
 
@@ -1328,8 +1329,9 @@ describe("managed post-writer workflows", () => {
 			expect(stub.messages).toHaveLength(1);
 			const content = stub.messages[0].message.content as string;
 			expect(content).toContain("## Managed workflow:");
-			expect(content).toContain("final PASS");
 			expect(content).toContain("final review · PASS");
+			if (topAgent === "documenter") expect(content).toContain("final PASS");
+			else expect(content).toContain("final documentation sync · completed");
 			expect(content).not.toContain(`- #${parentRunId} `);
 			const stepIds = [...content.matchAll(/^- #(\d+) /gmu)].map((match) => Number(match[1]));
 			expect(stepIds).toHaveLength(expectedOrder.length);
@@ -1341,7 +1343,7 @@ describe("managed post-writer workflows", () => {
 		}
 	});
 
-	it("forces a direct REVIEW_PASS through documentation and a fresh reviewer even with zero fix rounds", async () => {
+	it("runs one final documentation sync after a direct REVIEW_PASS without a second reviewer", async () => {
 		configureEnabledAgents(["worker", "documenter", "reviewer"], { maxFixRounds: 0 });
 		const stub = makeStub();
 		let queued!: BackgroundTask;
@@ -1350,18 +1352,13 @@ describe("managed post-writer workflows", () => {
 			queued = task;
 			return controller;
 		});
-		let reviewerCalls = 0;
 		const run = vi.spyOn(spawn, "runSingleAgentWithMainFallback").mockImplementation(async (options: any) => {
 			if (options.agentName === "documenter") {
-				expect(options.task).toContain("preliminary reviewer reported");
+				expect(options.task).toContain("Final documentation sync");
 				expect(options.task).toContain("DIRECT PASS REPORT");
 				return makeResult("documenter", options.task, "SYNCED README.md");
 			}
-			reviewerCalls++;
-			if (reviewerCalls === 1) return makeResult("reviewer", options.task, "DIRECT PASS REPORT\nVERDICT: REVIEW_PASS");
-			expect(options.task).toContain("DIRECT PASS REPORT");
-			expect(options.task).toContain("SYNCED README.md");
-			return makeResult("reviewer", options.task, "FRESH PASS\nVERDICT: REVIEW_PASS");
+			return makeResult("reviewer", options.task, "DIRECT PASS REPORT\nVERDICT: REVIEW_PASS");
 		});
 
 		try {
@@ -1370,10 +1367,12 @@ describe("managed post-writer workflows", () => {
 			await tool.execute("direct-pass", { agent: "reviewer", task: "Gate pending diff" }, new AbortController().signal, () => {}, executionContext());
 			await queued(controller.signal);
 
-			expect(run.mock.calls.map(([options]) => options.agentName)).toEqual(["reviewer", "documenter", "reviewer"]);
+			expect(run.mock.calls.map(([options]) => options.agentName)).toEqual(["reviewer", "documenter"]);
 			expect(stub.messages).toHaveLength(1);
-			expect(stub.messages[0].message.content).toContain("reviewer → documenter → reviewer");
+			expect(stub.messages[0].message.content).toContain("reviewer → documenter");
 			expect(stub.messages[0].message.content).toContain("pre-documentation review · PASS");
+			expect(stub.messages[0].message.content).toContain("final documentation sync · completed");
+			expect(stub.messages[0].message.content).not.toContain("final review");
 		} finally {
 			controller.abort();
 			await stub.hooks["session_shutdown"]?.({}, {});
@@ -1564,23 +1563,23 @@ describe("managed post-writer workflows", () => {
 			return controller;
 		});
 		let workerCalls = 0;
-		let documenterCalls = 0;
 		let reviewerCalls = 0;
 		const run = vi.spyOn(spawn, "runSingleAgentWithMainFallback").mockImplementation(async (options: any) => {
 			if (options.agentName === "worker") {
 				workerCalls++;
 				return makeResult("worker", options.task, workerCalls === 1 ? "INITIAL WORKER REPORT" : "FIX WORKER REPORT");
 			}
-			if (options.agentName === "documenter") {
-				documenterCalls++;
-				return makeResult("documenter", options.task, `DOC REPORT ${documenterCalls}`);
+			if (options.agentName === "reviewer") {
+				reviewerCalls++;
+				return makeResult(
+					"reviewer",
+					options.task,
+					reviewerCalls === 1 ? "OPEN FINDING\nVERDICT: REVIEW_FAIL" : "RESOLVED\nVERDICT: REVIEW_PASS",
+				);
 			}
-			reviewerCalls++;
-			return makeResult(
-				"reviewer",
-				options.task,
-				reviewerCalls === 1 ? "OPEN FINDING\nVERDICT: REVIEW_FAIL" : "RESOLVED\nVERDICT: REVIEW_PASS",
-			);
+			expect(options.task).toContain("FIX WORKER REPORT");
+			expect(options.task).toContain("RESOLVED");
+			return makeResult("documenter", options.task, "DOC REPORT");
 		});
 
 		try {
@@ -1590,16 +1589,17 @@ describe("managed post-writer workflows", () => {
 			await queued(controller.signal);
 
 			expect(run.mock.calls.map(([options]) => options.agentName)).toEqual([
-				"worker", "documenter", "reviewer", "worker", "documenter", "reviewer",
+				"worker", "reviewer", "worker", "reviewer", "documenter",
 			]);
-			expect(run.mock.calls[3]![0].task).toContain("OPEN FINDING");
+			expect(run.mock.calls[2]![0].task).toContain("OPEN FINDING");
+			expect(run.mock.calls[3]![0].task).toContain("FIX WORKER REPORT");
+			expect(run.mock.calls[3]![0].task).not.toContain("DOC REPORT");
 			expect(run.mock.calls[4]![0].task).toContain("FIX WORKER REPORT");
-			expect(run.mock.calls[4]![0].task).toContain("OPEN FINDING");
-			expect(run.mock.calls[5]![0].task).toContain("DOC REPORT 2");
 			expect(stub.messages).toHaveLength(1);
 			const content = stub.messages[0].message.content as string;
 			expect(content).toContain("1 fix round");
 			expect(content).toContain("re-review round 1 · PASS");
+			expect(content).toContain("final documentation sync · completed");
 		} finally {
 			controller.abort();
 			await stub.hooks["session_shutdown"]?.({}, {});
@@ -1715,7 +1715,7 @@ send({ type: "message_end", message: { role: "assistant", content: [{ type: "tex
 		}
 	});
 
-	it("runs enabled documenter between an auto-fix worker and the final re-review", async () => {
+	it("runs the final documenter once after an auto-fix chain settles", async () => {
 		if (!testAgentDir) throw new Error("test agent directory was not initialized");
 		writeFileSync(join(testAgentDir, "pi-subagents.json"), JSON.stringify({
 			enabledAgents: ["explorer", "worker", "cleaner", "documenter", "reviewer"],
@@ -1744,14 +1744,17 @@ send({ type: "message_end", message: { role: "assistant", content: [{ type: "tex
 				return makeResult("reviewer", options.task, "REQUEST_CHANGES\nVERDICT: REVIEW_FAIL");
 			}
 			if (options.agentName === "worker") return makeResult("worker", options.task, "fixed src/cache.ts");
-			if (options.agentName === "documenter") {
+			if (options.agentName === "reviewer") {
 				expect(options.task).toContain("fixed src/cache.ts");
-				expect(options.task).toContain("Do NOT commit, push, publish, tag, or release");
-				return makeResult("documenter", options.task, "updated README.md");
+				expect(options.task).not.toContain("updated README.md");
+				return makeResult("reviewer", options.task, "APPROVE\nVERDICT: REVIEW_PASS");
 			}
-			expect(options.task).toContain("documenter's pre-commit sync report");
-			expect(options.task).toContain("updated README.md");
-			return makeResult("reviewer", options.task, "APPROVE\nVERDICT: REVIEW_PASS");
+			expect(options.agentName).toBe("documenter");
+			expect(options.task).toContain("Final documentation sync");
+			expect(options.task).toContain("fixed src/cache.ts");
+			expect(options.task).toContain("VERDICT: REVIEW_PASS");
+			expect(options.task).toContain("Do NOT commit, push, publish, tag, or release");
+			return makeResult("documenter", options.task, "updated README.md");
 		});
 
 		try {
@@ -1770,12 +1773,12 @@ send({ type: "message_end", message: { role: "assistant", content: [{ type: "tex
 			expect(run.mock.calls.map(([options]) => options.agentName)).toEqual([
 				"reviewer",
 				"worker",
-				"documenter",
 				"reviewer",
+				"documenter",
 			]);
 			expect(stub.messages).toHaveLength(1);
 			const content = stub.messages[0].message.content as string;
-			expect(content).toContain("documenter · docs round 1 · completed");
+			expect(content).toContain("documenter · final documentation sync · completed");
 			expect(content).toContain("reviewer · re-review round 1 · PASS");
 			const stepIds = [...content.matchAll(/^- #(\d+) /gmu)];
 			expect(stepIds).toHaveLength(4);

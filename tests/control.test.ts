@@ -422,13 +422,13 @@ send({ type: "message_end", message: { role: "assistant", content: [{ type: "tex
 		expect(stub.messages).toHaveLength(0);
 		const parkedStatus = await execute(status, { id: String(runId) });
 		expect(parkedStatus.content[0].text).toContain("documenter");
-		expect(monitor.findRun(runId)?.task).toContain("Documentation sync after successful top-level worker.");
+		expect(monitor.findRun(runId)?.task).toContain("Final documentation sync");
 
 		const resumed = await execute(control, { action: "resume", id: runId, objective: "Finish documentation" });
 		expect(resumed.content[0].text).toContain(`Resumed run #${runId}`);
 		await waitFor(() => stub.messages.length === 1);
 		expect(run.mock.calls.map(([options]) => options.agentName)).toEqual([
-			"worker", "documenter", "documenter", "reviewer",
+			"worker", "reviewer", "documenter", "documenter", "reviewer",
 		]);
 		const completion = stub.messages[0].message.content as string;
 		expect(completion).toContain("documenter · documentation pass · completed");
@@ -461,6 +461,9 @@ send({ type: "message_end", message: { role: "assistant", content: [{ type: "tex
 			if (options.agentName === "worker") {
 				options.control?.markSettled();
 				return result("worker", options.task, "OLD WRITER OUTPUT");
+			}
+			if (options.agentName === "reviewer") {
+				return result("reviewer", options.task, "APPROVE\nVERDICT: REVIEW_PASS");
 			}
 			documenterStarted = true;
 			await new Promise<void>((resolveAborted) => {

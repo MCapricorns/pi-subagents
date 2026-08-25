@@ -1,12 +1,14 @@
 /**
  * Managed workflow policy and handoff formatting.
  *
- * Successful top-level writers can continue through documentation sync and an
- * independent final review. A direct passing reviewer is also forced through
- * documentation sync plus a fresh review when documenter is enabled. Any final
- * gate failure may then use the established worker → optional documenter →
- * reviewer fix rounds. Internal steps are launched by dispatch directly, so
- * they never re-enter this top-level policy or wake the main agent mid-chain.
+ * Successful top-level writers continue through an independent code review
+ * gate; bounded worker → reviewer fix rounds close its findings; one final
+ * documentation sync runs after the gate settles, so code fixes never
+ * invalidate an earlier docs pass and reviewers stay focused on code. A direct
+ * passing reviewer gets that same single final documentation sync instead of a
+ * second gate; a direct failing reviewer uses the same fix rounds plus the
+ * final sync. Internal steps are launched by dispatch directly, so they never
+ * re-enter this top-level policy or wake the main agent mid-chain.
  */
 
 import { isWriteCapableAgent, type AgentConfig } from "./agents.ts";
@@ -107,7 +109,9 @@ export function getManagedWorkflowPlan(
 	if (result.agent !== "reviewer") return undefined;
 
 	const verdict = reviewVerdict(getResultOutput(result));
-	if (verdict === "pass" && availability.documenter && availability.reviewer) {
+	// The pass stands as the code gate; documenter then syncs docs once and the
+	// workflow delivers without a second gate.
+	if (verdict === "pass" && availability.documenter) {
 		return { kind: "review-pass-sync", initialRelation: "pre-documentation review" };
 	}
 	if (verdict === "fail" && availability.worker && shouldTriggerFixLoop(result, config)) {
@@ -135,75 +139,54 @@ export function buildFixTaskBrief(reviewerResult: SingleResult, round: number, m
 		`Fix EVERY finding in the reviewer's findings list — there is no severity triage; all of them get fixed.`,
 		`If a finding is factually wrong or clearly out of scope, say so explicitly instead of fixing it.`,
 		`Do NOT refactor unrelated code beyond what the findings require.`,
-		`Do NOT commit, push, publish, tag, or release; do not bump versions. The parent chain still owns documentation sync and final review.`,
+		`Do NOT commit, push, publish, tag, or release; do not bump versions. The parent chain still owns re-review and the final documentation sync.`,
 		`After editing, run the project's format/build/tests when they exist and report`,
 		`exactly what you changed (paths + short rationale) so a reviewer can verify.`,
 		remaining > 0
 			? `A reviewer will re-review your changes automatically after you finish.`
-			: `This is the last auto-fix round; optional documentation sync and a fresh reviewer still run before final delivery.`,
+			: `This is the last auto-fix round; the workflow runs any enabled final documentation sync and then delivers.`,
 	].join("\n");
 }
 
-interface DocumentationBriefOptions {
-	title: string;
-	reports: Array<{ label: string; result: SingleResult }>;
-	closing: string;
-}
-
-function buildDocumentationBrief(options: DocumentationBriefOptions): string {
-	const reportSections = options.reports.flatMap(({ label, result }) => [
-		`${label}:`,
-		`---`,
-		getResultOutput(result),
-		`---`,
-		``,
-	]);
+/** Build the single documentation handoff that runs after the review gate
+ * settles. The last writer's report (top-level writer or final fix-round
+ * worker) and the terminal gate review are leads; the pending diff stays
+ * authoritative. At most one of the two is undefined in every managed flow. */
+export function buildFinalDocumenterBrief(
+	lastWriterResult?: SingleResult,
+	finalReviewResult?: SingleResult,
+): string {
+	const reportSections = [
+		...(lastWriterResult
+			? [
+				`The last writer (${lastWriterResult.agent}) reported:`,
+				`---`,
+				getResultOutput(lastWriterResult),
+				`---`,
+				``,
+			]
+			: []),
+		...(finalReviewResult
+			? [
+				`The final gate review reported:`,
+				`---`,
+				getResultOutput(finalReviewResult),
+				`---`,
+				``,
+			]
+			: []),
+	];
 	return [
-		options.title,
+		`Final documentation sync: the review gate settled and you are the last managed stage before delivery.`,
 		``,
 		...reportSections,
-		`Inspect the actual git diff (the complete pending diff) and relevant implementation; the report is only a lead.`,
-		`Synchronize stale README/docs, examples, API comments, docstrings, and explanatory comments with the behavior that will be committed.`,
+		`Inspect the actual git diff (the complete pending diff) and relevant implementation; the reports are only leads.`,
+		`Apply every documentation note the reviews recorded, then synchronize stale README/docs, examples, API comments, docstrings, and explanatory comments with the behavior that will be committed.`,
 		`Change documentation surfaces only; never alter runtime behavior or tests to make prose true.`,
 		`Make zero edits when the diff creates no documentation drift.`,
-		`Do NOT commit, push, publish, tag, or release; do not bump versions. ${options.closing}`,
+		`Do NOT commit, push, publish, tag, or release; do not bump versions. The parent workflow delivers directly after you; no fresh reviewer runs.`,
 		`Report exact documentation/comment paths changed, or state explicitly that no sync was needed.`,
 	].join("\n");
-}
-
-/** Build the pre-commit documentation handoff after one auto-fix worker. */
-export function buildDocumenterTaskBrief(
-	workerResult: SingleResult,
-	round: number,
-	reviewerResult?: SingleResult,
-): string {
-	return buildDocumentationBrief({
-		title: `Documentation sync after auto-fix round ${round}.`,
-		reports: [
-			...(reviewerResult ? [{ label: "The triggering reviewer reported", result: reviewerResult }] : []),
-			{ label: "The worker reported", result: workerResult },
-		],
-		closing: "a fresh reviewer gate runs after you.",
-	});
-}
-
-/** Build the automatic documentation stage after a successful top-level writer. */
-export function buildPostWriterDocumenterBrief(writerResult: SingleResult): string {
-	return buildDocumentationBrief({
-		title: `Documentation sync after successful top-level ${writerResult.agent}.`,
-		reports: [{ label: `The ${writerResult.agent} reported`, result: writerResult }],
-		closing: "the managed workflow owns any final reviewer and delivery.",
-	});
-}
-
-/** A direct passing review cannot be the final gate while documenter is enabled:
- * the preliminary report is context, but the actual pending diff is authoritative. */
-export function buildReviewPassDocumenterBrief(reviewerResult: SingleResult): string {
-	return buildDocumentationBrief({
-		title: "Documentation sync required before accepting a direct passing review.",
-		reports: [{ label: "The preliminary reviewer reported", result: reviewerResult }],
-		closing: "the preliminary pass is not final and a fresh reviewer gate runs after you.",
-	});
 }
 
 /**
@@ -278,33 +261,36 @@ export function formatManagedWorkflowSummary(
 	);
 }
 
-/** Build the first independent final gate after a top-level writer or required
- * post-pass documentation sync. Reports carry intent; the actual pending diff
- * remains authoritative. */
+export interface GateBriefOptions {
+	/** A final documenter runs after the gate settles. Documentation drift is
+	 * then routed to it as non-gating notes instead of failing the gate. */
+	documenterPending: boolean;
+}
+
+/** Build the code gate that runs directly after a top-level writer, before any
+ * documentation. Reports carry intent; the actual pending diff remains
+ * authoritative. */
 export function buildFinalReviewBrief(
 	initialResult: SingleResult,
-	documenterResult?: SingleResult,
+	options: GateBriefOptions,
 ): string {
-	const documenterSection = documenterResult
-		? [
-			``,
-			`The documenter's full sync report:`,
-			`---`,
-			getResultOutput(documenterResult),
-			`---`,
-		]
-		: [];
 	return [
-		`Fresh final gate for a managed ${initialResult.agent} workflow.`,
+		`Fresh code gate for a managed ${initialResult.agent} workflow.`,
 		``,
 		`The top-level ${initialResult.agent}'s full report:`,
 		`---`,
 		getResultOutput(initialResult),
 		`---`,
-		...documenterSection,
 		``,
-		`Run \`git status\` and \`git diff\` and inspect the actual pending code and documentation; reports are context, not proof.`,
-		`Remain read-only. Verify correctness, regressions, tests, documentation drift, and that documenter was the last writer when it ran.`,
+		`Run \`git status\` and \`git diff\` and inspect the actual pending code; the report is context, not proof.`,
+		`Remain read-only. Verify correctness, regressions, and tests.`,
+		...(options.documenterPending
+			? [
+				`Documentation sync runs AFTER this gate, so documentation drift is not a gate finding: record needed`,
+				`documentation updates as a separate short "## Documentation notes" list for the final documenter,`,
+				`and fail the gate only for code or test findings.`,
+			]
+			: []),
 		`This is an acceptance gate, not an advisory audit. End with exactly one standalone machine verdict line:`,
 		`VERDICT: REVIEW_PASS when no finding remains, otherwise VERDICT: REVIEW_FAIL.`,
 	].join("\n");
@@ -312,29 +298,19 @@ export function buildFinalReviewBrief(
 
 /**
  * The re-review brief handed to the reviewer after a worker fix round. Includes
- * the prior review, worker report, and optional documenter report so the
- * reviewer can adjudicate rejections instead of restating findings. The
- * convergence contract keeps rounds from ping-ponging: rule on the open
- * findings once, add only defects this round's edits introduced, never re-open
- * a verified resolution.
+ * the prior review and worker report so the reviewer can adjudicate rejections
+ * instead of restating findings. The convergence contract keeps rounds from
+ * ping-ponging: rule on the open findings once, add only defects this round's
+ * edits introduced, never re-open a verified resolution.
  */
 export function buildReReviewBrief(
 	reviewerResult: SingleResult,
 	round: number,
 	workerResult: SingleResult,
-	documenterResult?: SingleResult,
+	options: GateBriefOptions = { documenterPending: false },
 ): string {
 	const review = getResultOutput(reviewerResult);
 	const workerReport = getResultOutput(workerResult);
-	const documenterSection = documenterResult
-		? [
-			``,
-			`The documenter's pre-commit sync report:`,
-			`---`,
-			getResultOutput(documenterResult),
-			`---`,
-		]
-		: [];
 	return [
 		`Re-review after auto-fix round ${round}.`,
 		``,
@@ -347,7 +323,6 @@ export function buildReReviewBrief(
 		`---`,
 		workerReport,
 		`---`,
-		...documenterSection,
 		``,
 		`Rule on EVERY previous finding: resolved, or still open. A finding the worker rejected must be`,
 		`adjudicated ONCE — accept the rejection unless you can concretely refute the worker's reasoning;`,
@@ -355,6 +330,11 @@ export function buildReReviewBrief(
 		`Run \`git diff\` to see what changed, then add NEW findings only when they are defects this round's`,
 		`edits introduced or exposed (or a load-bearing issue the earlier review genuinely missed).`,
 		`Do NOT re-open a finding you verified as resolved.`,
+		...(options.documenterPending
+			? [
+				`Carry any unresolved "## Documentation notes" forward verbatim; the final documenter applies them after the chain settles.`,
+			]
+			: []),
 		`REQUEST_CHANGES only while an open finding remains; otherwise APPROVE.`,
 		`End with your machine-readable verdict line as usual (VERDICT: REVIEW_PASS / REVIEW_FAIL).`,
 	].join("\n");

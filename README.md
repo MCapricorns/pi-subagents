@@ -23,12 +23,12 @@ losing retained context.
 You
  └─ pi main agent
      ├─ explorer ─── maps the codebase
-     ├─ worker ───── implements ─┬─▶ documenter ─▶ reviewer
+     ├─ worker ───── implements ─┬─▶ reviewer ─▶ documenter
      ├─ cleaner ──── cleans up ──┘       (enabled roles only)
      ├─ documenter ─ synchronizes docs ─▶ reviewer
      └─ reviewer ─── advisory report (no VERDICT), or managed gate
-          ├─ REVIEW_PASS + documenter → documenter → fresh reviewer
-          └─ REVIEW_FAIL → worker → optional documenter → reviewer
+          ├─ REVIEW_PASS + documenter → final documentation sync
+          └─ REVIEW_FAIL → worker → reviewer (fix rounds) → final docs
 
 The stable parent run returns one final result when the complete workflow settles.
 ```
@@ -49,11 +49,12 @@ more of it.
   checkouts (worktrees) by default, then apply their changes back without
   touching your index.
 - **Documentation stops drifting.** Enabled `documenter` runs automatically
-  after successful workers/cleaners and before the final reviewer. It can also
-  run an explicitly requested whole-codebase maintenance pass.
-- **Review can close the loop.** A failed gate can automatically dispatch a worker,
-  run documentation sync, request another independent review, and repeat up to a
-  hard limit.
+  once after the review gate settles — after successful workers/cleaners or
+  fix rounds, never per fix round. It can also run an explicitly requested
+  whole-codebase maintenance pass.
+- **Review can close the loop.** A failed gate can automatically dispatch a
+  worker, request another independent review, and repeat up to a hard limit;
+  one final documentation sync follows the settled chain.
 - **Agents remain controllable.** Every run has a stable id and retained session,
   so you can change direction or continue later without starting from zero.
 - **Failures are handled, not hidden.** Model failures can hand the same session to
@@ -67,7 +68,7 @@ more of it.
 | One generic child role | Five focused engineering roles |
 | A one-shot prompt | Retained, steerable, resumable, forkable threads |
 | Concurrent writers in one checkout | Git worktree isolation for parallel workers |
-| A review report you must act on manually | Automatic writer → documenter → reviewer delivery and bounded fix rounds |
+| A review report you must act on manually | Automatic writer → reviewer → documenter delivery and bounded fix rounds |
 | Manual polling or follow-up | Automatic result delivery that resumes the main agent |
 | A hard failure when the selected model is unavailable | Direct handoff to the current main model |
 | Synchronized retries during startup contention | Extended jittered backoff that reduces retry collisions |
@@ -107,6 +108,25 @@ Compare screenshots/settings.png with design.png and report every visual mismatc
 
 The main agent decides when delegation is useful. You can also call the tools
 explicitly when you want exact control.
+
+## What changed in 4.1.4
+
+### Documentation sync moved after the review gate
+
+`documenter` now runs once at the end of a managed chain instead of before the
+reviewer and once per fix round:
+
+```text
+before: worker → documenter → reviewer → (worker → documenter → reviewer) × N
+after:  worker → reviewer → (worker → reviewer) × N → documenter
+```
+
+Code fixes no longer invalidate a docs pass written moments earlier, fix rounds
+stop paying for documenter runs and re-reviewing their churn, and a direct
+passing gate gets one final documentation sync instead of a second full review.
+Gate reviewers record documentation drift as non-gating `## Documentation notes`
+that the final documenter applies; when `documenter` is disabled, drift stays a
+normal gate finding. The sync is skipped when a chain ends on a failing gate.
 
 ## What changed in 4.1.2
 
@@ -225,22 +245,25 @@ subagent({
 });
 ```
 
-A gate reviewer ends with `REVIEW_PASS` or `REVIEW_FAIL`. A direct pass is not
-accepted as the final gate while `documenter` is enabled: runtime first syncs the
-actual pending diff, then starts a fresh reviewer. A failure uses the bounded loop:
+A gate reviewer ends with `REVIEW_PASS` or `REVIEW_FAIL`. A direct pass is
+final for the code: runtime runs the final documentation sync once (when
+`documenter` is enabled) and delivers. A failure uses the bounded loop:
 
 ```text
-reviewer → worker fixes every open finding → optional documenter sync → reviewer checks again → PASS/FAIL
+reviewer → worker fixes every open finding → reviewer checks again → … → final documentation sync
 ```
 
 Each step gets a fresh model context. The chain shares the same code state and
-passes every full reviewer, worker, and documenter report forward; it does not
-reuse one context window. Internal children bypass top-level lifecycle policy, so
-they cannot recursively start another chain.
+passes every full reviewer and worker report forward; it does not reuse one
+context window. Internal children bypass top-level lifecycle policy, so they
+cannot recursively start another chain. Gate reviewers keep documentation drift
+out of the verdict while `documenter` is enabled by recording it as
+`## Documentation notes` for the final documenter.
 
-`maxFixRounds` limits worker fix attempts only. Initial post-writer documentation
-and final review still run when it is `0`. Generic audits and read-only reviews
-are advisory: they omit `VERDICT`, remain read-only, and never trigger edits.
+`maxFixRounds` limits worker fix attempts only. The post-writer review gate and
+the final documentation sync still run when it is `0`. Generic audits and
+read-only reviews are advisory: they omit `VERDICT`, remain read-only, and
+never trigger edits.
 
 ### Clean up without guessing
 
@@ -258,7 +281,7 @@ axes genuinely differ, avoiding a generic abstraction that is worse than the
 duplication.
 
 ```text
-explicit cleanup request → cleaner applies proven cuts → documenter syncs docs → reviewer gates the diff
+explicit cleanup request → cleaner applies proven cuts → reviewer gates the diff → documenter syncs docs
 read-only cleanup audit   → reviewer reports candidates only
 ```
 
@@ -269,10 +292,11 @@ changes, and asking for cleanup does not reward speculative deletion.
 
 `documenter` has two deliberate launch paths.
 
-**For a pending worker or cleaner change**, enable the role. Runtime schedules it
-automatically against the actual diff before the final reviewer; do not dispatch
-a duplicate manual sync. If reviewer is disabled, documenter becomes the final
-managed stage. If documenter is disabled, reviewer follows the writer directly.
+**For a pending worker or cleaner change**, enable the role. Runtime schedules
+one final sync automatically against the actual diff after the review gate
+settles; do not dispatch a duplicate manual sync. If reviewer is disabled,
+documenter becomes the final managed stage directly after the writer. If
+documenter is disabled, reviewer follows the writer directly.
 
 **For an existing project**, explicitly authorize a broad maintenance pass:
 
@@ -308,11 +332,11 @@ filesystem isolation:
   not need a writable checkout.
 
 Worktree mode requires a Git repository with a committed `HEAD`. For an isolated
-writer, automatic documenter/reviewer children run inside that same worktree.
-Those isolated stages can still run in parallel; writer and documentation changes
-are integrated only after the final reviewer settles. Tracked, deleted, untracked,
-and binary changes are then carried back to the original checkout without staging
-or modifying the parent index.
+writer, automatic reviewer/documenter children run inside that same worktree.
+Those isolated stages can still run in parallel; writer, fix, and documentation
+changes are integrated only after the final managed stage settles. Tracked,
+deleted, untracked, and binary changes are then carried back to the original
+checkout without staging or modifying the parent index.
 
 Repository-lane discovery uses the Git top-level even in an empty repository, so
 root and nested paths share one lane before the first commit. Every shared
@@ -384,8 +408,7 @@ The active TUI widget shows queued and running work as a compact tree:
 ● reviewer workflow · review diff of src/cache.ts · 42s
   ├ ● worker · fix round 1 · src/cache.ts · claude-sonnet-4-5/high · 10s
   │    grep cacheKey
-  ├ ● documenter · docs round 1 · claude-haiku-4-5/low · 4s
-  └ ○ reviewer · re-review round 1 · claude-sonnet-4-5/high · 3s
+  └ ○ documenter · final documentation sync · claude-haiku-4-5/low · 3s
 ```
 
 A managed root keeps its original top-level role and workflow-wide elapsed
@@ -506,7 +529,7 @@ Configuration is stored at `~/.pi/agent/pi-subagents.json` and follows
 | `proactiveInjection` | Teach the main model when and how to delegate. Default `true`. |
 | `agentScope` | Discover `user`, `project`, or `both` agent directories. Default `user`. |
 | `maxConcurrency` | Running process limit and maximum tasks in one parallel call, from `1` to `16`. Default `4`. |
-| `maxFixRounds` | Maximum worker fixes after `REVIEW_FAIL`; each fix is followed by optional documenter and reviewer. `0` disables fixes but not initial post-writer docs/review. Default `2`. |
+| `maxFixRounds` | Maximum worker fixes after `REVIEW_FAIL`; each fix is re-reviewed by a reviewer, and one final documentation sync runs after the chain settles. `0` disables fixes but not the post-writer review gate or final docs. Default `2`. |
 | `idleTimeoutSec` | Seconds without RPC output before termination. `0` disables the watchdog. Default `90`. |
 
 Invalid values fall back safely. Older configs are normalized automatically. The
