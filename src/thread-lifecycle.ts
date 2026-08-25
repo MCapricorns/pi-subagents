@@ -1,7 +1,8 @@
 /**
  * Stable logical-thread generation lifecycle for background sub-agents.
  *
- * Dispatch owns workflow policy and internal role briefs; this module owns one
+ * Dispatch owns workflow policy, the live stage projection, and internal role
+ * briefs; this module owns one
  * stable parent generation end to end: managed-repository lane use,
  * worktree setup/finalization after downstream review, queue/process ownership,
  * retained-session resume/fork, and guarded one-time terminal publication.
@@ -86,6 +87,16 @@ export function withWorktreeSystemPrompt(agent: AgentConfig): AgentConfig {
 
 export function isWorktreeCapableAgent(agent: AgentConfig): boolean {
 	return isWriteCapableAgent(agent);
+}
+
+/** A direct reviewer otherwise cannot infer enabled-role availability from its
+ * isolated task. Managed internal gates receive the same contract in their
+ * generated briefs. Advisory reviews still emit neither machine marker. */
+function withEnabledDocumenterReviewContract(agent: AgentConfig): AgentConfig {
+	return {
+		...agent,
+		systemPrompt: `${agent.systemPrompt.trimEnd()}\n\nRuntime workflow context: documenter is enabled. In gate reviews, documentation drift is non-gating: emit DOCUMENTATION: NEEDED with ## Documentation notes, or DOCUMENTATION: CLEAN when no sync is needed. Advisory reviews still emit neither VERDICT nor DOCUMENTATION markers.`.trim(),
+	};
 }
 
 interface DispatchEnvironment {
@@ -249,7 +260,10 @@ export function createBackgroundDispatcher(options: BackgroundDispatcherOptions)
 		if (!discoveredAgent) return failedStartResult(agentName, task, `Unknown agent: "${agentName}".`);
 		const resolveLiveAgentTools = (candidate: AgentConfig): AgentConfig =>
 			resolveAgentTools({ ...candidate, tools: discoveredAgent.tools }, runtime.getActiveTools());
-		const agent = resolveLiveAgentTools(discoveredAgent);
+		const resolvedAgent = resolveLiveAgentTools(discoveredAgent);
+		const agent = agentName === "reviewer" && runAgents.some((candidate) => candidate.name === "documenter")
+			? withEnabledDocumenterReviewContract(resolvedAgent)
+			: resolvedAgent;
 		if (isolation === "worktree" && !isWorktreeCapableAgent(agent)) {
 			return {
 				...failedStartResult(agentName, task, `Agent "${agentName}" is read-only; worktree isolation is available only to write-capable agents such as worker, cleaner, or documenter.`),
@@ -1052,8 +1066,8 @@ export function createBackgroundDispatcher(options: BackgroundDispatcherOptions)
 					!thread.retired;
 				try {
 					// For isolated writers this is deliberately after the managed reviewer
-					// and documentation stages: every child sees the same worktree, then one
-					// lifecycle owner integrates the complete writer+fixes+docs state exactly once.
+					// and any needed documentation stage: every child sees the same worktree,
+					// then one lifecycle owner integrates the complete settled state exactly once.
 					await thread.finalizeIsolation(generation, result);
 					if (!ownsSettlement()) return;
 					if (workflowOutcome && isolation === "worktree") {

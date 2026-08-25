@@ -355,7 +355,7 @@ send({ type: "message_end", message: { role: "assistant", content: [{ type: "tex
 		expect(stub.messages[0].message.content).not.toContain("documenter");
 	});
 
-	it("parks during documenter, retains its newest session, and resumes to a fresh reviewer", async () => {
+	it("parks during documenter, retains its newest session, and resumes that explicit docs task directly", async () => {
 		writeFileSync(join(testDir, "pi-subagents.json"), JSON.stringify({
 			enabledAgents: ["worker", "documenter", "reviewer"],
 			maxFixRounds: 1,
@@ -428,14 +428,13 @@ send({ type: "message_end", message: { role: "assistant", content: [{ type: "tex
 		expect(resumed.content[0].text).toContain(`Resumed run #${runId}`);
 		await waitFor(() => stub.messages.length === 1);
 		expect(run.mock.calls.map(([options]) => options.agentName)).toEqual([
-			"worker", "reviewer", "documenter", "documenter", "reviewer",
+			"worker", "reviewer", "documenter", "documenter",
 		]);
 		const completion = stub.messages[0].message.content as string;
-		expect(completion).toContain("documenter · documentation pass · completed");
+		expect(completion).toContain("DOCS FINISHED README.md");
+		expect(completion).not.toContain("Managed workflow");
 		expect(completion).not.toContain("OLD WRITER REPORT");
-		const documenterStepId = /- #(\d+) documenter/.exec(completion)?.[1];
-		expect(documenterStepId).toBeTruthy();
-		const documenterReport = await execute(status, { id: documenterStepId });
+		const documenterReport = await execute(status, { id: String(runId) });
 		expect(documenterReport.content[0].text).toContain("DOCS FINISHED README.md");
 	});
 

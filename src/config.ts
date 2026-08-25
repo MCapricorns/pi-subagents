@@ -73,8 +73,9 @@ export const DEFAULT_MAX_CONCURRENCY = 4;
 export const MAX_CONCURRENCY_LIMIT = 16;
 /**
  * Maximum worker fixes after REVIEW_FAIL. Each fix is followed by a reviewer
- * re-review; this cap does not suppress the post-writer review gate or the
- * final documentation sync. 0 disables fixes. Default: 2.
+ * re-review; this cap does not suppress the post-writer review gate or its
+ * conditional/reviewer-disabled documentation fallback. 0 disables fixes.
+ * Default: 2.
  */
 export const DEFAULT_MAX_FIX_ROUNDS = 2;
 /** Upper bound accepted for maxFixRounds (defensive clamp). 0 disables the loop. */
@@ -116,8 +117,8 @@ export interface SubagentsConfig {
 	maxConcurrency: number;
 	/**
 	 * Maximum worker fixes after REVIEW_FAIL. Every fix receives the full review,
-	 * then a re-review runs; one final documentation sync follows the settled
-	 * chain and does not consume this budget. 0 disables fixes. Default: 2.
+	 * then a re-review runs; any documentation sync selected after the terminal
+	 * healthy review does not consume this budget. 0 disables fixes. Default: 2.
 	 */
 	maxFixRounds: number;
 	/**
@@ -247,7 +248,8 @@ export function normalizeConfig(raw: unknown): SubagentsConfig {
 	const maxConcurrency = clampCount(raw.maxConcurrency, MAX_CONCURRENCY_LIMIT);
 	if (maxConcurrency !== undefined) config.maxConcurrency = maxConcurrency;
 
-	// 0 disables worker fixes, not the initial managed docs/review workflow.
+	// 0 disables worker fixes, not the independent post-writer review gate or
+	// conditional/reviewer-disabled documentation fallback.
 	if (typeof raw.maxFixRounds === "number" && Number.isFinite(raw.maxFixRounds)) {
 		config.maxFixRounds = Math.max(0, Math.min(MAX_FIX_ROUNDS_LIMIT, Math.round(raw.maxFixRounds)));
 	}

@@ -20,6 +20,15 @@ import type { IsolationMode, WorktreeFinalizationStatus } from "./worktree.ts";
 
 export type RunStatus = "queued" | "running" | "steering" | "interrupting" | "parked" | "done" | "failed";
 export type ContinuationKind = "resume-retained" | "resume-appended" | "fork-retained" | "fork-appended" | "retarget";
+export type WorkflowStageStatus = "done" | "active" | "pending" | "changes" | "failed";
+
+/** Ephemeral projection of one real or currently planned managed stage. It is
+ * live monitor state only; durable results remain the per-run chain records. */
+export interface WorkflowStage {
+	agent: string;
+	relation: string;
+	status: WorkflowStageStatus;
+}
 
 export function isRunActiveStatus(status: RunStatus): boolean {
 	return status === "queued" || status === "running" || status === "steering" || status === "interrupting";
@@ -65,6 +74,9 @@ export interface RunView {
 	/** This stable top-level row currently owns a multi-stage managed workflow.
 	 * Its elapsed time is workflow-wide; active child rows own stage telemetry. */
 	managedWorkflow?: boolean;
+	/** Live-only stage timeline retained on the parent while completed internal
+	 * child rows leave the monitor. */
+	workflowStages?: WorkflowStage[];
 }
 
 /** Optional metadata for documenter/reviewer/fix children of a stable parent run. */
@@ -481,6 +493,18 @@ export class MonitorStore {
 		const run = this.find(id);
 		if (!run) return;
 		run.managedWorkflow = active || undefined;
+		if (!active) run.workflowStages = undefined;
+		this.notify();
+	}
+
+	/** Replace the live workflow projection atomically so renderers never observe
+	 * a half-updated fix/re-review plan. */
+	setWorkflowStages(id: number, stages: readonly WorkflowStage[]): void {
+		const run = this.find(id);
+		if (!run) return;
+		run.workflowStages = stages.length > 0
+			? stages.map((stage) => ({ ...stage }))
+			: undefined;
 		this.notify();
 	}
 
@@ -615,6 +639,7 @@ export class MonitorStore {
 		run.usage = emptyUsage();
 		run.activity = undefined;
 		run.managedWorkflow = undefined;
+		run.workflowStages = undefined;
 		run.activeSince = undefined;
 		run.endedAt = undefined;
 		run.elapsedMs = Math.max(run.elapsedMs, meta?.elapsedMs ?? 0);

@@ -10,6 +10,7 @@ import {
 	monitor,
 	statusIcon,
 	type RunView,
+	type WorkflowStage,
 } from "./monitor.ts";
 
 export const SUBAGENTS_WIDGET_ID = "pi-subagents";
@@ -50,7 +51,9 @@ function runPrimaryLine(
 	prefix: string,
 ): string {
 	const dim = (text: string): string => theme.fg("dim", text);
-	const icon = statusIcon(run.status, theme);
+	const icon = run.managedWorkflow && run.status === "running"
+		? theme.fg("accent", theme.bold("◆"))
+		: statusIcon(run.status, theme);
 	const displayName = run.managedWorkflow ? `${run.agent} workflow` : run.agent;
 	const name = theme.fg("accent", theme.bold(displayName));
 	const identity = `${prefix}${icon} ${name}`;
@@ -72,7 +75,9 @@ function runPrimaryLine(
 		: undefined;
 	const taskSource = run.parentRunId !== undefined
 		? [run.relationLabel, run.label].filter((part): part is string => Boolean(part)).join(" · ")
-		: formatTaskSummary(run.task, 64);
+		: run.managedWorkflow
+			? run.label ?? formatTaskSummary(run.task, 64)
+			: formatTaskSummary(run.task, 64);
 	const taskDesiredSource = [continuation, taskSource]
 		.filter((part): part is string => Boolean(part))
 		.join(" · ");
@@ -129,6 +134,46 @@ function runPrimaryLine(
 	return compactLine(primaryLeft, elapsed ? dim(`· ${elapsed}`) : "", width);
 }
 
+function workflowStageToken(stage: WorkflowStage, theme: Theme): string {
+	const content = (icon: string): string => `${icon} ${stage.relation}`;
+	switch (stage.status) {
+		case "done":
+			return theme.fg("success", content("✓"));
+		case "active":
+			return theme.fg("accent", theme.bold(content("●")));
+		case "changes":
+			return theme.fg("warning", content("!"));
+		case "failed":
+			return theme.fg("error", content("✗"));
+		default:
+			return theme.fg("dim", content("○"));
+	}
+}
+
+/** Render the real/currently planned stage sequence. On narrow terminals the
+ * active (or next actionable) stage becomes the left edge so it survives before
+ * older history; the workflow-wide elapsed tail is independently preserved on
+ * the primary line. */
+function workflowTimelineLine(run: RunView, theme: Theme, width: number): string | undefined {
+	const stages = run.workflowStages;
+	const indent = "  ";
+	if (!stages || stages.length === 0 || width <= visibleWidth(indent)) return undefined;
+	const separator = theme.fg("dim", " ─ ");
+	const render = (items: readonly WorkflowStage[]): string =>
+		items.map((stage) => workflowStageToken(stage, theme)).join(separator);
+	const full = `${indent}${render(stages)}`;
+	if (visibleWidth(full) <= width) return full;
+
+	let focusIndex = stages.findIndex((stage) => stage.status === "active");
+	if (focusIndex === -1) {
+		focusIndex = stages.findLastIndex((stage) => stage.status === "changes" || stage.status === "failed");
+	}
+	if (focusIndex === -1) focusIndex = stages.findIndex((stage) => stage.status === "pending");
+	if (focusIndex === -1) focusIndex = stages.length - 1;
+	const omittedPrefix = focusIndex > 0 ? theme.fg("dim", "… ─ ") : "";
+	return truncateToWidth(`${indent}${omittedPrefix}${render(stages.slice(focusIndex))}`, width, "…");
+}
+
 function runActivityLine(run: RunView, theme: Theme, width: number, indent: string): string[] {
 	const dim = (text: string): string => theme.fg("dim", text);
 	const activity = run.activity?.trim();
@@ -140,9 +185,10 @@ function runActivityLine(run: RunView, theme: Theme, width: number, indent: stri
 	return [truncateToWidth(`${indent}${dim(activitySummary)}`, width, "")];
 }
 
-/** Render active runs as a tree: main-agent dispatches are roots and managed
- * documenter/reviewer/fix steps nest under the stable parent row. Fork labels
- * include their source id; other control ids remain available through status. */
+/** Render active runs as compact workflow-aware trees. Stable managed parents
+ * retain their stage timeline while the current internal child supplies exact
+ * model/thinking/activity telemetry. Fork labels include their source id; other
+ * control ids remain available through status. */
 export function formatActiveRunLines(
 	runs: readonly RunView[],
 	theme: Theme,
@@ -166,9 +212,14 @@ export function formatActiveRunLines(
 	for (const root of roots) {
 		const children = childrenOf.get(root.id) ?? [];
 		lines.push(runPrimaryLine(root, theme, width, now, ""));
-		// The parent's managed-workflow placeholder is redundant while a child
-		// row shows live progress; keep it only between stages.
-		if (children.length === 0) lines.push(...runActivityLine(root, theme, width, "  "));
+		const hasTimeline = Boolean(root.managedWorkflow && root.workflowStages?.length);
+		const timeline = hasTimeline ? workflowTimelineLine(root, theme, width) : undefined;
+		if (timeline) lines.push(timeline);
+		// A parent placeholder ("managed workflow running") would duplicate the
+		// timeline. Standalone roots keep their useful activity line as before.
+		if (children.length === 0 && !hasTimeline) {
+			lines.push(...runActivityLine(root, theme, width, "  "));
+		}
 		children.forEach((child, index) => {
 			const connector = index === children.length - 1 ? "└ " : "├ ";
 			lines.push(runPrimaryLine(child, theme, width, now, theme.fg("dim", `  ${connector}`)));

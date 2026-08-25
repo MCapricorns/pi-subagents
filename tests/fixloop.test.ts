@@ -5,6 +5,7 @@ import {
 	buildFixTaskBrief,
 	buildReReviewBrief,
 	canStartManagedWorkflow,
+	documentationDisposition,
 	formatChainSummary,
 	formatManagedWorkflowSummary,
 	getManagedWorkflowPlan,
@@ -59,6 +60,16 @@ describe("shouldTriggerFixLoop", () => {
 	});
 });
 
+describe("documentationDisposition", () => {
+	it("accepts only standalone lines and lets the last valid marker win", () => {
+		expect(documentationDisposition("DOCUMENTATION: CLEAN")).toBe("clean");
+		expect(documentationDisposition("\tDOCUMENTATION: needed\r")).toBe("needed");
+		expect(documentationDisposition("Use DOCUMENTATION: CLEAN when done")).toBeUndefined();
+		expect(documentationDisposition("DOCUMENTATION: NEEDED is one option")).toBeUndefined();
+		expect(documentationDisposition("DOCUMENTATION: NEEDED\nnotes\nDOCUMENTATION: CLEAN")).toBe("clean");
+	});
+});
+
 describe("managed workflow planning", () => {
 	const role = (name: string, tools?: string[]) => ({ name, tools });
 	const available = (...names: string[]) => workflowAgentAvailability(names.map((name) => role(name)));
@@ -71,24 +82,27 @@ describe("managed workflow planning", () => {
 		expect(getManagedWorkflowPlan(result, config(0), available())).toBeUndefined();
 	});
 
-	it("routes a successful top-level documenter only to reviewer", () => {
+	it("delivers a successful top-level documenter directly", () => {
 		const result = reviewResult("docs done", { agent: "documenter" });
-		expect(getManagedWorkflowPlan(result, config(0), available("reviewer"))?.kind).toBe("post-writer");
-		expect(getManagedWorkflowPlan(result, config(0), available("documenter"))).toBeUndefined();
+		expect(getManagedWorkflowPlan(result, config(0), available("reviewer"))).toBeUndefined();
+		expect(getManagedWorkflowPlan(result, config(0), available("documenter", "reviewer"))).toBeUndefined();
 	});
 
-	it("runs one final documentation sync after a direct pass independent of maxFixRounds", () => {
-		const result = reviewResult("APPROVE\nVERDICT: REVIEW_PASS");
-		expect(getManagedWorkflowPlan(result, config(0), available("worker", "documenter", "reviewer"))?.kind)
-			.toBe("review-pass-sync");
-		expect(getManagedWorkflowPlan(result, config(0), available("documenter"))?.kind)
-			.toBe("review-pass-sync");
-		expect(getManagedWorkflowPlan(result, config(0), available("worker", "reviewer"))).toBeUndefined();
+	it("runs direct-pass docs only for NEEDED or a conservatively missing marker", () => {
+		const missing = reviewResult("APPROVE\nVERDICT: REVIEW_PASS");
+		const needed = reviewResult("DOCUMENTATION: NEEDED\nAPPROVE\nVERDICT: REVIEW_PASS");
+		const clean = reviewResult("DOCUMENTATION: CLEAN\nAPPROVE\nVERDICT: REVIEW_PASS");
+		const roles = available("worker", "documenter", "reviewer");
+		expect(getManagedWorkflowPlan(missing, config(0), roles)?.kind).toBe("review-pass-sync");
+		expect(getManagedWorkflowPlan(needed, config(0), roles)?.kind).toBe("review-pass-sync");
+		expect(getManagedWorkflowPlan(clean, config(0), roles)).toBeUndefined();
+		expect(getManagedWorkflowPlan(missing, config(0), available("worker", "reviewer"))).toBeUndefined();
 	});
 
 	it("never turns advisory or failed reviewer output into writes", () => {
 		const roles = available("worker", "documenter", "reviewer");
 		expect(getManagedWorkflowPlan(reviewResult("advisory only"), config(2), roles)).toBeUndefined();
+		expect(getManagedWorkflowPlan(reviewResult("DOCUMENTATION: NEEDED\nadvisory only"), config(2), roles)).toBeUndefined();
 		expect(getManagedWorkflowPlan(reviewResult("VERDICT: REVIEW_FAIL", { exitCode: 1 }), config(2), roles)).toBeUndefined();
 	});
 
@@ -133,9 +147,10 @@ describe("buildFixTaskBrief", () => {
 		expect(brief).toContain("factually wrong or clearly out of scope");
 	});
 
-	it("notes a re-review will follow when rounds remain", () => {
+	it("notes a re-review will follow and requires directly affected docs to stay synchronized", () => {
 		const brief = buildFixTaskBrief(reviewResult("VERDICT: REVIEW_FAIL"), 1, 2);
 		expect(brief).toContain("re-review your changes automatically");
+		expect(brief).toContain("directly affected by your fixes");
 		expect(brief).toContain("Do NOT commit, push, publish, tag, or release");
 	});
 });
@@ -177,6 +192,7 @@ describe("managed handoff briefs", () => {
 		expect(brief).toContain("actual pending code");
 		expect(brief).toContain("Remain read-only");
 		expect(brief).toContain("VERDICT: REVIEW_PASS");
+		expect(brief).toContain("documentation drift is an ordinary gate finding");
 		expect(brief).not.toContain("Documentation notes");
 	});
 
@@ -185,9 +201,11 @@ describe("managed handoff briefs", () => {
 			reviewResult("worker report", { agent: "worker" }),
 			{ documenterPending: true },
 		);
-		expect(brief).toContain("Documentation sync runs AFTER this gate");
+		expect(brief).toContain("conditional documentation sync");
 		expect(brief).toContain("## Documentation notes");
-		expect(brief).toContain("not a gate finding");
+		expect(brief).toContain("DOCUMENTATION: NEEDED");
+		expect(brief).toContain("DOCUMENTATION: CLEAN");
+		expect(brief).toContain("not a code-gate finding");
 	});
 });
 
@@ -215,7 +233,8 @@ describe("buildReReviewBrief", () => {
 			{ documenterPending: true },
 		);
 		expect(brief).toContain("Documentation notes");
-		expect(brief).toContain("forward verbatim");
+		expect(brief).toContain("DOCUMENTATION: NEEDED");
+		expect(brief).toContain("DOCUMENTATION: CLEAN");
 		const noDocumenter = buildReReviewBrief(
 			reviewResult("README drift\nVERDICT: REVIEW_FAIL"),
 			1,

@@ -29,14 +29,7 @@ export function buildDelegationDirective(
 		...(hasWorker ? ["worker"] : []),
 		...(hasCleaner ? ["cleaner"] : []),
 	];
-	const reviewedWriterNames = [
-		...codeWriterNames,
-		...(hasDocumenter ? ["documenter"] : []),
-	];
-	const automaticWriterRoute = [
-		...(hasReviewer ? ["reviewer"] : []),
-		...(hasDocumenter ? ["documenter"] : []),
-	].join(" → ");
+	const reviewedWriterNames = [...codeWriterNames];
 	const namedWorktreeTargets = [
 		...(hasWorker ? ["worker"] : []),
 		...(hasCleaner ? ["cleaner"] : []),
@@ -47,34 +40,43 @@ export function buildDelegationDirective(
 		: namedWorktreeTargets.length === 1
 			? `${namedWorktreeTargets[0]} or another`
 			: `${namedWorktreeTargets.slice(0, -1).join(", ")}, ${namedWorktreeTargets.at(-1)}, or another`;
+	const managedWriterWorkflowRule = reviewedWriterNames.length === 0
+		? undefined
+		: hasReviewer && hasDocumenter
+			? `Successful top-level ${reviewedWriterNames.join("/")} runs continue through the enabled reviewer gate. Only REVIEW_PASS can authorize documenter, which runs for DOCUMENTATION: NEEDED or a missing marker; the workflow delivers once. Never duplicate stages.`
+			: hasReviewer
+				? `Successful top-level ${reviewedWriterNames.join("/")} runs continue through the enabled reviewer gate and then deliver once; never duplicate the gate.`
+				: hasDocumenter
+					? `With reviewer disabled, successful top-level ${reviewedWriterNames.join("/")} runs use documenter as the conservative final fallback and then deliver once; never duplicate the fallback.`
+					: undefined;
 
 	const dispatchRules = [
-		"Handle simple work inline with direct tools: one-line lookups, known-target reads/edits, and quick questions do not justify a child process.",
+		"Keep small, known-target work in the main thread with direct tools: lookups and focused reads/edits do not justify a child context.",
 		...(hasExplorer
 			? [
-				"Use `explorer` proactively when reconnaissance becomes broad or crosses files: mapping unfamiliar code, tracing symbols/dependencies, or answering multi-file location/reference questions. Treat its output only as a retrieval index; re-read load-bearing files before edits or decisions about deletion, security, compatibility, persistence, or dynamic reachability. Use a stronger model/specialist for complex dynamic, concurrent, migration, or security-sensitive analysis.",
+				"Use `explorer` proactively only for broad or cross-file reconnaissance: mapping unfamiliar code, tracing symbols/dependencies, or finding multi-file references. It is a lightweight retrieval index, never an automatic gate. Re-read load-bearing files before edits or high-risk decisions. Use a stronger model/specialist for dynamic, concurrent, migration, or security analysis.",
 			]
 			: []),
 		...(hasWorker
-			? ["Use `worker` for a self-contained implementation, fix, refactor, or test task whose separate context pays for itself."]
+			? ["Use `worker` for a self-contained implementation, fix, refactor, or test whose separate context pays for itself—not a small known-target edit."]
 			: []),
 		...(hasCleaner
 			? [
-				`Use \`cleaner\` only for user-authorized cleanup, removal, simplification, duplicate-code consolidation, or maintenance. Once dispatched, it applies every safe proven in-scope cut without item-by-item approval; zero edits is valid only if none is proved. Generic or read-only audit, review, code-health, plan, or cleanup-candidate assessment goes to ${hasReviewer ? "`reviewer`" : "direct main-context inspection because `reviewer` is disabled"}. Never dispatch cleaner by PR count or as the pre-commit gate.`,
+				`Use \`cleaner\` only as the separate evidence-first entry for user-authorized cleanup, removal, simplification, duplicate-code consolidation, or maintenance; never substitute it for \`worker\`. It applies every safe proven in-scope cut without item-by-item approval. Generic or read-only audit, review, code-health, plan, or cleanup-candidate assessment goes to ${hasReviewer ? "`reviewer`" : "direct main-context inspection because `reviewer` is disabled"}. Never dispatch cleaner by PR count or as the pre-commit gate.`,
 			]
 			: []),
 		...(hasDocumenter
 			? [
-				`Use \`documenter\` directly for explicit whole-codebase maintenance or standalone documentation work.${codeWriterNames.length > 0 ? ` Successful ${codeWriterNames.join("/")} runs already auto-sync the actual diff once after the review gate; never dispatch a duplicate.` : ""} Zero edits is valid and broad mode is never inferred. It changes docs/comments only and never runtime behavior, versions, or release state.`,
+				`Use \`documenter\` directly only for explicit whole-codebase maintenance or standalone documentation/comment work; a top-level documenter delivers directly without an automatic reviewer.${codeWriterNames.length > 0 ? ` ${codeWriterNames.join("/")} must sync existing docs they directly affect; runtime runs documenter only after REVIEW_PASS with DOCUMENTATION: NEEDED or a missing marker, or as the reviewer-disabled fallback—never dispatch a duplicate.` : ""} It never changes runtime behavior, versions, or release state.`,
 			]
 			: []),
 		...(hasReviewer
 			? [
-				`Use \`reviewer\` for read-only assessments or an explicit gate.${reviewedWriterNames.length > 0 ? ` Successful ${reviewedWriterNames.join("/")} runs already get a fresh read-only reviewer gate.` : ""} Advisory output has no VERDICT: it stays read-only and does not authorize follow-up edits.`,
+				`Use \`reviewer\` for read-only assessments or a gate.${reviewedWriterNames.length > 0 ? ` Successful ${reviewedWriterNames.join("/")} runs already get one fresh read-only reviewer gate, independent of the writer.` : ""} Advisory output has no VERDICT and cannot authorize follow-up edits${hasDocumenter ? "; gates classify docs separately for the enabled documenter." : "."}`,
 			]
 			: []),
-		"Brief every child with the complete goal, exact paths, constraints, and expected output. It has no memory of this conversation.",
-		"Children are leaf processes without delegation tools. Do not ask them to spawn sub-agents; use `subagent_control fork` on a parked/settled retained thread for an independent continuation.",
+		"Brief each child with the complete goal, exact paths, constraints, and expected output; it has no conversation memory.",
+		"Children are leaf processes without delegation tools; use `subagent_control fork` on a parked/settled thread for an independent continuation.",
 		...(hasMultiple
 			? [
 				"Dispatch independent work in one `tasks` array and let the resumed main agent start dependent work only after prerequisites finish.",
@@ -86,24 +88,20 @@ export function buildDelegationDirective(
 	];
 
 	const handoffRules = [
-		"Dispatch returns immediately and ends this turn. Never sleep, poll, or call `subagent_wait` to hold the turn; results arrive as messages that automatically resume the main agent, even mid-turn.",
-		"Use `subagent_wait` with explicit `timeoutMs` only when the user specifically asks you to remain in-turn and wait. Its default lookup is non-blocking.",
-		"A result is already shown to the user. Do not restate, paraphrase, or re-summarize it; add only your conclusion or next action, often one line.",
+		"Dispatch ends this turn; results resume the main agent, even mid-turn. Never sleep, poll, or call `subagent_wait` to hold the turn.",
+		"Use `subagent_wait` with explicit `timeoutMs` only when the user asks to wait in-turn; its default lookup is non-blocking.",
+		"Results are already shown. Do not restate, paraphrase, or re-summarize them; add only your conclusion or next action.",
 		"A delivered result does not mean siblings are finished. Before declaring the overall task done, use `subagent_status` to confirm that no runs remain active.",
 	];
 
 	const verificationRules = [
 		"Never report an unrun check as passed; identify unavailable checks and pre-existing failures honestly.",
-		...(automaticWriterRoute && reviewedWriterNames.length > 0
-			? [
-				`Successful top-level write roles automatically continue through enabled downstream roles (${automaticWriterRoute}) to one final delivery; never duplicate stages.`,
-			]
-			: []),
+		...(managedWriterWorkflowRule ? [managedWriterWorkflowRule] : []),
 		...(hasReviewer
 			? [
 				...(hasDocumenter
 					? [
-						`A direct REVIEW_PASS is final for code: runtime runs the final documentation sync once and delivers. A direct REVIEW_FAIL ${autoFixEnabled ? "keeps auto-fix; maxFixRounds limits worker fixes only, not the final documentation sync." : "cannot start fixes while worker/fix rounds are disabled."}`,
+						`A direct REVIEW_PASS with DOCUMENTATION: CLEAN delivers immediately; NEEDED or a missing marker runs one documentation sync. A direct REVIEW_FAIL ${autoFixEnabled ? "keeps bounded worker/reviewer auto-fix, with docs considered only after its terminal REVIEW_PASS." : "cannot start fixes while worker/fix rounds are disabled."}`,
 					]
 					: []),
 				"Resolve every gate finding; do not bypass the configured auto-fix/re-review cap. A reviewer report without a standalone VERDICT is advisory and cannot trigger writes.",
@@ -116,7 +114,7 @@ export function buildDelegationDirective(
 	return `
 ## Sub-agent delegation (pi-subagents)
 
-The \`subagent\` tool starts specialized leaf agents in isolated Pi child processes and context windows. It returns immediately; completion messages automatically resume the main agent.
+The \`subagent\` tool starts isolated Pi child processes and context windows. Completions automatically resume the main agent.
 
 Available agents:
 ${catalog}

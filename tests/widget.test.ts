@@ -78,18 +78,24 @@ describe("formatActiveRunLines", () => {
 		expect(lines.every((line) => line.length > 0)).toBe(true);
 	});
 
-	it("nests auto-fix chain children under the triggering reviewer row", () => {
+	it("renders an auto-fix timeline and nests current child telemetry under its stable parent", () => {
 		const store = new MonitorStore();
 		const parent = store.addRun("reviewer", "Review src/index.ts", "xai/grok-parent", "xhigh");
 		store.setStatus(parent, "running");
 		store.setManagedWorkflow(parent, true);
+		store.setWorkflowStages(parent, [
+			{ agent: "reviewer", relation: "review", status: "changes" },
+			{ agent: "worker", relation: "fix 1/2", status: "active" },
+			{ agent: "reviewer", relation: "re-review 1/2", status: "pending" },
+			{ agent: "documenter", relation: "docs", status: "pending" },
+		]);
 		store.setActivity(parent, "auto-fix chain running");
 		const fix = store.addRun(
 			"worker",
 			"Auto-fix round 1 of 2 (triggered by a failed review).\n- src/index.ts:42 bug",
 			"openai/gpt-worker",
 			"max",
-			{ groupId: `fix-${parent}`, relationLabel: "fix round 1", parentRunId: parent },
+			{ groupId: `fix-${parent}`, relationLabel: "fix 1/2", parentRunId: parent },
 		);
 		store.setStatus(fix, "running");
 		store.setActivity(fix, "edit src/index.ts");
@@ -98,22 +104,62 @@ describe("formatActiveRunLines", () => {
 			"Re-review after auto-fix round 1.",
 			"anthropic/claude-reviewer",
 			"high",
-			{ groupId: `fix-${parent}`, relationLabel: "re-review round 1", parentRunId: parent },
+			{ groupId: `fix-${parent}`, relationLabel: "re-review 1/2", parentRunId: parent },
 		);
 		store.setStatus(reReview, "queued");
 
 		const lines = formatActiveRunLines(store.getRuns(), theme, 120);
-		expect(lines).toHaveLength(4);
-		expect(lines[0]).toContain("reviewer workflow · Review src/index.ts");
+		expect(lines).toHaveLength(5);
+		expect(lines[0]).toContain("◆ reviewer workflow · src/index.ts");
 		expect(lines[0]).not.toContain("grok-parent");
 		expect(lines[0]).not.toContain("/xhigh");
-		// Live children replace the parent's placeholder activity line.
+		expect(lines[1]).toContain("! review ─ ● fix 1/2 ─ ○ re-review 1/2 ─ ○ docs");
+		// The timeline replaces the parent's generic workflow placeholder.
 		expect(lines.join("\n")).not.toContain("auto-fix chain running");
-		expect(lines[1]).toContain("├ ● worker · fix round 1 · src/index.ts · gpt-worker/max");
-		expect(lines[2]).toBe("      edit src/index.ts");
-		expect(lines[3]).toContain("└ ○ reviewer · re-review round 1");
-		expect(lines[3]).toContain("claude-reviewer/high");
+		expect(lines[2]).toContain("├ ● worker · fix 1/2 · src/index.ts · gpt-worker/max");
+		expect(lines[3]).toBe("      edit src/index.ts");
+		expect(lines[4]).toContain("└ ○ reviewer · re-review 1/2");
+		expect(lines[4]).toContain("claude-reviewer/high");
 		expect(lines.join("\n")).not.toMatch(/#\d+/);
+	});
+
+	it("removes conditionally skipped docs and distinguishes process failure from review changes", () => {
+		const store = new MonitorStore();
+		const parent = store.addRun("worker", "Implement src/cache.ts");
+		store.setStatus(parent, "running");
+		store.setManagedWorkflow(parent, true);
+		store.setWorkflowStages(parent, [
+			{ agent: "worker", relation: "implement", status: "done" },
+			{ agent: "reviewer", relation: "review", status: "failed" },
+		]);
+		store.setActivity(parent, "managed workflow running");
+
+		const lines = formatActiveRunLines(store.getRuns(), theme, 100);
+		expect(lines).toHaveLength(2);
+		expect(lines[1]).toContain("✓ implement ─ ✗ review");
+		expect(lines.join("\n")).not.toContain("docs");
+		expect(lines.join("\n")).not.toContain("managed workflow running");
+	});
+
+	it("keeps the active stage and workflow elapsed visible on narrow layouts", () => {
+		const store = new MonitorStore();
+		const parent = store.addRun("worker", "Implement src/cache.ts");
+		store.setStatus(parent, "running");
+		store.setManagedWorkflow(parent, true);
+		store.setWorkflowStages(parent, [
+			{ agent: "worker", relation: "implement", status: "done" },
+			{ agent: "reviewer", relation: "review", status: "changes" },
+			{ agent: "worker", relation: "fix 2/2", status: "active" },
+			{ agent: "reviewer", relation: "re-review 2/2", status: "pending" },
+		]);
+		store.findRun(parent)!.startedAt = 1_000;
+		store.findRun(parent)!.activeSince = 1_000;
+
+		const lines = formatActiveRunLines(store.getRuns(), theme, 34, 62_000);
+		expect(lines).toHaveLength(2);
+		for (const line of lines) expect(visibleWidth(line)).toBeLessThanOrEqual(34);
+		expect(lines[0]).toContain("1m01s");
+		expect(lines[1]).toContain("● fix 2/2");
 	});
 
 	it("renders a chain child at root level with its relation when the parent row is gone", () => {

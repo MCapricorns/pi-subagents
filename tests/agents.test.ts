@@ -54,6 +54,7 @@ describe("shipped specialist agents", () => {
 		expect(cleaner?.systemPrompt).toContain("Never inherit deletion proof from an `explorer` report");
 		expect(cleaner?.systemPrompt).not.toContain("Audit mode");
 		expect(cleaner?.systemPrompt).not.toContain("Apply mode");
+		expect(cleaner?.systemPrompt).toContain("directly affected by the cleanup");
 		expect(cleaner?.systemPrompt).toContain("Never commit, push, publish, tag, release, or bump");
 	});
 
@@ -61,6 +62,8 @@ describe("shipped specialist agents", () => {
 		const worker = loadBuiltinAgents().find((agent) => agent.name === "worker");
 		expect(worker?.systemPrompt).toContain("Never commit, push, publish, tag, release, or bump");
 		expect(worker?.systemPrompt).toContain("parent workflow owns the independent review gate");
+		expect(worker?.systemPrompt).toContain("directly affected by your change");
+		expect(worker?.systemPrompt).toContain("conditional final documentation sync");
 	});
 
 	it("ships documenter as a low-cost write-capable two-mode documentation specialist", () => {
@@ -73,10 +76,13 @@ describe("shipped specialist agents", () => {
 		expect(documenter?.tools).toEqual(["read", "grep", "find", "ls", "bash", "edit", "write"]);
 		expect(documenter?.description).toContain("two modes");
 		expect(documenter?.systemPrompt).toContain("Pre-commit diff sync");
-		expect(documenter?.systemPrompt).toContain("Whole-codebase maintenance");
+		expect(documenter?.systemPrompt).toContain("Standalone documentation maintenance");
 		expect(documenter?.systemPrompt).toContain("never change runtime behavior");
 		expect(documenter?.systemPrompt).toContain("Never commit, push, publish, tag, or release");
 		expect(documenter?.systemPrompt).toContain("zero edits is valid");
+		expect(documenter?.systemPrompt).toContain("DOCUMENTATION: NEEDED");
+		expect(documenter?.systemPrompt).toContain("top-level documenter delivers directly");
+		expect(documenter?.systemPrompt).toContain("no fresh reviewer runs");
 	});
 
 	it("keeps reviewer advisory reports separate from auto-fix gate verdicts", () => {
@@ -85,8 +91,11 @@ describe("shipped specialist agents", () => {
 		expect(reviewer?.systemPrompt).toContain("Advisory review");
 		expect(reviewer?.systemPrompt).toContain("do **not** emit `VERDICT: REVIEW_*`");
 		expect(reviewer?.systemPrompt).toContain("Gate review");
-		expect(reviewer?.systemPrompt).toContain("In a gate review, use `VERDICT: REVIEW_FAIL`");
+		expect(reviewer?.systemPrompt).toContain("Use `VERDICT: REVIEW_FAIL` when any gate finding remains");
 		expect(reviewer?.systemPrompt).toContain("A `REQUEST_CHANGES` gate verdict starts");
+		expect(reviewer?.systemPrompt).toContain("DOCUMENTATION: NEEDED");
+		expect(reviewer?.systemPrompt).toContain("DOCUMENTATION: CLEAN");
+		expect(reviewer?.systemPrompt).toContain("missing marker conservatively as NEEDED");
 		expect(reviewer?.systemPrompt).not.toMatch(/\bBash\b/u);
 	});
 

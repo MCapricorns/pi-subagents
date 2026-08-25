@@ -80,9 +80,19 @@ describe("MonitorStore", () => {
 		expect(run.managedWorkflow).toBe(true);
 		expect(run.agent).toBe("worker");
 		expect(store.summarize(run)).toBe("worker workflow");
+		const stages = [
+			{ agent: "worker", relation: "implement", status: "done" as const },
+			{ agent: "reviewer", relation: "review", status: "active" as const },
+		];
+		store.setWorkflowStages(id, stages);
+		expect(run.workflowStages).toEqual(stages);
+		stages[0].relation = "mutated";
+		expect(run.workflowStages).not.toBe(stages);
+		expect(run.workflowStages?.[0].relation).toBe("implement");
 
 		store.restartRun(id, "reviewer", "Resume review", "xai/grok-reviewer", "xhigh");
 		expect(run.managedWorkflow).toBeUndefined();
+		expect(run.workflowStages).toBeUndefined();
 		expect(store.summarize(run)).toContain("reviewer · xai/grok-reviewer · thinking xhigh");
 	});
 

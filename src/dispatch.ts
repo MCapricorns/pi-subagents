@@ -1,8 +1,9 @@
 /**
  * The `subagent` tool: dispatches explorer/worker/cleaner/documenter/reviewer agents as isolated pi
  * child processes, single or parallel. Owns the public dispatch contract,
- * per-run status tracking, managed writer → reviewer → documenter workflows,
- * bounded worker/reviewer fix rounds, and internal step launching. Stable
+ * per-run status tracking, managed worker/cleaner → reviewer workflows with a
+ * conditional documenter, bounded worker/reviewer fix rounds, and internal
+ * step launching. Stable
  * thread generations, final integration, and completion ownership live in
  * thread-lifecycle.ts.
  */
@@ -21,6 +22,7 @@ import {
 	buildFinalReviewBrief,
 	buildFixTaskBrief,
 	buildReReviewBrief,
+	documentationDisposition,
 	type ChainStep,
 	type ManagedWorkflowOutcome,
 } from "./fixloop.ts";
@@ -30,6 +32,8 @@ import {
 	monitor,
 	statusIcon,
 	type RunChainMeta,
+	type WorkflowStage,
+	type WorkflowStageStatus,
 } from "./monitor.ts";
 import type { SubagentRuntime } from "./runtime.ts";
 import {
@@ -83,6 +87,14 @@ const SubagentParams = Type.Object({
 export function defaultIsolationMode(mode: "single" | "parallel", agentName: string, requested?: IsolationMode): IsolationMode {
 	if (requested) return requested;
 	return mode === "parallel" && agentName === "worker" ? "worktree" : "shared";
+}
+
+function workflowStageStatus(result: SingleResult): WorkflowStageStatus {
+	if (isFailedResult(result)) return "failed";
+	if (result.agent !== "reviewer") return "done";
+	const verdict = reviewVerdict(getResultOutput(result));
+	if (verdict === "fail") return "changes";
+	return verdict === "pass" ? "done" : "failed";
 }
 
 const managedRepositoryRootTails = new Map<string, Promise<void>>();
@@ -167,15 +179,15 @@ export function registerSubagentTool(pi: ExtensionAPI, runtime: SubagentRuntime)
 		name: "subagent",
 		label: "Subagent",
 		description: [
-			"Dispatch enabled specialized agents as isolated leaf Pi child processes, singly or in parallel.",
-			"Built-ins: explorer for broad read-only reconnaissance; worker for implementation; cleaner for explicitly authorized cleanup, removal, simplification, and duplicate-code consolidation; documenter for pre-commit diff sync or explicitly requested whole-codebase comment/README/docs maintenance; reviewer for generic read-only assessments and final gates.",
-			"Work starts in the background; successful top-level writers automatically continue through enabled documenter/reviewer stages and return one final completion. Results resume the main agent and are already shown to the user, so do not poll, duplicate downstream roles, or restate them. Give each child a self-contained brief because it has no conversation memory.",
+			"Dispatch enabled specialized agents as isolated leaf Pi child processes, singly or in parallel; keep small known-target work in the main thread with direct tools.",
+			"Built-ins: explorer for broad read-only reconnaissance (a retrieval index, never a gate); worker for implementation; cleaner as a separate explicitly authorized cleanup/removal/simplification/deduplication entry; documenter for explicit docs/comments work or conditional final diff sync; reviewer for generic read-only assessments and independent code gates.",
+			"Work starts in the background. Successful worker/cleaner runs keep one enabled reviewer gate and bounded fix loop; documenter runs afterward only when REVIEW_PASS reports DOCUMENTATION: NEEDED or omits the marker, with a reviewer-disabled fallback. A top-level documenter delivers directly. Results resume the main agent and are already shown, so do not poll, duplicate downstream roles, or restate them.",
 			"Single tasks default to shared; parallel workers default to detached Git worktrees. Only write-capable agents can use worktree isolation, and failures never fall back silently to shared.",
 			"A selected-model or provider failure continues the retained session on the current main model; ordinary tool/task failures do not.",
 			"Use subagent_control to steer/retarget an active top-level child, park/stop a managed downstream stage, or resume/fork retained context by stable run id.",
 		].join(" "),
 		promptSnippet:
-			"Dispatch isolated background agents: explorer (recon), worker (implementation), cleaner (authorized cleanup/deduplication), documenter (docs sync), reviewer (read-only assessment/gate); enabled post-writer stages run automatically, results resume automatically, and the workflow delivers once. Use direct tools for trivial work.",
+			"Dispatch isolated background agents for broad recon, self-contained implementation, authorized cleanup, explicit docs, or independent review; keep small known-target work on direct tools. Worker/cleaner gates and only needed/conservative docs sync run automatically, results resume automatically, and each workflow delivers once.",
 		parameters: SubagentParams,
 
 		async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
@@ -387,27 +399,90 @@ export function registerSubagentTool(pi: ExtensionAPI, runtime: SubagentRuntime)
 				const enabled = (name: string): boolean =>
 					request.agents.some((candidate) => candidate.name === name);
 				const canContinue = (): boolean => runtime.sessionActive && !request.signal.aborted;
+
+				// Keep a live parent-owned projection because settled internal rows are
+				// intentionally removed. Only real/currently planned stages enter it.
+				const initialStageRelation = initialStepResult.agent === "worker"
+					? "implement"
+					: initialStepResult.agent === "cleaner"
+						? "cleanup"
+						: "review";
+				const workflowStages: WorkflowStage[] = [{
+					agent: initialStepResult.agent,
+					relation: initialStageRelation,
+					status: workflowStageStatus(initialStepResult),
+				}];
+				let reviewStage: WorkflowStage | undefined;
+				if (request.plan.kind === "post-writer" && enabled("reviewer")) {
+					reviewStage = { agent: "reviewer", relation: "review", status: "pending" };
+					workflowStages.push(reviewStage);
+				}
+				let documentationStage: WorkflowStage | undefined;
+				if (enabled("documenter")) {
+					documentationStage = { agent: "documenter", relation: "docs", status: "pending" };
+					workflowStages.push(documentationStage);
+				}
+				const publishWorkflowStages = (): void => {
+					monitor.setWorkflowStages(request.parentRunId, workflowStages);
+				};
+				const insertBeforeDocumentation = (stage: WorkflowStage): void => {
+					const documentationIndex = documentationStage
+						? workflowStages.indexOf(documentationStage)
+						: -1;
+					if (documentationIndex === -1) workflowStages.push(stage);
+					else workflowStages.splice(documentationIndex, 0, stage);
+				};
+				const removeDocumentationStage = (): void => {
+					if (!documentationStage) return;
+					const index = workflowStages.indexOf(documentationStage);
+					if (index !== -1) workflowStages.splice(index, 1);
+					documentationStage = undefined;
+					publishWorkflowStages();
+				};
+				publishWorkflowStages();
+
 				const launchStep = async (
 					agentName: string,
 					task: string,
 					relation: string,
+					projection: {
+						stage?: WorkflowStage;
+						timelineRelation?: string;
+						childRelation?: string;
+					} = {},
 				): Promise<SingleResult> => {
 					if (!enabled(agentName)) {
 						throw new Error(`Managed workflow cannot launch disabled or missing agent "${agentName}".`);
 					}
-					const step = await launchInWorkflow(request, agentName, task, {
-						groupId: request.groupId,
-						relationLabel: relation,
-						parentRunId: request.parentRunId,
-					});
-					request.rememberLatest(step.result);
-					steps.push({ ...step, relation });
-					return step.result;
+					const stage: WorkflowStage = projection.stage ?? {
+						agent: agentName,
+						relation: projection.timelineRelation ?? relation,
+						status: "pending",
+					};
+					if (!projection.stage) insertBeforeDocumentation(stage);
+					stage.status = "active";
+					publishWorkflowStages();
+					try {
+						const step = await launchInWorkflow(request, agentName, task, {
+							groupId: request.groupId,
+							relationLabel: projection.childRelation ?? relation,
+							parentRunId: request.parentRunId,
+						});
+						stage.status = workflowStageStatus(step.result);
+						publishWorkflowStages();
+						request.rememberLatest(step.result);
+						steps.push({ ...step, relation });
+						return step.result;
+					} catch (error) {
+						stage.status = "failed";
+						publishWorkflowStages();
+						throw error;
+					}
 				};
 
-				/** Bounded worker → reviewer fix rounds. Documentation sync deliberately
-				 * stays out of the rounds: code fixes would invalidate it, and one final
-				 * documenter covers the settled diff once. */
+				/** Bounded worker → reviewer fix rounds. A conditional documentation sync
+				 * deliberately stays out of the rounds: code fixes would invalidate it,
+				 * and the terminal review classifies whether the settled diff needs one. */
 				const runFixRounds = async (
 					triggeringReviewer: SingleResult,
 				): Promise<{ lastReview?: SingleResult; lastWorker?: SingleResult }> => {
@@ -415,20 +490,24 @@ export function registerSubagentTool(pi: ExtensionAPI, runtime: SubagentRuntime)
 					const outcome: { lastReview?: SingleResult; lastWorker?: SingleResult } = {};
 					for (let round = 1; round <= request.config.maxFixRounds; round++) {
 						if (!canContinue()) break;
+						const fixRelation = `fix ${round}/${request.config.maxFixRounds}`;
 						const workerResult = await launchStep(
 							"worker",
 							buildFixTaskBrief(lastReviewer, round, request.config.maxFixRounds),
 							`fix round ${round}`,
+							{ timelineRelation: fixRelation, childRelation: fixRelation },
 						);
 						if (isFailedResult(workerResult) || !canContinue()) break;
 						outcome.lastWorker = workerResult;
 
+						const reReviewRelation = `re-review ${round}/${request.config.maxFixRounds}`;
 						const reviewResult = await launchStep(
 							"reviewer",
 							buildReReviewBrief(lastReviewer, round, workerResult, {
 								documenterPending: enabled("documenter"),
 							}),
 							`re-review round ${round}`,
+							{ timelineRelation: reReviewRelation, childRelation: reReviewRelation },
 						);
 						if (isFailedResult(reviewResult) || !canContinue()) break;
 						outcome.lastReview = reviewResult;
@@ -441,24 +520,40 @@ export function registerSubagentTool(pi: ExtensionAPI, runtime: SubagentRuntime)
 					return outcome;
 				};
 
-				/** One final documentation sync after the gate settles. It is skipped
-				 * when documenter is disabled, the last writer already was a
-				 * documenter with no code fixes after it, or the chain ended on a
-				 * failing/crashed gate (docs for rejected code would be rework). */
+				/** Run the low-cost final documentation sync only when the terminal REVIEW_PASS
+				 * reports drift or omits the new marker. A failed process, missing verdict, or
+				 * REVIEW_FAIL never writes docs. With no reviewer, retain the conservative
+				 * writer → documenter fallback. */
 				const runFinalDocumentation = async (
 					lastWriterResult: SingleResult | undefined,
 					finalReviewResult: SingleResult | undefined,
 				): Promise<void> => {
 					if (!canContinue() || !enabled("documenter")) return;
-					if (lastWriterResult?.agent === "documenter") return;
-					if (finalReviewResult) {
-						if (isFailedResult(finalReviewResult)) return;
-						if (reviewVerdict(getResultOutput(finalReviewResult)) === "fail") return;
+					if (lastWriterResult?.agent === "documenter") {
+						removeDocumentationStage();
+						return;
 					}
+					if (finalReviewResult) {
+						if (isFailedResult(finalReviewResult)) {
+							removeDocumentationStage();
+							return;
+						}
+						const reviewOutput = getResultOutput(finalReviewResult);
+						if (
+							reviewVerdict(reviewOutput) !== "pass" ||
+							documentationDisposition(reviewOutput) === "clean"
+						) {
+							removeDocumentationStage();
+							return;
+						}
+					}
+					documentationStage ??= { agent: "documenter", relation: "docs", status: "pending" };
+					if (!workflowStages.includes(documentationStage)) workflowStages.push(documentationStage);
 					await launchStep(
 						"documenter",
 						buildFinalDocumenterBrief(lastWriterResult, finalReviewResult),
 						"final documentation sync",
+						{ stage: documentationStage },
 					);
 				};
 
@@ -471,30 +566,30 @@ export function registerSubagentTool(pi: ExtensionAPI, runtime: SubagentRuntime)
 						const fixOutcome = await runFixRounds(initialStepResult);
 						await runFinalDocumentation(fixOutcome.lastWorker, fixOutcome.lastReview ?? initialStepResult);
 					} else if (request.plan.kind === "review-pass-sync") {
-						// The direct passing review already gated the pending code; sync
-						// docs once and deliver without a second gate.
+						// The direct passing review already gated the pending code. Its
+						// disposition requested (or conservatively defaulted to) one docs sync.
 						await runFinalDocumentation(undefined, initialStepResult);
 					} else if (enabled("reviewer")) {
 						const gateReview = await launchStep(
 							"reviewer",
 							buildFinalReviewBrief(initialStepResult, { documenterPending: enabled("documenter") }),
 							"final review",
+							{ stage: reviewStage },
 						);
-						if (!isFailedResult(gateReview)) {
-							let fixOutcome: Awaited<ReturnType<typeof runFixRounds>> = {};
-							if (
-								canContinue() &&
-								reviewVerdict(getResultOutput(gateReview)) === "fail" &&
-								enabled("worker") &&
-								request.config.maxFixRounds > 0
-							) {
-								fixOutcome = await runFixRounds(gateReview);
-							}
-							await runFinalDocumentation(
-								fixOutcome.lastWorker ?? initialStepResult,
-								fixOutcome.lastReview ?? gateReview,
-							);
+						let fixOutcome: Awaited<ReturnType<typeof runFixRounds>> = {};
+						if (
+							!isFailedResult(gateReview) &&
+							canContinue() &&
+							reviewVerdict(getResultOutput(gateReview)) === "fail" &&
+							enabled("worker") &&
+							request.config.maxFixRounds > 0
+						) {
+							fixOutcome = await runFixRounds(gateReview);
 						}
+						await runFinalDocumentation(
+							fixOutcome.lastWorker ?? initialStepResult,
+							fixOutcome.lastReview ?? gateReview,
+						);
 					} else {
 						// No gate configured: the documenter is the only downstream stage.
 						await runFinalDocumentation(initialStepResult, undefined);

@@ -22,15 +22,15 @@ losing retained context.
 ```text
 You
  └─ pi main agent
-     ├─ explorer ─── maps the codebase
-     ├─ worker ───── implements ─┬─▶ reviewer ─▶ documenter
-     ├─ cleaner ──── cleans up ──┘       (enabled roles only)
-     ├─ documenter ─ synchronizes docs ─▶ reviewer
+     ├─ explorer ─── retrieval index only (never an automatic gate)
+     ├─ worker ───── implements ─┬─▶ reviewer ─┬─ docs CLEAN → deliver
+     ├─ cleaner ──── cleans up ──┘             └─ NEEDED/missing → documenter
+     ├─ documenter ─ explicit docs/comments task → deliver
      └─ reviewer ─── advisory report (no VERDICT), or managed gate
-          ├─ REVIEW_PASS + documenter → final documentation sync
-          └─ REVIEW_FAIL → worker → reviewer (fix rounds) → final docs
+          └─ REVIEW_FAIL → worker → reviewer (bounded fix rounds)
 
-The stable parent run returns one final result when the complete workflow settles.
+Worker and cleaner update existing docs/comments they directly affect. The stable
+parent returns one final result when its complete managed workflow settles.
 ```
 
 Install it once and keep using pi normally. The extension teaches the main model
@@ -48,13 +48,13 @@ more of it.
 - **Parallel edits stay safe.** Parallel workers use temporary, isolated Git
   checkouts (worktrees) by default, then apply their changes back without
   touching your index.
-- **Documentation stops drifting.** Enabled `documenter` runs automatically
-  once after the review gate settles — after successful workers/cleaners or
-  fix rounds, never per fix round. It can also run an explicitly requested
-  whole-codebase maintenance pass.
+- **Documentation stops drifting without a mandatory extra pass.** Workers and
+  cleaners synchronize directly affected existing docs. After `REVIEW_PASS`,
+  enabled `documenter` runs only for `DOCUMENTATION: NEEDED` (or conservatively
+  for a missing marker); with reviewer disabled, it remains the fallback.
 - **Review can close the loop.** A failed gate can automatically dispatch a
   worker, request another independent review, and repeat up to a hard limit;
-  one final documentation sync follows the settled chain.
+  documentation is considered only after the terminal `REVIEW_PASS`.
 - **Agents remain controllable.** Every run has a stable id and retained session,
   so you can change direction or continue later without starting from zero.
 - **Failures are handled, not hidden.** Model failures can hand the same session to
@@ -68,7 +68,7 @@ more of it.
 | One generic child role | Five focused engineering roles |
 | A one-shot prompt | Retained, steerable, resumable, forkable threads |
 | Concurrent writers in one checkout | Git worktree isolation for parallel workers |
-| A review report you must act on manually | Automatic writer → reviewer → documenter delivery and bounded fix rounds |
+| A review report you must act on manually | Independent worker/cleaner gate, bounded fix rounds, and conditional docs sync |
 | Manual polling or follow-up | Automatic result delivery that resumes the main agent |
 | A hard failure when the selected model is unavailable | Direct handoff to the current main model |
 | Synchronized retries during startup contention | Extended jittered backoff that reduces retry collisions |
@@ -109,58 +109,31 @@ Compare screenshots/settings.png with design.png and report every visual mismatc
 The main agent decides when delegation is useful. You can also call the tools
 explicitly when you want exact control.
 
-## What changed in 4.1.4
+## Managed workflow behavior
 
-### Documentation sync moved after the review gate
+The runtime deliberately keeps delegation conservative:
 
-`documenter` now runs once at the end of a managed chain instead of before the
-reviewer and once per fix round:
+- Small work with a known target stays in the main thread on direct tools.
+  `explorer` is worthwhile for broad reconnaissance only; it returns a retrieval
+  index, never an automatic gate, and downstream roles re-read load-bearing code.
+- `worker` and `cleaner` remain distinct write-capable entry roles. Each updates
+  existing README/docs/examples/comments directly affected by its change. After
+  success, one enabled independent `reviewer` gate runs, with the existing bounded
+  worker ↔ reviewer fix loop for `REVIEW_FAIL`.
+- When `documenter` is enabled, every managed reviewer gate is asked for a
+  standalone `DOCUMENTATION: CLEAN` or `DOCUMENTATION: NEEDED` line. Only
+  `REVIEW_PASS` can authorize the final sync: NEEDED includes
+  `## Documentation notes` and runs it, CLEAN removes the pending docs stage,
+  and a missing marker on that passing gate conservatively runs it.
+- A process failure, missing verdict, or terminal `REVIEW_FAIL` never starts
+  documentation writing. With reviewer disabled, the writer → documenter
+  fallback remains. Documentation drift is non-gating only while documenter is
+  available; otherwise it is an ordinary review finding.
+- A top-level `documenter` is already an explicit docs/comments writing task. It
+  still uses the shared writer lane and may use worktree isolation, but delivers
+  directly after success instead of starting another reviewer.
 
-```text
-before: worker → documenter → reviewer → (worker → documenter → reviewer) × N
-after:  worker → reviewer → (worker → reviewer) × N → documenter
-```
-
-Code fixes no longer invalidate a docs pass written moments earlier, fix rounds
-stop paying for documenter runs and re-reviewing their churn, and a direct
-passing gate gets one final documentation sync instead of a second full review.
-Gate reviewers record documentation drift as non-gating `## Documentation notes`
-that the final documenter applies; when `documenter` is disabled, drift stays a
-normal gate finding. The sync is skipped when a chain ends on a failing gate.
-
-## What changed in 4.1.2
-
-### Documentation sync as a real workflow stage
-
-The new `documenter` is a write-capable, explorer-class role with two modes:
-
-1. **Pre-commit diff sync** — after the last code edit and before the final
-   reviewer, it compares the actual diff with comments, README/docs, examples,
-   commands, config, defaults, and lifecycle descriptions.
-2. **Whole-codebase maintenance** — when explicitly requested, it scans an
-   existing project for stale comments and documentation and applies every safe,
-   verified correction in scope.
-
-It never changes runtime behavior, commits, pushes, publishes, or bumps versions.
-When enabled, runtime now treats it as a managed stage: successful top-level
-`worker`/`cleaner` runs continue through `documenter → reviewer`, a successful
-whole-codebase `documenter` continues through reviewer, and auto-fix rounds use
-`worker → documenter → reviewer`. Existing non-empty configs receive `documenter`
-once and inherit the configured `explorer` model and thinking level; fresh
-installs leave it as an explicit setup choice.
-
-### Safer startup contention recovery
-
-Startup contention is much harder to exhaust. A child that exits or fails its RPC
-readiness handshake before the initial prompt is dispatched is retried through a
-longer backoff window. Each default delay also gets additive jitter, reducing the
-chance that several children retry in the same lockstep waves. The base window
-covers stale startup locks and leaves headroom beyond the default four-way fan-out.
-
-Only a failure known to precede prompt dispatch qualifies. Once the parent sends a
-prompt command, pi-subagents will not replay it—even if the ACK is lost or an idle
-watchdog wins the race—because Pi may already have started the model or tools.
-This recovery therefore cannot repeat model calls or edits.
+No workflow decision depends on diff line count, file count, or a size heuristic.
 
 ## Meet the team
 
@@ -169,7 +142,7 @@ This recovery therefore cannot repeat model calls or edits.
 | `explorer` | Read-only | Broad codebase search, unfamiliar-area mapping, symbol and dependency tracing, and multi-file reconnaissance. |
 | `worker` | Full | A self-contained implementation, bug fix, refactor, or test task carried through verification. |
 | `cleaner` | Full | Explicitly authorized cleanup, removal, simplification, and duplicate-code consolidation. Dispatch authorizes every safe in-scope cut; it must prove each one. |
-| `documenter` | Docs/comments | Pre-commit diff sync or explicitly requested whole-codebase documentation maintenance. Uses an explorer-class model, may make zero edits, and never changes runtime behavior. |
+| `documenter` | Docs/comments | Conditional final diff sync or an explicit standalone documentation/comment task (including explicitly broad maintenance). Uses an explorer-class model, may make zero edits, and never changes runtime behavior. |
 | `reviewer` | Read-only | Audits, code-health checks, plans, PR or issue validation, documentation-drift checks, and fresh pre-commit gates. |
 
 Children have no memory of the parent conversation. A good manual brief includes
@@ -245,25 +218,30 @@ subagent({
 });
 ```
 
-A gate reviewer ends with `REVIEW_PASS` or `REVIEW_FAIL`. A direct pass is
-final for the code: runtime runs the final documentation sync once (when
-`documenter` is enabled) and delivers. A failure uses the bounded loop:
+A gate reviewer ends with `REVIEW_PASS` or `REVIEW_FAIL` and independently
+emits `DOCUMENTATION: CLEAN` or `DOCUMENTATION: NEEDED` when documenter is
+enabled. Only `REVIEW_PASS` can continue to documentation: CLEAN delivers
+immediately, while NEEDED (or a missing marker on that passing gate) runs one
+final docs sync. A failure uses the bounded loop:
 
 ```text
-reviewer → worker fixes every open finding → reviewer checks again → … → final documentation sync
+reviewer → worker fixes every open finding → reviewer checks again → …
+                                          REVIEW_PASS ─┬─ CLEAN → deliver
+                                                       └─ NEEDED/missing → documenter
 ```
 
 Each step gets a fresh model context. The chain shares the same code state and
 passes every full reviewer and worker report forward; it does not reuse one
 context window. Internal children bypass top-level lifecycle policy, so they
 cannot recursively start another chain. Gate reviewers keep documentation drift
-out of the verdict while `documenter` is enabled by recording it as
-`## Documentation notes` for the final documenter.
+out of the code verdict while `documenter` is enabled by recording it under
+`## Documentation notes`; with documenter disabled, drift is a normal finding.
 
-`maxFixRounds` limits worker fix attempts only. The post-writer review gate and
-the final documentation sync still run when it is `0`. Generic audits and
-read-only reviews are advisory: they omit `VERDICT`, remain read-only, and
-never trigger edits.
+`maxFixRounds` limits worker fix attempts only. The post-writer review gate still
+runs when it is `0`, and only a terminal `REVIEW_PASS` can decide whether docs
+sync is needed. Generic audits and read-only reviews are advisory: they omit
+`VERDICT` and documentation machine markers, remain read-only, and never trigger
+edits.
 
 ### Clean up without guessing
 
@@ -281,7 +259,7 @@ axes genuinely differ, avoiding a generic abstraction that is worse than the
 duplication.
 
 ```text
-explicit cleanup request → cleaner applies proven cuts → reviewer gates the diff → documenter syncs docs
+explicit cleanup request → cleaner applies cuts + syncs affected docs → reviewer gate → conditional documenter
 read-only cleanup audit   → reviewer reports candidates only
 ```
 
@@ -292,13 +270,16 @@ changes, and asking for cleanup does not reward speculative deletion.
 
 `documenter` has two deliberate launch paths.
 
-**For a pending worker or cleaner change**, enable the role. Runtime schedules
-one final sync automatically against the actual diff after the review gate
-settles; do not dispatch a duplicate manual sync. If reviewer is disabled,
-documenter becomes the final managed stage directly after the writer. If
-documenter is disabled, reviewer follows the writer directly.
+**For a pending worker or cleaner change**, those writers first synchronize
+existing docs/comments directly affected by their edits. When the role is
+enabled, runtime schedules a final sync only after terminal `REVIEW_PASS` when
+the reviewer emits `DOCUMENTATION: NEEDED` or omits the marker; do not dispatch
+a duplicate. If reviewer is disabled, documenter remains the conservative final
+fallback. If documenter is disabled, documentation drift is an ordinary reviewer
+finding.
 
-**For an existing project**, explicitly authorize a broad maintenance pass:
+**For standalone documentation work**, explicitly authorize the desired scope
+(a whole-codebase maintenance pass must be explicit):
 
 ```ts
 subagent({
@@ -307,13 +288,10 @@ subagent({
 });
 ```
 
-A successful explicit whole-codebase documenter also continues automatically to
-reviewer when enabled. A generic or read-only documentation audit still belongs
-to `reviewer`. `documenter` is the last writer, never the approver:
-
-```text
-worker / cleaner / documenter / auto-fix worker → enabled downstream roles → one final delivery
-```
+A successful top-level documenter delivers directly without another reviewer.
+It still occupies the shared writer lane and can use worktree isolation. A
+generic or read-only documentation audit belongs to `reviewer`; `documenter` is
+a docs/comments writer, never the code approver.
 
 ## Safe parallel editing
 
@@ -332,11 +310,12 @@ filesystem isolation:
   not need a writable checkout.
 
 Worktree mode requires a Git repository with a committed `HEAD`. For an isolated
-writer, automatic reviewer/documenter children run inside that same worktree.
-Those isolated stages can still run in parallel; writer, fix, and documentation
-changes are integrated only after the final managed stage settles. Tracked,
-deleted, untracked, and binary changes are then carried back to the original
-checkout without staging or modifying the parent index.
+worker/cleaner, its automatic reviewer and any needed documenter run inside that
+same worktree. A top-level isolated documenter writes there and then delivers
+directly. Isolated workflows can still run in parallel; writer, fix, and any
+documentation changes are integrated only after the final managed stage
+settles. Tracked, deleted, untracked, and binary changes are then carried back
+to the original checkout without staging or modifying the parent index.
 
 Repository-lane discovery uses the Git top-level even in an empty repository, so
 root and nested paths share one lane before the first commit. Every shared
@@ -361,10 +340,11 @@ isolated checkpoint is available after that checkpoint has settled and integrate
 
 ## Follow, redirect, or stop a run
 
-Dispatch confirmations and completion messages include a stable `#id`. That
-parent id represents the whole managed workflow; each internal documenter,
-reviewer, and fix step gets a separate queryable id in the final summary. No
-internal completion wakes the main agent.
+Dispatch confirmations and completion messages include a stable `#id`. For a
+managed worker/cleaner or fix chain, that parent id represents the whole workflow;
+each internal reviewer, fix, and conditionally launched documenter gets a
+separate queryable id in the final summary. No internal completion wakes the
+main agent.
 
 | Tool | What it does |
 | --- | --- |
@@ -402,26 +382,34 @@ isolated apply is queued behind shared work.
 
 ## Results and live status
 
-The active TUI widget shows queued and running work as a compact tree:
+The active TUI widget shows standalone runs normally and projects each managed
+workflow as a compact timeline plus its current internal child:
 
 ```text
-● reviewer workflow · review diff of src/cache.ts · 42s
-  ├ ● worker · fix round 1 · src/cache.ts · claude-sonnet-4-5/high · 10s
-  │    grep cacheKey
-  └ ○ documenter · final documentation sync · claude-haiku-4-5/low · 3s
+◆ worker workflow · src/cache.ts                         · 42s
+  ✓ implement ─ ● review ─ ○ docs
+  └ ● reviewer · final review · claude-sonnet-4-5/high · 10s
+      git diff
 ```
 
-A managed root keeps its original top-level role and workflow-wide elapsed
-time, but deliberately omits model/thinking because several model stages own
-that row over its lifetime. The active nested row shows the current stage's
-actual role, selected/fallback model, thinking level, stage elapsed time, and
-activity. Per-stage usage stays attached to that stage; only the final summary
-is labeled and calculated as an aggregate.
+Success is green, the active stage uses the accent color and bold text, pending
+stages are dim, `REQUEST_CHANGES` is warning-colored, and process failure is an
+error. Fix paths show their budget (`fix 1/2`, `re-review 1/2`). The timeline
+contains only stages that ran or are currently planned; `DOCUMENTATION: CLEAN`
+removes pending docs instead of pretending that stage ran.
 
-Completed internal rows disappear from the widget; a parked parent remains
-queryable. Final messages contain one managed-workflow summary with aggregate
-token/cost totals and every internal id. Built-in roles author their own
-result-only handoff—outcome, relevant paths, verification, and unresolved
+A managed root keeps its original top-level role and workflow-wide elapsed time,
+but omits model/thinking because several model stages own it. The active nested
+row shows the current role, relation, selected/fallback model, thinking, stage
+elapsed, and activity. Completed internal rows can disappear while their stage
+remains visible on the parent until the workflow settles. Standalone,
+resume/retarget, and fork labels retain their existing semantics; narrow layouts
+prioritize the current stage and elapsed tail. Adjacent workflows add no blank
+separator rows.
+
+A parked parent remains queryable. Final messages contain one managed-workflow
+summary with aggregate token/cost totals and every internal id. Built-in roles
+author their own result-only handoff—outcome, relevant paths, verification, and unresolved
 blockers—without a second summarization layer that could distort the result.
 They omit task/process narration and recovered transient tool failures. The
 80-line delivery cap remains a safety limit; long output is written unchanged to
@@ -529,7 +517,7 @@ Configuration is stored at `~/.pi/agent/pi-subagents.json` and follows
 | `proactiveInjection` | Teach the main model when and how to delegate. Default `true`. |
 | `agentScope` | Discover `user`, `project`, or `both` agent directories. Default `user`. |
 | `maxConcurrency` | Running process limit and maximum tasks in one parallel call, from `1` to `16`. Default `4`. |
-| `maxFixRounds` | Maximum worker fixes after `REVIEW_FAIL`; each fix is re-reviewed by a reviewer, and one final documentation sync runs after the chain settles. `0` disables fixes but not the post-writer review gate or final docs. Default `2`. |
+| `maxFixRounds` | Maximum worker fixes after `REVIEW_FAIL`; each fix is re-reviewed. After terminal `REVIEW_PASS`, docs sync runs only for `DOCUMENTATION: NEEDED` or a missing marker. `0` disables fixes but not the post-writer gate or conditional/reviewer-disabled docs behavior. Default `2`. |
 | `idleTimeoutSec` | Seconds without RPC output before termination. `0` disables the watchdog. Default `90`. |
 
 Invalid values fall back safely. Older configs are normalized automatically. The
