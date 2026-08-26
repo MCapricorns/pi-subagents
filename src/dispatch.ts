@@ -208,7 +208,7 @@ export function registerSubagentTool(pi: ExtensionAPI, runtime: SubagentRuntime)
 				if (!run) return; // already finished — stay idempotent
 				if (opts?.silent || !runtime.sessionActive) return;
 				const icon = status === "done" ? "✓" : "✗";
-				ctx.ui.notify(`${icon} ${monitor.summarize(run)}`, status === "done" ? "info" : "error");
+				ctx.ui.notify(`${icon} #${run.id} ${monitor.summarize(run)}`, status === "done" ? "info" : "error");
 			};
 
 			// Live sub-agent activity → concise one-line status ("thinking",
@@ -315,7 +315,11 @@ export function registerSubagentTool(pi: ExtensionAPI, runtime: SubagentRuntime)
 				const resolveLiveAgentTools = (candidate: AgentConfig): AgentConfig =>
 					resolveAgentTools({ ...candidate, tools: discoveredAgent.tools }, runtime.getActiveTools());
 				const agent = resolveLiveAgentTools(discoveredAgent);
-				const resolvedRoute = resolveDispatchModelRoute(agent, request.config, request.ctx);
+				// Workflow policy (fix-round caps, agents) stays fixed for the chain,
+				// but model/thinking routes are re-read per stage so config edits
+				// apply to stages that have not launched yet.
+				const stageConfig = await loadConfig(runtime.configPath).catch(() => request.config);
+				const resolvedRoute = resolveDispatchModelRoute(agent, stageConfig, request.ctx);
 				const route = request.isolation === "worktree"
 					? { ...resolvedRoute, agent: withWorktreeSystemPrompt(resolvedRoute.agent) }
 					: resolvedRoute;
@@ -323,6 +327,7 @@ export function registerSubagentTool(pi: ExtensionAPI, runtime: SubagentRuntime)
 				const runId = monitor.addRun(agent.name, task, route.agent.model, thinkingLevel, {
 					...meta,
 					isolation: request.isolation,
+					...(request.worktreeId ? { worktreeId: request.worktreeId } : {}),
 				});
 				const onLive = makeLiveHandler(runId);
 				try {
@@ -339,7 +344,7 @@ export function registerSubagentTool(pi: ExtensionAPI, runtime: SubagentRuntime)
 							signal: request.signal,
 							onLive,
 							makeDetails: makeDetails("single", true),
-							idleTimeoutMs: request.config.idleTimeoutSec * 1000,
+							idleTimeoutMs: stageConfig.idleTimeoutSec * 1000,
 						},
 						route.mainFallbackRef,
 					);

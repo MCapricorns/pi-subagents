@@ -788,8 +788,32 @@ export async function runRpcAgentAttempt(options: RunRpcAttemptOptions): Promise
 				if (!closed) await processClosed.promise;
 				return;
 			}
-			const accepted = await abortAcceptedPrompt();
-			if (!accepted && !closed) await processClosed.promise;
+			// Bound the abort settlement exactly like stop: a child that never
+			// settles after abort must not hold the control operation forever.
+			let parkTimer: ReturnType<typeof setTimeout> | undefined;
+			let parkTimedOut = false;
+			const parkDeadline = new Promise<boolean>((resolve) => {
+				parkTimer = setTimeout(() => {
+					parkTimedOut = true;
+					resolve(false);
+				}, RPC_ABORT_SETTLE_TIMEOUT_MS);
+				if (typeof parkTimer.unref === "function") parkTimer.unref();
+			});
+			let accepted: boolean;
+			try {
+				accepted = await Promise.race([abortAcceptedPrompt(), parkDeadline]);
+			} catch {
+				/* a rejected abort still parks; termination below is the bounded fallback */
+				accepted = false;
+			} finally {
+				if (parkTimer) clearTimeout(parkTimer);
+			}
+			if (abortSettlement) {
+				const stable = abortSettlement;
+				abortSettlement = undefined;
+				stable.resolve();
+			}
+			if (!accepted && !parkTimedOut && !closed) await processClosed.promise;
 			if (finished && accepted) throw new Error("Thread exited while parking.");
 			markParked();
 			setAttemptPhase("parked");

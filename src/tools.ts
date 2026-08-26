@@ -7,6 +7,7 @@
 import { StringEnum } from "@earendil-works/pi-ai";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { Text } from "@earendil-works/pi-tui";
+import { existsSync } from "node:fs";
 import { Type } from "typebox";
 import { DEFAULT_MAX_RESULT_LINES, loadConfig } from "./config.ts";
 import { formatCompletionBlock, formatUsage, matchRunIds } from "./format.ts";
@@ -19,8 +20,11 @@ import {
 	statusLabel,
 	type RunStatus,
 } from "./monitor.ts";
+import { persistRecoveryRecords, recoveryRecordFromFinalization } from "./recovery.ts";
 import type { SubagentRuntime, SubagentThread } from "./runtime.ts";
+import { CONTROL_QUIESCE_TIMEOUT_MS, quiesced } from "./thread-lifecycle.ts";
 import { getResultOutput, isFailedResult, type SingleResult } from "./spawn.ts";
+import type { WorktreeFinalization } from "./worktree.ts";
 
 /** In-turn result lookup. Dispatch already ended the turn and results arrive as
  * wake-up messages, so the default must NOT block: a settled run returns its
@@ -648,6 +652,7 @@ export function registerLookupTools(pi: ExtensionAPI, runtime: SubagentRuntime):
 
 			const stopped: string[] = [];
 			const retainedIntegration: string[] = [];
+			const pendingIntegration: string[] = [];
 			for (const [claimIndex, claim] of claimed.entries()) {
 				const {
 					runId,
@@ -663,8 +668,13 @@ export function registerLookupTools(pi: ExtensionAPI, runtime: SubagentRuntime):
 					stopVersion,
 					stopMessage,
 				} = claim;
-				await interruptionPromises[claimIndex];
-				await completion;
+				// Every wait here is bounded: the queue task can sit for minutes in
+				// worktree finalization or behind the managed repository lane, and an
+				// unkillable child can stall even the RPC-level stop. Stop owns the
+				// lifecycle synchronously, so a stuck tail settles silently after we
+				// proceed; none of its late paths can publish a second result.
+				await quiesced(interruptionPromises[claimIndex]);
+				if (!(await quiesced(completion))) runtime.backgroundQueue.cancel(controller);
 				if (runtime.runControllers.get(runId) === controller) runtime.runControllers.delete(runId);
 				if (thread.queueController === controller) thread.queueController = undefined;
 
@@ -703,8 +713,42 @@ export function registerLookupTools(pi: ExtensionAPI, runtime: SubagentRuntime):
 							runId,
 							isolation: thread.isolation,
 						};
-					const finalization = await thread.finalizeIsolation(generation, stoppedResult);
-					if (finalization?.status === "retained") retainedIntegration.push(`#${runId}`);
+					const worktree = thread.worktree;
+					let finalization: WorktreeFinalization | undefined;
+					try {
+						finalization = await Promise.race([
+							thread.finalizeIsolation(generation, stoppedResult),
+							new Promise<undefined>((resolve) => {
+								const timer = setTimeout(() => resolve(undefined), CONTROL_QUIESCE_TIMEOUT_MS);
+								if (typeof timer.unref === "function") timer.unref();
+							}),
+						]);
+					} catch {
+						/* an unexpected finalize rejection must not block the stop */
+					}
+					if (finalization === undefined) {
+						// Integration is still settling in the background. Point a
+						// durable recovery record at the artifacts so the isolated work
+						// stays findable even if the background tail later fails; a
+						// successful tail removes them and the record self-prunes.
+						if (thread.isolation === "worktree" && worktree) {
+							stoppedResult.integrationStatus = "pending";
+							stoppedResult.integrationWorktreePath = worktree.worktreePath;
+							await persistRecoveryRecords(runtime.configPath, [
+								recoveryRecordFromFinalization(runId, {
+									status: "retained",
+									integrated: false,
+									hadChanges: false,
+									...(existsSync(worktree.worktreePath) ? { worktreePath: worktree.worktreePath } : {}),
+									...(existsSync(worktree.patchPath) ? { patchPath: worktree.patchPath } : {}),
+									error: "subagent_stop timed out waiting for worktree integration; it continues in the background",
+								}),
+							]).catch(() => undefined);
+						}
+						pendingIntegration.push(`#${runId}`);
+					} else if (finalization.status === "retained") {
+						retainedIntegration.push(`#${runId}`);
+					}
 					runtime.registerRunResult(runId, stoppedResult);
 					thread.lastResult = stoppedResult;
 				}
@@ -730,7 +774,7 @@ export function registerLookupTools(pi: ExtensionAPI, runtime: SubagentRuntime):
 			return {
 				content: [{
 					type: "text",
-					text: `Stopped ${stopped.length} thread${stopped.length === 1 ? "" : "s"}: ${stopped.join(", ")}. Retained sessions were retired; worktree changes are integrated on settlement.${retainedIntegration.length > 0 ? ` Integration failed for ${retainedIntegration.join(", ")}; inspect its result for retained recovery paths.` : ""}`,
+					text: `Stopped ${stopped.length} thread${stopped.length === 1 ? "" : "s"}: ${stopped.join(", ")}. Retained sessions were retired; worktree changes are integrated on settlement.${retainedIntegration.length > 0 ? ` Integration failed for ${retainedIntegration.join(", ")}; inspect its result for retained recovery paths.` : ""}${pendingIntegration.length > 0 ? ` Integration is still settling in the background for ${pendingIntegration.join(", ")}; a recovery record was persisted in case it fails.` : ""}`,
 				}],
 				details: {},
 			};

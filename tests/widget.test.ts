@@ -33,14 +33,13 @@ describe("formatActiveRunLines", () => {
 
 		const lines = formatActiveRunLines(store.getRuns(), theme, 120);
 		expect(lines).toHaveLength(2);
-		expect(lines[0]).toContain("worker · Fix src/index.ts");
+		expect(lines[0]).toContain(`● #${running} worker · Fix src/index.ts`);
 		expect(lines[0]).toContain("gpt-5-mini/high");
 		expect(lines[0]).not.toContain("openai/");
 		expect(lines[0]).not.toContain("edit src/index.ts");
 		expect(lines[1]).toBe("  edit src/index.ts");
 		expect(lines.join("\n")).not.toContain(`#${done}`);
 		expect(lines.join("\n")).not.toContain(`#${parked}`);
-		expect(lines.join("\n")).not.toMatch(/#\d+/);
 	});
 
 	it("omits a blank activity line and handles missing model/thinking", () => {
@@ -49,7 +48,7 @@ describe("formatActiveRunLines", () => {
 
 		const lines = formatActiveRunLines(store.getRuns(), theme, 120);
 		expect(lines).toHaveLength(1);
-		expect(lines[0]).toContain("explorer · Map the cleaner workflow");
+		expect(lines[0]).toContain("explorer · queued · Map the cleaner workflow");
 		expect(lines[0]).not.toContain("undefined");
 	});
 
@@ -73,8 +72,8 @@ describe("formatActiveRunLines", () => {
 
 		const lines = formatActiveRunLines(store.getRuns(), theme, 80);
 		expect(lines).toHaveLength(2);
-		expect(lines[0]).toContain("explorer · Map config");
-		expect(lines[1]).toContain("reviewer · Review config");
+		expect(lines[0]).toContain("explorer · queued · Map config");
+		expect(lines[1]).toContain("reviewer · queued · Review config");
 		expect(lines.every((line) => line.length > 0)).toBe(true);
 	});
 
@@ -110,17 +109,16 @@ describe("formatActiveRunLines", () => {
 
 		const lines = formatActiveRunLines(store.getRuns(), theme, 120);
 		expect(lines).toHaveLength(5);
-		expect(lines[0]).toContain("◆ reviewer workflow · src/index.ts");
+		expect(lines[0]).toContain(`◆ #${parent} reviewer workflow · src/index.ts`);
 		expect(lines[0]).not.toContain("grok-parent");
 		expect(lines[0]).not.toContain("/xhigh");
 		expect(lines[1]).toContain("! review ─ ● fix 1/2 ─ ○ re-review 1/2 ─ ○ docs");
 		// The timeline replaces the parent's generic workflow placeholder.
 		expect(lines.join("\n")).not.toContain("auto-fix chain running");
-		expect(lines[2]).toContain("├ ● worker · fix 1/2 · src/index.ts · gpt-worker/max");
+		expect(lines[2]).toContain(`├ ● #${fix} worker · fix 1/2 · src/index.ts · gpt-worker/max`);
 		expect(lines[3]).toBe("      edit src/index.ts");
-		expect(lines[4]).toContain("└ ○ reviewer · re-review 1/2");
-		expect(lines[4]).toContain("claude-reviewer/high");
-		expect(lines.join("\n")).not.toMatch(/#\d+/);
+		expect(lines[4]).toContain(`└ ○ #${reReview} reviewer · queued · re-review 1/2`);
+		expect(lines.join("\n")).not.toContain("claude-reviewer");
 	});
 
 	it("removes conditionally skipped docs and distinguishes process failure from review changes", () => {
@@ -175,8 +173,74 @@ describe("formatActiveRunLines", () => {
 
 		const lines = formatActiveRunLines(store.getRuns(), theme, 120);
 		expect(lines).toHaveLength(1);
-		expect(lines[0]).toContain("worker · fix round 2 · src/widget.ts");
+		expect(lines[0]).toContain(`● #${orphan} worker · fix round 2 · src/widget.ts`);
 		expect(lines[0]).not.toContain("└");
+	});
+
+	it("marks queued runs as not started", () => {
+		const store = new MonitorStore();
+		const queued = store.addRun("worker", "Waiting for a slot to fix src/cache.ts");
+
+		const lines = formatActiveRunLines(store.getRuns(), theme, 120);
+		expect(lines).toHaveLength(1);
+		expect(lines[0]).toContain(`○ #${queued} worker`);
+		expect(lines[0]).toContain("queued");
+		expect(lines[0]).not.toContain("undefined");
+	});
+
+	it("shows the worktree group identity and integration state on the owning root", () => {
+		const store = new MonitorStore();
+		const isolated = store.addRun(
+			"worker",
+			"Implement src/cache.ts",
+			undefined,
+			undefined,
+			{ isolation: "worktree", worktreeId: "a91f3c" },
+		);
+		store.setStatus(isolated, "running");
+
+		const [pending] = formatActiveRunLines(store.getRuns(), theme, 120);
+		expect(pending).toContain("wt:a91f3c");
+		expect(pending).not.toContain("applying");
+
+		store.setIsolation(isolated, "worktree", "finalizing", "a91f3c");
+		const [applying] = formatActiveRunLines(store.getRuns(), theme, 120);
+		expect(applying).toContain("wt:a91f3c applying");
+
+		store.setIsolation(isolated, "worktree", "retained", "a91f3c");
+		const [retained] = formatActiveRunLines(store.getRuns(), theme, 120);
+		expect(retained).toContain("wt:a91f3c retained");
+	});
+
+	it("keeps the worktree badge on the group owner while stage children inherit it via the tree", () => {
+		const store = new MonitorStore();
+		const parent = store.addRun(
+			"worker",
+			"Implement src/cache.ts",
+			undefined,
+			undefined,
+			{ isolation: "worktree", worktreeId: "b2c4d6" },
+		);
+		store.setStatus(parent, "running");
+		store.setManagedWorkflow(parent, true);
+		store.setWorkflowStages(parent, [
+			{ agent: "worker", relation: "implement", status: "done" },
+			{ agent: "reviewer", relation: "review", status: "active" },
+		]);
+		const review = store.addRun(
+			"reviewer",
+			"Fresh code gate for a managed worker workflow.",
+			undefined,
+			undefined,
+			{ relationLabel: "review", parentRunId: parent, isolation: "worktree", worktreeId: "b2c4d6" },
+		);
+		store.setStatus(review, "running");
+
+		const lines = formatActiveRunLines(store.getRuns(), theme, 120);
+		expect(lines[0]).toContain(`◆ #${parent} worker workflow`);
+		expect(lines[0]).toContain("wt:b2c4d6");
+		expect(lines[2]).toContain(`└ ● #${review} reviewer`);
+		expect(lines[2]).not.toContain("wt:");
 	});
 
 	it.each([

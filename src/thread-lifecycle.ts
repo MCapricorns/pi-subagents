@@ -67,6 +67,7 @@ import {
 } from "./spawn.ts";
 import {
 	createWorktreeIsolation,
+	worktreeGroupId,
 	type IsolationMode,
 	type WorktreeFinalization,
 	type WorktreeIsolation,
@@ -74,6 +75,24 @@ import {
 
 export const FORK_CONTINUATION_PROMPT =
 	"Continue from the retained context above. Review the prior work, then take the most useful next step toward completing the existing objective without repeating completed work.";
+
+/** Control operations must never wait forever on a settling generation: the
+ * queue task can legitimately spend minutes in worktree finalization (bounded
+ * per-Git-command timeouts) or wait behind the managed repository lane. After
+ * this deadline the control path owns the lifecycle synchronously and proceeds
+ * while the stuck tail settles silently in the background. */
+export const CONTROL_QUIESCE_TIMEOUT_MS = 20_000;
+
+/** Resolve true when the promise settles, or false after the bounded deadline. */
+export function quiesced(promise: Promise<unknown>, timeoutMs: number = CONTROL_QUIESCE_TIMEOUT_MS): Promise<boolean> {
+	return Promise.race([
+		promise.then(() => true, () => true),
+		new Promise<boolean>((resolve) => {
+			const timer = setTimeout(() => resolve(false), timeoutMs);
+			if (typeof timer.unref === "function") timer.unref();
+		}),
+	]);
+}
 
 const WORKTREE_ISOLATION_INSTRUCTIONS =
 	"You are running in a temporary detached Git worktree. Work only in the current cwd; do not create another worktree or manually copy/apply changes to the original checkout. The parent dispatcher will integrate your tracked, deleted, and untracked changes when this thread finally settles.";
@@ -148,6 +167,8 @@ export interface ManagedWorkflowRequest extends DispatchEnvironment {
 	executionCwd: string;
 	projectCwd: string;
 	isolation: IsolationMode;
+	/** Short identity of the isolated worktree shared by every workflow stage. */
+	worktreeId?: string;
 	signal: AbortSignal;
 	rememberLatest: (result: SingleResult) => void;
 }
@@ -294,6 +315,7 @@ export function createBackgroundDispatcher(options: BackgroundDispatcherOptions)
 			}
 		}
 		const executionCwd = worktree?.cwd ?? originalCwd;
+		const worktreeGroup = worktree ? worktreeGroupId(worktree) : undefined;
 		const resolvedRoute = resolveDispatchModelRoute(agent, runConfig, runCtx);
 		// Isolation is a persistent system-level invariant, not a one-shot task
 		// prefix: queued retargets, live retargets, resumes, and main-model
@@ -310,6 +332,7 @@ export function createBackgroundDispatcher(options: BackgroundDispatcherOptions)
 		}
 		const runId = existingThread?.id ?? monitor.addRun(agent.name, task, route.agent.model, thinkingLevel, {
 			isolation,
+			...(worktreeGroup ? { worktreeId: worktreeGroup } : {}),
 			...(seed?.forkedFromRunId !== undefined ? { forkedFromRunId: seed.forkedFromRunId } : {}),
 			...(seed?.continuationKind ? { continuationKind: seed.continuationKind } : {}),
 		});
@@ -329,6 +352,7 @@ export function createBackgroundDispatcher(options: BackgroundDispatcherOptions)
 			monitor.restartRun(runId, agent.name, task, route.agent.model, thinkingLevel, isolation, {
 				elapsedMs: existingThread.elapsedMs,
 				continuationKind: appendedObjectiveOnResume ? "resume-appended" : "resume-retained",
+				...(worktreeGroup ? { worktreeId: worktreeGroup } : {}),
 			});
 			runtime.settledRuns.delete(runId);
 		}
@@ -426,12 +450,20 @@ export function createBackgroundDispatcher(options: BackgroundDispatcherOptions)
 			// All normal, destructive-stop, and shutdown owners converge here. Cache
 			// the lane-protected apply itself so superseding lifecycle paths can project
 			// the same finalization onto their own result without acquiring twice.
-			generationFinalization ??= runInManagedRepositoryLane(
-				generationWorktree.originalRoot,
-				() => generationWorktree.finalize(),
-			);
+			if (!generationFinalization) {
+				monitor.setIsolation(
+					runId,
+					"worktree",
+					"finalizing",
+					worktreeGroupId(generationWorktree),
+				);
+				generationFinalization = runInManagedRepositoryLane(
+					generationWorktree.originalRoot,
+					() => generationWorktree.finalize(),
+				);
+			}
 			const finalization = await generationFinalization;
-			monitor.setIsolation(runId, "worktree", finalization.status);
+			monitor.setIsolation(runId, "worktree", finalization.status, worktreeGroupId(generationWorktree));
 			if (result) {
 				result.runId = runId;
 				result.isolation = "worktree";
@@ -565,7 +597,12 @@ export function createBackgroundDispatcher(options: BackgroundDispatcherOptions)
 					// control after that child settles, so cancel its queue owner explicitly.
 					if (phase === "settled") runtime.backgroundQueue.cancel(controller);
 				}
-				await completion;
+				// The settling tail may be blocked on worktree finalization or the
+				// managed repository lane. Park already owns the lifecycle, so proceed
+				// after a bounded wait and let the tail finish silently in the background.
+				if (!(await quiesced(completion))) {
+					runtime.backgroundQueue.cancel(controller);
+				}
 				if (
 					thread.generation !== generation ||
 					thread.lifecycleVersion !== version ||
@@ -631,7 +668,15 @@ export function createBackgroundDispatcher(options: BackgroundDispatcherOptions)
 			let continuationWorktree: WorktreeIsolation | undefined;
 			let clonedSession: Awaited<ReturnType<typeof forkRetainedSession>> | undefined;
 			try {
-				await thread.generationCompletion;
+				// Never wait forever on a previous generation that is still settling
+				// (e.g. blocked behind the managed repository lane in finalization).
+				if (!(await quiesced(thread.generationCompletion))) {
+					return failedStartResult(
+						thread.agentName,
+						thread.task,
+						`Run #${runId}'s previous generation is still settling; retry the resume shortly.`,
+					);
+				}
 				if (!ownsResumeReservation(thread, reservation)) {
 					return failedStartResult(
 						thread.agentName,
@@ -811,7 +856,15 @@ export function createBackgroundDispatcher(options: BackgroundDispatcherOptions)
 			let childWorktree: WorktreeIsolation | undefined;
 			let forkedSession: Awaited<ReturnType<typeof forkRetainedSession>> | undefined;
 			try {
-				await thread.generationCompletion;
+				// Same bounded preflight as resume: a still-settling source generation
+				// must not block the control operation forever.
+				if (!(await quiesced(thread.generationCompletion))) {
+					return failedStartResult(
+						thread.agentName,
+						thread.task,
+						`Run #${runId}'s previous generation is still settling; retry the fork shortly.`,
+					);
+				}
 				if (!ownsFork()) {
 					return failedStartResult(thread.agentName, thread.task, `Run #${runId} changed while fork was preparing; no child was started.`);
 				}
@@ -911,23 +964,41 @@ export function createBackgroundDispatcher(options: BackgroundDispatcherOptions)
 			isolation === "shared" && canStartManagedWorkflow(agent, workflowAvailability);
 		const runGeneration = async (backgroundSignal: AbortSignal): Promise<void> => {
 				if (runtime.threads.get(runId)?.generation !== generation) return;
+				// Model/thinking config may have changed while this generation sat
+				// queued behind the concurrency limit. Re-resolve the route at actual
+				// start so /subagents-setup edits apply to not-yet-started runs.
+				let activeRoute = route;
+				let activeIdleTimeoutMs = runConfig.idleTimeoutSec * 1000;
+				try {
+					const startConfig = await loadConfig(runtime.configPath);
+					runtime.backgroundQueue.setConcurrency(startConfig.maxConcurrency);
+					const resolvedStart = resolveDispatchModelRoute(agent, startConfig, runCtx);
+					activeRoute = isolation === "worktree"
+						? { ...resolvedStart, agent: withWorktreeSystemPrompt(resolvedStart.agent) }
+						: resolvedStart;
+					activeIdleTimeoutMs = startConfig.idleTimeoutSec * 1000;
+					monitor.setModel(runId, activeRoute.agent.model);
+					monitor.setThinking(runId, activeRoute.thinkingLevel);
+				} catch {
+					/* keep the dispatch-time route when fresh config is unavailable */
+				}
 				let result: SingleResult;
 				try {
 					result = await runSingleAgentWithMainFallback(
 						{
 							defaultCwd: executionCwd,
-							agent: route.agent,
+							agent: activeRoute.agent,
 							resolveAgentForAttempt: resolveLiveAgentTools,
 							agentName,
 							task,
 							cwd: executionCwd,
-							thinkingLevel,
-							thinkingLevelForModel: route.thinkingLevelForModel,
+							thinkingLevel: activeRoute.thinkingLevel,
+							thinkingLevelForModel: activeRoute.thinkingLevelForModel,
 							signal: backgroundSignal,
 							onLive,
 							control,
 							makeDetails: makeDetails("single", true),
-							idleTimeoutMs: runConfig.idleTimeoutSec * 1000,
+							idleTimeoutMs: activeIdleTimeoutMs,
 							...(priorSessionId && priorSessionDir
 								? {
 									sessionId: priorSessionId,
@@ -938,7 +1009,7 @@ export function createBackgroundDispatcher(options: BackgroundDispatcherOptions)
 								}
 								: {}),
 						},
-						route.mainFallbackRef,
+						activeRoute.mainFallbackRef,
 					);
 				} catch (error) {
 					const errorMessage = error instanceof Error ? error.message : String(error);
@@ -1013,6 +1084,7 @@ export function createBackgroundDispatcher(options: BackgroundDispatcherOptions)
 						executionCwd: thread.executionCwd,
 						projectCwd: originalCwd,
 						isolation,
+						...(worktree ? { worktreeId: worktreeGroupId(worktree) } : {}),
 						signal: backgroundSignal,
 						ctx: runCtx,
 						config: runConfig,

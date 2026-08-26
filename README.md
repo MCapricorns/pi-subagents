@@ -380,16 +380,26 @@ worktree finalization to the same one-time lifecycle owner. `stop-all` interrupt
 every lane holder before waiting for finalization, avoiding self-deadlock when an
 isolated apply is queued behind shared work.
 
+Every control operation is bounded: park, stop, resume, and fork never wait
+indefinitely on a generation that is still settling (for example an isolated
+apply queued behind the managed repository lane). Stop proceeds after a bounded
+deadline once it owns the lifecycle, a still-running integration continues in the
+background, and a durable recovery record is persisted pointing at the retained
+worktree/patch so stopped work is never lost.
+
 ## Results and live status
 
 The active TUI widget shows standalone runs normally and projects each managed
-workflow as a compact timeline plus its current internal child:
+workflow as a compact timeline plus its current internal child. Every row leads
+with its stable run id — the handle for `subagent_control`, `subagent_status`,
+and `subagent_stop`:
 
 ```text
-◆ worker workflow · src/cache.ts                         · 42s
+◆ #12 worker workflow · src/cache.ts · wt:a91f3c              · 42s
   ✓ implement ─ ● review ─ ○ docs
-  └ ● reviewer · final review · claude-sonnet-4-5/high · 10s
+  └ ● #15 reviewer · final review · claude-sonnet-4-5/high · 10s
       git diff
+○ #23 worker · queued · redirect to ripgrep crates · 5m02s
 ```
 
 Success is green, the active stage uses the accent color and bold text, pending
@@ -397,6 +407,15 @@ stages are dim, `REQUEST_CHANGES` is warning-colored, and process failure is an
 error. Fix paths show their budget (`fix 1/2`, `re-review 1/2`). The timeline
 contains only stages that ran or are currently planned; `DOCUMENTATION: CLEAN`
 removes pending docs instead of pretending that stage ran.
+
+Worktree-isolated runs carry a group badge on the row that owns the worktree:
+`wt:<id>` while active, `wt:<id> applying` while the settled patch is being
+applied to the original checkout, then `applied`/`clean`, or `retained` when
+integration failed. The short id changes when a resumed generation creates a
+continuation worktree, so a group boundary change is visible at a glance.
+Nested stage rows inherit the group through the tree instead of repeating the
+badge. Queued rows say `queued` and omit model/thinking — the route is
+re-resolved when the run actually starts.
 
 A managed root keeps its original top-level role and workflow-wide elapsed time,
 but omits model/thinking because several model stages own it. The active nested
@@ -435,6 +454,12 @@ fails at the provider level, the current main model continues the same retained
 session. Searches, reads, reasoning, and edits already completed are preserved.
 Ordinary tool and test failures remain task failures and do not trigger a model
 handoff.
+
+Model changes apply immediately to work that has not started: a run still
+waiting for a concurrency slot re-resolves its route when it actually starts,
+and managed workflow stages (fix rounds, re-reviews, the conditional documenter)
+re-read the config before each stage launches. Only an already-running child
+keeps the model it started with.
 
 Thinking defaults to **Auto**. pi-subagents starts from the role's preference and
 chooses only a level the effective model actually supports. A fallback re-checks

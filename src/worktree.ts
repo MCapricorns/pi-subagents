@@ -16,6 +16,18 @@ import { isAbsolute, join, relative, resolve } from "node:path";
 
 export type IsolationMode = "shared" | "worktree";
 
+const WORKTREE_TEMP_DIR_PREFIX = "pi-subagent-worktree-";
+
+/** Short stable identity of one isolated worktree group (the mkdtemp suffix).
+ * Continuation/fork generations create a fresh worktree, so the identity
+ * visibly changes when the group's filesystem boundary changes. */
+export function worktreeGroupId(worktree: Pick<WorktreeIsolation, "tempDir">): string {
+	const base = worktree.tempDir.split(/[\\/]/).filter(Boolean).pop() ?? worktree.tempDir;
+	return base.startsWith(WORKTREE_TEMP_DIR_PREFIX)
+		? base.slice(WORKTREE_TEMP_DIR_PREFIX.length)
+		: base;
+}
+
 export interface CommandRunOptions {
 	cwd: string;
 	input?: Buffer;

@@ -39,6 +39,26 @@ function formatContinuationTask(label: string, task: string, width: number): str
 	return summary ? `${label}${separator}${summary}` : label;
 }
 
+/** Worktree-group badge shown on the row that owns the isolated worktree: the
+ * short group identity plus its integration state, so a workflow visibly moves
+ * through applying → applied (or retained) and a continuation worktree (new
+ * identity) is distinguishable from the original one. */
+function worktreeBadge(run: RunView): string {
+	const id = run.worktreeId ?? "?";
+	switch (run.integrationStatus) {
+		case "finalizing":
+			return `wt:${id} applying`;
+		case "integrated":
+			return `wt:${id} applied`;
+		case "no_changes":
+			return `wt:${id} clean`;
+		case "retained":
+			return `wt:${id} retained`;
+		default:
+			return `wt:${id}`;
+	}
+}
+
 /** One compact primary line per genuinely active run, plus an optional indented
  * activity line. The primary line reserves stage model/thinking when present and
  * elapsed width before truncating the task. Settled and parked threads never
@@ -49,6 +69,7 @@ function runPrimaryLine(
 	width: number,
 	now: number,
 	prefix: string,
+	isGroupOwner: boolean,
 ): string {
 	const dim = (text: string): string => theme.fg("dim", text);
 	const icon = run.managedWorkflow && run.status === "running"
@@ -56,18 +77,24 @@ function runPrimaryLine(
 		: statusIcon(run.status, theme);
 	const displayName = run.managedWorkflow ? `${run.agent} workflow` : run.agent;
 	const name = theme.fg("accent", theme.bold(displayName));
-	const identity = `${prefix}${icon} ${name}`;
+	// The stable run id is the handle for subagent_control/subagent_status; a
+	// queued run has not started, which must be visible at a glance. Its model
+	// is omitted too: the route is re-resolved when the run actually starts.
+	const queued = run.status === "queued";
+	const queuedTag = queued ? ` ${dim("· queued")}` : "";
+	const identity = `${prefix}${icon} #${run.id} ${name}${queuedTag}`;
 	const elapsed = formatElapsed(run, now);
 	// Render only the resolved model id plus thinking level. Provider auth and
 	// other configuration never enter monitor state or this line.
 	const modelId = run.model?.split("/").at(-1);
-	const modelSource = run.managedWorkflow
+	const modelSource = run.managedWorkflow || queued
 		? ""
 		: formatTaskSummary(
 			modelId ? `${modelId}${run.thinking ? `/${run.thinking}` : ""}` : run.thinking ? `thinking:${run.thinking}` : "",
 			64,
 			false,
 		);
+	const badge = isGroupOwner && run.isolation === "worktree" ? worktreeBadge(run) : "";
 	// A chain child shows its role in the chain plus a task-derived label; the
 	// templated fix brief itself would only repeat the parent review's content.
 	const continuation = run.parentRunId === undefined
@@ -81,7 +108,7 @@ function runPrimaryLine(
 	const taskDesiredSource = [continuation, taskSource]
 		.filter((part): part is string => Boolean(part))
 		.join(" · ");
-	const primaryPartCount = 2 + (modelSource ? 1 : 0) + (elapsed ? 1 : 0);
+	const primaryPartCount = 2 + (modelSource ? 1 : 0) + (badge ? 1 : 0) + (elapsed ? 1 : 0);
 	const contentWidth = Math.max(
 		0,
 		width -
@@ -130,6 +157,7 @@ function runPrimaryLine(
 		identity,
 		task ? dim(task) : undefined,
 		modelThinking ? dim(modelThinking) : undefined,
+		badge ? dim(badge) : undefined,
 	].filter((part): part is string => Boolean(part)).join(" · ");
 	return compactLine(primaryLeft, elapsed ? dim(`· ${elapsed}`) : "", width);
 }
@@ -211,7 +239,9 @@ export function formatActiveRunLines(
 	const lines: string[] = [];
 	for (const root of roots) {
 		const children = childrenOf.get(root.id) ?? [];
-		lines.push(runPrimaryLine(root, theme, width, now, ""));
+		// Roots (including orphaned chain children whose parent row is gone) own
+		// their worktree group; nested children inherit the group via the tree.
+		lines.push(runPrimaryLine(root, theme, width, now, "", true));
 		const hasTimeline = Boolean(root.managedWorkflow && root.workflowStages?.length);
 		const timeline = hasTimeline ? workflowTimelineLine(root, theme, width) : undefined;
 		if (timeline) lines.push(timeline);
@@ -222,7 +252,7 @@ export function formatActiveRunLines(
 		}
 		children.forEach((child, index) => {
 			const connector = index === children.length - 1 ? "└ " : "├ ";
-			lines.push(runPrimaryLine(child, theme, width, now, theme.fg("dim", `  ${connector}`)));
+			lines.push(runPrimaryLine(child, theme, width, now, theme.fg("dim", `  ${connector}`), false));
 			lines.push(...runActivityLine(child, theme, width, "      "));
 		});
 	}

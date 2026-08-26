@@ -71,6 +71,32 @@ describe("MonitorStore", () => {
 		expect(run.usage.cost).toBe(0.5);
 	});
 
+	it("tracks the worktree group identity through isolation updates and restarts", () => {
+		const store = new MonitorStore();
+		const id = store.addRun("worker", "Implement src/cache.ts", undefined, undefined, {
+			isolation: "worktree",
+			worktreeId: "a91f3c",
+		});
+		let run = store.findRun(id)!;
+		expect(run.isolation).toBe("worktree");
+		expect(run.worktreeId).toBe("a91f3c");
+		expect(run.integrationStatus).toBe("pending");
+
+		store.setIsolation(id, "worktree", "finalizing");
+		run = store.findRun(id)!;
+		expect(run.integrationStatus).toBe("finalizing");
+		expect(run.worktreeId).toBe("a91f3c");
+
+		// A resumed generation with a continuation worktree carries a new identity.
+		store.restartRun(id, "worker", "Continue src/cache.ts", "openai/gpt-worker", "high", "worktree", {
+			elapsedMs: 1_000,
+			worktreeId: "zz9pla",
+		});
+		run = store.findRun(id)!;
+		expect(run.worktreeId).toBe("zz9pla");
+		expect(run.integrationStatus).toBe("pending");
+	});
+
 	it("marks stable workflow ownership without relabeling it as a child model stage", () => {
 		const store = new MonitorStore();
 		const id = store.addRun("worker", "Implement the change", "openai/gpt-worker", "max");

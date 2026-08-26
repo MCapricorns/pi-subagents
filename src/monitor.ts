@@ -34,13 +34,18 @@ export function isRunActiveStatus(status: RunStatus): boolean {
 	return status === "queued" || status === "running" || status === "steering" || status === "interrupting";
 }
 
+/** Durable integration projection of a worktree-isolated run: pending before
+ * settlement, finalizing while the patch is applied/cleaned up, then the
+ * terminal WorktreeFinalizationStatus. */
+export type RunIntegrationStatus = "pending" | "finalizing" | WorktreeFinalizationStatus;
+
 export interface RunView {
 	id: number;
 	agent: string;
 	task: string;
 	/** Short content label derived from the task (paths/symbols), shown next to
 	 * the agent name so concurrent same-agent runs are told apart by what they
-	 * are doing, not just their run id. */
+	 * are doing, not just by their run id. */
 	label?: string;
 	model?: string;
 	/** Selected model ref when the run handed off to current main. */
@@ -48,7 +53,10 @@ export interface RunView {
 	/** Effective thinking strength this run was launched with (frontmatter/config/global). */
 	thinking?: string;
 	isolation?: IsolationMode;
-	integrationStatus?: "pending" | WorktreeFinalizationStatus;
+	integrationStatus?: RunIntegrationStatus;
+	/** Short worktree-group identity (mkdtemp suffix) shared by every run inside
+	 * one isolated worktree; changes when a continuation worktree is created. */
+	worktreeId?: string;
 	forkedFromRunId?: number;
 	forkChildRunIds?: number[];
 	status: RunStatus;
@@ -85,6 +93,7 @@ export interface RunChainMeta {
 	relationLabel?: string;
 	parentRunId?: number;
 	isolation?: IsolationMode;
+	worktreeId?: string;
 	forkedFromRunId?: number;
 	continuationKind?: ContinuationKind;
 }
@@ -458,7 +467,7 @@ export class MonitorStore {
 			...(meta?.groupId ? { groupId: meta.groupId } : {}),
 			...(meta?.relationLabel ? { relationLabel: meta.relationLabel } : {}),
 			...(meta?.parentRunId !== undefined ? { parentRunId: meta.parentRunId } : {}),
-			...(meta?.isolation ? { isolation: meta.isolation, integrationStatus: meta.isolation === "worktree" ? "pending" : undefined } : {}),
+			...(meta?.isolation ? { isolation: meta.isolation, integrationStatus: meta.isolation === "worktree" ? "pending" : undefined, ...(meta.worktreeId ? { worktreeId: meta.worktreeId } : {}) } : {}),
 			...(meta?.forkedFromRunId !== undefined ? { forkedFromRunId: meta.forkedFromRunId } : {}),
 			...(meta?.continuationKind ? { continuationKind: meta.continuationKind } : {}),
 		});
@@ -559,11 +568,17 @@ export class MonitorStore {
 		this.notify();
 	}
 
-	setIsolation(id: number, isolation: IsolationMode, integrationStatus?: "pending" | WorktreeFinalizationStatus): void {
+	setIsolation(
+		id: number,
+		isolation: IsolationMode,
+		integrationStatus?: RunIntegrationStatus,
+		worktreeId?: string,
+	): void {
 		const run = this.find(id);
 		if (!run) return;
 		run.isolation = isolation;
 		run.integrationStatus = integrationStatus;
+		if (worktreeId) run.worktreeId = worktreeId;
 		this.notify();
 	}
 
@@ -608,7 +623,7 @@ export class MonitorStore {
 		model?: string,
 		thinking?: string,
 		isolation?: IsolationMode,
-		meta?: { elapsedMs?: number; continuationKind?: ContinuationKind },
+		meta?: { elapsedMs?: number; continuationKind?: ContinuationKind; worktreeId?: string },
 	): void {
 		const run = this.find(id);
 		if (!run) {
@@ -619,7 +634,13 @@ export class MonitorStore {
 				label: runLabel(task),
 				model,
 				thinking,
-				...(isolation ? { isolation, integrationStatus: isolation === "worktree" ? "pending" as const : undefined } : {}),
+				...(isolation
+					? {
+						isolation,
+						integrationStatus: isolation === "worktree" ? "pending" as const : undefined,
+						...(isolation === "worktree" && meta?.worktreeId ? { worktreeId: meta.worktreeId } : {}),
+					}
+					: {}),
 				status: "queued",
 				usage: emptyUsage(),
 				elapsedMs: meta?.elapsedMs ?? 0,
@@ -635,6 +656,8 @@ export class MonitorStore {
 		run.thinking = thinking;
 		if (isolation) run.isolation = isolation;
 		run.integrationStatus = isolation === "worktree" ? "pending" : undefined;
+		if (isolation === "worktree" && meta?.worktreeId) run.worktreeId = meta.worktreeId;
+		else if (isolation !== "worktree") run.worktreeId = undefined;
 		run.status = "queued";
 		run.usage = emptyUsage();
 		run.activity = undefined;
