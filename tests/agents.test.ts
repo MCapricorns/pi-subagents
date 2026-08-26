@@ -85,6 +85,18 @@ describe("shipped specialist agents", () => {
 		expect(documenter?.systemPrompt).toContain("no fresh reviewer runs");
 	});
 
+	it("requires gate fix instructions and worker pushback in the fix loop", () => {
+		const reviewer = loadBuiltinAgents().find((agent) => agent.name === "reviewer");
+		expect(reviewer?.systemPrompt).toContain("concrete fix instruction");
+		expect(reviewer?.systemPrompt).toContain("how to verify the fix");
+		expect(reviewer?.systemPrompt).toContain("judge the code as it now stands");
+		expect(reviewer?.systemPrompt).toContain("never issues unrelated to this round's edits");
+		const worker = loadBuiltinAgents().find((agent) => agent.name === "worker");
+		expect(worker?.systemPrompt).toContain("reviewer's fix instructions");
+		expect(worker?.systemPrompt).toContain("push back in your report");
+		expect(worker?.systemPrompt).toContain("A deviation without reasoning will be re-opened");
+	});
+
 	it("keeps reviewer advisory reports separate from auto-fix gate verdicts", () => {
 		const reviewer = loadBuiltinAgents().find((agent) => agent.name === "reviewer");
 		expect(reviewer?.description).toContain("generic audits");

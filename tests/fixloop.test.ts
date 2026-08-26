@@ -140,11 +140,14 @@ describe("buildFixTaskBrief", () => {
 		expect(brief).toContain("last auto-fix round");
 	});
 
-	it("instructs the worker to fix every finding, not only blockers", () => {
+	it("lets the worker implement instructions or push back with its own fix", () => {
 		const brief = buildFixTaskBrief(reviewResult("## Findings\n- file.ts:10 minor issue\nVERDICT: REVIEW_FAIL"), 1, 2);
-		expect(brief).toContain("Fix EVERY finding");
+		expect(brief).toContain("carries a fix instruction");
+		expect(brief).toContain("Close EVERY finding");
 		expect(brief).toContain("no severity triage");
-		expect(brief).toContain("factually wrong or clearly out of scope");
+		expect(brief).toContain("implement YOUR fix instead");
+		expect(brief).toContain("push back explicitly per finding");
+		expect(brief).toContain("will be re-opened");
 	});
 
 	it("notes a re-review will follow and requires directly affected docs to stay synchronized", () => {
@@ -191,6 +194,8 @@ describe("managed handoff briefs", () => {
 		expect(brief).toContain("worker report");
 		expect(brief).toContain("actual pending code");
 		expect(brief).toContain("Remain read-only");
+		expect(brief).toContain("fix instruction to EVERY gate finding");
+		expect(brief).toContain("specific enough to act on");
 		expect(brief).toContain("VERDICT: REVIEW_PASS");
 		expect(brief).toContain("documentation drift is an ordinary gate finding");
 		expect(brief).not.toContain("Documentation notes");
@@ -253,15 +258,20 @@ describe("buildReReviewBrief", () => {
 		expect(brief).toContain("REQUEST_CHANGES only while an open finding remains");
 	});
 
-	it("carries the convergence contract: adjudicate rejections once, no re-opening resolved items", () => {
+	it("carries the convergence contract: judge the result, adjudicate pushback once, no unrelated findings", () => {
 		const brief = buildReReviewBrief(
 			reviewResult("## Findings\n- file.ts:10 minor\nVERDICT: REVIEW_FAIL"),
 			2,
-			workerResult("file.ts:10 is intended behavior; rejected as out of scope."),
+			workerResult("file.ts:10: your instruction breaks X; shipped the guard on Y instead."),
 		);
+		expect(brief).toContain("pushback where it replaced your fix instruction");
+		expect(brief).toContain("Judge the code as it now stands");
+		expect(brief).toContain("whether or not the worker followed your fix instruction");
 		expect(brief).toContain("adjudicated ONCE");
 		expect(brief).toContain("never simply restate the finding");
 		expect(brief).toContain("defects this round's");
+		expect(brief).toContain("never opens findings unrelated to this round's edits");
+		expect(brief).not.toContain("genuinely missed");
 		expect(brief).toContain("Do NOT re-open a finding you verified as resolved");
 	});
 });

@@ -119,7 +119,10 @@ The runtime deliberately keeps delegation conservative:
 - `worker` and `cleaner` remain distinct write-capable entry roles. Each updates
   existing README/docs/examples/comments directly affected by its change. After
   success, one enabled independent `reviewer` gate runs, with the existing bounded
-  worker ↔ reviewer fix loop for `REVIEW_FAIL`.
+  worker ↔ reviewer fix loop for `REVIEW_FAIL`. Every gate finding carries a
+  concrete fix instruction; the worker implements those instructions or ships a
+  sounder fix with an explicit pushback, and re-review judges the resulting code —
+  only open findings and defects the fix itself introduced can continue the loop.
 - When `documenter` is enabled, every managed reviewer gate is asked for a
   standalone `DOCUMENTATION: CLEAN` or `DOCUMENTATION: NEEDED` line. Only
   `REVIEW_PASS` can authorize the final sync: NEEDED includes
@@ -225,14 +228,19 @@ immediately, while NEEDED (or a missing marker on that passing gate) runs one
 final docs sync. A failure uses the bounded loop:
 
 ```text
-reviewer → worker fixes every open finding → reviewer checks again → …
+reviewer → worker applies each fix instruction (or rebuts with a sounder fix)
+         → reviewer re-reviews the result → …
                                           REVIEW_PASS ─┬─ CLEAN → deliver
                                                        └─ NEEDED/missing → documenter
 ```
 
 Each step gets a fresh model context. The chain shares the same code state and
 passes every full reviewer and worker report forward; it does not reuse one
-context window. Internal children bypass top-level lifecycle policy, so they
+context window. Re-review converges instead of re-auditing: it rules on every
+previous finding once, judges the code as it now stands (a sound worker fix
+counts even when it deviates from the instruction), and adds new findings only
+for defects the fix round's own edits introduced or exposed — issues unrelated
+to those edits belong to a fresh gate, not to the loop. Internal children bypass top-level lifecycle policy, so they
 cannot recursively start another chain. Gate reviewers keep documentation drift
 out of the code verdict while `documenter` is enabled by recording it under
 `## Documentation notes`; with documenter disabled, drift is a normal finding.

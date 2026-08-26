@@ -3,6 +3,10 @@
  *
  * Successful top-level worker/cleaner runs continue through an independent
  * code review gate; bounded worker → reviewer fix rounds close its findings.
+ * Gate findings carry concrete fix instructions that the worker implements
+ * unless it can justify a sounder fix and push back; re-review adjudicates on
+ * the resulting code (open findings plus fix-introduced defects only) so the
+ * rounds converge instead of re-auditing from scratch.
  * Reviewers classify documentation drift explicitly, so the low-cost final
  * documenter runs only when needed (or conservatively when an older/custom
  * reviewer omits the marker). Direct passing/failing gates use the same policy.
@@ -139,8 +143,9 @@ export function getManagedWorkflowPlan(
 
 /**
  * Build the worker task brief for one fix round from a reviewer's findings.
- * The worker gets the full review text so it can address concrete file:line
- * issues, with instructions to fix every reported finding and self-verify.
+ * The worker gets the full review text — findings plus their fix instructions
+ * — and closes every finding either by implementing the instruction or by
+ * shipping a sounder fix with an explicit per-finding pushback.
  */
 export function buildFixTaskBrief(reviewerResult: SingleResult, round: number, maxRounds: number): string {
 	const review = getResultOutput(reviewerResult);
@@ -153,13 +158,15 @@ export function buildFixTaskBrief(reviewerResult: SingleResult, round: number, m
 		review,
 		`---`,
 		``,
-		`Fix EVERY finding in the reviewer's findings list — there is no severity triage; all of them get fixed.`,
-		`If a finding is factually wrong or clearly out of scope, say so explicitly instead of fixing it.`,
+		`Each finding in the reviewer's report carries a fix instruction. Close EVERY finding — there is no severity triage; all of them get fixed.`,
+		`You own the fix: when an instruction is factually wrong, clearly out of scope, or a sounder fix exists, implement YOUR fix instead,`,
+		`then push back explicitly per finding — cite it, refute the instruction's reasoning, and state what you shipped instead.`,
+		`A pushback without a working alternative or concrete reasoning will be re-opened.`,
 		`Do NOT refactor unrelated code beyond what the findings require.`,
 		`Synchronize any existing README/docs/examples/comments directly affected by your fixes; do not broaden into standalone documentation maintenance.`,
 		`Do NOT commit, push, publish, tag, or release; do not bump versions. The parent chain still owns re-review and any conditional final documentation sync.`,
 		`After editing, run the project's format/build/tests when they exist and report`,
-		`exactly what you changed (paths + short rationale) so a reviewer can verify.`,
+		`exactly what you changed (paths + short rationale) plus any pushback, so a reviewer can verify.`,
 		remaining > 0
 			? `A reviewer will re-review your changes automatically after you finish.`
 			: `This is the last auto-fix round; the workflow conditionally runs any needed final documentation sync and then delivers.`,
@@ -304,6 +311,8 @@ export function buildFinalReviewBrief(
 		``,
 		`Run \`git status\` and \`git diff\` and inspect the actual pending code; the report is context, not proof.`,
 		`Remain read-only. Verify correctness, regressions, and tests.`,
+		`Attach a concrete fix instruction to EVERY gate finding: what to change, where, and how to verify the fix.`,
+		`A worker will implement your instructions unless it can justify a sounder fix and push back, so make each instruction specific enough to act on.`,
 		...(options.documenterPending
 			? [
 				`A conditional documentation sync is available AFTER this gate, so documentation drift is not a code-gate finding.`,
@@ -321,10 +330,11 @@ export function buildFinalReviewBrief(
 
 /**
  * The re-review brief handed to the reviewer after a worker fix round. Includes
- * the prior review and worker report so the reviewer can adjudicate rejections
+ * the prior review and worker report so the reviewer can adjudicate pushback
  * instead of restating findings. The convergence contract keeps rounds from
- * ping-ponging: rule on the open findings once, add only defects this round's
- * edits introduced, never re-open a verified resolution.
+ * ping-ponging: judge the resulting code (not instruction obedience), rule on
+ * the open findings once, add only defects this round's edits introduced,
+ * never re-open a verified resolution.
  */
 export function buildReReviewBrief(
 	reviewerResult: SingleResult,
@@ -342,16 +352,17 @@ export function buildReReviewBrief(
 		review,
 		`---`,
 		``,
-		`The worker's report (what it changed, plus any finding it rejected as factually wrong or out of scope):`,
+		`The worker's report (what it changed, plus any pushback where it replaced your fix instruction with its own fix):`,
 		`---`,
 		workerReport,
 		`---`,
 		``,
-		`Rule on EVERY previous finding: resolved, or still open. A finding the worker rejected must be`,
-		`adjudicated ONCE — accept the rejection unless you can concretely refute the worker's reasoning;`,
-		`never simply restate the finding for another round.`,
-		`Run \`git diff\` to see what changed, then add NEW findings only when they are defects this round's`,
-		`edits introduced or exposed (or a load-bearing issue the earlier review genuinely missed).`,
+		`Rule on EVERY previous finding: resolved, or still open. Judge the code as it now stands — a finding is`,
+		`resolved when the pending diff fixes it soundly, whether or not the worker followed your fix instruction.`,
+		`A finding the worker pushed back on must be adjudicated ONCE — accept the worker's fix unless you can`,
+		`concretely refute its reasoning; never simply restate the finding for another round.`,
+		`Run \`git diff\` to see what changed, then add NEW findings only for defects this round's edits introduced or exposed.`,
+		`Re-review never opens findings unrelated to this round's edits; issues the earlier review missed belong to a fresh gate.`,
 		`Do NOT re-open a finding you verified as resolved.`,
 		...(options.documenterPending
 			? [
