@@ -100,13 +100,12 @@ describe("extension registration", () => {
 		expect(JSON.stringify(control.parameters.properties.action)).toContain("fork");
 	});
 
-	it("wires recovery and one-time feature notices through session_start", async () => {
+	it("wires recovery, widget install, and config migration through session_start", async () => {
 		if (!testAgentDir) throw new Error("test agent directory was not initialized");
 		const configPath = join(testAgentDir, "pi-subagents.json");
 		const patchPath = join(testAgentDir, "retained.patch");
 		writeFileSync(configPath, JSON.stringify({
 			enabledAgents: ["explorer", "worker", "reviewer"],
-			announcedFeatures: [],
 		}), "utf8");
 		writeFileSync(patchPath, "patch", "utf8");
 		await persistRecoveryRecords(configPath, [{
@@ -127,42 +126,23 @@ describe("extension registration", () => {
 
 		expect(setWidget).toHaveBeenCalledWith("pi-subagents", expect.any(Function), { placement: "aboveEditor" });
 		expect(notify).toHaveBeenCalledWith(expect.stringContaining("recovery for run #41"), "error");
-		// Neither inheritance source has model/thinking overrides, so both
-		// migration notices describe enablement without claiming copied routing.
-		expect(notify).toHaveBeenCalledWith(
-			"pi-subagents: the built-in cleaner agent was enabled by default. Run /subagents-setup to adjust or disable it.",
-			"info",
-		);
-		expect(notify).toHaveBeenCalledWith(
-			"pi-subagents: the new documenter agent was enabled for your existing config. It synchronizes comments and README/docs before commit; run /subagents-setup to adjust or disable it.",
-			"info",
-		);
+		expect(notify.mock.calls.some((call) => call[1] === "info")).toBe(false);
 		const savedConfig = JSON.parse(readFileSync(configPath, "utf8"));
-		// The load-time upgrades inserted both roles into the old explicit list and
-		// stamped the config so the migrations and notices never repeat.
-		expect(savedConfig.enabledAgents).toEqual(["explorer", "worker", "cleaner", "documenter", "reviewer"]);
-		expect(savedConfig.announcedFeatures).toEqual(expect.arrayContaining([
-			"cleanerDefaulted",
-			"cleanerAutoEnabled",
-			"cleanerAutoEnabledNotice",
-			"documenterDefaulted",
-			"documenterAutoEnabled",
-			"documenterAutoEnabledNotice",
-		]));
+		expect(savedConfig.enabledAgents).toEqual(["explorer", "worker", "reviewer"]);
 
-		// Recovery remains visible while its artifact exists, but the feature markers
-		// prevent repeated informational notices on later session starts.
+		// Recovery remains visible while its artifact exists; later session starts
+		// add no informational notices.
 		notify.mockClear();
 		await stub.hooks["session_start"]({}, context);
 		expect(notify).toHaveBeenCalledWith(expect.stringContaining("recovery for run #41"), "error");
 		expect(notify.mock.calls.some((call) => call[1] === "info")).toBe(false);
 	});
 
-	it("runs recovery but skips feature notices outside TUI mode", async () => {
+	it("runs recovery but skips the widget outside TUI mode", async () => {
 		if (!testAgentDir) throw new Error("test agent directory was not initialized");
 		const configPath = join(testAgentDir, "pi-subagents.json");
 		const patchPath = join(testAgentDir, "non-tui-retained.patch");
-		writeFileSync(configPath, JSON.stringify({ announcedFeatures: [] }), "utf8");
+		writeFileSync(configPath, JSON.stringify({}), "utf8");
 		writeFileSync(patchPath, "patch", "utf8");
 		await persistRecoveryRecords(configPath, [{
 			runId: 42,
@@ -178,92 +158,45 @@ describe("extension registration", () => {
 
 		expect(notify).toHaveBeenCalledWith(expect.stringContaining("recovery for run #42"), "error");
 		expect(notify.mock.calls.some((call) => call[1] === "info")).toBe(false);
-		expect(JSON.parse(readFileSync(configPath, "utf8")).announcedFeatures).toEqual([]);
 	});
 
-	it("states reviewer inheritance in the cleaner notice only when settings were copied", async () => {
+	it("keeps available agent model overrides and drops stale ones at session start", async () => {
 		if (!testAgentDir) throw new Error("test agent directory was not initialized");
 		const configPath = join(testAgentDir, "pi-subagents.json");
-		// A pre-cleaner config whose reviewer carries model and thinking overrides.
 		writeFileSync(configPath, JSON.stringify({
 			enabledAgents: ["explorer", "worker", "reviewer"],
-			agentModels: { reviewer: "anthropic/claude-sonnet-4-5" },
+			agentModels: {
+				worker: "gone/old-model",
+				reviewer: "live/current-model",
+			},
 			agentThinkingLevels: { reviewer: "low" },
-			announcedFeatures: [],
 		}), "utf8");
 
 		const stub = makeStub();
 		register(stub.api);
 		const notify = vi.fn();
 		const setWidget = vi.fn();
-		await stub.hooks["session_start"]({}, { mode: "tui", hasUI: true, ui: { notify, setWidget } });
+		const context = {
+			mode: "tui",
+			hasUI: true,
+			ui: { notify, setWidget },
+			model: { provider: "live", id: "current-model" },
+			modelRegistry: { getAvailable: () => [{ provider: "live", id: "current-model" }] },
+		};
+		await stub.hooks["session_start"]({}, context);
 
 		expect(notify).toHaveBeenCalledWith(
-			"pi-subagents: the built-in cleaner agent was enabled by default and inherited your reviewer model/thinking settings. Run /subagents-setup to adjust or disable it.",
-			"info",
+			"pi-subagents: removed stale agent model overrides that are no longer available (worker: gone/old-model). Those agents now follow the current main model; run /subagents-setup to re-pick.",
+			"warning",
 		);
 		const savedConfig = JSON.parse(readFileSync(configPath, "utf8"));
-		expect(savedConfig.announcedFeatures).toEqual(expect.arrayContaining([
-			"cleanerDefaulted",
-			"cleanerAutoEnabled",
-			"cleanerInheritedReviewer",
-			"cleanerAutoEnabledNotice",
-		]));
-	});
+		expect(savedConfig.agentModels).toEqual({ reviewer: "live/current-model" });
+		expect(savedConfig.agentThinkingLevels).toEqual({ reviewer: "low" });
 
-	it("states explorer inheritance in the documenter migration notice", async () => {
-		if (!testAgentDir) throw new Error("test agent directory was not initialized");
-		const configPath = join(testAgentDir, "pi-subagents.json");
-		writeFileSync(configPath, JSON.stringify({
-			enabledAgents: ["explorer", "worker", "cleaner", "reviewer"],
-			agentModels: { explorer: "anthropic/claude-haiku-4-5" },
-			agentThinkingLevels: { explorer: "low" },
-			announcedFeatures: ["cleanerDefaulted"],
-		}), "utf8");
-
-		const stub = makeStub();
-		register(stub.api);
-		const notify = vi.fn();
-		const setWidget = vi.fn();
-		await stub.hooks["session_start"]({}, { mode: "tui", hasUI: true, ui: { notify, setWidget } });
-
-		expect(notify).toHaveBeenCalledWith(
-			"pi-subagents: the new documenter agent was enabled for your existing config and inherited your explorer model/thinking settings. It synchronizes comments and README/docs before commit; run /subagents-setup to adjust or disable it.",
-			"info",
-		);
-		const savedConfig = JSON.parse(readFileSync(configPath, "utf8"));
-		expect(savedConfig.enabledAgents).toEqual(["explorer", "worker", "cleaner", "documenter", "reviewer"]);
-		expect(savedConfig.agentModels.documenter).toBe("anthropic/claude-haiku-4-5");
-		expect(savedConfig.agentThinkingLevels.documenter).toBe("low");
-		expect(savedConfig.announcedFeatures).toEqual(expect.arrayContaining([
-			"documenterDefaulted",
-			"documenterAutoEnabled",
-			"documenterInheritedExplorer",
-			"documenterAutoEnabledNotice",
-		]));
-	});
-
-	it("skips the cleaner notice when cleaner was disabled before it could fire", async () => {
-		if (!testAgentDir) throw new Error("test agent directory was not initialized");
-		const configPath = join(testAgentDir, "pi-subagents.json");
-		// The upgrade ran and stamped the injection, but the user then disabled
-		// cleaner (e.g. via full setup) before the async announcement save landed.
-		// Documenter migration is already processed so this test stays isolated.
-		writeFileSync(configPath, JSON.stringify({
-			enabledAgents: ["explorer", "worker", "reviewer"],
-			announcedFeatures: ["cleanerDefaulted", "cleanerAutoEnabled", "documenterDefaulted"],
-		}), "utf8");
-
-		const stub = makeStub();
-		register(stub.api);
-		const notify = vi.fn();
-		const setWidget = vi.fn();
-		await stub.hooks["session_start"]({}, { mode: "tui", hasUI: true, ui: { notify, setWidget } });
-
-		expect(notify.mock.calls.some((call) => call[1] === "info")).toBe(false);
-		const savedConfig = JSON.parse(readFileSync(configPath, "utf8"));
-		expect(savedConfig.enabledAgents).toEqual(["explorer", "worker", "reviewer"]);
-		expect(savedConfig.announcedFeatures).not.toContain("cleanerAutoEnabledNotice");
+		// The stale override is gone from disk, so the notice never repeats.
+		notify.mockClear();
+		await stub.hooks["session_start"]({}, context);
+		expect(notify).not.toHaveBeenCalledWith(expect.stringContaining("stale agent model"), "warning");
 	});
 
 	it("does not register the tool inside any child sub-agent process", () => {
@@ -1414,7 +1347,7 @@ describe("managed post-writer workflows", () => {
 	});
 
 	it("never writes docs after a terminal REVIEW_FAIL gate", async () => {
-		configureEnabledAgents(["worker", "documenter", "reviewer"], { maxFixRounds: 0 });
+		configureEnabledAgents(["worker", "documenter", "reviewer"]);
 		const stub = makeStub();
 		let queued!: BackgroundTask;
 		const controller = new AbortController();
@@ -1443,7 +1376,13 @@ describe("managed post-writer workflows", () => {
 			);
 			await queued(controller.signal);
 
-			expect(run.mock.calls.map(([options]) => options.agentName)).toEqual(["worker", "reviewer"]);
+			// The gate fails, both fix rounds run and re-fail, and no documenter
+			// ever starts despite DOCUMENTATION: NEEDED on a terminal FAIL.
+			expect(run.mock.calls.map(([options]) => options.agentName)).toEqual([
+				"worker", "reviewer",
+				"worker", "reviewer",
+				"worker", "reviewer",
+			]);
 			expect(stub.messages).toHaveLength(1);
 			expect(stub.messages[0].message.content).toContain("final FAIL");
 			expect(stub.messages[0].message.content).not.toContain("final documentation sync");

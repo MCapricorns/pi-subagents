@@ -13,7 +13,6 @@ function bullets(lines: readonly string[]): string {
 
 export function buildDelegationDirective(
 	agents: AgentConfig[],
-	options: { maxFixRounds?: number } = {},
 ): string {
 	if (agents.length === 0) return "";
 
@@ -24,7 +23,7 @@ export function buildDelegationDirective(
 	const hasDocumenter = agents.some((agent) => agent.name === "documenter");
 	const hasReviewer = agents.some((agent) => agent.name === "reviewer");
 	const hasMultiple = agents.length > 1;
-	const autoFixEnabled = hasWorker && (options.maxFixRounds ?? 1) > 0;
+	const autoFixEnabled = hasWorker;
 	const codeWriterNames = [
 		...(hasWorker ? ["worker"] : []),
 		...(hasCleaner ? ["cleaner"] : []),
@@ -101,10 +100,10 @@ export function buildDelegationDirective(
 			? [
 				...(hasDocumenter
 					? [
-						`A direct REVIEW_PASS with DOCUMENTATION: CLEAN delivers immediately; NEEDED or a missing marker runs one documentation sync. A direct REVIEW_FAIL ${autoFixEnabled ? "keeps bounded worker/reviewer auto-fix, with docs considered only after its terminal REVIEW_PASS." : "cannot start fixes while worker/fix rounds are disabled."}`,
+						`A direct REVIEW_PASS with DOCUMENTATION: CLEAN delivers immediately; NEEDED or a missing marker runs one documentation sync. A direct REVIEW_FAIL ${autoFixEnabled ? "keeps bounded worker/reviewer auto-fix, with docs considered only after its terminal REVIEW_PASS." : "cannot start fixes while worker is disabled."}`,
 					]
 					: []),
-				"Resolve every gate finding; do not bypass the configured auto-fix/re-review cap. A reviewer report without a standalone VERDICT is advisory and cannot trigger writes.",
+				"Resolve every gate finding; do not bypass the auto-fix/re-review cap. A reviewer report without a standalone VERDICT is advisory and cannot trigger writes.",
 				"Use multi-model cross-review only when explicitly requested or for genuinely high-risk security, unsafe/FFI, persistence-migration, or concurrency changes.",
 			]
 			: []),

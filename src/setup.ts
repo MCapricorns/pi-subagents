@@ -13,13 +13,9 @@ import type { ExtensionCommandContext } from "@earendil-works/pi-coding-agent";
 import {
 	AGENT_SCOPE_VALUES,
 	BUILTIN_AGENT_NAMES,
-	CLEANER_DEFAULTED_FEATURE,
-	DOCUMENTER_DEFAULTED_FEATURE,
 	DEFAULT_CONFIG,
 	DEFAULT_ENABLED_AGENTS,
 	DEFAULT_IDLE_TIMEOUT_SEC,
-	DEFAULT_MAX_CONCURRENCY,
-	DEFAULT_MAX_FIX_ROUNDS,
 	DEFAULT_THINKING_LEVEL,
 	type AgentScope,
 	type SubagentsConfig,
@@ -243,8 +239,6 @@ async function pickInjection(ctx: ExtensionCommandContext, current: boolean): Pr
 	return choice.startsWith("On");
 }
 
-const CONCURRENCY_STEPS = [1, 2, 3, 4, 6, 8, 12, 16];
-const FIX_ROUNDS_STEPS = [0, 1, 2, 3, 5];
 const IDLE_TIMEOUT_STEPS = [0, 30, 60, 90, 120, 180, 300, 600];
 
 async function pickCount(
@@ -299,22 +293,6 @@ async function runFullSetup(ctx: ExtensionCommandContext, configPath: string, ba
 	if (injection === undefined) return false;
 	const scope = await pickScope(ctx, base.agentScope);
 	if (scope === undefined) return false;
-	const maxConcurrency = await pickCount(
-		ctx,
-		"Max sub-agents running at once?",
-		CONCURRENCY_STEPS,
-		base.maxConcurrency,
-		DEFAULT_MAX_CONCURRENCY,
-	);
-	if (maxConcurrency === undefined) return false;
-	const maxFixRounds = await pickCount(
-		ctx,
-		"Reviewer worker-fix rounds? (0 = no automatic fixes)",
-		FIX_ROUNDS_STEPS,
-		base.maxFixRounds,
-		DEFAULT_MAX_FIX_ROUNDS,
-	);
-	if (maxFixRounds === undefined) return false;
 	const idleTimeoutSec = await pickCount(
 		ctx,
 		"Idle timeout in seconds? (0 = disabled)",
@@ -333,16 +311,7 @@ async function runFullSetup(ctx: ExtensionCommandContext, configPath: string, ba
 		maxResultLines: base.maxResultLines,
 		proactiveInjection: injection,
 		agentScope: scope,
-		maxConcurrency,
-		maxFixRounds,
 		idleTimeoutSec,
-		// Full setup is an explicit decision point: mark role-enable migrations as
-		// processed so the user's saved selection is kept as-is.
-		announcedFeatures: [...new Set([
-			...base.announcedFeatures,
-			CLEANER_DEFAULTED_FEATURE,
-			DOCUMENTER_DEFAULTED_FEATURE,
-		])],
 	};
 	await saveConfig(next, configPath);
 	ctx.ui.notify(`pi-subagents configured with Auto thinking. Saved to ${configPath}`, "info");
@@ -357,8 +326,6 @@ async function updateRuntimeSetting(
 		const choice = await ctx.ui.select("Runtime setting", [
 			"Proactive injection",
 			"Agent scope",
-			"Max concurrency",
-			"Reviewer worker-fix rounds",
 			"Idle timeout",
 		]);
 		if (choice === undefined) return undefined;
@@ -371,14 +338,6 @@ async function updateRuntimeSetting(
 			const value = await pickScope(ctx, config.agentScope);
 			if (value === undefined) continue;
 			next.agentScope = value;
-		} else if (choice.startsWith("Max concurrency")) {
-			const value = await pickCount(ctx, "Max sub-agents running at once?", CONCURRENCY_STEPS, config.maxConcurrency, DEFAULT_MAX_CONCURRENCY);
-			if (value === undefined) continue;
-			next.maxConcurrency = value;
-		} else if (choice.startsWith("Reviewer")) {
-			const value = await pickCount(ctx, "Reviewer worker-fix rounds?", FIX_ROUNDS_STEPS, config.maxFixRounds, DEFAULT_MAX_FIX_ROUNDS);
-			if (value === undefined) continue;
-			next.maxFixRounds = value;
 		} else {
 			const value = await pickCount(ctx, "Idle timeout in seconds?", IDLE_TIMEOUT_STEPS, config.idleTimeoutSec, DEFAULT_IDLE_TIMEOUT_SEC);
 			if (value === undefined) continue;

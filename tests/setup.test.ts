@@ -13,7 +13,6 @@ function existingConfig(overrides: Partial<SubagentsConfig> = {}): SubagentsConf
 		enabledAgents: ["explorer"],
 		agentModels: {},
 		agentThinkingLevels: {},
-		announcedFeatures: ["cleanerDefaulted", "documenterDefaulted"],
 		...overrides,
 	};
 }
@@ -297,7 +296,7 @@ describe("setup back navigation", () => {
 	it("returns an escaped runtime value to Runtime settings, then settings", async () => {
 		const dir = mkdtempSync(join(tmpdir(), "pi-subagents-setup-runtime-back-"));
 		const configPath = join(dir, "pi-subagents.json");
-		const original = existingConfig({ maxConcurrency: 4 });
+		const original = existingConfig();
 		writeFileSync(configPath, JSON.stringify(original), "utf8");
 		const titles: string[] = [];
 		let settingsVisits = 0;
@@ -313,7 +312,7 @@ describe("setup back navigation", () => {
 				}
 				if (title === "Runtime setting") {
 					return runtimeVisits++ === 0
-						? options.find((option) => option.startsWith("Max concurrency"))
+						? options.find((option) => option.startsWith("Idle timeout"))
 						: undefined;
 				}
 				return undefined;
@@ -325,7 +324,7 @@ describe("setup back navigation", () => {
 			expect(titles).toEqual([
 				"pi-subagents settings",
 				"Runtime setting",
-				"Max sub-agents running at once?",
+				"Idle timeout in seconds?",
 				"Runtime setting",
 				"pi-subagents settings",
 			]);
@@ -338,7 +337,7 @@ describe("setup back navigation", () => {
 	it("returns an escaped full re-setup pass to settings without saving", async () => {
 		const dir = mkdtempSync(join(tmpdir(), "pi-subagents-setup-full-back-"));
 		const configPath = join(dir, "pi-subagents.json");
-		const original = existingConfig({ maxConcurrency: 2 });
+		const original = existingConfig();
 		writeFileSync(configPath, JSON.stringify(original), "utf8");
 		let settingsVisits = 0;
 		const ctx = setupContext(dir, {
@@ -378,16 +377,16 @@ describe("settings preservation", () => {
 					return options.find((option) => option.startsWith("Runtime"));
 				}
 				if (title === "Runtime setting") {
-					return options.find((option) => option.startsWith("Max concurrency"));
+					return options.find((option) => option.startsWith("Idle timeout"));
 				}
-				return options.find((option) => option.startsWith("6"));
+				return options.find((option) => option.startsWith("120"));
 			}),
 			custom: vi.fn(),
 		});
 		try {
 			await runSetup(ctx, configPath);
 			const saved = JSON.parse(readFileSync(configPath, "utf8"));
-			expect(saved.maxConcurrency).toBe(6);
+			expect(saved.idleTimeoutSec).toBe(120);
 			expect(saved.agentModels.documenter).toBe("deepseek/deepseek-v4-flash");
 			expect(saved.agentThinkingLevels.documenter).toBe("max");
 		} finally {
@@ -400,55 +399,50 @@ describe("enable/disable flow", () => {
 	it("newly enabling cleaner inherits the reviewer's model and thinking", async () => {
 		const dir = mkdtempSync(join(tmpdir(), "pi-subagents-setup-enable-"));
 		const configPath = join(dir, "pi-subagents.json");
-		writeFileSync(
-			configPath,
-			JSON.stringify({
-				enabledAgents: ["explorer", "worker", "reviewer"],
-				agentModels: { reviewer: "anthropic/sonnet" },
-				agentThinkingLevels: { reviewer: "low" },
-				// Stamped: the load-time upgrade already ran and the user disabled
-				// cleaner deliberately, so it stays off until re-enabled here.
-				announcedFeatures: ["cleanerDefaulted", "documenterDefaulted"],
-			}),
-			"utf8",
-		);
-		const ctx = setupContext(dir, {
-			notify: vi.fn(),
-			select: vi.fn(async (_title: string, options: string[]) =>
-				options.find((option) => option.startsWith("Enable"))),
-			custom: pickerDriver((component) => {
-				// Move to cleaner (third row) and toggle it on, then confirm.
-				component.handleInput("down");
-				component.handleInput("down");
-				component.handleInput(" ");
-				component.handleInput("enter");
-			}),
+			writeFileSync(
+				configPath,
+				JSON.stringify({
+					enabledAgents: ["explorer", "worker", "reviewer"],
+					agentModels: { reviewer: "anthropic/sonnet" },
+					agentThinkingLevels: { reviewer: "low" },
+				}),
+				"utf8",
+			);
+			const ctx = setupContext(dir, {
+				notify: vi.fn(),
+				select: vi.fn(async (_title: string, options: string[]) =>
+					options.find((option) => option.startsWith("Enable"))),
+				custom: pickerDriver((component) => {
+					// Move to cleaner (third row) and toggle it on, then confirm.
+					component.handleInput("down");
+					component.handleInput("down");
+					component.handleInput(" ");
+					component.handleInput("enter");
+				}),
+			});
+			try {
+				await runSetup(ctx, configPath);
+				const saved = JSON.parse(readFileSync(configPath, "utf8"));
+				expect(saved.enabledAgents).toEqual(["explorer", "worker", "reviewer", "cleaner"]);
+				expect(saved.agentModels).toEqual({ reviewer: "anthropic/sonnet", cleaner: "anthropic/sonnet" });
+				expect(saved.agentThinkingLevels).toEqual({ reviewer: "low", cleaner: "low" });
+			} finally {
+				rmSync(dir, { recursive: true, force: true });
+			}
 		});
-		try {
-			await runSetup(ctx, configPath);
-			const saved = JSON.parse(readFileSync(configPath, "utf8"));
-			expect(saved.enabledAgents).toEqual(["explorer", "worker", "reviewer", "cleaner"]);
-			expect(saved.agentModels).toEqual({ reviewer: "anthropic/sonnet", cleaner: "anthropic/sonnet" });
-			expect(saved.agentThinkingLevels).toEqual({ reviewer: "low", cleaner: "low" });
-			expect(saved.announcedFeatures).toEqual(["cleanerDefaulted", "documenterDefaulted"]);
-		} finally {
-			rmSync(dir, { recursive: true, force: true });
-		}
-	});
 
 	it("newly enabling documenter inherits the explorer model and thinking", async () => {
 		const dir = mkdtempSync(join(tmpdir(), "pi-subagents-setup-documenter-"));
 		const configPath = join(dir, "pi-subagents.json");
-		writeFileSync(
-			configPath,
-			JSON.stringify({
-				enabledAgents: ["explorer", "worker", "cleaner", "reviewer"],
-				agentModels: { explorer: "anthropic/haiku" },
-				agentThinkingLevels: { explorer: "low" },
-				announcedFeatures: ["cleanerDefaulted", "documenterDefaulted"],
-			}),
-			"utf8",
-		);
+			writeFileSync(
+				configPath,
+				JSON.stringify({
+					enabledAgents: ["explorer", "worker", "cleaner", "reviewer"],
+					agentModels: { explorer: "anthropic/haiku" },
+					agentThinkingLevels: { explorer: "low" },
+				}),
+				"utf8",
+			);
 		const ctx = setupContext(dir, {
 			notify: vi.fn(),
 			select: vi.fn(async (_title: string, options: string[]) =>

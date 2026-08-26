@@ -27,6 +27,11 @@ interface PendingTask {
 	onError?: (error: unknown) => void | Promise<void>;
 }
 
+/** How many sub-agent processes may run at once, and how many tasks one
+ * parallel `subagent` call may contain. Fixed by design: the queue sheds load
+ * by waiting, so the knob bought nothing worth its maintenance. */
+export const MAX_CONCURRENT_SUBAGENTS = 4;
+
 export class BackgroundTaskQueue {
 	private concurrency: number;
 	private readonly pending: PendingTask[] = [];
@@ -37,16 +42,6 @@ export class BackgroundTaskQueue {
 
 	constructor(concurrency: number) {
 		this.concurrency = Math.max(1, concurrency);
-	}
-
-	/**
-	 * Update the concurrency limit (e.g. after a config change). Raising it
-	 * immediately starts more queued work; lowering it takes effect as running
-	 * tasks finish — already-running tasks are never interrupted.
-	 */
-	setConcurrency(concurrency: number): void {
-		this.concurrency = Math.max(1, concurrency);
-		this.drain();
 	}
 
 	enqueue(task: BackgroundTask, onCancelled?: () => void, onError?: (error: unknown) => void | Promise<void>): AbortController {

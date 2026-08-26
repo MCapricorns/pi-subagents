@@ -15,6 +15,7 @@ import { realpath } from "node:fs/promises";
 import { resolve } from "node:path";
 import { Type } from "typebox";
 import { discoverAgents, resolveAgentTools, type AgentConfig } from "./agents.ts";
+import { MAX_CONCURRENT_SUBAGENTS } from "./background.ts";
 import { loadConfig } from "./config.ts";
 import { formatUsage, queuedResult } from "./format.ts";
 import {
@@ -23,6 +24,7 @@ import {
 	buildFixTaskBrief,
 	buildReReviewBrief,
 	documentationDisposition,
+	MAX_FIX_ROUNDS,
 	type ChainStep,
 	type ManagedWorkflowOutcome,
 } from "./fixloop.ts";
@@ -193,8 +195,6 @@ export function registerSubagentTool(pi: ExtensionAPI, runtime: SubagentRuntime)
 		async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
 			monitor.beginTurn();
 			const config = await loadConfig(runtime.configPath);
-			// Pick up concurrency changes from /subagents-setup without a restart.
-			runtime.backgroundQueue.setConcurrency(config.maxConcurrency);
 
 			// Finished runs leave the active monitor immediately. Their final findings
 			// are sent as a custom message that starts a follow-up turn.
@@ -493,19 +493,19 @@ export function registerSubagentTool(pi: ExtensionAPI, runtime: SubagentRuntime)
 				): Promise<{ lastReview?: SingleResult; lastWorker?: SingleResult }> => {
 					let lastReviewer = triggeringReviewer;
 					const outcome: { lastReview?: SingleResult; lastWorker?: SingleResult } = {};
-					for (let round = 1; round <= request.config.maxFixRounds; round++) {
+					for (let round = 1; round <= MAX_FIX_ROUNDS; round++) {
 						if (!canContinue()) break;
-						const fixRelation = `fix ${round}/${request.config.maxFixRounds}`;
+						const fixRelation = `fix ${round}/${MAX_FIX_ROUNDS}`;
 						const workerResult = await launchStep(
 							"worker",
-							buildFixTaskBrief(lastReviewer, round, request.config.maxFixRounds),
+							buildFixTaskBrief(lastReviewer, round, MAX_FIX_ROUNDS),
 							`fix round ${round}`,
 							{ timelineRelation: fixRelation, childRelation: fixRelation },
 						);
 						if (isFailedResult(workerResult) || !canContinue()) break;
 						outcome.lastWorker = workerResult;
 
-						const reReviewRelation = `re-review ${round}/${request.config.maxFixRounds}`;
+						const reReviewRelation = `re-review ${round}/${MAX_FIX_ROUNDS}`;
 						const reviewResult = await launchStep(
 							"reviewer",
 							buildReReviewBrief(lastReviewer, round, workerResult, {
@@ -586,8 +586,7 @@ export function registerSubagentTool(pi: ExtensionAPI, runtime: SubagentRuntime)
 							!isFailedResult(gateReview) &&
 							canContinue() &&
 							reviewVerdict(getResultOutput(gateReview)) === "fail" &&
-							enabled("worker") &&
-							request.config.maxFixRounds > 0
+							enabled("worker")
 						) {
 							fixOutcome = await runFixRounds(gateReview);
 						}
@@ -620,12 +619,12 @@ export function registerSubagentTool(pi: ExtensionAPI, runtime: SubagentRuntime)
 			// Sub-agents intentionally detach from the foreground turn. This makes the
 			// editor available immediately; completion messages later wake the main agent.
 			if (params.tasks && params.tasks.length > 0) {
-				if (params.tasks.length > config.maxConcurrency) {
+				if (params.tasks.length > MAX_CONCURRENT_SUBAGENTS) {
 					return {
 						content: [
 							{
 								type: "text",
-								text: `Too many parallel tasks (${params.tasks.length}). Max is ${config.maxConcurrency} (configurable via /subagents-setup).`,
+								text: `Too many parallel tasks (${params.tasks.length}). Max is ${MAX_CONCURRENT_SUBAGENTS}.`,
 							},
 						],
 						details: makeDetails("parallel", true)([]),

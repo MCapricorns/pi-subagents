@@ -86,6 +86,22 @@ export function findModelByRef(
 	return normalized ? models.find((model) => modelRef(model) === normalized) : undefined;
 }
 
+/** Split persisted agent model overrides into the ones Pi still reports as
+ * available and the stale ones. Stale refs are dropped at session start (with
+ * a user notice) so the config never carries models that can no longer run. */
+export function filterUnavailableModelOverrides(
+	agentModels: Record<string, string>,
+	models: readonly Model<Api>[],
+): { kept: Record<string, string>; dropped: Array<{ agent: string; ref: string }> } {
+	const kept: Record<string, string> = {};
+	const dropped: Array<{ agent: string; ref: string }> = [];
+	for (const [agent, ref] of Object.entries(agentModels)) {
+		if (findModelByRef(models, ref)) kept[agent] = ref;
+		else dropped.push({ agent, ref });
+	}
+	return { kept, dropped };
+}
+
 /**
  * Resolve one agent's runtime route:
  *

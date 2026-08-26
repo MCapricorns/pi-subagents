@@ -13,7 +13,6 @@ import {
 	workflowAgentAvailability,
 	type ChainStep,
 } from "../src/fixloop.ts";
-import { DEFAULT_CONFIG, type SubagentsConfig } from "../src/config.ts";
 import type { SingleResult } from "../src/spawn.ts";
 
 function assistant(text: string): any {
@@ -32,31 +31,25 @@ function reviewResult(text: string, overrides: Partial<SingleResult> = {}): Sing
 	};
 }
 
-const config = (maxFixRounds: number): SubagentsConfig => ({ ...DEFAULT_CONFIG, maxFixRounds });
-
 describe("shouldTriggerFixLoop", () => {
-	it("triggers on a healthy reviewer REVIEW_FAIL when maxFixRounds > 0", () => {
-		expect(shouldTriggerFixLoop(reviewResult("REQUEST_CHANGES\nVERDICT: REVIEW_FAIL"), config(2))).toBe(true);
-	});
-
-	it("does not trigger when maxFixRounds is 0 (loop disabled)", () => {
-		expect(shouldTriggerFixLoop(reviewResult("VERDICT: REVIEW_FAIL"), config(0))).toBe(false);
+	it("triggers on a healthy reviewer REVIEW_FAIL", () => {
+		expect(shouldTriggerFixLoop(reviewResult("REQUEST_CHANGES\nVERDICT: REVIEW_FAIL"))).toBe(true);
 	});
 
 	it("does not trigger on a passing review", () => {
-		expect(shouldTriggerFixLoop(reviewResult("APPROVE\nVERDICT: REVIEW_PASS"), config(2))).toBe(false);
+		expect(shouldTriggerFixLoop(reviewResult("APPROVE\nVERDICT: REVIEW_PASS"))).toBe(false);
 	});
 
 	it("does not trigger on a failed reviewer process (exit code != 0)", () => {
-		expect(shouldTriggerFixLoop(reviewResult("VERDICT: REVIEW_FAIL", { exitCode: 1 }), config(2))).toBe(false);
+		expect(shouldTriggerFixLoop(reviewResult("VERDICT: REVIEW_FAIL", { exitCode: 1 }))).toBe(false);
 	});
 
 	it("does not trigger for non-reviewer agents", () => {
-		expect(shouldTriggerFixLoop(reviewResult("VERDICT: REVIEW_FAIL", { agent: "worker" }), config(2))).toBe(false);
+		expect(shouldTriggerFixLoop(reviewResult("VERDICT: REVIEW_FAIL", { agent: "worker" }))).toBe(false);
 	});
 
 	it("does not trigger when no verdict marker is present", () => {
-		expect(shouldTriggerFixLoop(reviewResult("just a plain report"), config(2))).toBe(false);
+		expect(shouldTriggerFixLoop(reviewResult("just a plain report"))).toBe(false);
 	});
 });
 
@@ -76,16 +69,16 @@ describe("managed workflow planning", () => {
 
 	it.each(["worker", "cleaner"])("routes a successful %s through whichever downstream role exists", (agent) => {
 		const result = reviewResult("done", { agent });
-		expect(getManagedWorkflowPlan(result, config(0), available("documenter", "reviewer"))?.kind).toBe("post-writer");
-		expect(getManagedWorkflowPlan(result, config(0), available("reviewer"))?.kind).toBe("post-writer");
-		expect(getManagedWorkflowPlan(result, config(0), available("documenter"))?.kind).toBe("post-writer");
-		expect(getManagedWorkflowPlan(result, config(0), available())).toBeUndefined();
+		expect(getManagedWorkflowPlan(result, available("documenter", "reviewer"))?.kind).toBe("post-writer");
+		expect(getManagedWorkflowPlan(result, available("reviewer"))?.kind).toBe("post-writer");
+		expect(getManagedWorkflowPlan(result, available("documenter"))?.kind).toBe("post-writer");
+		expect(getManagedWorkflowPlan(result, available())).toBeUndefined();
 	});
 
 	it("delivers a successful top-level documenter directly", () => {
 		const result = reviewResult("docs done", { agent: "documenter" });
-		expect(getManagedWorkflowPlan(result, config(0), available("reviewer"))).toBeUndefined();
-		expect(getManagedWorkflowPlan(result, config(0), available("documenter", "reviewer"))).toBeUndefined();
+		expect(getManagedWorkflowPlan(result, available("reviewer"))).toBeUndefined();
+		expect(getManagedWorkflowPlan(result, available("documenter", "reviewer"))).toBeUndefined();
 	});
 
 	it("runs direct-pass docs only for NEEDED or a conservatively missing marker", () => {
@@ -93,24 +86,23 @@ describe("managed workflow planning", () => {
 		const needed = reviewResult("DOCUMENTATION: NEEDED\nAPPROVE\nVERDICT: REVIEW_PASS");
 		const clean = reviewResult("DOCUMENTATION: CLEAN\nAPPROVE\nVERDICT: REVIEW_PASS");
 		const roles = available("worker", "documenter", "reviewer");
-		expect(getManagedWorkflowPlan(missing, config(0), roles)?.kind).toBe("review-pass-sync");
-		expect(getManagedWorkflowPlan(needed, config(0), roles)?.kind).toBe("review-pass-sync");
-		expect(getManagedWorkflowPlan(clean, config(0), roles)).toBeUndefined();
-		expect(getManagedWorkflowPlan(missing, config(0), available("worker", "reviewer"))).toBeUndefined();
+		expect(getManagedWorkflowPlan(missing, roles)?.kind).toBe("review-pass-sync");
+		expect(getManagedWorkflowPlan(needed, roles)?.kind).toBe("review-pass-sync");
+		expect(getManagedWorkflowPlan(clean, roles)).toBeUndefined();
+		expect(getManagedWorkflowPlan(missing, available("worker", "reviewer"))).toBeUndefined();
 	});
 
 	it("never turns advisory or failed reviewer output into writes", () => {
 		const roles = available("worker", "documenter", "reviewer");
-		expect(getManagedWorkflowPlan(reviewResult("advisory only"), config(2), roles)).toBeUndefined();
-		expect(getManagedWorkflowPlan(reviewResult("DOCUMENTATION: NEEDED\nadvisory only"), config(2), roles)).toBeUndefined();
-		expect(getManagedWorkflowPlan(reviewResult("VERDICT: REVIEW_FAIL", { exitCode: 1 }), config(2), roles)).toBeUndefined();
+		expect(getManagedWorkflowPlan(reviewResult("advisory only"), roles)).toBeUndefined();
+		expect(getManagedWorkflowPlan(reviewResult("DOCUMENTATION: NEEDED\nadvisory only"), roles)).toBeUndefined();
+		expect(getManagedWorkflowPlan(reviewResult("VERDICT: REVIEW_FAIL", { exitCode: 1 }), roles)).toBeUndefined();
 	});
 
-	it("starts direct auto-fix only with an enabled worker and positive fix budget", () => {
+	it("starts direct auto-fix only with an enabled worker", () => {
 		const failedGate = reviewResult("VERDICT: REVIEW_FAIL");
-		expect(getManagedWorkflowPlan(failedGate, config(1), available("worker", "reviewer"))?.kind).toBe("auto-fix");
-		expect(getManagedWorkflowPlan(failedGate, config(0), available("worker", "reviewer"))).toBeUndefined();
-		expect(getManagedWorkflowPlan(failedGate, config(2), available("reviewer"))).toBeUndefined();
+		expect(getManagedWorkflowPlan(failedGate, available("worker", "reviewer"))?.kind).toBe("auto-fix");
+		expect(getManagedWorkflowPlan(failedGate, available("reviewer"))).toBeUndefined();
 	});
 
 	it("reserves shared lanes for writers and reviewers that need a stable diff", () => {

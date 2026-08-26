@@ -18,7 +18,13 @@
 import { isWriteCapableAgent, type AgentConfig } from "./agents.ts";
 import { getResultOutput, isFailedResult, reviewVerdict, type SingleResult } from "./spawn.ts";
 import { formatUsageCompact, sumUsage } from "./monitor.ts";
-import type { SubagentsConfig } from "./config.ts";
+
+/**
+ * Worker fixes allowed after REVIEW_FAIL. Each fix is followed by a reviewer
+ * re-review; this cap does not suppress the post-writer review gate or its
+ * conditional/reviewer-disabled documentation fallback.
+ */
+export const MAX_FIX_ROUNDS = 2;
 
 /**
  * Whether a completed result should trigger the auto-fix loop instead of being
@@ -27,8 +33,7 @@ import type { SubagentsConfig } from "./config.ts";
  * normally. Loop-internal re-review results never reach this path (they are
  * awaited inside the loop, not delivered through the completion flow).
  */
-export function shouldTriggerFixLoop(result: SingleResult, config: SubagentsConfig): boolean {
-	if (config.maxFixRounds <= 0) return false;
+export function shouldTriggerFixLoop(result: SingleResult): boolean {
 	if (result.agent !== "reviewer") return false;
 	if (isFailedResult(result)) return false;
 	// A dispatch crash (spawn infra, delivery API, ...) is never a real review
@@ -97,8 +102,8 @@ export function canStartManagedWorkflow(
 	if (isWriteCapableAgent(agent)) return true;
 	if (agent.name === "reviewer") {
 		// Hold a stable diff snapshot against every discoverable writer even when
-		// this review is advisory or maxFixRounds=0. Classification happens only
-		// after the read-only child returns, too late to acquire the lane safely.
+		// this review is advisory. Classification happens only after the read-only
+		// child returns, too late to acquire the lane safely.
 		return availability.writer;
 	}
 	return false;
@@ -108,7 +113,6 @@ export function canStartManagedWorkflow(
  * machine verdict is advisory and cannot start any write-capable child. */
 export function getManagedWorkflowPlan(
 	result: SingleResult,
-	config: SubagentsConfig,
 	availability: WorkflowAgentAvailability,
 ): ManagedWorkflowPlan | undefined {
 	if (result.parked || result.dispatchFailed || isFailedResult(result)) return undefined;
@@ -135,7 +139,7 @@ export function getManagedWorkflowPlan(
 	) {
 		return { kind: "review-pass-sync", initialRelation: "pre-documentation review" };
 	}
-	if (verdict === "fail" && availability.worker && shouldTriggerFixLoop(result, config)) {
+	if (verdict === "fail" && availability.worker && shouldTriggerFixLoop(result)) {
 		return { kind: "auto-fix", initialRelation: "initial review" };
 	}
 	return undefined;

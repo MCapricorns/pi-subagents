@@ -102,16 +102,13 @@ describe("buildDelegationDirective", () => {
 		expect(both).toContain("Only REVIEW_PASS can authorize documenter");
 	});
 
-	it("advertises auto-fix only when worker exists and rounds are enabled", () => {
+	it("advertises auto-fix only when the worker role exists", () => {
 		const roles = [agent("worker"), agent("documenter"), agent("reviewer")];
-		expect(buildDelegationDirective(roles, { maxFixRounds: 1 })).toContain(
+		expect(buildDelegationDirective(roles)).toContain(
 			"direct REVIEW_FAIL keeps bounded worker/reviewer auto-fix",
 		);
-		expect(buildDelegationDirective(roles, { maxFixRounds: 0 })).toContain(
-			"cannot start fixes while worker/fix rounds are disabled",
-		);
 		expect(buildDelegationDirective([agent("documenter"), agent("reviewer")])).toContain(
-			"cannot start fixes while worker/fix rounds are disabled",
+			"cannot start fixes while worker is disabled",
 		);
 	});
 

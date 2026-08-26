@@ -968,7 +968,9 @@ describe("shutdown and destructive-stop integration", () => {
 
 	it("keeps a queued isolated stop active until worktree cleanup and result publication finish", async () => {
 		const root = mkdtempSync(join(tmpdir(), "pi-subagents-isolation-queued-stop-"));
-		writeFileSync(join(agentDir, "pi-subagents.json"), JSON.stringify({ maxConcurrency: 1 }), "utf8");
+		writeFileSync(join(agentDir, "pi-subagents.json"), JSON.stringify({
+			enabledAgents: ["explorer", "worker"],
+		}), "utf8");
 		const finalization = deferred<WorktreeFinalization>();
 		const handle = fakeWorktree(root);
 		handle.finalizeMock.mockImplementation(() => finalization.promise);
@@ -987,8 +989,14 @@ describe("shutdown and destructive-stop integration", () => {
 			});
 		});
 		const { stub, subagent, stop, status } = registered();
-		await execute(subagent, { agent: "explorer", task: "occupy slot" }, root);
-		await waitFor(() => monitor.getRuns().some((run) => run.task === "occupy slot" && run.status === "running"));
+		// Concurrency is fixed at four slots; occupy all of them so the isolated
+		// worker below stays queued and its stop can be observed pre-start.
+		for (let index = 1; index <= 4; index++) {
+			await execute(subagent, { agent: "explorer", task: `occupy slot ${index}` }, root);
+		}
+		await waitFor(() =>
+			monitor.getRuns().filter((run) => run.task?.startsWith("occupy slot") && run.status === "running").length === 4
+		);
 		const queued = await execute(subagent, {
 			agent: "worker",
 			task: "queued isolated",

@@ -10,7 +10,7 @@
 
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { rmSync } from "node:fs";
-import { BackgroundTaskQueue } from "./background.ts";
+import { BackgroundTaskQueue, MAX_CONCURRENT_SUBAGENTS } from "./background.ts";
 import {
 	completionGroupTriggersTurn,
 	createCompletionBatcher,
@@ -19,7 +19,7 @@ import {
 	type CompletionBatcher,
 	type CompletionMessageItem,
 } from "./completion.ts";
-import { loadConfigSync, type ThinkingLevel } from "./config.ts";
+import { type ThinkingLevel } from "./config.ts";
 import { isRunActiveStatus, monitor } from "./monitor.ts";
 import {
 	persistRecoveryRecords,
@@ -124,10 +124,7 @@ export interface SubagentRuntime {
 }
 
 export function createRuntime(pi: ExtensionAPI, configPath: string): SubagentRuntime {
-	// Init-time decisions need the config synchronously; the full (migrating)
-	// async load runs per tool call.
-	const initialConfig = loadConfigSync(configPath);
-	const backgroundQueue = new BackgroundTaskQueue(initialConfig.maxConcurrency);
+	const backgroundQueue = new BackgroundTaskQueue(MAX_CONCURRENT_SUBAGENTS);
 
 	const runtime: SubagentRuntime = {
 		configPath,

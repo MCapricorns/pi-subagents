@@ -272,7 +272,7 @@ export function isRetryableStartupFailure(result: SingleResult, durationMs: numb
 }
 
 export function formatStartupRetryExhaustedError(model: string, attempts: number): string {
-	return `Subagent failed to start after ${attempts} attempt${attempts === 1 ? "" : "s"} on ${model}: the child failed before its initial RPC prompt was dispatched and produced no model, tool, output, or usage activity. This is typically a concurrent pi startup race (several sub-agents starting at once). Retry the dispatch, or temporarily lower maxConcurrency in /subagents-setup.`;
+	return `Subagent failed to start after ${attempts} attempt${attempts === 1 ? "" : "s"} on ${model}: the child failed before its initial RPC prompt was dispatched and produced no model, tool, output, or usage activity. This is typically a concurrent pi startup race (several sub-agents starting at once). Retry the dispatch, or dispatch fewer sub-agents at once.`;
 }
 
 export async function waitForStartupRetry(delayMs: number, signal?: AbortSignal): Promise<boolean> {

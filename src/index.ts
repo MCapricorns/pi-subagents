@@ -86,7 +86,7 @@ export default function (pi: ExtensionAPI): void {
 			enabledNames: config.enabledAgents,
 			projectTrusted: ctx.isProjectTrusted?.() === true,
 		});
-		const directive = buildDelegationDirective(agents, { maxFixRounds: config.maxFixRounds });
+		const directive = buildDelegationDirective(agents);
 		if (!directive) return undefined;
 		return { systemPrompt: `${event.systemPrompt}\n${directive}` };
 	});

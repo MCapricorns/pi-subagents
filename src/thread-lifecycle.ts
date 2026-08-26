@@ -720,7 +720,6 @@ export function createBackgroundDispatcher(options: BackgroundDispatcherOptions)
 				if (!ownsResumeReservation(thread, reservation)) {
 					throw new Error(`Run #${runId} changed while resume configuration was loading.`);
 				}
-				runtime.backgroundQueue.setConcurrency(currentConfig.maxConcurrency);
 				const currentAgents = discoverAgents(currentCtx.cwd, {
 					scope: currentConfig.agentScope,
 					enabledNames: currentConfig.enabledAgents,
@@ -888,7 +887,6 @@ export function createBackgroundDispatcher(options: BackgroundDispatcherOptions)
 				if (!ownsFork()) throw new Error(`Run #${runId} changed while its retained session was being forked.`);
 				const currentConfig = await loadConfig(runtime.configPath);
 				if (!ownsFork()) throw new Error(`Run #${runId} changed while fork configuration was loading.`);
-				runtime.backgroundQueue.setConcurrency(currentConfig.maxConcurrency);
 				const currentAgents = discoverAgents(currentCtx.cwd, {
 					scope: currentConfig.agentScope,
 					enabledNames: currentConfig.enabledAgents,
@@ -971,7 +969,6 @@ export function createBackgroundDispatcher(options: BackgroundDispatcherOptions)
 				let activeIdleTimeoutMs = runConfig.idleTimeoutSec * 1000;
 				try {
 					const startConfig = await loadConfig(runtime.configPath);
-					runtime.backgroundQueue.setConcurrency(startConfig.maxConcurrency);
 					const resolvedStart = resolveDispatchModelRoute(agent, startConfig, runCtx);
 					activeRoute = isolation === "worktree"
 						? { ...resolvedStart, agent: withWorktreeSystemPrompt(resolvedStart.agent) }
@@ -1064,7 +1061,7 @@ export function createBackgroundDispatcher(options: BackgroundDispatcherOptions)
 
 				if (thread.retireOnSettle) runtime.retireThreadSession(thread);
 				let workflowOutcome: ManagedWorkflowOutcome | undefined;
-				const workflowPlan = getManagedWorkflowPlan(result, runConfig, workflowAvailability);
+				const workflowPlan = getManagedWorkflowPlan(result, workflowAvailability);
 				if (workflowPlan && runtime.sessionActive) {
 					thread.state = "running";
 					// The stable parent row now represents workflow ownership, not whichever

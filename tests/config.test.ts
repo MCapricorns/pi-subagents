@@ -4,28 +4,16 @@ import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 import {
 	BUILTIN_AGENT_NAMES,
-	CLEANER_AUTO_ENABLED_FEATURE,
-	CLEANER_DEFAULTED_FEATURE,
-	CLEANER_INHERITED_FEATURE,
 	DEFAULT_ENABLED_AGENTS,
 	DEFAULT_IDLE_TIMEOUT_SEC,
-	DEFAULT_MAX_CONCURRENCY,
-	DEFAULT_MAX_FIX_ROUNDS,
 	DEFAULT_MAX_RESULT_LINES,
 	DEFAULT_THINKING_LEVEL,
-	DOCUMENTER_AUTO_ENABLED_FEATURE,
-	DOCUMENTER_DEFAULTED_FEATURE,
-	DOCUMENTER_INHERITED_FEATURE,
 	IDLE_TIMEOUT_SEC_LIMIT,
-	MAX_CONCURRENCY_LIMIT,
-	MAX_FIX_ROUNDS_LIMIT,
 	MAX_RESULT_LINES_LIMIT,
 	loadConfig,
 	normalizeConfig,
 	saveConfig,
 } from "../src/config.ts";
-
-const ROLE_MIGRATIONS_PROCESSED = [CLEANER_DEFAULTED_FEATURE, DOCUMENTER_DEFAULTED_FEATURE];
 
 describe("normalizeConfig", () => {
 	it("ships five built-ins but keeps documenter opt-in on a fresh install", () => {
@@ -37,197 +25,31 @@ describe("normalizeConfig", () => {
 		expect(config.agentScope).toBe("user");
 		expect(config.agentModels).toEqual({});
 		expect(config.agentThinkingLevels).toEqual({});
-		expect(config).not.toHaveProperty("agentBackupModels");
-		expect(config).not.toHaveProperty("thinkingLevel");
 		expect(config.notifyOnReviewPass).toBe(false);
-		expect(config.maxConcurrency).toBe(DEFAULT_MAX_CONCURRENCY);
+	});
+
+	it("drops the removed tuning keys instead of honoring them", () => {
+		const config = normalizeConfig({ maxConcurrency: 9, maxFixRounds: 0, announcedFeatures: ["x"] });
+		expect(config).not.toHaveProperty("maxConcurrency");
+		expect(config).not.toHaveProperty("maxFixRounds");
+		expect(config).not.toHaveProperty("announcedFeatures");
 	});
 
 	it("keeps valid enabledAgents and drops non-strings", () => {
 		const config = normalizeConfig({
 			enabledAgents: ["explorer", "worker", 42, null, "explorer"],
-			announcedFeatures: ROLE_MIGRATIONS_PROCESSED,
 		});
 		expect(config.enabledAgents).toEqual(["explorer", "worker"]);
-	});
-
-	it("migrates the former built-in role name across config fields", () => {
-		const config = normalizeConfig({
-			enabledAgents: ["explore", "worker", "explorer"],
-			agentModels: { explore: "anthropic/legacy" },
-			agentThinkingLevels: { explore: "low" },
-			announcedFeatures: ROLE_MIGRATIONS_PROCESSED,
-		});
-		expect(config.enabledAgents).toEqual(["explorer", "worker"]);
-		expect(config.agentModels).toEqual({ explorer: "anthropic/legacy" });
-		expect(config.agentThinkingLevels).toEqual({ explorer: "low" });
-	});
-
-	it("prefers valid explicit explorer settings over legacy keys", () => {
-		const config = normalizeConfig({
-			agentModels: {
-				explore: "anthropic/legacy",
-				explorer: "openai/current",
-			},
-			agentThinkingLevels: { explore: "low", explorer: "high" },
-			announcedFeatures: ROLE_MIGRATIONS_PROCESSED,
-		});
-		expect(config.agentModels).toEqual({ explorer: "openai/current" });
-		expect(config.agentThinkingLevels).toEqual({ explorer: "high" });
-	});
-
-	it("defaults cleaner on for pre-cleaner configs and inherits reviewer settings", () => {
-		const config = normalizeConfig({
-			enabledAgents: ["explorer", "worker", "reviewer"],
-			agentModels: { reviewer: "anthropic/claude-sonnet-4-5" },
-			agentThinkingLevels: { reviewer: "low" },
-			announcedFeatures: [DOCUMENTER_DEFAULTED_FEATURE],
-		});
-		expect(config.enabledAgents).toEqual(["explorer", "worker", "cleaner", "reviewer"]);
-		expect(config.agentModels).toEqual({
-			reviewer: "anthropic/claude-sonnet-4-5",
-			cleaner: "anthropic/claude-sonnet-4-5",
-		});
-		expect(config.agentThinkingLevels).toEqual({ reviewer: "low", cleaner: "low" });
-		expect(config.announcedFeatures).toEqual([
-			DOCUMENTER_DEFAULTED_FEATURE,
-			CLEANER_DEFAULTED_FEATURE,
-			CLEANER_AUTO_ENABLED_FEATURE,
-			CLEANER_INHERITED_FEATURE,
-		]);
-	});
-
-	it("stamps the reviewer inheritance only when settings were actually copied", () => {
-		// Reviewer present with only a model override: that one setting is copied
-		// and the inheritance stamp is set even though nothing else was.
-		const modelOnly = normalizeConfig({
-			enabledAgents: ["worker", "reviewer"],
-			agentModels: { reviewer: "anthropic/claude-sonnet-4-5" },
-			announcedFeatures: [DOCUMENTER_DEFAULTED_FEATURE],
-		});
-		expect(modelOnly.agentModels).toEqual({
-			reviewer: "anthropic/claude-sonnet-4-5",
-			cleaner: "anthropic/claude-sonnet-4-5",
-		});
-		expect(modelOnly.agentThinkingLevels).toEqual({});
-		expect(modelOnly.announcedFeatures).toEqual([
-			DOCUMENTER_DEFAULTED_FEATURE,
-			CLEANER_DEFAULTED_FEATURE,
-			CLEANER_AUTO_ENABLED_FEATURE,
-			CLEANER_INHERITED_FEATURE,
-		]);
-
-		// Reviewer enabled but no overrides to copy: injection still happens, but
-		// the inheritance stamp (and the notice's inheritance claim) must not.
-		const noOverrides = normalizeConfig({
-			enabledAgents: ["worker", "reviewer"],
-			announcedFeatures: [DOCUMENTER_DEFAULTED_FEATURE],
-		});
-		expect(noOverrides.agentModels).toEqual({});
-		expect(noOverrides.agentThinkingLevels).toEqual({});
-		expect(noOverrides.announcedFeatures).toEqual([
-			DOCUMENTER_DEFAULTED_FEATURE,
-			CLEANER_DEFAULTED_FEATURE,
-			CLEANER_AUTO_ENABLED_FEATURE,
-		]);
-	});
-
-	it("appends cleaner when an old explicit list has no reviewer to inherit from", () => {
-		const config = normalizeConfig({
-			enabledAgents: ["worker"],
-			announcedFeatures: [DOCUMENTER_DEFAULTED_FEATURE],
-		});
-		expect(config.enabledAgents).toEqual(["worker", "cleaner"]);
-		expect(config.agentModels).toEqual({});
-		expect(config.agentThinkingLevels).toEqual({});
-		expect(config.announcedFeatures).toEqual([
-			DOCUMENTER_DEFAULTED_FEATURE,
-			CLEANER_DEFAULTED_FEATURE,
-			CLEANER_AUTO_ENABLED_FEATURE,
-		]);
-	});
-
-	it("stamps a config that already enables cleaner without injecting", () => {
-		const config = normalizeConfig({
-			enabledAgents: ["explorer", "worker", "cleaner", "reviewer"],
-			announcedFeatures: [DOCUMENTER_DEFAULTED_FEATURE],
-		});
-		expect(config.enabledAgents).toEqual(["explorer", "worker", "cleaner", "reviewer"]);
-		expect(config.announcedFeatures).toEqual([DOCUMENTER_DEFAULTED_FEATURE, CLEANER_DEFAULTED_FEATURE]);
-	});
-
-	it("respects a deliberate cleaner disable once the upgrade is stamped", () => {
-		const existing = ["explorer", "worker", "reviewer"];
-		const config = normalizeConfig({
-			enabledAgents: existing,
-			announcedFeatures: ROLE_MIGRATIONS_PROCESSED,
-		});
-		expect(config.enabledAgents).toEqual(existing);
-		expect(config.announcedFeatures).toEqual(ROLE_MIGRATIONS_PROCESSED);
-	});
-
-	it("enables documenter for existing configs and inherits explorer routing", () => {
-		const config = normalizeConfig({
-			enabledAgents: ["explorer", "worker", "cleaner", "reviewer"],
-			agentModels: { explorer: "anthropic/claude-haiku-4-5" },
-			agentThinkingLevels: { explorer: "low" },
-			announcedFeatures: [CLEANER_DEFAULTED_FEATURE],
-		});
-		expect(config.enabledAgents).toEqual(["explorer", "worker", "cleaner", "documenter", "reviewer"]);
-		expect(config.agentModels).toEqual({
-			explorer: "anthropic/claude-haiku-4-5",
-			documenter: "anthropic/claude-haiku-4-5",
-		});
-		expect(config.agentThinkingLevels).toEqual({ explorer: "low", documenter: "low" });
-		expect(config.announcedFeatures).toEqual([
-			CLEANER_DEFAULTED_FEATURE,
-			DOCUMENTER_DEFAULTED_FEATURE,
-			DOCUMENTER_AUTO_ENABLED_FEATURE,
-			DOCUMENTER_INHERITED_FEATURE,
-		]);
-	});
-
-	it("does not claim documenter inheritance when explorer has no overrides", () => {
-		const config = normalizeConfig({
-			enabledAgents: ["worker", "reviewer"],
-			announcedFeatures: [CLEANER_DEFAULTED_FEATURE],
-		});
-		expect(config.enabledAgents).toEqual(["worker", "documenter", "reviewer"]);
-		expect(config.agentModels).toEqual({});
-		expect(config.agentThinkingLevels).toEqual({});
-		expect(config.announcedFeatures).toEqual([
-			CLEANER_DEFAULTED_FEATURE,
-			DOCUMENTER_DEFAULTED_FEATURE,
-			DOCUMENTER_AUTO_ENABLED_FEATURE,
-		]);
-	});
-
-	it("stamps existing documenter configs and respects a later disable", () => {
-		const alreadyEnabled = normalizeConfig({
-			enabledAgents: ["worker", "documenter", "reviewer"],
-			announcedFeatures: [CLEANER_DEFAULTED_FEATURE],
-		});
-		expect(alreadyEnabled.enabledAgents).toEqual(["worker", "documenter", "reviewer"]);
-		expect(alreadyEnabled.announcedFeatures).toEqual(ROLE_MIGRATIONS_PROCESSED);
-
-		const disabled = normalizeConfig({
-			enabledAgents: ["worker", "reviewer"],
-			announcedFeatures: ROLE_MIGRATIONS_PROCESSED,
-		});
-		expect(disabled.enabledAgents).toEqual(["worker", "reviewer"]);
-		expect(disabled.announcedFeatures).toEqual(ROLE_MIGRATIONS_PROCESSED);
 	});
 
 	it("honors an explicitly empty enabledAgents array", () => {
 		const config = normalizeConfig({ enabledAgents: [] });
 		expect(config.enabledAgents).toEqual([]);
-		expect(config.announcedFeatures).toEqual(ROLE_MIGRATIONS_PROCESSED);
 	});
 
 	it("keeps only valid provider/model references in agentModels", () => {
 		const config = normalizeConfig({
 			agentModels: { explorer: "anthropic/claude-haiku-4-5", bad: "noslash", empty: "  " },
-			announcedFeatures: ROLE_MIGRATIONS_PROCESSED,
 		});
 		expect(config.agentModels).toEqual({ explorer: "anthropic/claude-haiku-4-5" });
 	});
@@ -255,7 +77,6 @@ describe("normalizeConfig", () => {
 	it("keeps only valid thinking levels in agentThinkingLevels", () => {
 		const config = normalizeConfig({
 			agentThinkingLevels: { explorer: "high", bad: "ultra", empty: "" },
-			announcedFeatures: ROLE_MIGRATIONS_PROCESSED,
 		});
 		expect(config.agentThinkingLevels).toEqual({ explorer: "high" });
 	});
@@ -276,28 +97,6 @@ describe("normalizeConfig", () => {
 		expect(normalizeConfig({ agentScope: "everywhere" }).agentScope).toBe("user");
 	});
 
-	it("clamps the numeric limits and rejects non-numbers", () => {
-		const config = normalizeConfig({ maxConcurrency: 6 });
-		expect(config.maxConcurrency).toBe(6);
-
-		const clamped = normalizeConfig({ maxConcurrency: 0 });
-		expect(clamped.maxConcurrency).toBe(1);
-		expect(normalizeConfig({ maxConcurrency: 999 }).maxConcurrency).toBe(MAX_CONCURRENCY_LIMIT);
-
-		const invalid = normalizeConfig({ maxConcurrency: "many" });
-		expect(invalid.maxConcurrency).toBe(DEFAULT_MAX_CONCURRENCY);
-	});
-
-	it("defaults maxFixRounds to 2 and clamps to [0, 5]", () => {
-		expect(DEFAULT_MAX_FIX_ROUNDS).toBe(2);
-		expect(normalizeConfig({}).maxFixRounds).toBe(2);
-		expect(normalizeConfig({ maxFixRounds: 0 }).maxFixRounds).toBe(0);
-		expect(normalizeConfig({ maxFixRounds: 3 }).maxFixRounds).toBe(3);
-		expect(normalizeConfig({ maxFixRounds: 99 }).maxFixRounds).toBe(MAX_FIX_ROUNDS_LIMIT);
-		expect(normalizeConfig({ maxFixRounds: 2.6 }).maxFixRounds).toBe(3);
-		expect(normalizeConfig({ maxFixRounds: "many" }).maxFixRounds).toBe(DEFAULT_MAX_FIX_ROUNDS);
-	});
-
 	it("defaults idleTimeoutSec to 90 and clamps to [0, 600]", () => {
 		expect(DEFAULT_IDLE_TIMEOUT_SEC).toBe(90);
 		expect(normalizeConfig({}).idleTimeoutSec).toBe(90);
@@ -311,20 +110,6 @@ describe("normalizeConfig", () => {
 	it("drops the obsolete visionModel key during normalization", () => {
 		expect("visionModel" in normalizeConfig({ visionModel: "anthropic/claude-sonnet-4-5" })).toBe(false);
 		expect("visionModel" in normalizeConfig({})).toBe(false);
-	});
-
-	it("keeps announcedFeatures as a string array and drops garbage", () => {
-		expect(normalizeConfig({ announcedFeatures: ["visionModel", 42, ""] }).announcedFeatures).toEqual([
-			"visionModel",
-			CLEANER_DEFAULTED_FEATURE,
-			DOCUMENTER_DEFAULTED_FEATURE,
-			DOCUMENTER_AUTO_ENABLED_FEATURE,
-		]);
-		expect(normalizeConfig({}).announcedFeatures).toEqual([
-			CLEANER_DEFAULTED_FEATURE,
-			DOCUMENTER_DEFAULTED_FEATURE,
-			DOCUMENTER_AUTO_ENABLED_FEATURE,
-		]);
 	});
 });
 
@@ -360,37 +145,33 @@ describe("loadConfig", () => {
 		expect(config.proactiveInjection).toBe(true);
 	});
 
-	it("persists schema upgrades and the explorer key migration", async () => {
+	it("persists the normalized shape and drops every legacy key", async () => {
 		const dir = mkdtempSync(join(tmpdir(), "pi-subagents-test-"));
 		const path = join(dir, "pi-subagents.json");
-		// A config written before the pool removal and explorer rename.
+		// A config written across many older versions.
 		writeFileSync(path, JSON.stringify({
-			enabledAgents: ["explore"],
-			agentModels: { explore: "anthropic/legacy" },
-			agentThinkingLevels: { explore: "low" },
+			enabledAgents: ["explorer"],
+			agentModels: { explorer: "anthropic/legacy" },
+			agentThinkingLevels: { explorer: "low" },
 			thinkingLevel: "max",
-			agentBackupModels: { explore: "openai/backup" },
+			agentBackupModels: { explorer: "openai/backup" },
+			maxConcurrency: 12,
+			maxFixRounds: 5,
+			announcedFeatures: ["cleanerDefaulted", "documenterDefaulted"],
 		}), "utf8");
 
 		const config = await loadConfig(path);
-		expect(config.maxConcurrency).toBe(DEFAULT_MAX_CONCURRENCY);
-		expect(config.enabledAgents).toEqual(["explorer", "cleaner", "documenter"]);
-		expect(config.agentModels).toEqual({
-			explorer: "anthropic/legacy",
-			documenter: "anthropic/legacy",
-		});
-		expect(config.agentThinkingLevels).toEqual({ explorer: "low", documenter: "low" });
+		expect(config.enabledAgents).toEqual(["explorer"]);
+		expect(config.agentModels).toEqual({ explorer: "anthropic/legacy" });
+		expect(config.agentThinkingLevels).toEqual({ explorer: "low" });
 
 		const saved = JSON.parse(readFileSync(path, "utf8"));
-		expect(saved.enabledAgents).toEqual(["explorer", "cleaner", "documenter"]);
-		expect(saved.agentModels).toEqual({
-			explorer: "anthropic/legacy",
-			documenter: "anthropic/legacy",
-		});
-		expect(saved.agentThinkingLevels).toEqual({ explorer: "low", documenter: "low" });
-		expect(saved).not.toHaveProperty("agentBackupModels");
-		expect(saved).not.toHaveProperty("thinkingLevel");
-		expect(saved.maxConcurrency).toBe(DEFAULT_MAX_CONCURRENCY);
+		expect(saved.enabledAgents).toEqual(["explorer"]);
+		expect(saved.agentModels).toEqual({ explorer: "anthropic/legacy" });
+		expect(saved.agentThinkingLevels).toEqual({ explorer: "low" });
+		for (const key of ["agentBackupModels", "thinkingLevel", "maxConcurrency", "maxFixRounds", "announcedFeatures"]) {
+			expect(saved).not.toHaveProperty(key);
+		}
 	});
 
 	it("normalizes an upgraded config and saves the result", async () => {
@@ -403,11 +184,11 @@ describe("loadConfig", () => {
 		);
 
 		const config = await loadConfig(path);
-		expect(config.enabledAgents).toEqual(["explorer", "cleaner", "documenter"]);
+		expect(config.enabledAgents).toEqual(["explorer"]);
 		expect(config.agentModels).toEqual({});
 
 		const saved = JSON.parse(readFileSync(path, "utf8"));
-		expect(saved.enabledAgents).toEqual(["explorer", "cleaner", "documenter"]);
+		expect(saved.enabledAgents).toEqual(["explorer"]);
 		expect(saved.agentModels).toEqual({});
 	});
 });

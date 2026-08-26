@@ -207,10 +207,10 @@ subagent({
 });
 ```
 
-Independent tasks run up to `maxConcurrency` (default `4`). One parallel call may
-contain at most that many tasks and is rejected if it exceeds the limit. Accepted
-background work from separate calls waits in the shared queue when all slots are
-busy.
+Independent tasks run up to a fixed limit of `4` concurrent sub-agent processes.
+One parallel call may contain at most that many tasks and is rejected if it
+exceeds the limit. Accepted background work from separate calls waits in the
+shared queue when all slots are busy.
 
 ### Run an independent quality gate
 
@@ -245,8 +245,9 @@ cannot recursively start another chain. Gate reviewers keep documentation drift
 out of the code verdict while `documenter` is enabled by recording it under
 `## Documentation notes`; with documenter disabled, drift is a normal finding.
 
-`maxFixRounds` limits worker fix attempts only. The post-writer review gate still
-runs when it is `0`, and only a terminal `REVIEW_PASS` can decide whether docs
+The loop is fixed at two worker fix rounds (each fix is re-reviewed); disabling
+the `worker` agent is the way to turn fixes off. The post-writer review gate still
+runs regardless, and only a terminal `REVIEW_PASS` can decide whether docs
 sync is needed. Generic audits and read-only reviews are advisory: they omit
 `VERDICT` and documentation machine markers, remain read-only, and never trigger
 edits.
@@ -503,8 +504,8 @@ subagent({
 
 ## Configuration
 
-The wizard covers enabled agents, per-agent models and thinking, concurrency,
-auto-fix rounds, and the idle timeout:
+The wizard covers enabled agents, per-agent models and thinking, and the idle
+timeout:
 
 ```text
 /subagents-setup
@@ -534,8 +535,6 @@ Configuration is stored at `~/.pi/agent/pi-subagents.json` and follows
   "maxResultLines": 80,
   "proactiveInjection": true,
   "agentScope": "user",
-  "maxConcurrency": 4,
-  "maxFixRounds": 2,
   "idleTimeoutSec": 90
 }
 ```
@@ -549,16 +548,15 @@ Configuration is stored at `~/.pi/agent/pi-subagents.json` and follows
 | `maxResultLines` | Lines kept in a completion message before the full result moves to a temporary artifact. Default `80`. |
 | `proactiveInjection` | Teach the main model when and how to delegate. Default `true`. |
 | `agentScope` | Discover `user`, `project`, or `both` agent directories. Default `user`. |
-| `maxConcurrency` | Running process limit and maximum tasks in one parallel call, from `1` to `16`. Default `4`. |
-| `maxFixRounds` | Maximum worker fixes after `REVIEW_FAIL`; each fix is re-reviewed. After terminal `REVIEW_PASS`, docs sync runs only for `DOCUMENTATION: NEEDED` or a missing marker. `0` disables fixes but not the post-writer gate or conditional/reviewer-disabled docs behavior. Default `2`. |
 | `idleTimeoutSec` | Seconds without RPC output before termination. `0` disables the watchdog. Default `90`. |
 
-Invalid values fall back safely. Older configs are normalized automatically. The
-former built-in name `explore` migrates to `explorer`, and pre-cleaner non-empty
-agent lists receive `cleaner` once. Existing non-empty configs also receive
-`documenter` once, inserted before `reviewer`, with any configured `explorer`
-model and thinking copied across. Fresh installs do not enable `documenter`
-until the user selects it. Later deliberate disables are respected.
+Invalid values fall back safely. Keys from older versions (including the former
+`maxConcurrency` and `maxFixRounds` tuning options, now fixed at `4` concurrent
+processes and `2` fix rounds) are dropped automatically and the normalized
+shape is saved back. At session start, per-agent model overrides that Pi no
+longer reports as available are removed with a one-time notice; those agents
+fall back to the current main model until you re-pick them in
+`/subagents-setup`.
 
 ## Custom and overridden agents
 
