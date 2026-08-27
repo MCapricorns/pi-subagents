@@ -94,8 +94,7 @@ describe("extension registration", () => {
 		expect(tool.parameters.properties.isolation).toBeDefined();
 		expect(tool.parameters.properties.tasks.items.properties.isolation).toBeDefined();
 		const control = stub.tools.find((t) => t.name === "subagent_control");
-		expect(control.description).toContain("Managed downstream documenter/reviewer/fix stages");
-		expect(control.promptSnippet).toContain("park/stop a managed downstream stage");
+		expect(control.promptSnippet).toContain("Resume a parked or settled subagent thread");
 	});
 
 	it("wires recovery, widget install, and config migration through session_start", async () => {
@@ -1416,10 +1415,9 @@ describe("managed post-writer workflows", () => {
 			);
 			await queued(controller.signal);
 
-			// The gate fails, both fix rounds run and re-fail, and no documenter
-			// ever starts despite DOCUMENTATION: NEEDED on a terminal FAIL.
+			// The gate fails, the single fix round runs and re-fails, and no
+			// documenter ever starts despite DOCUMENTATION: NEEDED on a terminal FAIL.
 			expect(run.mock.calls.map(([options]) => options.agentName)).toEqual([
-				"worker", "reviewer",
 				"worker", "reviewer",
 				"worker", "reviewer",
 			]);
@@ -1590,6 +1588,48 @@ describe("managed post-writer workflows", () => {
 			expect(stub.messages).toHaveLength(1);
 			expect(stub.messages[0].message.content).toContain("DOCUMENTATION: CLEAN");
 			expect(stub.messages[0].message.content).not.toContain("Managed workflow");
+		} finally {
+			controller.abort();
+			await stub.hooks["session_shutdown"]?.({}, {});
+		}
+	});
+
+	it("delivers an advisory re-verification directly even when a verdict leaks through", async () => {
+		vi.useFakeTimers();
+		vi.setSystemTime(0);
+		configureEnabledAgents(["worker", "documenter", "reviewer"]);
+		const stub = makeStub();
+		let queued!: BackgroundTask;
+		const controller = new AbortController();
+		vi.spyOn(BackgroundTaskQueue.prototype, "enqueue").mockImplementation((task) => {
+			queued = task;
+			return controller;
+		});
+		const run = vi.spyOn(spawn, "runSingleAgentWithMainFallback").mockImplementation(async (options: any) => {
+			expect(options.agent.systemPrompt).toContain("this dispatch is advisory");
+			// The reviewer ignores the advisory contract and emits a gate verdict anyway.
+			return makeResult("reviewer", options.task, "OPEN FINDING\nVERDICT: REVIEW_FAIL");
+		});
+
+		try {
+			register(stub.api);
+			const tool = stub.tools.find((candidate) => candidate.name === "subagent");
+			await tool.execute(
+				"advisory-reverify",
+				{ agent: "reviewer", task: "Re-verify the pending diff after my fixes.", advisory: true },
+				new AbortController().signal,
+				() => {},
+				executionContext(),
+			);
+			await queued(controller.signal);
+			vi.advanceTimersByTime(150);
+
+			expect(run.mock.calls.map(([options]) => options.agentName)).toEqual(["reviewer"]);
+			expect(stub.messages).toHaveLength(1);
+			expect(stub.messages[0].message.content).toContain("VERDICT: REVIEW_FAIL");
+			expect(stub.messages[0].message.content).not.toContain("Managed workflow");
+			expect(stub.messages[0].message.content).not.toContain("Auto-fix chain");
+			expect(monitor.getRuns().find((run2) => run2.activity === "auto-fix chain running")).toBeUndefined();
 		} finally {
 			controller.abort();
 			await stub.hooks["session_shutdown"]?.({}, {});
@@ -2079,21 +2119,21 @@ send({ type: "message_end", message: { role: "assistant", content: [{ type: "tex
 			await atFix;
 			expect(monitor.findRun(parentRunId)?.workflowStages).toEqual([
 				{ agent: "reviewer", relation: "review", status: "changes" },
-				{ agent: "worker", relation: "fix 1/2", status: "active" },
+				{ agent: "worker", relation: "fix 1/1", status: "active" },
 				{ agent: "documenter", relation: "docs", status: "pending" },
 			]);
 			expect(monitor.getRuns()).toContainEqual(expect.objectContaining({
 				parentRunId,
 				agent: "worker",
-				relationLabel: "fix 1/2",
+				relationLabel: "fix 1/1",
 			}));
 
 			releaseFix();
 			await atReReview;
 			expect(monitor.findRun(parentRunId)?.workflowStages).toEqual([
 				{ agent: "reviewer", relation: "review", status: "changes" },
-				{ agent: "worker", relation: "fix 1/2", status: "done" },
-				{ agent: "reviewer", relation: "re-review 1/2", status: "active" },
+				{ agent: "worker", relation: "fix 1/1", status: "done" },
+				{ agent: "reviewer", relation: "re-review 1/1", status: "active" },
 				{ agent: "documenter", relation: "docs", status: "pending" },
 			]);
 			expect(monitor.getRuns()).not.toContainEqual(expect.objectContaining({
@@ -2103,7 +2143,7 @@ send({ type: "message_end", message: { role: "assistant", content: [{ type: "tex
 			expect(monitor.getRuns()).toContainEqual(expect.objectContaining({
 				parentRunId,
 				agent: "reviewer",
-				relationLabel: "re-review 1/2",
+				relationLabel: "re-review 1/1",
 			}));
 
 			releaseReReview();
@@ -2113,8 +2153,8 @@ send({ type: "message_end", message: { role: "assistant", content: [{ type: "tex
 			]);
 			expect(observedProjections).toContainEqual([
 				{ agent: "reviewer", relation: "review", status: "changes" },
-				{ agent: "worker", relation: "fix 1/2", status: "done" },
-				{ agent: "reviewer", relation: "re-review 1/2", status: "done" },
+				{ agent: "worker", relation: "fix 1/1", status: "done" },
+				{ agent: "reviewer", relation: "re-review 1/1", status: "done" },
 			]);
 		} finally {
 			unsubscribe();

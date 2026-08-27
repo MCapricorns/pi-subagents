@@ -31,7 +31,6 @@ export type ThreadState =
 	| "queued"
 	| "resuming"
 	| "running"
-	| "steering"
 	| "interrupting"
 	| "parked"
 	| "completed"
@@ -51,6 +50,8 @@ export interface SubagentThread {
 	executionCwd: string;
 	thinkingLevel?: ThinkingLevel;
 	isolation: IsolationMode;
+	/** Report-only reviewer dispatch: verdicts never chain into auto-fix. */
+	advisoryReview: boolean;
 	worktree?: WorktreeIsolation;
 	state: ThreadState;
 	control: RpcRunControl;
@@ -71,9 +72,6 @@ export interface SubagentThread {
 	/** A destructive stop retires context even if the active child settles later. */
 	retireOnSettle?: boolean;
 	retired?: boolean;
-	/** Abort the active generation to a stable checkpoint and wait until its
-	 * queue work has published that checkpoint and released its slot. */
-	park: () => Promise<"queued" | "active">;
 	/** Installed by dispatch so the control tool can restart the same logical id. */
 	resume: (objective?: string, ctx?: ExtensionContext) => Promise<SingleResult>;
 	/** Dispatch-owned, generation-guarded worktree settlement hook. Its apply
@@ -205,7 +203,7 @@ export function createRuntime(pi: ExtensionAPI, configPath: string): SubagentRun
 			if (!runtime.sessionActive) return;
 			runtime.sessionActive = false;
 			const shutdownThreads = [...runtime.threads.values()];
-			const liveStates = new Set(["queued", "resuming", "running", "steering", "interrupting"]);
+			const liveStates = new Set(["queued", "resuming", "running", "interrupting"]);
 			const previousStates = new Map(shutdownThreads.map((thread) => [thread.id, thread.state] as const));
 			// Invalidate every lifecycle claim synchronously before the first await.
 			// Resume preflight checks both this version and sessionActive, then

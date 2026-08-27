@@ -121,19 +121,20 @@ describe("managed workflow planning", () => {
 
 describe("buildFixTaskBrief", () => {
 	it("embeds the reviewer's findings and the round number", () => {
-		const brief = buildFixTaskBrief(reviewResult("## Critical\n- file.ts:42 bug\nVERDICT: REVIEW_FAIL"), 1, 2);
-		expect(brief).toContain("round 1 of 2");
+		const brief = buildFixTaskBrief(reviewResult("## Critical\n- file.ts:42 bug\nVERDICT: REVIEW_FAIL"), 1, 1);
+		expect(brief).toContain("round 1 of 1");
 		expect(brief).toContain("file.ts:42 bug");
 		expect(brief).toContain("REQUEST_CHANGES");
 	});
 
-	it("notes when this is the last round", () => {
-		const brief = buildFixTaskBrief(reviewResult("VERDICT: REVIEW_FAIL"), 2, 2);
-		expect(brief).toContain("last auto-fix round");
+	it("tells the worker unresolved findings return to the main window", () => {
+		const brief = buildFixTaskBrief(reviewResult("VERDICT: REVIEW_FAIL"), 1, 1);
+		expect(brief).toContain("re-reviews your changes automatically");
+		expect(brief).toContain("goes back to the main window");
 	});
 
 	it("lets the worker implement instructions or push back with its own fix", () => {
-		const brief = buildFixTaskBrief(reviewResult("## Findings\n- file.ts:10 minor issue\nVERDICT: REVIEW_FAIL"), 1, 2);
+		const brief = buildFixTaskBrief(reviewResult("## Findings\n- file.ts:10 minor issue\nVERDICT: REVIEW_FAIL"), 1, 1);
 		expect(brief).toContain("carries a fix instruction");
 		expect(brief).toContain("Close EVERY finding");
 		expect(brief).toContain("no severity triage");
@@ -141,8 +142,8 @@ describe("buildFixTaskBrief", () => {
 	});
 
 	it("notes a re-review will follow and requires directly affected docs to stay synchronized", () => {
-		const brief = buildFixTaskBrief(reviewResult("VERDICT: REVIEW_FAIL"), 1, 2);
-		expect(brief).toContain("re-review your changes automatically");
+		const brief = buildFixTaskBrief(reviewResult("VERDICT: REVIEW_FAIL"), 1, 1);
+		expect(brief).toContain("re-reviews your changes automatically");
 		expect(brief).toContain("directly affected by your fixes");
 	});
 });

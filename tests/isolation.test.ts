@@ -377,40 +377,6 @@ describe("dispatch isolation selection", () => {
 });
 
 describe("logical worktree reuse and guarded finalization", () => {
-	it("reuses one worktree across park/resume and preserves the execution cwd", async () => {
-		const root = mkdtempSync(join(tmpdir(), "pi-subagents-isolation-park-"));
-		const handle = fakeWorktree(root);
-		const create = vi.spyOn(worktreeModule, "createWorktreeIsolation").mockResolvedValue(handle);
-		const queued: Array<{ task: BackgroundTask; controller: AbortController }> = [];
-		vi.spyOn(BackgroundTaskQueue.prototype, "enqueue").mockImplementation((task) => {
-			const controller = new AbortController();
-			queued.push({ task, controller });
-			return controller;
-		});
-		const sessionDir = mkdtempSync(join(tmpdir(), "pi-subagents-isolation-session-"));
-		const run = vi.spyOn(spawnModule, "runSingleAgentWithMainFallback")
-			.mockResolvedValueOnce(emptyResult("park me", {
-				parked: true,
-				sessionId: "session-1",
-				sessionDir,
-			}))
-			.mockResolvedValueOnce(emptyResult("continue"));
-		const { subagent, control } = registered();
-		const dispatched = await execute(subagent, { agent: "worker", task: "park me", isolation: "worktree" }, root);
-		const runId = dispatched.details.results[0].runId;
-		await queued[0].task(queued[0].controller.signal);
-		expect(monitor.findRun(runId)?.status).toBe("parked");
-		expect(handle.finalizeMock!).not.toHaveBeenCalled();
-
-		const resumed = await execute(control, { action: "resume", id: runId, objective: "continue" }, root);
-		expect(resumed.content[0]!.text).toContain(`Resumed run #${runId}`);
-		expect(create).toHaveBeenCalledTimes(1);
-		await queued[1].task(queued[1].controller.signal);
-		expect(handle.finalizeMock).toHaveBeenCalledTimes(1);
-		expect(run.mock.calls[0][0].cwd).toBe(handle.cwd);
-		expect(run.mock.calls[1][0].cwd).toBe(handle.cwd);
-		rmSync(root, { recursive: true, force: true });
-	});
 
 	it("resumes a settled isolated thread in a fresh worktree with a rewritten session cwd", async () => {
 		const root = mkdtempSync(join(tmpdir(), "pi-subagents-isolation-settled-resume-"));
@@ -517,30 +483,6 @@ describe("logical worktree reuse and guarded finalization", () => {
 		expect(create).toHaveBeenCalledTimes(3);
 		expect(create.mock.calls[2]![1]).toMatchObject({ seedIsIntegrated: true });
 		await queued[2].task(queued[2].controller.signal);
-		rmSync(root, { recursive: true, force: true });
-	});
-
-	it("retargets without creating or finalizing another worktree", async () => {
-		const root = mkdtempSync(join(tmpdir(), "pi-subagents-isolation-retarget-"));
-		const handle = fakeWorktree(root);
-		const create = vi.spyOn(worktreeModule, "createWorktreeIsolation").mockResolvedValue(handle);
-		const queued: BackgroundTask[] = [];
-		vi.spyOn(BackgroundTaskQueue.prototype, "enqueue").mockImplementation((task) => {
-			queued.push(task);
-			return new AbortController();
-		});
-		const run = vi.spyOn(spawnModule, "runSingleAgentWithMainFallback").mockResolvedValue(emptyResult("replacement"));
-		const { subagent, control } = registered();
-		const dispatched = await execute(subagent, { agent: "worker", task: "old", isolation: "worktree" }, root);
-		const runId = dispatched.details.results[0].runId;
-		const retargeted = await execute(control, { action: "retarget", id: runId, objective: "replacement" }, root);
-		expect(retargeted.content[0].text).toContain("no child was spawned");
-		await queued[0](new AbortController().signal);
-		expect(create).toHaveBeenCalledTimes(1);
-		expect(run.mock.calls[0]![0].control!.getObjective()).toBe("replacement");
-		expect(run.mock.calls[0]![0].cwd).toBe(handle.cwd);
-		expect(run.mock.calls[0]![0].agent!.systemPrompt!).toContain("temporary detached Git worktree");
-		expect(handle.finalizeMock!).toHaveBeenCalledTimes(1);
 		rmSync(root, { recursive: true, force: true });
 	});
 
@@ -763,68 +705,6 @@ describe("logical worktree reuse and guarded finalization", () => {
 		rmSync(root, { recursive: true, force: true });
 	});
 
-	it("ignores a stale generation and finalizes the shared handle exactly once", async () => {
-		const root = mkdtempSync(join(tmpdir(), "pi-subagents-isolation-stale-"));
-		const handle = fakeWorktree(root);
-		vi.spyOn(worktreeModule, "createWorktreeIsolation").mockResolvedValue(handle);
-		const queued: Array<{ task: BackgroundTask; controller: AbortController }> = [];
-		vi.spyOn(BackgroundTaskQueue.prototype, "enqueue").mockImplementation((task) => {
-			const controller = new AbortController();
-			queued.push({ task, controller });
-			return controller;
-		});
-		const first = deferred<any>();
-		vi.spyOn(spawnModule, "runSingleAgentWithMainFallback")
-			.mockImplementationOnce(async (options: any) => {
-				options.onLive?.({ kind: "status", status: "running" });
-				return first.promise;
-			})
-			.mockResolvedValueOnce(emptyResult("generation two"));
-		const { subagent, control } = registered();
-		const dispatched = await execute(subagent, { agent: "worker", task: "generation one", isolation: "worktree" }, root);
-		const runId = dispatched.details.results[0].runId;
-		const staleTask = queued[0].task(queued[0].controller.signal);
-		await waitFor(() => monitor.findRun(runId)?.status === "running");
-		await execute(control, { action: "park", id: runId }, root);
-		await execute(control, { action: "resume", id: runId, objective: "generation two" }, root);
-		first.resolve(emptyResult("generation one", { parked: true }));
-		await staleTask;
-		expect(handle.finalizeMock).not.toHaveBeenCalled();
-		await queued[1].task(queued[1].controller.signal);
-		expect(handle.finalizeMock).toHaveBeenCalledTimes(1);
-		rmSync(root, { recursive: true, force: true });
-	});
-
-	it("rejects park after terminal settlement has claimed a slow worktree finalization", async () => {
-		const root = mkdtempSync(join(tmpdir(), "pi-subagents-isolation-settle-park-"));
-		const finalization = deferred<WorktreeFinalization>();
-		const handle = fakeWorktree(root);
-		handle.finalizeMock.mockImplementation(() => finalization.promise);
-		vi.spyOn(worktreeModule, "createWorktreeIsolation").mockResolvedValue(handle);
-		vi.spyOn(spawnModule, "runSingleAgentWithMainFallback").mockImplementation(async (options: any) => {
-			options.onLive?.({ kind: "status", status: "running" });
-			return emptyResult("settling");
-		});
-		const { stub, subagent, control } = registered();
-		const dispatched = await execute(subagent, {
-			agent: "worker",
-			task: "settling",
-			isolation: "worktree",
-		}, root);
-		const runId = dispatched.details.results[0].runId;
-		await waitFor(() => handle.finalizeMock.mock.calls.length === 1);
-		expect(monitor.findRun(runId)?.status).toBe("running");
-
-		await expect(execute(control, { action: "park", id: runId }, root))
-			.rejects.toThrow(/handling settle/i);
-		expect(stub.messages).toHaveLength(0);
-		finalization.resolve({ status: "no_changes", integrated: false, hadChanges: false });
-		await waitFor(() => stub.messages.length === 1);
-		expect(stub.messages[0].message.content).toContain("settling");
-		expect(monitor.findRun(runId)).toBeUndefined();
-		rmSync(root, { recursive: true, force: true });
-	});
-
 	it("lets destructive stop supersede slow settlement without publishing success", async () => {
 		const root = mkdtempSync(join(tmpdir(), "pi-subagents-isolation-settle-stop-"));
 		const finalization = deferred<WorktreeFinalization>();
@@ -896,7 +776,7 @@ describe("logical worktree reuse and guarded finalization", () => {
 });
 
 describe("shutdown and destructive-stop integration", () => {
-	it("interrupts every stop-all lane holder before finalizing a parked isolated thread", async () => {
+	it("interrupts every stop-all lane holder before finalizing a running isolated thread", async () => {
 		writeFileSync(join(agentDir, "pi-subagents.json"), JSON.stringify({
 			enabledAgents: ["worker", "reviewer"],
 			maxConcurrency: 2,
@@ -907,7 +787,7 @@ describe("shutdown and destructive-stop integration", () => {
 		const order: string[] = [];
 		const handle = fakeWorktree(root);
 		handle.finalizeMock.mockImplementation(async () => {
-			order.push("integrate parked");
+			order.push("integrate isolated");
 			return { status: "no_changes", integrated: false, hadChanges: false };
 		});
 		vi.spyOn(worktreeModule, "createWorktreeIsolation").mockResolvedValue(handle);
@@ -916,8 +796,13 @@ describe("shutdown and destructive-stop integration", () => {
 			releaseSharedReviewer = resolveSharedReviewer;
 		});
 		vi.spyOn(spawnModule, "runSingleAgentWithMainFallback").mockImplementation(async (options: any) => {
-			if (options.task === "Park isolated first") {
-				return emptyResult(options.task, { parked: true });
+			if (options.task === "Run isolated first") {
+				options.onLive?.({ kind: "status", status: "running" });
+				await new Promise<void>((resolveAborted) => {
+					if (options.signal.aborted) resolveAborted();
+					else options.signal.addEventListener("abort", () => resolveAborted(), { once: true });
+				});
+				return emptyResult(options.task, { exitCode: 1, stopReason: "aborted", errorMessage: "stopped" });
 			}
 			order.push("shared reviewer start");
 			await Promise.race([
@@ -942,10 +827,10 @@ describe("shutdown and destructive-stop integration", () => {
 		try {
 			await execute(subagent, {
 				agent: "worker",
-				task: "Park isolated first",
+				task: "Run isolated first",
 				isolation: "worktree",
 			}, root);
-			await waitFor(() => monitor.getRuns().some((run) => run.task === "Park isolated first" && run.status === "parked"));
+			await waitFor(() => monitor.getRuns().some((run) => run.task === "Run isolated first" && run.status === "running"));
 			await execute(subagent, { agent: "reviewer", task: "Hold shared lane for stop-all" }, root);
 			await waitFor(() => order.includes("shared reviewer start"));
 
@@ -963,7 +848,7 @@ describe("shutdown and destructive-stop integration", () => {
 			expect(order).toEqual([
 				"shared reviewer start",
 				"shared reviewer end",
-				"integrate parked",
+				"integrate isolated",
 			]);
 			expect(handle.finalizeMock).toHaveBeenCalledTimes(1);
 		} finally {
@@ -1141,12 +1026,17 @@ describe("shutdown and destructive-stop integration", () => {
 		git(["commit", "-m", "base"]);
 		vi.spyOn(spawnModule, "runSingleAgentWithMainFallback").mockImplementation(async (options: any) => {
 			writeFileSync(join(options.cwd, "parked.txt"), "parked worker edit\n", "utf8");
-			return emptyResult("parked", { parked: true });
+			options.onLive?.({ kind: "status", status: "running" });
+			await new Promise<void>((resolve) => {
+				if (options.signal.aborted) resolve();
+				else options.signal.addEventListener("abort", () => resolve(), { once: true });
+			});
+			return emptyResult("parked", { exitCode: 1, stopReason: "aborted", errorMessage: "shutdown" });
 		});
 		const { stub, subagent } = registered();
 		const dispatched = await execute(subagent, { agent: "worker", task: "parked", isolation: "worktree" }, root);
 		const runId = dispatched.details.results[0].runId;
-		await waitFor(() => monitor.getRuns().some((run) => run.status === "parked"));
+		await waitFor(() => monitor.getRuns().some((run) => run.status === "running"));
 		await stub.hooks["session_shutdown"]?.({}, {});
 		// Shutdown interrupts to the parked checkpoint but deliberately does not
 		// integrate: the isolated edit stays in its worktree for a later resume.

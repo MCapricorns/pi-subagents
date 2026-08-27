@@ -61,17 +61,17 @@ export function buildDelegationDirective(
 			: []),
 		...(hasCleaner
 			? [
-				`Use \`cleaner\` only as the separate evidence-first entry for user-authorized cleanup, removal, simplification, duplicate-code consolidation, or maintenance; never substitute it for \`worker\`. It applies every safe proven in-scope cut without item-by-item approval. Generic or read-only audit, review, code-health, plan, or cleanup-candidate assessment goes to ${hasReviewer ? "`reviewer`" : "direct main-context inspection because `reviewer` is disabled"}. Never dispatch cleaner by PR count or as the pre-commit gate.`,
+				`Use \`cleaner\` only for user-authorized cleanup, removal, simplification, or duplicate-code consolidation; it applies every safe proven in-scope cut without item-by-item approval. Read-only audits and code-health reviews go to ${hasReviewer ? "`reviewer`" : "the main context because `reviewer` is disabled"}. Never dispatch cleaner by PR count or as the pre-commit gate.`,
 			]
 			: []),
 		...(hasDocumenter
 			? [
-				`Use \`documenter\` directly only for explicit whole-codebase maintenance or standalone documentation/comment work; a top-level documenter delivers directly without an automatic reviewer.${codeWriterNames.length > 0 ? ` ${codeWriterNames.join("/")} must sync existing docs they directly affect; runtime runs documenter only after REVIEW_PASS with DOCUMENTATION: NEEDED or a missing marker, or as the reviewer-disabled fallback—never dispatch a duplicate.` : ""} It never changes runtime behavior, versions, or release state.`,
+				`Use \`documenter\` directly only for explicit whole-codebase or standalone documentation/comment work; a top-level documenter delivers without an automatic reviewer.${codeWriterNames.length > 0 ? ` ${codeWriterNames.join("/")} must sync existing docs they directly affect; runtime runs documenter only after REVIEW_PASS with DOCUMENTATION: NEEDED or a missing marker, or as the reviewer-disabled fallback—never dispatch a duplicate.` : ""} It never changes runtime behavior, versions, or release state.`,
 			]
 			: []),
 		...(hasReviewer
 			? [
-				`Use \`reviewer\` for read-only assessments or a gate.${reviewedWriterNames.length > 0 ? ` Successful ${reviewedWriterNames.join("/")} runs already get one fresh read-only reviewer gate, independent of the writer.` : ""} Advisory output has no VERDICT and cannot authorize follow-up edits${hasDocumenter ? "; gates classify docs separately for the enabled documenter." : "."}`,
+				`Use \`reviewer\` for read-only assessments or a gate.${reviewedWriterNames.length > 0 ? ` Successful ${reviewedWriterNames.join("/")} runs already get one fresh read-only reviewer gate, independent of the writer.` : ""} Advisory output has no VERDICT and cannot authorize follow-up edits${hasDocumenter ? "; gates classify docs separately for the enabled documenter." : "."} Re-verifying your own fixes? Dispatch with \`advisory: true\`: the report returns to you and never starts the auto-fix chain.`,
 			]
 			: []),
 		"Brief each child with the complete goal, exact paths, constraints, and expected output; it has no conversation memory.",

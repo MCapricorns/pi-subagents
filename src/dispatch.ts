@@ -69,6 +69,11 @@ const IsolationSchema = Type.Optional(
 	StringEnum(["shared", "worktree"] as const, { description: ISOLATION_DESCRIPTION }),
 );
 
+const ADVISORY_DESCRIPTION =
+	"Report-only reviewer dispatch: findings return to you for the decision; a verdict (if emitted anyway) never starts the auto-fix chain. Use when re-verifying work you already fixed yourself.";
+
+const AdvisorySchema = Type.Optional(Type.Boolean({ description: ADVISORY_DESCRIPTION }));
+
 const TaskItem = Type.Object({
 	agent: Type.String({ description: "Name of the agent to invoke" }),
 	task: Type.String({
@@ -77,6 +82,7 @@ const TaskItem = Type.Object({
 	}),
 	cwd: Type.Optional(Type.String({ description: "Working directory for the agent process" })),
 	isolation: IsolationSchema,
+	advisory: AdvisorySchema,
 });
 
 const SubagentParams = Type.Object({
@@ -87,6 +93,7 @@ const SubagentParams = Type.Object({
 	tasks: Type.Optional(Type.Array(TaskItem, { description: "Array of {agent, task} for parallel execution" })),
 	cwd: Type.Optional(Type.String({ description: "Working directory for the agent process (single mode)" })),
 	isolation: IsolationSchema,
+	advisory: AdvisorySchema,
 });
 
 export function defaultIsolationMode(mode: "single" | "parallel", agentName: string, requested?: IsolationMode): IsolationMode {
@@ -510,7 +517,7 @@ export function registerSubagentTool(pi: ExtensionAPI, runtime: SubagentRuntime)
 			"Work starts in the background. Successful worker/cleaner runs keep one enabled reviewer gate and bounded fix loop; documenter runs afterward only when REVIEW_PASS reports DOCUMENTATION: NEEDED or omits the marker, with a reviewer-disabled fallback. A top-level documenter delivers directly. Results resume the main agent and are already shown, so do not poll, duplicate downstream roles, or restate them.",
 			"Single tasks default to shared; parallel workers default to detached Git worktrees. Only write-capable agents can use worktree isolation, and failures never fall back silently to shared.",
 			"A selected-model or provider failure continues the retained session on the current main model; ordinary tool/task failures do not.",
-			"Use subagent_control to steer/retarget an active top-level child, park/stop a managed downstream stage, or resume retained context by stable run id.",
+			"Use subagent_control to resume a parked or settled thread's retained context by stable run id; use subagent_stop for destructive cancellation.",
 		].join(" "),
 		promptSnippet:
 			"Dispatch isolated background agents for broad recon, self-contained implementation, authorized cleanup, explicit docs, or independent review; keep small known-target work on direct tools. Worker/cleaner gates and only needed/conservative docs sync run automatically, results resume automatically, and each workflow delivers once.",
@@ -596,6 +603,12 @@ export function registerSubagentTool(pi: ExtensionAPI, runtime: SubagentRuntime)
 						item.task,
 						item.cwd,
 						defaultIsolationMode("parallel", item.agent, item.isolation as IsolationMode | undefined),
+						undefined,
+						false,
+						undefined,
+						undefined,
+						undefined,
+						{ advisoryReview: item.advisory === true },
 					));
 				}
 				const startedRuns = results.filter((result) => result.exitCode === -1);
@@ -633,6 +646,12 @@ export function registerSubagentTool(pi: ExtensionAPI, runtime: SubagentRuntime)
 				params.task as string,
 				params.cwd,
 				defaultIsolationMode("single", params.agent as string, params.isolation as IsolationMode | undefined),
+				undefined,
+				false,
+				undefined,
+				undefined,
+				undefined,
+				{ advisoryReview: params.advisory === true },
 			);
 			if (result.exitCode !== -1) {
 				throw new Error(getResultOutput(result));

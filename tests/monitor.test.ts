@@ -507,7 +507,6 @@ describe("status labels and timing", () => {
 	it("statusLabel maps statuses to user-facing words", () => {
 		expect(statusLabel("queued")).toBe("ready");
 		expect(statusLabel("running")).toBe("running");
-		expect(statusLabel("steering")).toBe("steering");
 		expect(statusLabel("interrupting")).toBe("interrupting");
 		expect(statusLabel("parked")).toBe("parked");
 		expect(statusLabel("done")).toBe("done");

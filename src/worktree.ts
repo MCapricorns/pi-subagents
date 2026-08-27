@@ -2,7 +2,7 @@
  * Detached Git worktree isolation for write-capable sub-agents.
  *
  * A handle is created before a child is queued and stays owned by the logical
- * thread across retries, model candidates, retargets, and park/resume. Finalize
+ * thread across retries, model candidates, and resumes. Finalize
  * is idempotent: it records a binary patch, applies it to the original working
  * tree without touching its index, then removes/prunes the temporary worktree.
  * Failed integration deliberately retains both the worktree and patch.

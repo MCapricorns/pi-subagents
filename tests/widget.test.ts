@@ -84,17 +84,17 @@ describe("formatActiveRunLines", () => {
 		store.setManagedWorkflow(parent, true);
 		store.setWorkflowStages(parent, [
 			{ agent: "reviewer", relation: "review", status: "changes" },
-			{ agent: "worker", relation: "fix 1/2", status: "active" },
-			{ agent: "reviewer", relation: "re-review 1/2", status: "pending" },
+			{ agent: "worker", relation: "fix 1/1", status: "active" },
+			{ agent: "reviewer", relation: "re-review 1/1", status: "pending" },
 			{ agent: "documenter", relation: "docs", status: "pending" },
 		]);
 		store.setActivity(parent, "auto-fix chain running");
 		const fix = store.addRun(
 			"worker",
-			"Auto-fix round 1 of 2 (triggered by a failed review).\n- src/index.ts:42 bug",
+			"Auto-fix round 1 of 1 (triggered by a failed review).\n- src/index.ts:42 bug",
 			"openai/gpt-worker",
 			"max",
-			{ groupId: `fix-${parent}`, relationLabel: "fix 1/2", parentRunId: parent },
+			{ groupId: `fix-${parent}`, relationLabel: "fix 1/1", parentRunId: parent },
 		);
 		store.setStatus(fix, "running");
 		store.setActivity(fix, "edit src/index.ts");
@@ -103,7 +103,7 @@ describe("formatActiveRunLines", () => {
 			"Re-review after auto-fix round 1.",
 			"anthropic/claude-reviewer",
 			"high",
-			{ groupId: `fix-${parent}`, relationLabel: "re-review 1/2", parentRunId: parent },
+			{ groupId: `fix-${parent}`, relationLabel: "re-review 1/1", parentRunId: parent },
 		);
 		store.setStatus(reReview, "queued");
 
@@ -112,12 +112,12 @@ describe("formatActiveRunLines", () => {
 		expect(lines[0]).toContain(`◆ #${parent} reviewer workflow · src/index.ts`);
 		expect(lines[0]).not.toContain("grok-parent");
 		expect(lines[0]).not.toContain("/xhigh");
-		expect(lines[1]).toContain("! review ─ ● fix 1/2 ─ ○ re-review 1/2 ─ ○ docs");
+		expect(lines[1]).toContain("! review ─ ● fix 1/1 ─ ○ re-review 1/1 ─ ○ docs");
 		// The timeline replaces the parent's generic workflow placeholder.
 		expect(lines.join("\n")).not.toContain("auto-fix chain running");
-		expect(lines[2]).toContain(`├ ● #${fix} worker · fix 1/2 · src/index.ts · gpt-worker/max`);
+		expect(lines[2]).toContain(`├ ● #${fix} worker · fix 1/1 · src/index.ts · gpt-worker/max`);
 		expect(lines[3]).toBe("      edit src/index.ts");
-		expect(lines[4]).toContain(`└ ○ #${reReview} reviewer · queued · re-review 1/2`);
+		expect(lines[4]).toContain(`└ ○ #${reReview} reviewer · queued · re-review 1/1`);
 		expect(lines.join("\n")).not.toContain("claude-reviewer");
 	});
 
@@ -164,7 +164,7 @@ describe("formatActiveRunLines", () => {
 		const store = new MonitorStore();
 		const orphan = store.addRun(
 			"worker",
-			"Auto-fix round 2 of 2.\n- src/widget.ts:10 issue",
+			"Auto-fix round 1 of 1.\n- src/widget.ts:10 issue",
 			undefined,
 			undefined,
 			{ groupId: "fix-999", relationLabel: "fix round 2", parentRunId: 999 },
@@ -244,7 +244,6 @@ describe("formatActiveRunLines", () => {
 	});
 
 	it.each([
-		["retarget", "retarget", "retarget: replacement objective"],
 		["retained resume", "resume-retained", "resume: current objective"],
 		["appended resume", "resume-appended", "resume: appended objective"],
 	] as const)("keeps %s semantics visible beside a path-heavy task at 80 columns", (_name, kind, label) => {

@@ -202,7 +202,7 @@ export function writeResultArtifact(output: string, agentName: string, cwd?: str
 }
 
 export function isFailedResult(result: SingleResult): boolean {
-	if (result.parked) return false;
+
 	return result.exitCode !== 0 || result.stopReason === "error" || result.stopReason === "aborted";
 }
 
@@ -308,12 +308,12 @@ async function waitForControlledRetry(
 ): Promise<boolean> {
 	let remaining = normalizeStartupRetryDelay(delayMs);
 	while (remaining > 0) {
-		if (control?.isParkRequested() || control?.isStopRequested()) return false;
+		if (control?.isStopRequested()) return false;
 		const slice = Math.min(remaining, 50);
 		if (!(await waitForStartupRetry(slice, signal))) return false;
 		remaining -= slice;
 	}
-	return !signal?.aborted && !control?.isParkRequested() && !control?.isStopRequested();
+	return !signal?.aborted && !control?.isStopRequested();
 }
 
 export function getResultOutput(result: SingleResult): string {
@@ -376,7 +376,7 @@ export interface RunSingleOptions {
 
 function controlledDisposition(options: RunSingleOptions, base?: SingleResult): SingleResult | undefined {
 	const control = options.control;
-	if (!control?.isParkRequested() && !control?.isStopRequested()) return undefined;
+	if (!control?.isStopRequested()) return undefined;
 	const result: SingleResult = base ?? {
 		agent: options.agentName,
 		task: control.getObjective(),
@@ -390,23 +390,14 @@ function controlledDisposition(options: RunSingleOptions, base?: SingleResult): 
 		sessionDir: options.sessionDir,
 	};
 	result.task = control.getObjective();
-	if (control.isParkRequested()) {
-		result.parked = true;
-		result.exitCode = 0;
-		result.stopReason = undefined;
-		result.errorMessage = undefined;
-	} else {
-		result.parked = undefined;
-		result.exitCode = 1;
-		result.stopReason = "aborted";
-		result.errorMessage = control.getStopMessage();
-	}
+	result.exitCode = 1;
+	result.stopReason = "aborted";
+	result.errorMessage = control.getStopMessage();
 	return result;
 }
 
 function signalAbortDisposition(options: RunSingleOptions, base: SingleResult): SingleResult | undefined {
 	if (!options.signal?.aborted) return undefined;
-	base.parked = undefined;
 	base.exitCode = 1;
 	base.stopReason = "aborted";
 	base.errorMessage = "Subagent was aborted";
@@ -508,14 +499,7 @@ export async function runSingleAgentWithMainFallback(
 		let retries = 0;
 		for (let attempt = 0; ; attempt++) {
 			const immediate = controlledDisposition(opts);
-			if (immediate) {
-				if (immediate.parked && !options.sessionDir && !sessionExists(sessionDir, sessionId)) {
-					await rm(sessionDir, { recursive: true, force: true }).catch(() => undefined);
-					immediate.sessionId = undefined;
-					immediate.sessionDir = undefined;
-				}
-				return immediate;
-			}
+			if (immediate) return immediate;
 			const start = Date.now();
 			try {
 				const attemptOptions = opts.resolveAgentForAttempt
@@ -529,7 +513,7 @@ export async function runSingleAgentWithMainFallback(
 			const durationMs = Date.now() - start;
 			const controlled = controlledDisposition(opts, lastResult);
 			if (controlled) return controlled;
-			if (lastResult.parked || lastResult.stopReason === "aborted") return lastResult;
+			if (lastResult.stopReason === "aborted") return lastResult;
 			if (!isRetryableStartupFailure(lastResult, durationMs)) {
 				if (retries > 0 && !isFailedResult(lastResult)) lastResult.startupRetries = retries;
 				return lastResult;
@@ -646,7 +630,7 @@ export async function runSingleAgentWithMainFallback(
 		}
 
 		result = await runWithStartupRetry(candidateOptions);
-		if (result.parked || result.stopReason === "aborted") return finish(result);
+		if (result.stopReason === "aborted") return finish(result);
 		if (!isModelLevelFailure(result)) return finish(result);
 		// Any model-level failure advances immediately to the sole fallback (the
 		// current main model). Retain selected-attempt tool diagnostics and usage;

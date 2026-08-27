@@ -15,9 +15,8 @@ Your main agent can send research to `explorer`, implementation to `worker`,
 intentional cleanup and duplicate-code consolidation to `cleaner`, documentation
 synchronization to `documenter`, and independent checks to `reviewer`. Each role
 runs in its own child process with a clean context, works in the background, and
-returns its result automatically. Active top-level work can be steered or
-retargeted; managed stages can be parked, resumed, or stopped without losing
-retained context, and parked/settled threads survive a pi reload or restart.
+returns its result automatically. Settled or interrupted threads keep their
+retained context across resumes, stops, and pi reloads or restarts.
 
 ```text
 You
@@ -27,7 +26,7 @@ You
      ├─ cleaner ──── cleans up ──┘             └─ NEEDED/missing → documenter
      ├─ documenter ─ explicit docs/comments task → deliver
      └─ reviewer ─── advisory report (no VERDICT), or managed gate
-          └─ REVIEW_FAIL → worker → reviewer (bounded fix rounds)
+          └─ REVIEW_FAIL → worker → re-review (one round, then you decide)
 
 Worker and cleaner update existing docs/comments they directly affect. The stable
 parent returns one final result when its complete managed workflow settles.
@@ -66,9 +65,9 @@ more of it.
 | A basic launcher often gives you… | pi-subagents gives you… |
 | --- | --- |
 | One generic child role | Five focused engineering roles |
-| A one-shot prompt | Retained, steerable, resumable threads that survive reloads |
+| A one-shot prompt | Retained, resumable threads that survive reloads |
 | Concurrent writers in one checkout | Git worktree isolation for parallel workers |
-| A review report you must act on manually | Independent worker/cleaner gate, bounded fix rounds, and conditional docs sync |
+| A review report you must act on manually | Independent worker/cleaner gate, one bounded fix round, and conditional docs sync |
 | Manual polling or follow-up | Automatic result delivery that resumes the main agent |
 | A hard failure when the selected model is unavailable | Direct handoff to the current main model |
 | Synchronized retries during startup contention | Extended jittered backoff that reduces retry collisions |
@@ -248,8 +247,9 @@ cannot recursively start another chain. Gate reviewers keep documentation drift
 out of the code verdict while `documenter` is enabled by recording it under
 `## Documentation notes`; with documenter disabled, drift is a normal finding.
 
-The loop is fixed at two worker fix rounds (each fix is re-reviewed); disabling
-the `worker` agent is the way to turn fixes off. The post-writer review gate still
+The loop is fixed at one worker fix round (the fix is re-reviewed once); anything
+still unresolved is delivered back to the main window for the decision instead of
+burning more rounds. Disabling the `worker` agent is the way to turn fixes off. The post-writer review gate still
 runs regardless, and only a terminal `REVIEW_PASS` can decide whether docs
 sync is needed. Generic audits and read-only reviews are advisory: they omit
 `VERDICT` and documentation machine markers, remain read-only, and never trigger
@@ -338,7 +338,7 @@ writer or documentation sync. Isolated agents keep doing model work in parallel,
 but their final apply waits for the same lane.
 
 Normal completion, stop, and shutdown share one finalization result, so isolated
-state is applied at most once. If park, stop, or shutdown wins after the top-level
+state is applied at most once. If stop or shutdown wins after the top-level
 child settles, no downstream role starts and the stable top-level session remains
 the checkpoint. If setup or integration fails, pi-subagents keeps the useful
 patch or worktree when possible and records recovery information in:
@@ -359,42 +359,48 @@ main agent.
 
 | Tool | What it does |
 | --- | --- |
-| `subagent_control` | `steer`, `retarget`, `park`, or `resume` a logical thread. |
+| `subagent_control` | `resume` a parked or settled logical thread with its retained context. |
 | `subagent_status` | Show active and recent runs, or return the full result for one id. |
 | `subagent_wait` | Look up a result in the current turn. It is non-blocking by default; use `timeoutMs` only when you must wait in-turn. |
 | `subagent_stop` | Destructively cancel work, deliver partial output, and retire that thread's retained session. |
 
 ```ts
-subagent_control({ action: "steer", id: 7, instruction: "Check the Windows path too." });
-subagent_control({ action: "park", id: 7 });
+subagent_control({ action: "resume", id: 7 });
 subagent_control({ action: "resume", id: 7, objective: "Finish the tests." });
 ```
 
-Use `steer` or `retarget` only while the top-level RPC child is active. `steer`
-queues guidance without changing the displayed objective; `retarget` aborts that
-generation's objective and replaces it in the same session. During an automatic
-documenter, reviewer, or fix stage, use `park` or `stop`. `resume` without an
-`objective` continues the currently displayed goal; supplying one appends that
-explicit goal to the retained conversation and makes it the new displayed goal.
-It never clears prior context. Widget labels distinguish retained, appended,
-and retargeted objectives.
+`resume` without an `objective` continues the currently displayed goal;
+supplying one appends that explicit goal to the retained conversation and makes
+it the new displayed goal. It never clears prior context, and a resumed logical
+run keeps cumulative active elapsed time across all generations. Widget labels
+distinguish retained and appended objectives.
 
-Use `park` to preserve the newest active stage and release its process slot;
-parking during documentation retains the documenter's partial/session, not an
-older writer or review. A resumed logical run keeps cumulative active elapsed
-time across all generations while excluding the parked interval. Use `stop` only
-when you want to discard that thread's future continuation. Stop and session
-shutdown abort the active internal stage, suppress stale delivery, and leave
-worktree finalization to the same one-time lifecycle owner. `stop-all` interrupts
-every lane holder before waiting for finalization, avoiding self-deadlock when an
-isolated apply is queued behind shared work.
+Use `stop` only when you want to discard that thread's future continuation. Stop
+and session shutdown abort the active internal stage, suppress stale delivery,
+and leave worktree finalization to the same one-time lifecycle owner. `stop-all`
+interrupts every lane holder before waiting for finalization, avoiding
+self-deadlock when an isolated apply is queued behind shared work.
 
-Every control operation is bounded: park, stop, and resume never wait
-indefinitely on a generation that is still settling (for example an isolated
-apply queued behind the managed repository lane). Stop proceeds after a bounded
-deadline once it owns the lifecycle, a still-running integration continues in the
-background, and a durable recovery record is persisted pointing at the retained
-worktree/patch so stopped work is never lost.
+Every control operation is bounded: stop and resume never wait indefinitely on a
+generation that is still settling (for example an isolated apply queued behind
+the managed repository lane). Stop proceeds after a bounded deadline once it owns
+the lifecycle, a still-running integration continues in the background, and a
+durable recovery record is persisted pointing at the retained worktree/patch so
+stopped work is never lost.
+
+### Re-verify your own fixes without triggering auto-fix
+
+When the main window fixes review findings itself and wants an independent
+confirmation, dispatch the reviewer with `advisory: true`:
+
+```ts
+subagent({ agent: "reviewer", task: "Re-verify the pending diff.", advisory: true });
+```
+
+The reviewer is told to report findings only (no `VERDICT`/`DOCUMENTATION`
+markers), and even if a verdict slips through, the runtime refuses to start the
+auto-fix chain for an advisory dispatch — the report always comes back to the
+main window for the decision.
 
 ## Survive reloads and restarts
 
@@ -438,7 +444,7 @@ and `subagent_stop`:
 
 Success is green, the active stage uses the accent color and bold text, pending
 stages are dim, `REQUEST_CHANGES` is warning-colored, and process failure is an
-error. Fix paths show their budget (`fix 1/2`, `re-review 1/2`). The timeline
+error. Fix paths show their budget (`fix 1/1`, `re-review 1/1`). The timeline
 contains only stages that ran or are currently planned; `DOCUMENTATION: CLEAN`
 removes pending docs instead of pretending that stage ran.
 
@@ -456,7 +462,7 @@ but omits model/thinking because several model stages own it. The active nested
 row shows the current role, relation, selected/fallback model, thinking, stage
 elapsed, and activity. Completed internal rows can disappear while their stage
 remains visible on the parent until the workflow settles. Standalone and
-resume/retarget labels retain their existing semantics; narrow layouts
+resume labels retain their existing semantics; narrow layouts
 prioritize the current stage and elapsed tail. Adjacent workflows add no blank
 separator rows.
 
@@ -518,7 +524,7 @@ subagent({
   even when its ACK is lost.
 - **Idle watchdog:** a run with no RPC output for `idleTimeoutSec` is terminated;
   selected-model failures can continue on the current main model.
-- **Retained context:** model handoff, park/resume, retarget, and cross-reload
+- **Retained context:** model handoff, resume, and cross-reload
   restore build on the same session history instead of repeating discovery.
 - **Visible failures:** process crashes, partial parallel starts, model failures,
   and Git integration failures are returned as failures rather than silent hangs.
@@ -577,7 +583,7 @@ Configuration is stored at `~/.pi/agent/pi-subagents.json` and follows
 
 Invalid values fall back safely. Keys from older versions (including the former
 `maxConcurrency` and `maxFixRounds` tuning options, now fixed at `4` concurrent
-processes and `2` fix rounds) are dropped automatically and the normalized
+processes and the old fix-round knob) are dropped automatically and the normalized
 shape is saved back. At session start, per-agent model overrides that Pi no
 longer reports as available are removed with a one-time notice; those agents
 fall back to the current main model until you re-pick them in

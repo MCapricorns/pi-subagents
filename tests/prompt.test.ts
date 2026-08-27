@@ -57,10 +57,10 @@ describe("buildDelegationDirective", () => {
 
 	it("routes only edit-authorized cleanup to cleaner and generic audits to reviewer", () => {
 		const directive = buildDelegationDirective([agent("cleaner"), agent("reviewer")]);
-		expect(directive).toContain("user-authorized cleanup, removal, simplification, duplicate-code consolidation");
+		expect(directive).toContain("user-authorized cleanup, removal, simplification, or duplicate-code consolidation");
 		expect(directive).toContain("applies every safe proven in-scope cut without item-by-item approval");
-		expect(directive).toContain("Generic or read-only audit, review, code-health, plan");
-		expect(directive).toContain("goes to `reviewer`");
+		expect(directive).toContain("Read-only audits and code-health reviews");
+		expect(directive).toContain("reviews go to `reviewer`");
 		expect(directive).toContain("cannot authorize follow-up edits");
 		expect(directive).toContain("Never dispatch cleaner by PR count or as the pre-commit gate");
 		expect(directive).not.toContain("Audit mode");
@@ -74,8 +74,8 @@ describe("buildDelegationDirective", () => {
 			agent("documenter"),
 			agent("reviewer"),
 		]);
-		expect(directive).toContain("explicit whole-codebase maintenance or standalone documentation/comment work");
-		expect(directive).toContain("top-level documenter delivers directly without an automatic reviewer");
+		expect(directive).toContain("explicit whole-codebase or standalone documentation/comment work");
+		expect(directive).toContain("delivers without an automatic reviewer");
 		expect(directive).toContain("worker/cleaner must sync existing docs they directly affect");
 		expect(directive).toContain("DOCUMENTATION: NEEDED or a missing marker");
 		expect(directive).toContain("never dispatch a duplicate");

@@ -3,8 +3,7 @@ export interface FakeRpcScriptOptions {
 	/** Runs after receipt/counting but before agent_start and onPrompt. Override
 	 * to delay or reject prompt preflight; the snippet must call respond(). */
 	onPromptPreflight?: string;
-	onPrompt: string;
-	onSteer?: string;
+	onPrompt: string;
 	onAbort?: string;
 	onAbortRetry?: string;
 	onGetState?: string;
@@ -39,11 +38,6 @@ const handle = async (command) => {
 		const input = command.message;
 		${options.onPrompt}
 		${options.autoSettle === false ? "" : "send({ type: \"agent_settled\" });"}
-		return;
-	}
-	if (command.type === "steer") {
-		respond(command);
-		${options.onSteer ?? ""}
 		return;
 	}
 	if (command.type === "abort") {

@@ -257,6 +257,17 @@ function withEnabledDocumenterReviewContract(agent: AgentConfig): AgentConfig {
 	};
 }
 
+/** The dispatcher explicitly requested a report-only review: forbid the gate
+ * markers at the source and (in dispatch) refuse to chain on them anyway. */
+function withAdvisoryReviewContract(agent: AgentConfig): AgentConfig {
+	return {
+		...agent,
+		systemPrompt: `${agent.systemPrompt.trimEnd()}
+
+Runtime workflow context: this dispatch is advisory. Report findings only; do not emit VERDICT or DOCUMENTATION markers — the runtime will not act on them.`.trim(),
+	};
+}
+
 export interface DispatchEnvironment {
 	ctx: ExtensionContext;
 	config: SubagentsConfig;
@@ -289,6 +300,7 @@ export type StartBackgroundInternal = (
 	environment?: DispatchEnvironment,
 	seed?: SessionSeed,
 	resumeReservation?: ResumeReservation,
+	options?: { advisoryReview?: boolean },
 ) => Promise<SingleResult>;
 
 export interface ThreadLifecycleDeps {
@@ -371,14 +383,7 @@ interface BackgroundDispatcherOptions {
 	runManagedWorkflow: (request: ManagedWorkflowRequest) => Promise<ManagedWorkflowOutcome>;
 }
 
-type BackgroundStarter = (
-	agentName: string,
-	task: string,
-	cwd: string | undefined,
-	isolation?: IsolationMode,
-) => Promise<SingleResult>;
-
-export function createBackgroundDispatcher(options: BackgroundDispatcherOptions): BackgroundStarter {
+export function createBackgroundDispatcher(options: BackgroundDispatcherOptions): StartBackgroundInternal {
 	const {
 		runtime,
 		getEnvironment,
@@ -398,6 +403,7 @@ export function createBackgroundDispatcher(options: BackgroundDispatcherOptions)
 		environment?: DispatchEnvironment,
 		seed?: SessionSeed,
 		resumeReservation?: ResumeReservation,
+		options?: { advisoryReview?: boolean },
 	): Promise<SingleResult> => {
 		if (!runtime.sessionActive) {
 			return failedStartResult(agentName, task, "Parent session shut down before this subagent generation could start.");
@@ -415,8 +421,13 @@ export function createBackgroundDispatcher(options: BackgroundDispatcherOptions)
 		const resolveLiveAgentTools = (candidate: AgentConfig): AgentConfig =>
 			resolveAgentTools({ ...candidate, tools: discoveredAgent.tools }, runtime.getActiveTools());
 		const resolvedAgent = resolveLiveAgentTools(discoveredAgent);
-		const agent = agentName === "reviewer" && runAgents.some((candidate) => candidate.name === "documenter")
-			? withEnabledDocumenterReviewContract(resolvedAgent)
+		const advisoryReview = options?.advisoryReview ?? existingThread?.advisoryReview ?? false;
+		const agent = agentName === "reviewer"
+			? advisoryReview
+				? withAdvisoryReviewContract(resolvedAgent)
+				: runAgents.some((candidate) => candidate.name === "documenter")
+					? withEnabledDocumenterReviewContract(resolvedAgent)
+					: resolvedAgent
 			: resolvedAgent;
 		if (isolation === "worktree" && !isWorktreeCapableAgent(agent)) {
 			return {
@@ -451,7 +462,7 @@ export function createBackgroundDispatcher(options: BackgroundDispatcherOptions)
 		const worktreeGroup = worktree ? worktreeGroupId(worktree) : undefined;
 		const resolvedRoute = resolveDispatchModelRoute(agent, runConfig, runCtx);
 		// Isolation is a persistent system-level invariant, not a one-shot task
-		// prefix: queued retargets, live retargets, resumes, and main-model
+		// prefix: resumes and main-model
 		// handoffs all keep the same worktree boundary.
 		const route = isolation === "worktree"
 			? { ...resolvedRoute, agent: withWorktreeSystemPrompt(resolvedRoute.agent) }
@@ -493,20 +504,14 @@ export function createBackgroundDispatcher(options: BackgroundDispatcherOptions)
 			const state: ThreadState =
 				phase === "queued" || phase === "starting"
 					? "queued"
-					: phase === "steering"
-						? "steering"
-						: phase === "interrupting"
-							? "interrupting"
-							: phase === "parked"
-								? "parked"
-								: phase === "stopped"
-									? "stopped"
-									: "running";
+					: phase === "interrupting"
+						? "interrupting"
+						: phase === "stopped"
+							? "stopped"
+							: "running";
 			thread.state = state;
 			if (state === "queued") monitor.setStatus(runId, "queued");
-			else if (state === "steering") monitor.setStatus(runId, "steering");
 			else if (state === "interrupting") monitor.setStatus(runId, "interrupting");
-			else if (state === "parked") monitor.setStatus(runId, "parked");
 			else if (state === "running") monitor.setStatus(runId, "running");
 		});
 
@@ -520,6 +525,7 @@ export function createBackgroundDispatcher(options: BackgroundDispatcherOptions)
 			thread.executionCwd = executionCwd;
 			thread.thinkingLevel = thinkingLevel;
 			thread.isolation = isolation;
+			thread.advisoryReview = advisoryReview;
 			thread.worktree = worktree;
 			thread.state = "queued";
 			thread.control = control;
@@ -543,6 +549,7 @@ export function createBackgroundDispatcher(options: BackgroundDispatcherOptions)
 				executionCwd,
 				thinkingLevel,
 				isolation,
+				advisoryReview,
 				worktree,
 				state: "queued",
 				control,
@@ -551,9 +558,6 @@ export function createBackgroundDispatcher(options: BackgroundDispatcherOptions)
 				elapsedMs: 0,
 				sessionId: seed?.sessionId,
 				sessionDir: seed?.sessionDir,
-				park: async () => {
-					throw new Error("Thread park was not initialized.");
-				},
 				resume: async () => failedStartResult(agent.name, task, "Thread resume was not initialized."),
 				finalizeIsolation: async () => undefined,
 			};
@@ -634,7 +638,7 @@ export function createBackgroundDispatcher(options: BackgroundDispatcherOptions)
 					};
 				}
 
-				// A stale process/generation may finish after a park/resume race. It owns
+				// A stale process/generation may finish after a superseded resume. It owns
 				// no monitor mutation, result registration, or completion delivery.
 				if (runtime.threads.get(runId)?.generation !== generation) return;
 				result.runId = runId;
@@ -654,9 +658,7 @@ export function createBackgroundDispatcher(options: BackgroundDispatcherOptions)
 				}
 
 				const lifecycleInterrupted = (): boolean =>
-					thread.lifecycleOperation === "park" ||
 					thread.lifecycleOperation === "stop" ||
-					thread.state === "parked" ||
 					thread.state === "stopped";
 				// Destructive stop owns publication once it has synchronously claimed
 				// the lifecycle. Leave the partial result/session on the thread; the
@@ -664,21 +666,14 @@ export function createBackgroundDispatcher(options: BackgroundDispatcherOptions)
 				// exactly one aborted result.
 				if (thread.lifecycleOperation === "stop") return;
 
-				if (result.parked) {
-					thread.state = "parked";
-					monitor.setStatus(runId, "parked");
-					runtime.settledRuns.delete(runId);
-					persistThreadCheckpoint(runtime, thread, "parked");
-					return;
-				}
-				// A park/shutdown can win in the microtask gap after the top-level RPC
+				// A shutdown can win in the microtask gap after the top-level RPC
 				// settles. Do not launch an obsolete documenter/reviewer or replace the
 				// stable top-level session with an aborted downstream attempt.
 				if (backgroundSignal.aborted || lifecycleInterrupted() || !runtime.sessionActive) return;
 
 				if (thread.retireOnSettle) runtime.retireThreadSession(thread);
 				let workflowOutcome: ManagedWorkflowOutcome | undefined;
-				const workflowPlan = getManagedWorkflowPlan(result, workflowAvailability);
+				const workflowPlan = getManagedWorkflowPlan(result, workflowAvailability, thread.advisoryReview);
 				if (workflowPlan && runtime.sessionActive) {
 					// The continuation is runtime-initiated (gate review, auto-fix
 					// rounds, documentation sync): release this generation's
@@ -856,16 +851,12 @@ export function createBackgroundDispatcher(options: BackgroundDispatcherOptions)
 			queuedGeneration,
 			() => {
 				if (runtime.threads.get(runId)?.generation !== generation) return;
-				// Queued park/stop owns publication and may still be finalizing an
+				// A destructive stop owns publication and may still be finalizing an
 				// isolated worktree. Do not expose a terminal monitor state before
-				// that owner records the checkpoint or aborted result.
-				if (thread.lifecycleOperation === "park" || thread.lifecycleOperation === "stop") return;
+				// that owner records the aborted result.
+				if (thread.lifecycleOperation === "stop") return;
 				runtime.runControllers.delete(runId);
 				thread.queueController = undefined;
-				if (thread.state === "parked") {
-					monitor.setStatus(runId, "parked");
-					return;
-				}
 				thread.state = "stopped";
 				monitor.setStatus(runId, "failed");
 				if (!runtime.sessionActive) {
@@ -950,7 +941,7 @@ export function createBackgroundDispatcher(options: BackgroundDispatcherOptions)
 	return startBackground;
 }
 
-/** Install park/resume/finalize control surfaces on a thread. Called for
+/** Install resume/finalize control surfaces on a thread. Called for
  * every fresh generation (closures refresh with the current dispatch context)
  * and for threads restored from the durable manifest, whose startBackground
  * resolves the live dispatcher at call time. */
@@ -1098,68 +1089,6 @@ export function installThreadLifecycle(thread: SubagentThread, deps: ThreadLifec
 
 	const persistElapsedTime = (): void => {
 		thread.elapsedMs = monitor.getElapsedMs(runId) ?? thread.elapsedMs;
-	};
-
-	thread.park = async (): Promise<"queued" | "active"> => {
-		if (thread.retired) throw new Error(`Run #${runId} was retired by subagent_stop.`);
-		if (thread.lifecycleOperation) throw new Error(`Run #${runId} is already handling ${thread.lifecycleOperation}.`);
-		if (thread.state === "parked") return "active";
-		const phase = thread.control.getPhase();
-		const queued = thread.state === "queued" && phase === "queued";
-		if (
-			!queued &&
-			((phase === "settled" && thread.state !== "running") ||
-				!["starting", "running", "steering", "interrupting", "retrying", "settled"].includes(phase))
-		) {
-			throw new Error(`Run #${runId} is ${thread.state}; only active work can be parked.`);
-		}
-
-		const version = ++thread.lifecycleVersion;
-		const generation = thread.generation;
-		const completion = thread.generationCompletion;
-		const controller = thread.queueController;
-		thread.lifecycleOperation = "park";
-		try {
-			if (queued) {
-				thread.control.parkPending();
-				runtime.backgroundQueue.cancel(controller);
-			} else {
-				await thread.control.park();
-				// A managed downstream child does not attach to the top-level RPC
-				// control after that child settles, so cancel its queue owner explicitly.
-				if (phase === "settled") runtime.backgroundQueue.cancel(controller);
-			}
-			// The settling tail may be blocked on worktree finalization or the
-			// managed repository lane. Park already owns the lifecycle, so proceed
-			// after a bounded wait and let the tail finish silently in the background.
-			if (!(await quiesced(completion))) {
-				runtime.backgroundQueue.cancel(controller);
-			}
-			if (
-				thread.generation !== generation ||
-				thread.lifecycleVersion !== version ||
-				thread.lifecycleOperation !== "park"
-			) {
-				throw new Error(`Run #${runId} changed while parking.`);
-			}
-			thread.state = "parked";
-			thread.queueController = undefined;
-			runtime.runControllers.delete(runId);
-			const parkedRun = monitor.findRun(runId);
-			if (parkedRun?.managedWorkflow && parkedRun.task !== thread.task) {
-				// The active child row previously showed this stage objective. Once it
-				// disappears, keep the parked parent aligned with what resume retains.
-				monitor.setTask(runId, thread.task);
-			}
-			monitor.setStatus(runId, "parked");
-			persistElapsedTime();
-			persistThreadCheckpoint(runtime, thread, "parked");
-			return queued ? "queued" : "active";
-		} finally {
-			if (thread.lifecycleVersion === version && thread.lifecycleOperation === "park") {
-				thread.lifecycleOperation = undefined;
-			}
-		}
 	};
 
 	thread.resume = async (objective?: string, resumeCtx?: ExtensionContext): Promise<SingleResult> => {
@@ -1361,6 +1290,7 @@ function createRestoredThread(
 		executionCwd: record.executionCwd,
 		...(record.thinkingLevel ? { thinkingLevel: record.thinkingLevel as ThinkingLevel } : {}),
 		isolation: record.isolation,
+		advisoryReview: false,
 		worktree,
 		state,
 		control: new RpcRunControl(record.task, record.generation),
@@ -1370,9 +1300,6 @@ function createRestoredThread(
 		sessionId: record.sessionId,
 		sessionDir: record.sessionDir,
 		lastResult: restoredResultFromSummary(record),
-		park: async () => {
-			throw new Error(`Run #${record.runId} park was not initialized.`);
-		},
 		resume: async () => failedStartResult(record.agentName, record.task, "Thread resume was not initialized."),
 		finalizeIsolation: async () => undefined,
 	};

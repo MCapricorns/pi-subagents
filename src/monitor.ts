@@ -18,8 +18,8 @@ import type { IsolationMode, WorktreeFinalizationStatus } from "./worktree.ts";
 // Types
 // ---------------------------------------------------------------------------
 
-export type RunStatus = "queued" | "running" | "steering" | "interrupting" | "parked" | "done" | "failed";
-export type ContinuationKind = "resume-retained" | "resume-appended" | "retarget";
+export type RunStatus = "queued" | "running" | "interrupting" | "parked" | "done" | "failed";
+export type ContinuationKind = "resume-retained" | "resume-appended";
 export type WorkflowStageStatus = "done" | "active" | "pending" | "changes" | "failed";
 
 /** Ephemeral projection of one real or currently planned managed stage. It is
@@ -31,7 +31,7 @@ export interface WorkflowStage {
 }
 
 export function isRunActiveStatus(status: RunStatus): boolean {
-	return status === "queued" || status === "running" || status === "steering" || status === "interrupting";
+	return status === "queued" || status === "running" || status === "interrupting";
 }
 
 /** Durable integration projection of a worktree-isolated run: pending before
@@ -326,7 +326,6 @@ export function continuationLabel(kind: ContinuationKind | undefined): string | 
 	switch (kind) {
 		case "resume-retained": return "resume: current objective";
 		case "resume-appended": return "resume: appended objective";
-		case "retarget": return "retarget: replacement objective";
 		default: return undefined;
 	}
 }
@@ -493,8 +492,8 @@ export class MonitorStore {
 		const run = this.find(id);
 		if (!run) return;
 		const previousStatus = run.status;
-		const wasExecuting = previousStatus === "running" || previousStatus === "steering" || previousStatus === "interrupting";
-		const isExecuting = status === "running" || status === "steering" || status === "interrupting";
+		const wasExecuting = previousStatus === "running" || previousStatus === "interrupting";
+		const isExecuting = status === "running" || status === "interrupting";
 		const now = Date.now();
 		run.status = status;
 		if (isExecuting && !wasExecuting) {
@@ -597,7 +596,7 @@ export class MonitorStore {
 	}
 
 
-	/** Update the objective shown for a queued retarget or resumed generation. */
+	/** Update the objective shown for a resumed generation. */
 	setTask(id: number, task: string): void {
 		const run = this.find(id);
 		if (!run) return;
@@ -747,8 +746,6 @@ export function statusIcon(status: RunStatus, theme: Theme): string {
 	switch (status) {
 		case "running":
 			return theme.fg("accent", "●");
-		case "steering":
-			return theme.fg("accent", "◆");
 		case "interrupting":
 			return theme.fg("warning", "◐");
 		case "parked":
@@ -769,8 +766,6 @@ export function statusLabel(status: RunStatus): string {
 			return "ready";
 		case "running":
 			return "running";
-		case "steering":
-			return "steering";
 		case "interrupting":
 			return "interrupting";
 		case "parked":

@@ -20,11 +20,11 @@ import { getResultOutput, isFailedResult, reviewVerdict, type SingleResult } fro
 import { formatUsageCompact, sumUsage } from "./monitor.ts";
 
 /**
- * Worker fixes allowed after REVIEW_FAIL. Each fix is followed by a reviewer
- * re-review; this cap does not suppress the post-writer review gate or its
- * conditional/reviewer-disabled documentation fallback.
+ * Worker fixes allowed after REVIEW_FAIL: one fix, one re-review. Anything
+ * still unresolved is handed back to the main window instead of burning more
+ * rounds, keeping chain latency and cost bounded.
  */
-export const MAX_FIX_ROUNDS = 2;
+export const MAX_FIX_ROUNDS = 1;
 
 /**
  * Whether a completed result should trigger the auto-fix loop instead of being
@@ -114,8 +114,9 @@ export function canStartManagedWorkflow(
 export function getManagedWorkflowPlan(
 	result: SingleResult,
 	availability: WorkflowAgentAvailability,
+	advisoryReview = false,
 ): ManagedWorkflowPlan | undefined {
-	if (result.parked || result.dispatchFailed || isFailedResult(result)) return undefined;
+	if (result.dispatchFailed || isFailedResult(result)) return undefined;
 	if (result.agent === "worker" || result.agent === "cleaner") {
 		if (!availability.documenter && !availability.reviewer) return undefined;
 		return {
@@ -127,6 +128,9 @@ export function getManagedWorkflowPlan(
 	// owns the writer lane but delivers directly without an automatic code gate.
 	if (result.agent === "documenter") return undefined;
 	if (result.agent !== "reviewer") return undefined;
+	// An advisory dispatch never chains: the caller asked for a report, so even
+	// a stray gate verdict must be delivered rather than acted on.
+	if (advisoryReview) return undefined;
 
 	const output = getResultOutput(result);
 	const verdict = reviewVerdict(output);
@@ -155,7 +159,6 @@ export function getManagedWorkflowPlan(
  */
 export function buildFixTaskBrief(reviewerResult: SingleResult, round: number, maxRounds: number): string {
 	const review = getResultOutput(reviewerResult);
-	const remaining = maxRounds - round;
 	return [
 		`Auto-fix round ${round} of ${maxRounds} (triggered by a failed review).`,
 		``,
@@ -169,9 +172,7 @@ export function buildFixTaskBrief(reviewerResult: SingleResult, round: number, m
 		`Do NOT refactor unrelated code. Synchronize any existing README/docs/examples/comments directly affected by your fixes.`,
 		`Run the project's format/build/tests when they exist, then report exactly what you changed (paths + short rationale)`,
 		`plus any pushback, so a reviewer can verify.`,
-		remaining > 0
-			? `A reviewer will re-review your changes automatically after you finish.`
-			: `This is the last auto-fix round; the workflow conditionally runs any needed final documentation sync and then delivers.`,
+		`A reviewer re-reviews your changes automatically after you finish; anything still unresolved after that re-review goes back to the main window.`,
 	].join("\n");
 }
 

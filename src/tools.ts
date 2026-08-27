@@ -1,6 +1,6 @@
 /**
  * Thread controls and lookup tools around the subagent runtime:
- * subagent_control (steer/retarget/park/resume), subagent_wait (in-turn
+ * subagent_control (resume), subagent_wait (in-turn
  * result lookup), subagent_status, and destructive subagent_stop.
  */
 
@@ -47,15 +47,12 @@ function renderFirstLine(result: { content?: unknown }, label: string, theme: an
 
 export function registerLookupTools(pi: ExtensionAPI, runtime: SubagentRuntime): void {
 	const SubagentControlParams = Type.Object({
-		action: StringEnum(["steer", "retarget", "park", "resume"] as const, {
+		action: StringEnum(["resume"] as const, {
 			description: "Control operation for the logical sub-agent thread.",
 		}),
 		id: Type.Integer({ minimum: 1, description: "Stable run id shown by subagent dispatch/status output." }),
-		instruction: Type.Optional(
-			Type.String({ description: "Instruction queued by steer after the current child tool batch." }),
-		),
 		objective: Type.Optional(
-			Type.String({ description: "Replacement objective for retarget; optional appended objective for resume. Omit on resume to continue the current retained objective." }),
+			Type.String({ description: "Optional appended objective for resume. Omit to continue the current retained objective." }),
 		),
 	});
 
@@ -63,18 +60,13 @@ export function registerLookupTools(pi: ExtensionAPI, runtime: SubagentRuntime):
 		name: "subagent_control",
 		label: "Subagent Control",
 		description: [
-			"Control an existing sub-agent thread by stable run id.",
-			"steer queues an instruction after the current tool batch while the top-level RPC child is active.",
-			"retarget replaces the objective in that same active top-level child.",
-			"Managed downstream documenter/reviewer/fix stages are controlled by the parent queue rather than its settled RPC control: use park or stop there, then resume with an objective to redirect retained context.",
-			"park aborts to a stable checkpoint, terminates the child, preserves context, and releases its concurrency slot.",
+			"Resume an existing sub-agent thread by stable run id.",
 			"resume restarts a parked, completed, or failed retained thread with the same run id and cumulative active time; omit objective to continue the current goal, or provide one to append it to retained context and make it the displayed current goal.",
+			"Threads parked or interrupted by a shutdown/reload are restorable; use subagent_stop for destructive cancellation.",
 		].join(" "),
-		promptSnippet: "Control a subagent thread: steer/retarget an active top-level child; park/stop a managed downstream stage; resume retained context.",
+		promptSnippet: "Resume a parked or settled subagent thread with its retained context.",
 		promptGuidelines: [
-			"Use subagent_control steer to refine an active top-level RPC child without restarting it; the instruction is delivered after its current tool batch.",
-			"Use subagent_control retarget only while that top-level child is active. During a managed downstream stage, park it and resume with a replacement objective instead.",
-			"Use subagent_control park to checkpoint useful context while releasing the process/concurrency slot, and resume to continue the same run id later. Resume without objective keeps the current goal; resume with objective appends that goal to retained context.",
+			"Use subagent_control resume to continue a parked/settled thread on the same run id. Resume without objective keeps the current goal; resume with objective appends that goal to retained context.",
 			"Use subagent_stop only for destructive cancellation; it retires that thread's retained session.",
 		],
 		parameters: SubagentControlParams,
@@ -91,54 +83,6 @@ export function registerLookupTools(pi: ExtensionAPI, runtime: SubagentRuntime):
 
 			try {
 				switch (params.action) {
-					case "steer": {
-						const instruction = nonBlank(params.instruction);
-						if (!instruction) {
-							return { content: [{ type: "text", text: "steer requires a non-blank instruction." }], details: {} };
-						}
-						if (!(["running", "steering"] as const).includes(thread.control.getPhase() as any)) {
-							return { content: [{ type: "text", text: `Run #${thread.id} is ${thread.control.getPhase()}; only a running thread can be steered.` }], details: {} };
-						}
-						await thread.control.steer(instruction);
-						return { content: [{ type: "text", text: `Queued steering instruction for run #${thread.id} after its current tool batch.` }], details: {} };
-					}
-					case "retarget": {
-						const objective = nonBlank(params.objective);
-						if (!objective) {
-							return { content: [{ type: "text", text: "retarget requires a non-blank objective." }], details: {} };
-						}
-						const phase = thread.control.getPhase();
-						if (thread.state === "queued" && phase === "queued") {
-							thread.task = objective;
-							thread.control.retargetPending(objective);
-							monitor.setTask(thread.id, objective);
-							monitor.setContinuationKind(thread.id, "retarget");
-							return { content: [{ type: "text", text: `Updated queued run #${thread.id} to the replacement objective; no child was spawned by this control action.` }], details: {} };
-						}
-						if (!(["starting", "running", "steering", "interrupting", "retrying"] as const).includes(phase as any)) {
-							return { content: [{ type: "text", text: `Run #${thread.id} is ${thread.state}; use resume with objective to restart retained context.` }], details: {} };
-						}
-						thread.task = objective;
-						monitor.setTask(thread.id, objective);
-						monitor.setContinuationKind(thread.id, "retarget");
-						await thread.control.retarget(objective);
-						return { content: [{ type: "text", text: `Retargeted run #${thread.id} in the same session; the aborted objective will not be delivered as a completion.` }], details: {} };
-					}
-					case "park": {
-						if (thread.state === "parked") {
-							return { content: [{ type: "text", text: `Run #${thread.id} is already parked.` }], details: {} };
-						}
-						const disposition = await thread.park();
-						return disposition === "queued"
-							? {
-								content: [{ type: "text", text: `Parked queued run #${thread.id}; it never spawned a child or empty session.` }],
-								details: {},
-							}
-							: {
-								content: [{ type: "text", text: `Parked run #${thread.id} at a stable checkpoint; its session is retained and concurrency slot released.` }],
-								details: {},
-							};
-					}
 					case "resume": {
 						if (thread.retired) {
 							return { content: [{ type: "text", text: `Run #${thread.id} was retired by subagent_stop and has no resumable session.` }], details: {} };
@@ -423,8 +367,8 @@ export function registerLookupTools(pi: ExtensionAPI, runtime: SubagentRuntime):
 								text: parked
 									? `Run #${active.id} ${owner} is parked with retained${retainedStage ? ` ${retainedStage} stage` : ""} context${metadata ? ` (${metadata})` : ""}. Use subagent_control resume to restart it, or subagent_stop to retire it.`
 									: managedDownstream
-										? `Run #${active.id} ${owner} is in a managed downstream stage (${stageStatus}${metadata ? ` · ${metadata}` : ""}). Use subagent_wait for its result, subagent_control park to checkpoint it, or subagent_stop to cancel it. Steer/retarget are unavailable until you park and resume the retained stage.`
-										: `Run #${active.id} ${owner} is still active (${active.activity ?? statusLabel(active.status)}${metadata ? ` · ${metadata}` : ""}). Use subagent_wait to block for its result, subagent_control to steer/park it, or subagent_stop to cancel it.`,
+										? `Run #${active.id} ${owner} is in a managed downstream stage (${stageStatus}${metadata ? ` · ${metadata}` : ""}). Use subagent_wait for its result or subagent_stop to cancel it.`
+										: `Run #${active.id} ${owner} is still active (${active.activity ?? statusLabel(active.status)}${metadata ? ` · ${metadata}` : ""}). Use subagent_wait to block for its result or subagent_stop to cancel it.`,
 							},
 						],
 						details: {},
@@ -473,7 +417,7 @@ export function registerLookupTools(pi: ExtensionAPI, runtime: SubagentRuntime):
 			sections.push(parkedLines.length > 0 ? parkedLines.join("\n") : "(none)");
 			sections.push(`### Finished this session (${runtime.settledRuns.size})`);
 			sections.push(completedLines.length > 0 ? completedLines.join("\n") : "(none)");
-			sections.push("Pass a run id to subagent_status for the full result, use subagent_control to steer/park/resume, or subagent_wait for active work.");
+			sections.push("Pass a run id to subagent_status for the full result, use subagent_control to resume a settled thread, or subagent_wait for active work.");
 			return { content: [{ type: "text", text: sections.join("\n\n") }], details: {} };
 		},
 
@@ -527,7 +471,7 @@ export function registerLookupTools(pi: ExtensionAPI, runtime: SubagentRuntime):
 					...[...runtime.threads.values()]
 						.filter((thread) =>
 							thread.lifecycleOperation !== undefined ||
-							["queued", "resuming", "running", "steering", "interrupting"].includes(thread.state),
+							["queued", "resuming", "running", "interrupting"].includes(thread.state),
 						)
 						.map((thread) => thread.id),
 				])]
@@ -574,7 +518,7 @@ export function registerLookupTools(pi: ExtensionAPI, runtime: SubagentRuntime):
 				const wasResuming = previousState === "resuming";
 				const wasActive =
 					thread.lifecycleOperation !== undefined ||
-					["queued", "resuming", "running", "steering", "interrupting"].includes(previousState);
+					["queued", "resuming", "running", "interrupting"].includes(previousState);
 				const stopVersion = ++thread.lifecycleVersion;
 				// Stop-all claims every target before the first await. This invalidates
 				// all concurrent resume preflights as one synchronous operation.
@@ -659,7 +603,6 @@ export function registerLookupTools(pi: ExtensionAPI, runtime: SubagentRuntime):
 					stoppedResult = prior
 						? {
 							...prior,
-							parked: undefined,
 							exitCode: 1,
 							stopReason: "aborted",
 							errorMessage: stopMessage,

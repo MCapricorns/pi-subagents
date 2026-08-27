@@ -1,7 +1,7 @@
 /*
  * Persistent pi RPC child transport for one logical sub-agent generation.
  *
- * A child stays alive across prompt/steer/abort/retarget operations and speaks
+ * A child stays alive across prompt/abort operations and speaks
  * strict LF-delimited JSONL. The process is terminated only after the logical
  * run settles, is parked/stopped, or fails. Session files remain owned by the
  * parent runtime so a later generation can resume the same thread.
@@ -83,8 +83,6 @@ export interface RpcSingleResult {
 	sessionDir?: string;
 	/** Original task/project cwd used for result-artifact retention buckets. */
 	projectCwd?: string;
-	/** Internal disposition: dispatch suppresses completion delivery for parks. */
-	parked?: boolean;
 	/** Stable logical run id assigned by dispatch (also present on queued results). */
 	runId?: number;
 	/** Filesystem isolation selected for this logical thread. */
@@ -99,7 +97,7 @@ export interface RpcSingleResult {
 }
 
 export type SubagentLiveEvent =
-	| { kind: "status"; status: "queued" | "running" | "steering" | "interrupting" | "parked" | "done" | "failed" }
+	| { kind: "status"; status: "queued" | "running" | "interrupting" | "done" | "failed" }
 	| { kind: "model"; model?: string; thinking?: ThinkingLevel; fallbackFrom?: string }
 	| { kind: "usage"; usage: UsageStats; model?: string }
 	| { kind: "session"; sessionId: string; sessionDir: string }
@@ -112,17 +110,12 @@ export type RpcControlPhase =
 	| "queued"
 	| "starting"
 	| "running"
-	| "steering"
 	| "interrupting"
 	| "retrying"
-	| "parked"
 	| "settled"
 	| "stopped";
 
 interface AttemptControl {
-	steer(instruction: string): Promise<void>;
-	retarget(objective: string): Promise<void>;
-	park(): Promise<void>;
 	stop(reason?: string): Promise<void>;
 }
 
@@ -137,7 +130,6 @@ export class RpcRunControl {
 	private attempt?: { token: number; control: AttemptControl };
 	private nextToken = 1;
 	private serial: Promise<void> = Promise.resolve();
-	private parkRequested = false;
 	private stopRequested = false;
 	private stopMessage = "Subagent was aborted";
 	private childPids = new Set<number>();
@@ -156,10 +148,6 @@ export class RpcRunControl {
 
 	getPhase(): RpcControlPhase {
 		return this.phase;
-	}
-
-	isParkRequested(): boolean {
-		return this.parkRequested;
 	}
 
 	isStopRequested(): boolean {
@@ -181,28 +169,17 @@ export class RpcRunControl {
 		return [...this.childPids];
 	}
 
-	/** Update a not-yet-started/retrying objective without launching a process. */
-	retargetPending(objective: string): void {
-		this.objective = objective;
-	}
-
-	/** Mark queued/starting work for park without waiting on an RPC abort event. */
-	parkPending(): void {
-		this.parkRequested = true;
-		this.setPhase("parked");
-	}
-
 	markStarting(): void {
 		this.setPhase("starting");
 	}
 
 	markRetrying(): void {
-		if (!this.parkRequested && !this.stopRequested) this.setPhase("retrying");
+		if (!this.stopRequested) this.setPhase("retrying");
 	}
 
 	markSettled(): void {
 		this.attempt = undefined;
-		if (!this.parkRequested && !this.stopRequested) this.setPhase("settled");
+		if (!this.stopRequested) this.setPhase("settled");
 	}
 
 	/** Allocate an attempt token used to reject state updates from old children. */
@@ -221,32 +198,6 @@ export class RpcRunControl {
 	updateAttemptPhase(token: number, phase: RpcControlPhase): void {
 		if (this.attempt?.token !== token) return;
 		this.setPhase(phase);
-	}
-
-	async steer(instruction: string): Promise<void> {
-		return this.serialize(async () => {
-			const attempt = this.attempt?.control;
-			if (!attempt) throw new Error(`Thread is ${this.phase}; steering requires a running child.`);
-			await attempt.steer(instruction);
-		});
-	}
-
-	async retarget(objective: string): Promise<void> {
-		return this.serialize(async () => {
-			this.objective = objective;
-			const attempt = this.attempt?.control;
-			if (!attempt) return;
-			await attempt.retarget(objective);
-		});
-	}
-
-	async park(): Promise<void> {
-		return this.serialize(async () => {
-			this.parkRequested = true;
-			const attempt = this.attempt?.control;
-			if (attempt) await attempt.park();
-			this.setPhase("parked");
-		});
 	}
 
 	async stop(reason = "Subagent was aborted"): Promise<void> {
@@ -554,11 +505,6 @@ export async function runRpcAgentAttempt(options: RunRpcAttemptOptions): Promise
 	let abortSettlement: Deferred<void> | undefined;
 	let initialPromptResolved = false;
 	const initialPrompt = deferred<{ accepted: boolean; error?: Error }>();
-	let continuationCommandInFlight = false;
-	let continuationAccepted = false;
-	let continuationTurnStarted = false;
-	let continuationTurnCompleted = false;
-	let deferredAgentSettlement = false;
 	const pendingRequests = new Map<string, PendingRequest>();
 	const outcome = deferred<void>();
 	const processClosed = deferred<void>();
@@ -575,13 +521,8 @@ export async function runRpcAgentAttempt(options: RunRpcAttemptOptions): Promise
 
 	const setAttemptPhase = (phase: RpcControlPhase): void => {
 		if (attemptToken !== undefined) control?.updateAttemptPhase(attemptToken, phase);
-		switch (phase) {
-			case "running":
-			case "steering":
-			case "interrupting":
-			case "parked":
-				emit({ kind: "status", status: phase });
-				break;
+		if (phase === "running" || phase === "interrupting") {
+			emit({ kind: "status", status: phase });
 		}
 	};
 
@@ -698,142 +639,6 @@ export async function runRpcAgentAttempt(options: RunRpcAttemptOptions): Promise
 	};
 
 	const attemptControl: AttemptControl = {
-		async steer(instruction: string): Promise<void> {
-			if (finished) throw new Error("Thread already settled before it could be steered.");
-			const acceptance = await initialPrompt.promise;
-			if (!acceptance.accepted) throw acceptance.error ?? new Error("The initial prompt was rejected.");
-			setAttemptPhase("steering");
-			// Prompt+streamingBehavior performs the active→steer / idle→new-prompt
-			// choice atomically inside Pi. Hold any old agent_settled event until this
-			// command is accepted so an extension-handler race cannot drop the steer.
-			continuationCommandInFlight = true;
-			continuationAccepted = false;
-			continuationTurnStarted = false;
-			continuationTurnCompleted = false;
-			deferredAgentSettlement = false;
-			try {
-				await send({ type: "prompt", message: asPlainTextRpcPrompt(instruction), streamingBehavior: "steer" });
-				continuationAccepted = true;
-				if (deferredAgentSettlement && !continuationTurnStarted) {
-					// A handled input can succeed without starting a turn. Confirm the
-					// server is idle before consuming the delayed settlement.
-					const state = await send({ type: "get_state" }).catch(() => undefined);
-					if ((state?.data as { isStreaming?: unknown } | undefined)?.isStreaming === false) {
-						continuationAccepted = false;
-						deferredAgentSettlement = false;
-						settleRun();
-					}
-				}
-			} catch (error) {
-				continuationAccepted = false;
-				if (deferredAgentSettlement) {
-					deferredAgentSettlement = false;
-					settleRun();
-				}
-				throw error;
-			} finally {
-				continuationCommandInFlight = false;
-			}
-			// Remain visibly steering until the next turn starts.
-		},
-		async retarget(objective: string): Promise<void> {
-			if (finished) throw new Error("Thread already settled before it could be retargeted.");
-			setAttemptPhase("interrupting");
-			result.task = objective;
-			const accepted = await abortAcceptedPrompt();
-			if (!accepted) {
-				if (!closed) await processClosed.promise;
-				return;
-			}
-			if (finished || closed) throw new Error("Thread exited while retargeting.");
-			// The aborted assistant message remains in the retained session/history,
-			// but it must not classify the replacement objective as aborted.
-			result.stopReason = undefined;
-			result.errorMessage = undefined;
-			result.exitCode = 0;
-			// Tool failures belong to the abandoned objective. Keep them in session
-			// history, but do not classify a successful replacement as failed.
-			result.failedTools = undefined;
-			try {
-				await send({ type: "prompt", message: asPlainTextRpcPrompt(objective) });
-				setAttemptPhase("running");
-			} catch (error) {
-				const promptError = error instanceof Error ? error : new Error(String(error));
-				result.exitCode = 1;
-				result.stopReason = "error";
-				result.errorMessage = `Replacement prompt was rejected: ${promptError.message}`;
-				if (promptError instanceof RpcCommandRejectedError) result.rpcPromptRejected = true;
-				finish();
-				terminate();
-				if (!closed) await processClosed.promise;
-				throw promptError;
-			}
-		},
-		async park(): Promise<void> {
-			const markParked = (): void => {
-				result.parked = true;
-				result.exitCode = 0;
-				result.stopReason = undefined;
-				result.errorMessage = undefined;
-				result.rpcStartupFailed = undefined;
-				result.rpcPromptRejected = undefined;
-			};
-			if (finished) {
-				if (!closed) await processClosed.promise;
-				if (result.parked) return;
-				// Handshake/startup already tore the child down. Convert a pre-prompt
-				// settlement into a park instead of throwing past the control tool.
-				if (!result.rpcPromptAccepted) {
-					markParked();
-					return;
-				}
-				throw new Error("Thread already settled before it could be parked.");
-			}
-			setAttemptPhase("interrupting");
-			if (!initialPromptResolved) {
-				const parked = new Error("Run was parked before its initial prompt.");
-				resolveInitialPrompt(false, parked);
-				rejectPending(parked);
-				markParked();
-				setAttemptPhase("parked");
-				finish();
-				terminate();
-				if (!closed) await processClosed.promise;
-				return;
-			}
-			// Bound the abort settlement exactly like stop: a child that never
-			// settles after abort must not hold the control operation forever.
-			let parkTimer: ReturnType<typeof setTimeout> | undefined;
-			let parkTimedOut = false;
-			const parkDeadline = new Promise<boolean>((resolve) => {
-				parkTimer = setTimeout(() => {
-					parkTimedOut = true;
-					resolve(false);
-				}, RPC_ABORT_SETTLE_TIMEOUT_MS);
-				if (typeof parkTimer.unref === "function") parkTimer.unref();
-			});
-			let accepted: boolean;
-			try {
-				accepted = await Promise.race([abortAcceptedPrompt(), parkDeadline]);
-			} catch {
-				/* a rejected abort still parks; termination below is the bounded fallback */
-				accepted = false;
-			} finally {
-				if (parkTimer) clearTimeout(parkTimer);
-			}
-			if (abortSettlement) {
-				const stable = abortSettlement;
-				abortSettlement = undefined;
-				stable.resolve();
-			}
-			if (!accepted && !parkTimedOut && !closed) await processClosed.promise;
-			if (finished && accepted) throw new Error("Thread exited while parking.");
-			markParked();
-			setAttemptPhase("parked");
-			finish();
-			terminate();
-			if (!closed) await processClosed.promise;
-		},
 		async stop(reason = "Subagent was aborted"): Promise<void> {
 			if (finished) {
 				if (!closed) await processClosed.promise;
@@ -943,14 +748,7 @@ export async function runRpcAgentAttempt(options: RunRpcAttemptOptions): Promise
 			emit({ kind: "status", status: "running" });
 		}
 		if (event.type === "turn_start") {
-			if (continuationCommandInFlight || continuationAccepted) {
-				continuationTurnStarted = true;
-			}
 			setAttemptPhase("running");
-		}
-		if (event.type === "turn_end" && continuationTurnStarted) {
-			continuationTurnCompleted = true;
-			deferredAgentSettlement = false;
 		}
 
 		if (event.type === "message_update") {
@@ -1012,18 +810,6 @@ export async function runRpcAgentAttempt(options: RunRpcAttemptOptions): Promise
 				stable.resolve();
 				return;
 			}
-			if ((continuationCommandInFlight || continuationAccepted) && !continuationTurnCompleted) {
-				// Pi may emit an old settlement while an extension handler is yielding
-				// and the atomic prompt command starts the continuation. Its successful
-				// response guarantees a new/queued turn, so defer this stale event until
-				// that continuation has completed a turn.
-				deferredAgentSettlement = true;
-				return;
-			}
-			continuationAccepted = false;
-			continuationTurnStarted = false;
-			continuationTurnCompleted = false;
-			deferredAgentSettlement = false;
 			settleRun();
 		}
 	};
@@ -1112,13 +898,7 @@ export async function runRpcAgentAttempt(options: RunRpcAttemptOptions): Promise
 	}
 
 	try {
-		if (control?.isParkRequested()) {
-			resolveInitialPrompt(false, new Error("Run was parked before its initial prompt."));
-			result.parked = true;
-			result.exitCode = 0;
-			finish();
-			terminate();
-		} else if (control?.isStopRequested()) {
+		if (control?.isStopRequested()) {
 			resolveInitialPrompt(false, new Error("Run was stopped before its initial prompt."));
 			await attemptControl.stop();
 		} else {
@@ -1137,13 +917,13 @@ export async function runRpcAgentAttempt(options: RunRpcAttemptOptions): Promise
 				await send({ type: "get_state" }, readyTimeoutMs);
 			} catch (error) {
 				const handshakeError = error instanceof Error ? error : new Error(String(error));
-				if (!control?.isParkRequested() && !control?.isStopRequested()) {
+				if (!control?.isStopRequested()) {
 					failBeforePrompt(handshakeError, true);
 				} else {
 					resolveInitialPrompt(false, handshakeError);
 				}
 			}
-			if (!finished && !initialPromptResolved && !control?.isParkRequested() && !control?.isStopRequested()) {
+			if (!finished && !initialPromptResolved && !control?.isStopRequested()) {
 				// Pi starts the agent immediately after prompt preflight, before its
 				// success response necessarily reaches stdout. From this point on, a
 				// missing ACK is ambiguous and must never be recovered by replay.
