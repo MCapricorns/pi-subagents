@@ -603,11 +603,6 @@ export function registerSubagentTool(pi: ExtensionAPI, runtime: SubagentRuntime)
 						item.task,
 						item.cwd,
 						defaultIsolationMode("parallel", item.agent, item.isolation as IsolationMode | undefined),
-						undefined,
-						false,
-						undefined,
-						undefined,
-						undefined,
 						{ advisoryReview: item.advisory === true },
 					));
 				}
@@ -646,11 +641,6 @@ export function registerSubagentTool(pi: ExtensionAPI, runtime: SubagentRuntime)
 				params.task as string,
 				params.cwd,
 				defaultIsolationMode("single", params.agent as string, params.isolation as IsolationMode | undefined),
-				undefined,
-				false,
-				undefined,
-				undefined,
-				undefined,
 				{ advisoryReview: params.advisory === true },
 			);
 			if (result.exitCode !== -1) {

@@ -289,18 +289,23 @@ export interface ResumeReservation {
 }
 
 /** The dispatcher's full internal entry point; the public tool surface only
- * uses the first five parameters. */
+ * uses the first four parameters. */
+export interface StartBackgroundOptions {
+	/** Resume path only: the thread whose retained context continues. */
+	existingThread?: SubagentThread;
+	appendedObjectiveOnResume?: boolean;
+	environment?: DispatchEnvironment;
+	seed?: SessionSeed;
+	resumeReservation?: ResumeReservation;
+	advisoryReview?: boolean;
+}
+
 export type StartBackgroundInternal = (
 	agentName: string,
 	task: string,
 	cwd: string | undefined,
 	isolation?: IsolationMode,
-	existingThread?: SubagentThread,
-	appendedObjectiveOnResume?: boolean,
-	environment?: DispatchEnvironment,
-	seed?: SessionSeed,
-	resumeReservation?: ResumeReservation,
-	options?: { advisoryReview?: boolean },
+	options?: StartBackgroundOptions,
 ) => Promise<SingleResult>;
 
 export interface ThreadLifecycleDeps {
@@ -398,13 +403,15 @@ export function createBackgroundDispatcher(options: BackgroundDispatcherOptions)
 		task: string,
 		cwd: string | undefined,
 		isolation: IsolationMode = "shared",
-		existingThread?: SubagentThread,
-		appendedObjectiveOnResume = false,
-		environment?: DispatchEnvironment,
-		seed?: SessionSeed,
-		resumeReservation?: ResumeReservation,
-		options?: { advisoryReview?: boolean },
+		startOptions: StartBackgroundOptions = {},
 	): Promise<SingleResult> => {
+		const {
+			existingThread,
+			appendedObjectiveOnResume = false,
+			environment,
+			seed,
+			resumeReservation,
+		} = startOptions;
 		if (!runtime.sessionActive) {
 			return failedStartResult(agentName, task, "Parent session shut down before this subagent generation could start.");
 		}
@@ -421,7 +428,7 @@ export function createBackgroundDispatcher(options: BackgroundDispatcherOptions)
 		const resolveLiveAgentTools = (candidate: AgentConfig): AgentConfig =>
 			resolveAgentTools({ ...candidate, tools: discoveredAgent.tools }, runtime.getActiveTools());
 		const resolvedAgent = resolveLiveAgentTools(discoveredAgent);
-		const advisoryReview = options?.advisoryReview ?? existingThread?.advisoryReview ?? false;
+		const advisoryReview = startOptions.advisoryReview ?? existingThread?.advisoryReview ?? false;
 		const agent = agentName === "reviewer"
 			? advisoryReview
 				? withAdvisoryReviewContract(resolvedAgent)
@@ -471,9 +478,6 @@ export function createBackgroundDispatcher(options: BackgroundDispatcherOptions)
 		const priorTask = existingThread?.task;
 		const priorSessionId = seed?.sessionId ?? existingThread?.sessionId;
 		const priorSessionDir = seed?.sessionDir ?? existingThread?.sessionDir;
-		if (existingThread && resumeReservation && !ownsResumeReservation(runtime, existingThread, resumeReservation)) {
-			return failedStartResult(agentName, task, `Run #${existingThread.id} changed while resume was preparing; no new generation was started.`);
-		}
 		const runId = existingThread?.id ?? monitor.addRun(agent.name, task, route.agent.model, thinkingLevel, {
 			isolation,
 			...(worktreeGroup ? { worktreeId: worktreeGroup } : {}),
@@ -532,13 +536,13 @@ export function createBackgroundDispatcher(options: BackgroundDispatcherOptions)
 			// A newly admitted generation owns no output yet. Keeping the prior
 			// generation here would make a queued stop publish stale task,
 			// session metadata as this generation's partial.
-				thread.lastResult = undefined;
-				if (seed?.sessionId && seed.sessionDir) {
-					thread.sessionId = seed.sessionId;
-					thread.sessionDir = seed.sessionDir;
-				}
-				thread.retireOnSettle = false;
-				thread.isolationFailureNotified = false;
+			thread.lastResult = undefined;
+			if (seed?.sessionId && seed.sessionDir) {
+				thread.sessionId = seed.sessionId;
+				thread.sessionDir = seed.sessionDir;
+			}
+			thread.retireOnSettle = false;
+			thread.isolationFailureNotified = false;
 		} else {
 			thread = {
 				id: runId,
@@ -1197,15 +1201,17 @@ export function installThreadLifecycle(thread: SubagentThread, deps: ThreadLifec
 				nextTask,
 				thread.cwd,
 				thread.isolation,
-				thread,
-				objective !== undefined,
 				{
-					ctx: currentCtx,
-					config: currentConfig,
-					agents: currentAgents,
+					existingThread: thread,
+					appendedObjectiveOnResume: objective !== undefined,
+					environment: {
+						ctx: currentCtx,
+						config: currentConfig,
+						agents: currentAgents,
+					},
+					seed,
+					resumeReservation: reservation,
 				},
-				seed,
-				reservation,
 			);
 			if (pending.exitCode !== -1) {
 				if (clonedSession) {
