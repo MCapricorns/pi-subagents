@@ -8,7 +8,7 @@ import { monitor } from "../src/monitor.ts";
 import { persistRecoveryRecords } from "../src/recovery.ts";
 import * as spawn from "../src/spawn.ts";
 import { fakeRpcScript } from "./fake-rpc.ts";
-import { makeStub, waitFor } from "./test-helpers.ts";
+import { captureEnqueue, fakeChild, makeStub, runTool, shutdownExtension, waitFor } from "./test-helpers.ts";
 
 function executionContext(overrides: { uiNotify?: ReturnType<typeof vi.fn> } = {}): any {
 	return {
@@ -237,13 +237,7 @@ describe("delegated task validation", () => {
 		register(stub.api);
 		const tool = stub.tools.find((candidate) => candidate.name === "subagent");
 
-		const result = await tool.execute(
-			"call-1",
-			{ agent: "worker", task: " \n\t " },
-			new AbortController().signal,
-			() => {},
-			executionContext(),
-		);
+		const result = await runTool(tool, "call-1", { agent: "worker", task: " \n\t " }, executionContext());
 
 		expect(enqueue).not.toHaveBeenCalled();
 		expect(result.content[0].text).toContain("Invalid parameters. task must contain at least one non-whitespace character.");
@@ -256,18 +250,12 @@ describe("delegated task validation", () => {
 		register(stub.api);
 		const tool = stub.tools.find((candidate) => candidate.name === "subagent");
 
-		const result = await tool.execute(
-			"call-2",
-			{
+		const result = await runTool(tool, "call-2", {
 				tasks: [
 					{ agent: "explorer", task: "Inspect the relevant files" },
 					{ agent: "worker", task: "\n\t" },
 				],
-			},
-			new AbortController().signal,
-			() => {},
-			executionContext(),
-		);
+			}, executionContext());
 
 		expect(enqueue).not.toHaveBeenCalled();
 		expect(result.content[0].text).toContain("Invalid parameters. tasks[1].task must contain at least one non-whitespace character.");
@@ -283,13 +271,7 @@ describe("subagent control lookup", () => {
 		register(stub.api);
 		const control = stub.tools.find((candidate) => candidate.name === "subagent_control");
 
-		const result = await control.execute(
-			"call-control",
-			{ action: "resume", id: 999 },
-			new AbortController().signal,
-			() => {},
-			executionContext(),
-		);
+		const result = await runTool(control, "call-control", { action: "resume", id: 999 }, executionContext());
 
 		expect(enqueue).not.toHaveBeenCalled();
 		expect(result.content[0].text).toContain("No subagent thread matches run #999");
@@ -302,22 +284,9 @@ describe("registered tool background dispatch", () => {
 		vi.setSystemTime(0);
 		configureEnabledAgents(["worker"]);
 		const stub = makeStub();
-		const capturedTasks: BackgroundTask[] = [];
-		const backgroundController = new AbortController();
-		vi.spyOn(BackgroundTaskQueue.prototype, "enqueue").mockImplementation((task) => {
-			capturedTasks.push(task);
-			return backgroundController;
-		});
+		const { tasks: capturedTasks, controllers } = captureEnqueue();
 
-		let childDir: string | undefined;
-		const previousScript = process.argv[1];
-		try {
-			childDir = mkdtempSync(join(tmpdir(), "pi-subagents-load-child-"));
-			const childScript = join(childDir, "fake-pi-child.mjs");
-			writeFileSync(
-				childScript,
-				fakeRpcScript({
-					onPrompt: `send({
+			const restoreChild = fakeChild(`send({
 	type: "message_end",
 	message: {
 		role: "assistant",
@@ -325,23 +294,14 @@ describe("registered tool background dispatch", () => {
 		usage: { input: 0, output: 0, cacheRead: 321, cacheWrite: 0, cost: { total: 0 }, totalTokens: 321 },
 		stopReason: "stop"
 	}
-});`,
-				}),
-				"utf8",
-			);
-			process.argv[1] = childScript;
+});`);
+		try {
 
 			register(stub.api);
 			const tool = stub.tools.find((candidate) => candidate.name === "subagent");
 			const task = "\x1b[31mInspect\x1b[0m\n  cache-read metrics";
 			const summary = "Inspect cache-read metrics";
-			const dispatch = await tool.execute(
-				"call-valid",
-				{ agent: "worker", task },
-				new AbortController().signal,
-				() => {},
-				executionContext(),
-			);
+			const dispatch = await runTool(tool, "call-valid", { agent: "worker", task }, executionContext());
 
 			expect(dispatch.terminate).toBe(true);
 			expect(capturedTasks).toHaveLength(1);
@@ -349,7 +309,7 @@ describe("registered tool background dispatch", () => {
 			expect(runId).toBeTypeOf("number");
 			expect(dispatch.content[0].text).toContain(`#${runId} worker`);
 			expect(renderToolResult(tool, dispatch)).toContain(`#${runId} worker`);
-			await capturedTasks[0](backgroundController.signal);
+			await capturedTasks[0](controllers[0].signal);
 
 			expect(stub.messages).toHaveLength(0);
 			vi.advanceTimersByTime(150);
@@ -360,11 +320,8 @@ describe("registered tool background dispatch", () => {
 			expect(completion.message.content).toMatch(/\bR321\b/);
 			expect(completion.options).toEqual({ deliverAs: "steer", triggerTurn: true });
 		} finally {
-			backgroundController.abort();
-			await stub.hooks["session_shutdown"]?.({}, {});
-			for (const run of [...monitor.getRuns()]) monitor.removeRun(run.id);
-			process.argv[1] = previousScript;
-			if (childDir) rmSync(childDir, { recursive: true, force: true });
+			restoreChild();
+			await shutdownExtension(stub, { controllers });
 		}
 	});
 
@@ -373,24 +330,9 @@ describe("registered tool background dispatch", () => {
 		vi.setSystemTime(0);
 		configureEnabledAgents(["worker"]);
 		const stub = makeStub();
-		const capturedTasks: BackgroundTask[] = [];
-		const backgroundController = new AbortController();
-		vi.spyOn(BackgroundTaskQueue.prototype, "enqueue").mockImplementation((task) => {
-			capturedTasks.push(task);
-			return backgroundController;
-		});
+		const { tasks: capturedTasks, controllers } = captureEnqueue();
 
-		let childDir: string | undefined;
-		const previousScript = process.argv[1];
-		try {
-			childDir = mkdtempSync(join(tmpdir(), "pi-subagents-failchild-"));
-			const childScript = join(childDir, "fake-pi-child.mjs");
-			// The child exits cleanly (exit code 0) even though its bash tool failed —
-			// exactly the shape that used to produce a misleading "completed" message.
-			writeFileSync(
-				childScript,
-				fakeRpcScript({
-					onPrompt: `for (let i = 1; i <= 4; i++) {
+			const restoreChild = fakeChild(`for (let i = 1; i <= 4; i++) {
 	send({ type: "tool_execution_start", toolName: "bash-" + i, args: {} });
 	send({
 		type: "tool_execution_end",
@@ -407,23 +349,14 @@ send({
 		usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, cost: { total: 0 }, totalTokens: 0 },
 		stopReason: "stop"
 	}
-});`,
-				}),
-				"utf8",
-			);
-			process.argv[1] = childScript;
+});`);
+		try {
 
 			register(stub.api);
 			const tool = stub.tools.find((candidate) => candidate.name === "subagent");
-			const dispatch = await tool.execute(
-				"call-f",
-				{ agent: "worker", task: "Fix the compile error" },
-				new AbortController().signal,
-				() => {},
-				executionContext(),
-			);
+			const dispatch = await runTool(tool, "call-f", { agent: "worker", task: "Fix the compile error" }, executionContext());
 			const runId = dispatch.details.results[0].runId;
-			await capturedTasks[0](backgroundController.signal);
+			await capturedTasks[0](controllers[0].signal);
 			vi.advanceTimersByTime(150);
 			expect(stub.messages).toHaveLength(1);
 			const content = stub.messages[0].message.content;
@@ -435,13 +368,7 @@ send({
 			expect(stub.messages[0].options).toEqual({ deliverAs: "steer", triggerTurn: true });
 
 			const status = stub.tools.find((candidate) => candidate.name === "subagent_status");
-			const full = await status.execute(
-				"status-f",
-				{ id: String(runId) },
-				new AbortController().signal,
-				() => {},
-				executionContext(),
-			);
+			const full = await runTool(status, "status-f", { id: String(runId) }, executionContext());
 			expect(full.content[0].text).toContain("completed with 4 failed tool calls");
 			for (let i = 1; i <= 4; i++) {
 				expect(full.content[0].text).toContain(`- bash-${i}: MSBuild.exe failed ${i}`);
@@ -449,33 +376,17 @@ send({
 			}
 			expect(full.content[0].text).not.toContain("… and");
 		} finally {
-			backgroundController.abort();
-			await stub.hooks["session_shutdown"]?.({}, {});
-			for (const run of [...monitor.getRuns()]) monitor.removeRun(run.id);
-			process.argv[1] = previousScript;
-			if (childDir) rmSync(childDir, { recursive: true, force: true });
+			restoreChild();
+			await shutdownExtension(stub, { controllers });
 		}
 	});
 
 	it("subagent_wait returns the finished result in-turn instead of sleeping", async () => {
 		configureEnabledAgents(["worker"]);
 		const stub = makeStub();
-		const capturedTasks: BackgroundTask[] = [];
-		const backgroundController = new AbortController();
-		vi.spyOn(BackgroundTaskQueue.prototype, "enqueue").mockImplementation((task) => {
-			capturedTasks.push(task);
-			return backgroundController;
-		});
+		const { tasks: capturedTasks, controllers } = captureEnqueue();
 
-		let childDir: string | undefined;
-		const previousScript = process.argv[1];
-		try {
-			childDir = mkdtempSync(join(tmpdir(), "pi-subagents-wait-child-"));
-			const childScript = join(childDir, "fake-pi-child.mjs");
-			writeFileSync(
-				childScript,
-				fakeRpcScript({
-					onPrompt: `send({
+			const restoreChild = fakeChild(`send({
 	type: "message_end",
 	message: {
 		role: "assistant",
@@ -483,24 +394,15 @@ send({
 		usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, cost: { total: 0 }, totalTokens: 0 },
 		stopReason: "stop"
 	}
-});`,
-				}),
-				"utf8",
-			);
-			process.argv[1] = childScript;
+});`);
+		try {
 
 			register(stub.api);
 			const tool = stub.tools.find((candidate) => candidate.name === "subagent");
 			const waitTool = stub.tools.find((candidate) => candidate.name === "subagent_wait");
 			expect(waitTool).toBeDefined();
 
-			await tool.execute(
-				"call-w",
-				{ agent: "worker", task: "Fix the build" },
-				new AbortController().signal,
-				() => {},
-				executionContext(),
-			);
+			await runTool(tool, "call-w", { agent: "worker", task: "Fix the build" }, executionContext());
 			expect(capturedTasks).toHaveLength(1);
 
 			// An explicit timeoutMs opts into blocking (the default is a
@@ -515,7 +417,7 @@ send({
 				() => {},
 				executionContext(),
 			);
-			await capturedTasks[0](backgroundController.signal);
+			await capturedTasks[0](controllers[0].signal);
 			const waitResult = await waitPromise;
 
 			const text = waitResult.content[0].text;
@@ -524,108 +426,57 @@ send({
 			expect(text).toContain("Task: Fix the build");
 
 			// A settled run resolves immediately on a second call.
-			const second = await waitTool.execute(
-				"wait-2",
-				{ id: String(runId) },
-				new AbortController().signal,
-				() => {},
-				executionContext(),
-			);
+			const second = await runTool(waitTool, "wait-2", { id: String(runId) }, executionContext());
 			expect(second.content[0].text).toContain("worker result payload");
 		} finally {
-			backgroundController.abort();
-			await stub.hooks["session_shutdown"]?.({}, {});
-			for (const run of [...monitor.getRuns()]) monitor.removeRun(run.id);
-			process.argv[1] = previousScript;
-			if (childDir) rmSync(childDir, { recursive: true, force: true });
+			restoreChild();
+			await shutdownExtension(stub, { controllers });
 		}
 	});
 
 	it("subagent_wait reports no active runs and times out on still-running ones", async () => {
 		const stub = makeStub();
-		const capturedTasks: BackgroundTask[] = [];
-		const backgroundController = new AbortController();
-		vi.spyOn(BackgroundTaskQueue.prototype, "enqueue").mockImplementation((task) => {
-			capturedTasks.push(task);
-			return backgroundController;
-		});
+		const { tasks: capturedTasks, controllers } = captureEnqueue();
 
 		try {
 			register(stub.api);
 			const tool = stub.tools.find((candidate) => candidate.name === "subagent");
 			const waitTool = stub.tools.find((candidate) => candidate.name === "subagent_wait");
 
-			const none = await waitTool.execute("wait-none", {}, new AbortController().signal, () => {}, executionContext());
+			const none = await runTool(waitTool, "wait-none", {}, executionContext());
 			expect(none.content[0].text).toContain("No active subagent runs");
 
-			await tool.execute(
-				"call-w2",
-				{ agent: "worker", task: "Long task" },
-				new AbortController().signal,
-				() => {},
-				executionContext(),
-			);
+			await runTool(tool, "call-w2", { agent: "worker", task: "Long task" }, executionContext());
 			// The captured task never runs, so the run stays active: wait times out.
 			const runId = monitor.getRuns().find((run) => run.task === "Long task")?.id;
 			expect(runId).toBeDefined();
-			const timedOut = await waitTool.execute(
-				"wait-to",
-				{ id: String(runId), timeoutMs: 100 },
-				new AbortController().signal,
-				() => {},
-				executionContext(),
-			);
+			const timedOut = await runTool(waitTool, "wait-to", { id: String(runId), timeoutMs: 100 }, executionContext());
 			expect(timedOut.content[0].text).toContain("wait timed out");
 			expect(timedOut.content[0].text).toContain(`#${runId}`);
 
 			// The default is a NON-blocking lookup: a still-active run returns a
 			// note immediately (the model ends its turn and the wake-up message
 			// delivers the result) instead of holding the turn.
-			const nonBlocking = await waitTool.execute(
-				"wait-nb",
-				{ id: String(runId) },
-				new AbortController().signal,
-				() => {},
-				executionContext(),
-			);
+			const nonBlocking = await runTool(waitTool, "wait-nb", { id: String(runId) }, executionContext());
 			expect(nonBlocking.content[0].text).toContain(`run #${runId} is still active`);
 			expect(nonBlocking.content[0].text).toContain("end your turn");
 
-			const unknown = await waitTool.execute(
-				"wait-x",
-				{ id: "99" },
-				new AbortController().signal,
-				() => {},
-				executionContext(),
-			);
+			const unknown = await runTool(waitTool, "wait-x", { id: "99" }, executionContext());
 			expect(unknown.content[0].text).toContain('No active subagent run matches "99"');
 		} finally {
-			backgroundController.abort();
-			await stub.hooks["session_shutdown"]?.({}, {});
-			for (const run of [...monitor.getRuns()]) monitor.removeRun(run.id);
+			await shutdownExtension(stub, { controllers });
 		}
 	});
 
 	it("subagent_wait resolves with a note when the calling turn's signal is aborted", async () => {
 		const stub = makeStub();
-		const capturedTasks: BackgroundTask[] = [];
-		const backgroundController = new AbortController();
-		vi.spyOn(BackgroundTaskQueue.prototype, "enqueue").mockImplementation((task) => {
-			capturedTasks.push(task);
-			return backgroundController;
-		});
+		const { tasks: capturedTasks, controllers } = captureEnqueue();
 
 		try {
 			register(stub.api);
 			const tool = stub.tools.find((candidate) => candidate.name === "subagent");
 			const waitTool = stub.tools.find((candidate) => candidate.name === "subagent_wait");
-			await tool.execute(
-				"call-wa",
-				{ agent: "worker", task: "Long task" },
-				new AbortController().signal,
-				() => {},
-				executionContext(),
-			);
+			await runTool(tool, "call-wa", { agent: "worker", task: "Long task" }, executionContext());
 			const runId = monitor.getRuns().find((run) => run.task === "Long task")?.id;
 			expect(runId).toBeDefined();
 
@@ -654,35 +505,17 @@ send({
 			const aborted = await pending;
 			expect(aborted.content[0].text).toContain("wait aborted");
 		} finally {
-			backgroundController.abort();
-			await stub.hooks["session_shutdown"]?.({}, {});
-			for (const run of [...monitor.getRuns()]) monitor.removeRun(run.id);
+			await shutdownExtension(stub, { controllers });
 		}
 	});
 
 	it("subagent_status lists active runs and returns full results by id", async () => {
 		configureEnabledAgents(["worker"]);
 		const stub = makeStub();
-		const capturedTasks: BackgroundTask[] = [];
-		const backgroundController = new AbortController();
-		vi.spyOn(BackgroundTaskQueue.prototype, "enqueue").mockImplementation((task) => {
-			capturedTasks.push(task);
-			return backgroundController;
-		});
+		const { tasks: capturedTasks, controllers } = captureEnqueue();
 
-		let childDir: string | undefined;
-		const previousScript = process.argv[1];
+			const restoreChild = fakeChild(`send({ type: "message_end", message: { role: "assistant", content: [{ type: "text", text: "status payload" }], usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, cost: { total: 0 }, totalTokens: 0 }, stopReason: "stop" } });`);
 		try {
-			childDir = mkdtempSync(join(tmpdir(), "pi-subagents-status-child-"));
-			const childScript = join(childDir, "fake-pi-child.mjs");
-			writeFileSync(
-				childScript,
-				fakeRpcScript({
-					onPrompt: `send({ type: "message_end", message: { role: "assistant", content: [{ type: "text", text: "status payload" }], usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, cost: { total: 0 }, totalTokens: 0 }, stopReason: "stop" } });`,
-				}),
-				"utf8",
-			);
-			process.argv[1] = childScript;
 
 			register(stub.api);
 			const tool = stub.tools.find((candidate) => candidate.name === "subagent");
@@ -690,16 +523,10 @@ send({
 			expect(statusTool).toBeDefined();
 
 			// No runs yet: empty overview.
-			const empty = await statusTool.execute("st-0", {}, new AbortController().signal, () => {}, executionContext());
+			const empty = await runTool(statusTool, "st-0", {}, executionContext());
 			expect(empty.content[0].text).toContain("Active subagent runs (0)");
 
-			await tool.execute(
-				"call-s",
-				{ agent: "worker", task: "Inspect the build" },
-				new AbortController().signal,
-				() => {},
-				executionContext(),
-			);
+			await runTool(tool, "call-s", { agent: "worker", task: "Inspect the build" }, executionContext());
 
 			// Queued run shows in the overview with its id.
 			const runId = monitor.getRuns().find((run) => run.task === "Inspect the build")?.id;
@@ -709,7 +536,7 @@ send({
 				"bash",
 				"bash curl -H 'Authorization: Bearer DO_NOT_LEAK_TEST_TOKEN' x?token=DO_NOT_LEAK_QUERY \x1b]0;unsafe\x07",
 			);
-			const overview = await statusTool.execute("st-1", {}, new AbortController().signal, () => {}, executionContext());
+			const overview = await runTool(statusTool, "st-1", {}, executionContext());
 			expect(overview.content[0].text).toContain("Active subagent runs (1)");
 			expect(overview.content[0].text).toContain(`#${runId} worker`);
 			expect(overview.content[0].text).toContain("Authorization: Bearer <redacted>");
@@ -719,37 +546,29 @@ send({
 
 			// While active, an id lookup reports the run is still running without
 			// exposing the raw tool arguments stored by the live monitor.
-			const stillActive = await statusTool.execute("st-2", { id: String(runId) }, new AbortController().signal, () => {}, executionContext());
+			const stillActive = await runTool(statusTool, "st-2", { id: String(runId) }, executionContext());
 			expect(stillActive.content[0].text).toContain("still active");
 			expect(stillActive.content[0].text).not.toContain("DO_NOT_LEAK");
 			expect(stillActive.content[0].text).not.toContain("\x1b");
 
 			// After the run settles, the same id returns the full result.
-			await capturedTasks[0](backgroundController.signal);
-			const settledView = await statusTool.execute("st-3", { id: String(runId) }, new AbortController().signal, () => {}, executionContext());
+			await capturedTasks[0](controllers[0].signal);
+			const settledView = await runTool(statusTool, "st-3", { id: String(runId) }, executionContext());
 			expect(settledView.content[0].text).toContain("### [worker] completed");
 			expect(settledView.content[0].text).toContain("status payload");
 
-			const after = await statusTool.execute("st-4", {}, new AbortController().signal, () => {}, executionContext());
+			const after = await runTool(statusTool, "st-4", {}, executionContext());
 			expect(after.content[0].text).toContain("Finished this session (1)");
 			expect(after.content[0].text).toContain(`#${runId} worker · Inspect the build · completed`);
 		} finally {
-			backgroundController.abort();
-			await stub.hooks["session_shutdown"]?.({}, {});
-			for (const run of [...monitor.getRuns()]) monitor.removeRun(run.id);
-			process.argv[1] = previousScript;
-			if (childDir) rmSync(childDir, { recursive: true, force: true });
+			restoreChild();
+			await shutdownExtension(stub, { controllers });
 		}
 	});
 
 	it("subagent_stop cancels active runs and resolves waiters with an aborted result", async () => {
 		const stub = makeStub();
-		const capturedTasks: BackgroundTask[] = [];
-		const backgroundController = new AbortController();
-		vi.spyOn(BackgroundTaskQueue.prototype, "enqueue").mockImplementation((task) => {
-			capturedTasks.push(task);
-			return backgroundController;
-		});
+		const { tasks: capturedTasks, controllers } = captureEnqueue();
 
 		try {
 			register(stub.api);
@@ -759,16 +578,10 @@ send({
 			expect(stopTool).toBeDefined();
 
 			// Unknown id: nothing to stop.
-			const unknown = await stopTool.execute("stop-x", { id: "99" }, new AbortController().signal, () => {}, executionContext());
+			const unknown = await runTool(stopTool, "stop-x", { id: "99" }, executionContext());
 			expect(unknown.content[0].text).toContain('No subagent thread matches "99"');
 
-			await tool.execute(
-				"call-st",
-				{ agent: "worker", task: "Long task" },
-				new AbortController().signal,
-				() => {},
-				executionContext(),
-			);
+			await runTool(tool, "call-st", { agent: "worker", task: "Long task" }, executionContext());
 
 			// A waiter blocks on the queued run; stopping resolves it.
 			const runId = monitor.getRuns().find((run) => run.task === "Long task")?.id;
@@ -780,7 +593,7 @@ send({
 				() => {},
 				executionContext(),
 			);
-			const stopped = await stopTool.execute("stop-1", { id: String(runId) }, new AbortController().signal, () => {}, executionContext());
+			const stopped = await runTool(stopTool, "stop-1", { id: String(runId) }, executionContext());
 			expect(stopped.content[0].text).toContain(`Stopped 1 thread: #${runId} worker (queued)`);
 
 			const waited = await waitPromise;
@@ -789,9 +602,7 @@ send({
 			expect(stub.messages).toHaveLength(1);
 			expect(stub.messages[0].message.content).toContain("Stopped by subagent_stop");
 		} finally {
-			backgroundController.abort();
-			await stub.hooks["session_shutdown"]?.({}, {});
-			for (const run of [...monitor.getRuns()]) monitor.removeRun(run.id);
+			await shutdownExtension(stub, { controllers });
 		}
 	});
 
@@ -800,43 +611,19 @@ send({
 		vi.setSystemTime(0);
 		configureEnabledAgents(["explorer", "reviewer"]);
 		const stub = makeStub();
-		const capturedTasks: BackgroundTask[] = [];
-		const controllers: AbortController[] = [];
-		vi.spyOn(BackgroundTaskQueue.prototype, "enqueue").mockImplementation((task) => {
-			capturedTasks.push(task);
-			const controller = new AbortController();
-			controllers.push(controller);
-			return controller;
-		});
+		const { tasks: capturedTasks, controllers } = captureEnqueue();
 
-		let childDir: string | undefined;
-		const previousScript = process.argv[1];
+			const restoreChild = fakeChild(`send({ type: "message_end", message: { role: "assistant", content: [{ type: "text", text: "batch result" }], stopReason: "stop" } });`);
 		try {
-			childDir = mkdtempSync(join(tmpdir(), "pi-subagents-batch-child-"));
-			const childScript = join(childDir, "fake-pi-child.mjs");
-			writeFileSync(
-				childScript,
-				fakeRpcScript({
-					onPrompt: `send({ type: "message_end", message: { role: "assistant", content: [{ type: "text", text: "batch result" }], stopReason: "stop" } });`,
-				}),
-				"utf8",
-			);
-			process.argv[1] = childScript;
 
 			register(stub.api);
 			const tool = stub.tools.find((candidate) => candidate.name === "subagent");
-			const dispatch = await tool.execute(
-				"call-batch",
-				{
+			const dispatch = await runTool(tool, "call-batch", {
 					tasks: [
 						{ agent: "explorer", task: "Inspect the change" },
 						{ agent: "reviewer", task: "Review the change" },
 					],
-				},
-				new AbortController().signal,
-				() => {},
-				executionContext(),
-			);
+				}, executionContext());
 
 			expect(dispatch.terminate).toBe(true);
 			expect(capturedTasks).toHaveLength(2);
@@ -861,11 +648,8 @@ send({
 			for (const runId of runIds) expect(completion.message.content).toContain(`run #${runId}`);
 			expect(completion.options).toEqual({ deliverAs: "steer", triggerTurn: true });
 		} finally {
-			for (const controller of controllers) controller.abort();
-			await stub.hooks["session_shutdown"]?.({}, {});
-			for (const run of [...monitor.getRuns()]) monitor.removeRun(run.id);
-			process.argv[1] = previousScript;
-			if (childDir) rmSync(childDir, { recursive: true, force: true });
+			restoreChild();
+			await shutdownExtension(stub, { controllers });
 		}
 	});
 
@@ -875,49 +659,23 @@ send({
 		if (!testAgentDir) throw new Error("test agent directory was not initialized");
 		configureEnabledAgents(["reviewer"], { notifyOnReviewPass: true });
 		const stub = makeStub();
-		let capturedTask: BackgroundTask | undefined;
-		const controller = new AbortController();
-		vi.spyOn(BackgroundTaskQueue.prototype, "enqueue").mockImplementation((task) => {
-			capturedTask = task;
-			return controller;
-		});
+		const { tasks, controllers } = captureEnqueue();
 
-		let childDir: string | undefined;
-		const previousScript = process.argv[1];
+			const restoreChild = fakeChild(`send({ type: "message_end", message: { role: "assistant", content: [{ type: "text", text: "APPROVE\\nVERDICT: REVIEW_PASS" }], stopReason: "stop" } });`);
 		try {
-			childDir = mkdtempSync(join(tmpdir(), "pi-subagents-review-pass-child-"));
-			const childScript = join(childDir, "fake-pi-child.mjs");
-			writeFileSync(
-				childScript,
-				fakeRpcScript({
-					onPrompt: `send({ type: "message_end", message: { role: "assistant", content: [{ type: "text", text: "APPROVE\\nVERDICT: REVIEW_PASS" }], stopReason: "stop" } });`,
-				}),
-				"utf8",
-			);
-			process.argv[1] = childScript;
 
 			register(stub.api);
 			const tool = stub.tools.find((candidate) => candidate.name === "subagent");
-			await tool.execute(
-				"call-review-pass",
-				{ agent: "reviewer", task: "Review the change" },
-				new AbortController().signal,
-				() => {},
-				executionContext(),
-			);
+			await runTool(tool, "call-review-pass", { agent: "reviewer", task: "Review the change" }, executionContext());
 
-			expect(capturedTask).toBeDefined();
-			await capturedTask?.(controller.signal);
+			await tasks[0](controllers[0].signal);
 			expect(stub.messages).toHaveLength(0);
 			vi.advanceTimersByTime(150);
 			expect(stub.messages).toHaveLength(1);
 			expect(stub.messages[0].options).toEqual({ deliverAs: "nextTurn" });
 		} finally {
-			controller.abort();
-			await stub.hooks["session_shutdown"]?.({}, {});
-			for (const run of [...monitor.getRuns()]) monitor.removeRun(run.id);
-			process.argv[1] = previousScript;
-			if (childDir) rmSync(childDir, { recursive: true, force: true });
+			restoreChild();
+			await shutdownExtension(stub, { controllers });
 		}
 	});
 
@@ -926,45 +684,21 @@ send({
 		vi.setSystemTime(0);
 		configureEnabledAgents(["explorer", "reviewer"]);
 		const stub = makeStub();
-		const capturedTasks: BackgroundTask[] = [];
-		const controllers: AbortController[] = [];
-		vi.spyOn(BackgroundTaskQueue.prototype, "enqueue").mockImplementation((task) => {
-			capturedTasks.push(task);
-			const controller = new AbortController();
-			controllers.push(controller);
-			return controller;
-		});
+		const { tasks: capturedTasks, controllers } = captureEnqueue();
 
-		let childDir: string | undefined;
-		const previousScript = process.argv[1];
-		try {
-			childDir = mkdtempSync(join(tmpdir(), "pi-subagents-failure-child-"));
-			const childScript = join(childDir, "fake-pi-child.mjs");
-			writeFileSync(
-				childScript,
-				fakeRpcScript({
-					onPrompt: `const failed = input.includes("must fail");
+			const restoreChild = fakeChild(`const failed = input.includes("must fail");
 const text = failed ? "VERDICT: REVIEW_FAIL" : "successful result";
-send({ type: "message_end", message: { role: "assistant", content: [{ type: "text", text }], stopReason: failed ? "error" : "stop" } });`,
-				}),
-				"utf8",
-			);
-			process.argv[1] = childScript;
+send({ type: "message_end", message: { role: "assistant", content: [{ type: "text", text }], stopReason: failed ? "error" : "stop" } });`);
+		try {
 
 			register(stub.api);
 			const tool = stub.tools.find((candidate) => candidate.name === "subagent");
-			await tool.execute(
-				"call-failure",
-				{
+			await runTool(tool, "call-failure", {
 					tasks: [
 						{ agent: "explorer", task: "succeed first" },
 						{ agent: "reviewer", task: "must fail now" },
 					],
-				},
-				new AbortController().signal,
-				() => {},
-				executionContext(),
-			);
+				}, executionContext());
 
 			expect(capturedTasks).toHaveLength(2);
 			await capturedTasks[0](controllers[0].signal);
@@ -979,11 +713,8 @@ send({ type: "message_end", message: { role: "assistant", content: [{ type: "tex
 			vi.advanceTimersByTime(1_000);
 			expect(stub.messages).toHaveLength(2);
 		} finally {
-			for (const controller of controllers) controller.abort();
-			await stub.hooks["session_shutdown"]?.({}, {});
-			for (const run of [...monitor.getRuns()]) monitor.removeRun(run.id);
-			process.argv[1] = previousScript;
-			if (childDir) rmSync(childDir, { recursive: true, force: true });
+			restoreChild();
+			await shutdownExtension(stub, { controllers });
 		}
 	});
 
@@ -991,39 +722,17 @@ send({ type: "message_end", message: { role: "assistant", content: [{ type: "tex
 		vi.useFakeTimers();
 		vi.setSystemTime(0);
 		const stub = makeStub();
-		let capturedTask: BackgroundTask | undefined;
-		const controller = new AbortController();
-		vi.spyOn(BackgroundTaskQueue.prototype, "enqueue").mockImplementation((task) => {
-			capturedTask = task;
-			return controller;
-		});
+		const { tasks, controllers } = captureEnqueue();
 
-		let childDir: string | undefined;
-		const previousScript = process.argv[1];
+			const restoreChild = fakeChild(`const lines = Array.from({ length: 100 }, (_, i) => "line " + i).join("\\n");
+send({ type: "message_end", message: { role: "assistant", content: [{ type: "text", text: lines }], stopReason: "stop" } });`);
 		try {
-			childDir = mkdtempSync(join(tmpdir(), "pi-subagents-truncate-child-"));
-			const childScript = join(childDir, "fake-pi-child.mjs");
-			writeFileSync(
-				childScript,
-				fakeRpcScript({
-					onPrompt: `const lines = Array.from({ length: 100 }, (_, i) => "line " + i).join("\\n");
-send({ type: "message_end", message: { role: "assistant", content: [{ type: "text", text: lines }], stopReason: "stop" } });`,
-				}),
-				"utf8",
-			);
-			process.argv[1] = childScript;
 
 			register(stub.api);
 			const tool = stub.tools.find((candidate) => candidate.name === "subagent");
-			await tool.execute(
-				"call-truncate",
-				{ agent: "reviewer", task: "Review the change" },
-				new AbortController().signal,
-				() => {},
-				executionContext(),
-			);
+			await runTool(tool, "call-truncate", { agent: "reviewer", task: "Review the change" }, executionContext());
 
-			await capturedTask?.(controller.signal);
+			await tasks[0](controllers[0].signal);
 			vi.advanceTimersByTime(150);
 			expect(stub.messages).toHaveLength(1);
 			const content = stub.messages[0].message.content as string;
@@ -1035,11 +744,8 @@ send({ type: "message_end", message: { role: "assistant", content: [{ type: "tex
 			expect(readFileSync(artifactPath!, "utf8")).toContain("line 99");
 			rmSync(artifactPath!, { force: true });
 		} finally {
-			controller.abort();
-			await stub.hooks["session_shutdown"]?.({}, {});
-			for (const run of [...monitor.getRuns()]) monitor.removeRun(run.id);
-			process.argv[1] = previousScript;
-			if (childDir) rmSync(childDir, { recursive: true, force: true });
+			restoreChild();
+			await shutdownExtension(stub, { controllers });
 		}
 	});
 });
@@ -1085,30 +791,25 @@ describe("managed post-writer workflows", () => {
 			// One chain (worker → held gate review) plus three stuck explorers
 			// exhaust all four manual slots; the chain's continuation must then
 			// suspend its slot so a fifth dispatch still starts immediately.
-			await tool.execute("chain", { agent: "worker", task: "Chain owner" }, new AbortController().signal, () => {}, ctx);
+			await runTool(tool, "chain", { agent: "worker", task: "Chain owner" }, ctx);
 			for (const task of ["Stuck one", "Stuck two", "Stuck three"]) {
-				await tool.execute("fill", { agent: "explorer", task }, new AbortController().signal, () => {}, ctx);
+				await runTool(tool, "fill", { agent: "explorer", task }, ctx);
 			}
 			await waitFor(() => reviewerStarts === 1 && explorerStarts === 3);
 
-			const fifth = await tool.execute("fifth", { agent: "explorer", task: "Fifth dispatch" }, new AbortController().signal, () => {}, ctx);
+			const fifth = await runTool(tool, "fifth", { agent: "explorer", task: "Fifth dispatch" }, ctx);
 			expect(fifth.details.results[0].runId).toBeGreaterThan(0);
 			await waitFor(() => explorerStarts === 4);
 		} finally {
-			await stub.hooks["session_shutdown"]?.({}, {});
+			await shutdownExtension(stub);
 		}
 	});
 
 	it("re-reads parent shells and active plugins for every managed stage", async () => {
-		configureEnabledAgents(["worker", "documenter", "reviewer"], { maxFixRounds: 1 });
+		configureEnabledAgents(["worker", "documenter", "reviewer"]);
 		const stub = makeStub();
 		stub.activeTools = ["read", "powershell", "edit", "write", "custom_extension"];
-		let queued!: BackgroundTask;
-		const controller = new AbortController();
-		vi.spyOn(BackgroundTaskQueue.prototype, "enqueue").mockImplementation((task) => {
-			queued = task;
-			return controller;
-		});
+		const { tasks, controllers } = captureEnqueue();
 		let reviewerCalls = 0;
 		const run = vi.spyOn(spawn, "runSingleAgentWithMainFallback").mockImplementation(async (options: any) => {
 			if (options.agentName === "reviewer") {
@@ -1130,14 +831,8 @@ describe("managed post-writer workflows", () => {
 		try {
 			register(stub.api);
 			const tool = stub.tools.find((candidate) => candidate.name === "subagent");
-			await tool.execute(
-				"adaptive-tools-chain",
-				{ agent: "reviewer", task: "Gate adaptive tools" },
-				new AbortController().signal,
-				() => {},
-				executionContext(),
-			);
-			await queued(controller.signal);
+			await runTool(tool, "adaptive-tools-chain", { agent: "reviewer", task: "Gate adaptive tools" }, executionContext());
+			await tasks[0](controllers[0].signal);
 
 			const calls = run.mock.calls.map(([options]) => options);
 			expect(calls.map((options) => options.agentName)).toEqual([
@@ -1156,20 +851,14 @@ describe("managed post-writer workflows", () => {
 				"read", "grep", "find", "ls", "powershell", "edit", "write", "custom_extension",
 			]);
 		} finally {
-			controller.abort();
-			await stub.hooks["session_shutdown"]?.({}, {});
+			await shutdownExtension(stub, { controllers });
 		}
 	});
 
 	it("keeps parent and active-stage widget telemetry attributed to their actual roles", async () => {
 		configureEnabledAgents(["worker", "documenter", "reviewer"]);
 		const stub = makeStub();
-		let queued!: BackgroundTask;
-		const controller = new AbortController();
-		vi.spyOn(BackgroundTaskQueue.prototype, "enqueue").mockImplementation((task) => {
-			queued = task;
-			return controller;
-		});
+		const { tasks, controllers } = captureEnqueue();
 		const workerUsage = { input: 100, output: 10, cacheRead: 0, cacheWrite: 0, cost: 1, contextTokens: 0, turns: 1 };
 		const documenterUsage = { input: 20, output: 2, cacheRead: 0, cacheWrite: 0, cost: 0.01, contextTokens: 0, turns: 1 };
 		const reviewerUsage = { input: 30, output: 3, cacheRead: 0, cacheWrite: 0, cost: 0.2, contextTokens: 0, turns: 1 };
@@ -1226,15 +915,9 @@ describe("managed post-writer workflows", () => {
 		try {
 			register(stub.api);
 			const tool = stub.tools.find((candidate) => candidate.name === "subagent");
-			const dispatched = await tool.execute(
-				"widget-attribution",
-				{ agent: "worker", task: "Implement widget attribution" },
-				new AbortController().signal,
-				() => {},
-				executionContext(),
-			);
+			const dispatched = await runTool(tool, "widget-attribution", { agent: "worker", task: "Implement widget attribution" }, executionContext());
 			const parentRunId = dispatched.details.results[0].runId as number;
-			const workflow = queued(controller.signal);
+			const workflow = tasks[0](controllers[0].signal);
 			await atReviewer;
 
 			const parent = monitor.findRun(parentRunId)!;
@@ -1284,8 +967,7 @@ describe("managed post-writer workflows", () => {
 		} finally {
 			releaseReviewer();
 			releaseDocumenter();
-			controller.abort();
-			await stub.hooks["session_shutdown"]?.({}, {});
+			await shutdownExtension(stub, { controllers });
 		}
 	});
 
@@ -1293,14 +975,9 @@ describe("managed post-writer workflows", () => {
 		["worker", ["worker", "reviewer", "documenter"]],
 		["cleaner", ["cleaner", "reviewer", "documenter"]],
 	] as const)("runs successful top-level %s through its reviewer and conservative docs fallback", async (topAgent, expectedOrder) => {
-		configureEnabledAgents(["explorer", "worker", "cleaner", "documenter", "reviewer"], { maxFixRounds: 1 });
+		configureEnabledAgents(["explorer", "worker", "cleaner", "documenter", "reviewer"]);
 		const stub = makeStub();
-		let queued!: BackgroundTask;
-		const controller = new AbortController();
-		vi.spyOn(BackgroundTaskQueue.prototype, "enqueue").mockImplementation((task) => {
-			queued = task;
-			return controller;
-		});
+		const { tasks, controllers } = captureEnqueue();
 		const topTask = `${topAgent} top-level task`;
 		const run = vi.spyOn(spawn, "runSingleAgentWithMainFallback").mockImplementation(async (options: any) => {
 			if (options.task === topTask) return makeResult(topAgent, options.task, `${topAgent} report src/change.ts`);
@@ -1327,7 +1004,7 @@ describe("managed post-writer workflows", () => {
 				executionContext(),
 			);
 			const parentRunId = dispatch.details.results[0].runId;
-			await queued(controller.signal);
+			await tasks[0](controllers[0].signal);
 
 			expect(run.mock.calls.map(([options]) => options.agentName)).toEqual(expectedOrder);
 			expect(stub.messages).toHaveLength(1);
@@ -1341,20 +1018,14 @@ describe("managed post-writer workflows", () => {
 			expect(new Set(stepIds).size).toBe(expectedOrder.length);
 			expect(stub.messages[0].options).toEqual({ deliverAs: "steer", triggerTurn: true });
 		} finally {
-			controller.abort();
-			await stub.hooks["session_shutdown"]?.({}, {});
+			await shutdownExtension(stub, { controllers });
 		}
 	});
 
 	it("skips pending documenter when the post-writer gate reports DOCUMENTATION: CLEAN", async () => {
-		configureEnabledAgents(["worker", "documenter", "reviewer"], { maxFixRounds: 1 });
+		configureEnabledAgents(["worker", "documenter", "reviewer"]);
 		const stub = makeStub();
-		let queued!: BackgroundTask;
-		const controller = new AbortController();
-		vi.spyOn(BackgroundTaskQueue.prototype, "enqueue").mockImplementation((task) => {
-			queued = task;
-			return controller;
-		});
+		const { tasks, controllers } = captureEnqueue();
 		const run = vi.spyOn(spawn, "runSingleAgentWithMainFallback").mockImplementation(async (options: any) => {
 			if (options.agentName === "worker") return makeResult("worker", options.task, "implemented src/cache.ts");
 			expect(options.agentName).toBe("reviewer");
@@ -1366,34 +1037,22 @@ describe("managed post-writer workflows", () => {
 		try {
 			register(stub.api);
 			const tool = stub.tools.find((candidate) => candidate.name === "subagent");
-			await tool.execute(
-				"post-writer-clean",
-				{ agent: "worker", task: "Implement src/cache.ts" },
-				new AbortController().signal,
-				() => {},
-				executionContext(),
-			);
-			await queued(controller.signal);
+			await runTool(tool, "post-writer-clean", { agent: "worker", task: "Implement src/cache.ts" }, executionContext());
+			await tasks[0](controllers[0].signal);
 
 			expect(run.mock.calls.map(([options]) => options.agentName)).toEqual(["worker", "reviewer"]);
 			expect(stub.messages).toHaveLength(1);
 			expect(stub.messages[0].message.content).toContain("worker → reviewer");
 			expect(stub.messages[0].message.content).not.toContain("final documentation sync");
 		} finally {
-			controller.abort();
-			await stub.hooks["session_shutdown"]?.({}, {});
+			await shutdownExtension(stub, { controllers });
 		}
 	});
 
 	it("never writes docs after a terminal REVIEW_FAIL gate", async () => {
 		configureEnabledAgents(["worker", "documenter", "reviewer"]);
 		const stub = makeStub();
-		let queued!: BackgroundTask;
-		const controller = new AbortController();
-		vi.spyOn(BackgroundTaskQueue.prototype, "enqueue").mockImplementation((task) => {
-			queued = task;
-			return controller;
-		});
+		const { tasks, controllers } = captureEnqueue();
 		const run = vi.spyOn(spawn, "runSingleAgentWithMainFallback").mockImplementation(async (options: any) => {
 			if (options.agentName === "worker") return makeResult("worker", options.task, "implemented");
 			return makeResult(
@@ -1406,14 +1065,8 @@ describe("managed post-writer workflows", () => {
 		try {
 			register(stub.api);
 			const tool = stub.tools.find((candidate) => candidate.name === "subagent");
-			await tool.execute(
-				"post-writer-fail-no-docs",
-				{ agent: "worker", task: "Implement then fail gate" },
-				new AbortController().signal,
-				() => {},
-				executionContext(),
-			);
-			await queued(controller.signal);
+			await runTool(tool, "post-writer-fail-no-docs", { agent: "worker", task: "Implement then fail gate" }, executionContext());
+			await tasks[0](controllers[0].signal);
 
 			// The gate fails, the single fix round runs and re-fails, and no
 			// documenter ever starts despite DOCUMENTATION: NEEDED on a terminal FAIL.
@@ -1425,20 +1078,14 @@ describe("managed post-writer workflows", () => {
 			expect(stub.messages[0].message.content).toContain("final FAIL");
 			expect(stub.messages[0].message.content).not.toContain("final documentation sync");
 		} finally {
-			controller.abort();
-			await stub.hooks["session_shutdown"]?.({}, {});
+			await shutdownExtension(stub, { controllers });
 		}
 	});
 
 	it("treats a malformed post-writer review as a failed gate and never starts documenter", async () => {
-		configureEnabledAgents(["worker", "documenter", "reviewer"], { maxFixRounds: 1 });
+		configureEnabledAgents(["worker", "documenter", "reviewer"]);
 		const stub = makeStub();
-		let queued!: BackgroundTask;
-		const controller = new AbortController();
-		vi.spyOn(BackgroundTaskQueue.prototype, "enqueue").mockImplementation((task) => {
-			queued = task;
-			return controller;
-		});
+		const { tasks, controllers } = captureEnqueue();
 		const run = vi.spyOn(spawn, "runSingleAgentWithMainFallback").mockImplementation(async (options: any) => {
 			if (options.agentName === "worker") return makeResult("worker", options.task, "implemented");
 			if (options.agentName === "reviewer") {
@@ -1451,20 +1098,14 @@ describe("managed post-writer workflows", () => {
 		try {
 			register(stub.api);
 			const tool = stub.tools.find((candidate) => candidate.name === "subagent");
-			const dispatched = await tool.execute(
-				"post-writer-malformed-gate",
-				{ agent: "worker", task: "Implement then return a malformed gate" },
-				new AbortController().signal,
-				() => {},
-				executionContext(),
-			);
+			const dispatched = await runTool(tool, "post-writer-malformed-gate", { agent: "worker", task: "Implement then return a malformed gate" }, executionContext());
 			const parentRunId = dispatched.details.results[0].runId as number;
 			const observedProjections: unknown[] = [];
 			unsubscribe = monitor.subscribe(() => {
 				const stages = monitor.findRun(parentRunId)?.workflowStages;
 				if (stages) observedProjections.push(stages.map((stage) => ({ ...stage })));
 			});
-			await queued(controller.signal);
+			await tasks[0](controllers[0].signal);
 
 			expect(run.mock.calls.map(([options]) => options.agentName)).toEqual(["worker", "reviewer"]);
 			expect(observedProjections).toContainEqual([
@@ -1478,8 +1119,7 @@ describe("managed post-writer workflows", () => {
 			expect(content).not.toContain("final documentation sync");
 		} finally {
 			unsubscribe();
-			controller.abort();
-			await stub.hooks["session_shutdown"]?.({}, {});
+			await shutdownExtension(stub, { controllers });
 		}
 	});
 
@@ -1487,26 +1127,15 @@ describe("managed post-writer workflows", () => {
 		vi.useFakeTimers();
 		configureEnabledAgents(["documenter", "reviewer"]);
 		const stub = makeStub();
-		let queued!: BackgroundTask;
-		const controller = new AbortController();
-		vi.spyOn(BackgroundTaskQueue.prototype, "enqueue").mockImplementation((task) => {
-			queued = task;
-			return controller;
-		});
+		const { tasks, controllers } = captureEnqueue();
 		const run = vi.spyOn(spawn, "runSingleAgentWithMainFallback").mockImplementation(async (options: any) =>
 			makeResult("documenter", options.task, "updated README.md"));
 
 		try {
 			register(stub.api);
 			const tool = stub.tools.find((candidate) => candidate.name === "subagent");
-			await tool.execute(
-				"standalone-documenter",
-				{ agent: "documenter", task: "Update README.md for the explicit docs request" },
-				new AbortController().signal,
-				() => {},
-				executionContext(),
-			);
-			await queued(controller.signal);
+			await runTool(tool, "standalone-documenter", { agent: "documenter", task: "Update README.md for the explicit docs request" }, executionContext());
+			await tasks[0](controllers[0].signal);
 			vi.advanceTimersByTime(150);
 
 			expect(run.mock.calls.map(([options]) => options.agentName)).toEqual(["documenter"]);
@@ -1514,20 +1143,14 @@ describe("managed post-writer workflows", () => {
 			expect(stub.messages[0].message.content).toContain("### [documenter] completed");
 			expect(stub.messages[0].message.content).not.toContain("Managed workflow");
 		} finally {
-			controller.abort();
-			await stub.hooks["session_shutdown"]?.({}, {});
+			await shutdownExtension(stub, { controllers });
 		}
 	});
 
 	it("conservatively runs one docs sync after a direct REVIEW_PASS with no documentation marker", async () => {
-		configureEnabledAgents(["worker", "documenter", "reviewer"], { maxFixRounds: 0 });
+		configureEnabledAgents(["worker", "documenter", "reviewer"]);
 		const stub = makeStub();
-		let queued!: BackgroundTask;
-		const controller = new AbortController();
-		vi.spyOn(BackgroundTaskQueue.prototype, "enqueue").mockImplementation((task) => {
-			queued = task;
-			return controller;
-		});
+		const { tasks, controllers } = captureEnqueue();
 		const run = vi.spyOn(spawn, "runSingleAgentWithMainFallback").mockImplementation(async (options: any) => {
 			if (options.agentName === "documenter") {
 				expect(options.task).toContain("Final documentation sync");
@@ -1540,8 +1163,8 @@ describe("managed post-writer workflows", () => {
 		try {
 			register(stub.api);
 			const tool = stub.tools.find((candidate) => candidate.name === "subagent");
-			await tool.execute("direct-pass", { agent: "reviewer", task: "Gate pending diff" }, new AbortController().signal, () => {}, executionContext());
-			await queued(controller.signal);
+			await runTool(tool, "direct-pass", { agent: "reviewer", task: "Gate pending diff" }, executionContext());
+			await tasks[0](controllers[0].signal);
 
 			expect(run.mock.calls.map(([options]) => options.agentName)).toEqual(["reviewer", "documenter"]);
 			expect(stub.messages).toHaveLength(1);
@@ -1550,21 +1173,15 @@ describe("managed post-writer workflows", () => {
 			expect(stub.messages[0].message.content).toContain("final documentation sync · completed");
 			expect(stub.messages[0].message.content).not.toContain("final review");
 		} finally {
-			controller.abort();
-			await stub.hooks["session_shutdown"]?.({}, {});
+			await shutdownExtension(stub, { controllers });
 		}
 	});
 
 	it("delivers a direct REVIEW_PASS with DOCUMENTATION: CLEAN without starting documenter", async () => {
 		vi.useFakeTimers();
-		configureEnabledAgents(["worker", "documenter", "reviewer"], { maxFixRounds: 0 });
+		configureEnabledAgents(["worker", "documenter", "reviewer"]);
 		const stub = makeStub();
-		let queued!: BackgroundTask;
-		const controller = new AbortController();
-		vi.spyOn(BackgroundTaskQueue.prototype, "enqueue").mockImplementation((task) => {
-			queued = task;
-			return controller;
-		});
+		const { tasks, controllers } = captureEnqueue();
 		const run = vi.spyOn(spawn, "runSingleAgentWithMainFallback").mockImplementation(async (options: any) => {
 			expect(options.agent.systemPrompt).toContain("Runtime workflow context: documenter is enabled");
 			expect(options.agent.systemPrompt).toContain("documentation drift is non-gating");
@@ -1574,14 +1191,8 @@ describe("managed post-writer workflows", () => {
 		try {
 			register(stub.api);
 			const tool = stub.tools.find((candidate) => candidate.name === "subagent");
-			await tool.execute(
-				"direct-clean-pass",
-				{ agent: "reviewer", task: "Gate pending diff" },
-				new AbortController().signal,
-				() => {},
-				executionContext(),
-			);
-			await queued(controller.signal);
+			await runTool(tool, "direct-clean-pass", { agent: "reviewer", task: "Gate pending diff" }, executionContext());
+			await tasks[0](controllers[0].signal);
 			vi.advanceTimersByTime(150);
 
 			expect(run.mock.calls.map(([options]) => options.agentName)).toEqual(["reviewer"]);
@@ -1589,8 +1200,7 @@ describe("managed post-writer workflows", () => {
 			expect(stub.messages[0].message.content).toContain("DOCUMENTATION: CLEAN");
 			expect(stub.messages[0].message.content).not.toContain("Managed workflow");
 		} finally {
-			controller.abort();
-			await stub.hooks["session_shutdown"]?.({}, {});
+			await shutdownExtension(stub, { controllers });
 		}
 	});
 
@@ -1599,12 +1209,7 @@ describe("managed post-writer workflows", () => {
 		vi.setSystemTime(0);
 		configureEnabledAgents(["worker", "documenter", "reviewer"]);
 		const stub = makeStub();
-		let queued!: BackgroundTask;
-		const controller = new AbortController();
-		vi.spyOn(BackgroundTaskQueue.prototype, "enqueue").mockImplementation((task) => {
-			queued = task;
-			return controller;
-		});
+		const { tasks, controllers } = captureEnqueue();
 		const run = vi.spyOn(spawn, "runSingleAgentWithMainFallback").mockImplementation(async (options: any) => {
 			expect(options.agent.systemPrompt).toContain("this dispatch is advisory");
 			// The reviewer ignores the advisory contract and emits a gate verdict anyway.
@@ -1614,14 +1219,8 @@ describe("managed post-writer workflows", () => {
 		try {
 			register(stub.api);
 			const tool = stub.tools.find((candidate) => candidate.name === "subagent");
-			await tool.execute(
-				"advisory-reverify",
-				{ agent: "reviewer", task: "Re-verify the pending diff after my fixes.", advisory: true },
-				new AbortController().signal,
-				() => {},
-				executionContext(),
-			);
-			await queued(controller.signal);
+			await runTool(tool, "advisory-reverify", { agent: "reviewer", task: "Re-verify the pending diff after my fixes.", advisory: true }, executionContext());
+			await tasks[0](controllers[0].signal);
 			vi.advanceTimersByTime(150);
 
 			expect(run.mock.calls.map(([options]) => options.agentName)).toEqual(["reviewer"]);
@@ -1631,29 +1230,23 @@ describe("managed post-writer workflows", () => {
 			expect(stub.messages[0].message.content).not.toContain("Auto-fix chain");
 			expect(monitor.getRuns().find((run2) => run2.activity === "auto-fix chain running")).toBeUndefined();
 		} finally {
-			controller.abort();
-			await stub.hooks["session_shutdown"]?.({}, {});
+			await shutdownExtension(stub, { controllers });
 		}
 	});
 
 	it("keeps an advisory reviewer read-only and starts no downstream child", async () => {
 		vi.useFakeTimers();
-		configureEnabledAgents(["worker", "documenter", "reviewer"], { maxFixRounds: 2 });
+		configureEnabledAgents(["worker", "documenter", "reviewer"]);
 		const stub = makeStub();
-		let queued!: BackgroundTask;
-		const controller = new AbortController();
-		vi.spyOn(BackgroundTaskQueue.prototype, "enqueue").mockImplementation((task) => {
-			queued = task;
-			return controller;
-		});
+		const { tasks, controllers } = captureEnqueue();
 		const run = vi.spyOn(spawn, "runSingleAgentWithMainFallback").mockImplementation(async (options: any) =>
 			makeResult("reviewer", options.task, "Advisory findings only; no gate verdict."));
 
 		try {
 			register(stub.api);
 			const tool = stub.tools.find((candidate) => candidate.name === "subagent");
-			await tool.execute("advisory", { agent: "reviewer", task: "Audit architecture, report only" }, new AbortController().signal, () => {}, executionContext());
-			await queued(controller.signal);
+			await runTool(tool, "advisory", { agent: "reviewer", task: "Audit architecture, report only" }, executionContext());
+			await tasks[0](controllers[0].signal);
 			vi.advanceTimersByTime(150);
 
 			expect(run.mock.calls.map(([options]) => options.agentName)).toEqual(["reviewer"]);
@@ -1661,8 +1254,7 @@ describe("managed post-writer workflows", () => {
 			expect(stub.messages[0].message.content).not.toContain("Managed workflow");
 			expect(stub.messages[0].message.content).toContain("Advisory findings only");
 		} finally {
-			controller.abort();
-			await stub.hooks["session_shutdown"]?.({}, {});
+			await shutdownExtension(stub, { controllers });
 		}
 	});
 
@@ -1672,14 +1264,9 @@ describe("managed post-writer workflows", () => {
 		[["worker"], ["worker"]],
 	] as const)("honors disabled downstream roles: %j", async (enabledAgents, expectedOrder) => {
 		vi.useFakeTimers();
-		configureEnabledAgents([...enabledAgents], { maxFixRounds: 1 });
+		configureEnabledAgents([...enabledAgents]);
 		const stub = makeStub();
-		let queued!: BackgroundTask;
-		const controller = new AbortController();
-		vi.spyOn(BackgroundTaskQueue.prototype, "enqueue").mockImplementation((task) => {
-			queued = task;
-			return controller;
-		});
+		const { tasks, controllers } = captureEnqueue();
 		const run = vi.spyOn(spawn, "runSingleAgentWithMainFallback").mockImplementation(async (options: any) => {
 			if (options.agentName === "reviewer") return makeResult("reviewer", options.task, "VERDICT: REVIEW_PASS");
 			return makeResult(options.agentName, options.task, `${options.agentName} report`);
@@ -1688,30 +1275,22 @@ describe("managed post-writer workflows", () => {
 		try {
 			register(stub.api);
 			const tool = stub.tools.find((candidate) => candidate.name === "subagent");
-			await tool.execute("disabled-roles", { agent: "worker", task: "Implement with selected roles" }, new AbortController().signal, () => {}, executionContext());
-			await queued(controller.signal);
+			await runTool(tool, "disabled-roles", { agent: "worker", task: "Implement with selected roles" }, executionContext());
+			await tasks[0](controllers[0].signal);
 			vi.advanceTimersByTime(150);
 
 			expect(run.mock.calls.map(([options]) => options.agentName)).toEqual(expectedOrder);
 			expect(run.mock.calls.some(([options]) => options.agentName === "Unknown")).toBe(false);
 			expect(stub.messages).toHaveLength(1);
 		} finally {
-			controller.abort();
-			await stub.hooks["session_shutdown"]?.({}, {});
+			await shutdownExtension(stub, { controllers });
 		}
 	});
 
 	it("keeps a direct reviewer behind a shared writer workflow even with zero fix rounds", async () => {
-		configureEnabledAgents(["worker", "reviewer"], { maxFixRounds: 0 });
+		configureEnabledAgents(["worker", "reviewer"]);
 		const stub = makeStub();
-		const queued: BackgroundTask[] = [];
-		const controllers: AbortController[] = [];
-		vi.spyOn(BackgroundTaskQueue.prototype, "enqueue").mockImplementation((task) => {
-			queued.push(task);
-			const controller = new AbortController();
-			controllers.push(controller);
-			return controller;
-		});
+		const { tasks: queued, controllers } = captureEnqueue();
 		const order: string[] = [];
 		let releaseWriter!: () => void;
 		const writerGate = new Promise<void>((resolveWriter) => {
@@ -1734,8 +1313,8 @@ describe("managed post-writer workflows", () => {
 		try {
 			register(stub.api);
 			const tool = stub.tools.find((candidate) => candidate.name === "subagent");
-			await tool.execute("shared-writer", { agent: "worker", task: "Shared writer" }, new AbortController().signal, () => {}, executionContext());
-			await tool.execute("direct-reviewer", { agent: "reviewer", task: "Direct advisory" }, new AbortController().signal, () => {}, executionContext());
+			await runTool(tool, "shared-writer", { agent: "worker", task: "Shared writer" }, executionContext());
+			await runTool(tool, "direct-reviewer", { agent: "reviewer", task: "Direct advisory" }, executionContext());
 			const writerRun = queued[0](controllers[0].signal);
 			await vi.waitFor(() => expect(order).toEqual(["writer"]));
 			const reviewerRun = queued[1](controllers[1].signal);
@@ -1748,27 +1327,19 @@ describe("managed post-writer workflows", () => {
 			expect(run).toHaveBeenCalledTimes(3);
 		} finally {
 			releaseWriter();
-			for (const controller of controllers) controller.abort();
-			await stub.hooks["session_shutdown"]?.({}, {});
+			await shutdownExtension(stub, { controllers });
 		}
 	});
 
 	it("keeps root/nested empty-repo documenters behind a writer workflow when reviewer is disabled", async () => {
-		configureEnabledAgents(["worker", "documenter"], { maxFixRounds: 0 });
+		configureEnabledAgents(["worker", "documenter"]);
 		const { execFileSync } = await import("node:child_process");
 		const repo = mkdtempSync(join(tmpdir(), "pi-subagents-empty-lane-"));
 		execFileSync("git", ["init"], { cwd: repo, stdio: "ignore" });
 		const nested = join(repo, "nested");
 		mkdirSync(nested, { recursive: true });
 		const stub = makeStub();
-		const queued: BackgroundTask[] = [];
-		const controllers: AbortController[] = [];
-		vi.spyOn(BackgroundTaskQueue.prototype, "enqueue").mockImplementation((task) => {
-			queued.push(task);
-			const controller = new AbortController();
-			controllers.push(controller);
-			return controller;
-		});
+		const { tasks: queued, controllers } = captureEnqueue();
 		const order: string[] = [];
 		let releaseWriter!: () => void;
 		const writerGate = new Promise<void>((resolveWriter) => {
@@ -1791,8 +1362,8 @@ describe("managed post-writer workflows", () => {
 		try {
 			register(stub.api);
 			const tool = stub.tools.find((candidate) => candidate.name === "subagent");
-			await tool.execute("writer-docs", { agent: "worker", task: "Writer before docs", cwd: repo }, new AbortController().signal, () => {}, executionContext());
-			await tool.execute("standalone-docs", { agent: "documenter", task: "Standalone docs", cwd: nested }, new AbortController().signal, () => {}, executionContext());
+			await runTool(tool, "writer-docs", { agent: "worker", task: "Writer before docs", cwd: repo }, executionContext());
+			await runTool(tool, "standalone-docs", { agent: "documenter", task: "Standalone docs", cwd: nested }, executionContext());
 			const writerRun = queued[0](controllers[0].signal);
 			await vi.waitFor(() => expect(order).toEqual(["writer"]));
 			const documenterRun = queued[1](controllers[1].signal);
@@ -1804,21 +1375,15 @@ describe("managed post-writer workflows", () => {
 			expect(order).toEqual(["writer", "managed documenter", "standalone documenter"]);
 		} finally {
 			releaseWriter();
-			for (const controller of controllers) controller.abort();
-			await stub.hooks["session_shutdown"]?.({}, {});
+			await shutdownExtension(stub, { controllers });
 			rmSync(repo, { recursive: true, force: true });
 		}
 	});
 
 	it("auto-fixes a post-writer failure and skips docs when the terminal re-review is CLEAN", async () => {
-		configureEnabledAgents(["worker", "documenter", "reviewer"], { maxFixRounds: 1 });
+		configureEnabledAgents(["worker", "documenter", "reviewer"]);
 		const stub = makeStub();
-		let queued!: BackgroundTask;
-		const controller = new AbortController();
-		vi.spyOn(BackgroundTaskQueue.prototype, "enqueue").mockImplementation((task) => {
-			queued = task;
-			return controller;
-		});
+		const { tasks, controllers } = captureEnqueue();
 		let workerCalls = 0;
 		let reviewerCalls = 0;
 		const run = vi.spyOn(spawn, "runSingleAgentWithMainFallback").mockImplementation(async (options: any) => {
@@ -1842,8 +1407,8 @@ describe("managed post-writer workflows", () => {
 		try {
 			register(stub.api);
 			const tool = stub.tools.find((candidate) => candidate.name === "subagent");
-			await tool.execute("post-writer-fail", { agent: "worker", task: "Implement then gate" }, new AbortController().signal, () => {}, executionContext());
-			await queued(controller.signal);
+			await runTool(tool, "post-writer-fail", { agent: "worker", task: "Implement then gate" }, executionContext());
+			await tasks[0](controllers[0].signal);
 
 			expect(run.mock.calls.map(([options]) => options.agentName)).toEqual([
 				"worker", "reviewer", "worker", "reviewer",
@@ -1858,8 +1423,7 @@ describe("managed post-writer workflows", () => {
 			expect(content).toContain("re-review round 1 · PASS");
 			expect(content).not.toContain("final documentation sync");
 		} finally {
-			controller.abort();
-			await stub.hooks["session_shutdown"]?.({}, {});
+			await shutdownExtension(stub, { controllers });
 		}
 	});
 });
@@ -1870,41 +1434,17 @@ describe("auto-fix loop dispatch", () => {
 		vi.setSystemTime(0);
 		const stub = makeStub();
 		const uiNotify = vi.fn();
-		const capturedTasks: BackgroundTask[] = [];
-		const controllers: AbortController[] = [];
-		vi.spyOn(BackgroundTaskQueue.prototype, "enqueue").mockImplementation((task) => {
-			capturedTasks.push(task);
-			const controller = new AbortController();
-			controllers.push(controller);
-			return controller;
-		});
+		const { tasks: capturedTasks, controllers } = captureEnqueue();
 
-		let childDir: string | undefined;
-		const previousScript = process.argv[1];
-		try {
-			childDir = mkdtempSync(join(tmpdir(), "pi-subagents-chain-child-"));
-			const childScript = join(childDir, "fake-pi-child.mjs");
-			writeFileSync(
-				childScript,
-				fakeRpcScript({
-					onPrompt: `let text = "REQUEST_CHANGES\\nVERDICT: REVIEW_FAIL";
+			const restoreChild = fakeChild(`let text = "REQUEST_CHANGES\\nVERDICT: REVIEW_FAIL";
 if (input.includes("Auto-fix round")) text = "all blockers fixed";
 else if (input.includes("Re-review after auto-fix round")) text = "APPROVE\\nVERDICT: REVIEW_PASS";
-send({ type: "message_end", message: { role: "assistant", content: [{ type: "text", text }], stopReason: "stop" } });`,
-				}),
-				"utf8",
-			);
-			process.argv[1] = childScript;
+send({ type: "message_end", message: { role: "assistant", content: [{ type: "text", text }], stopReason: "stop" } });`);
+		try {
 
 			register(stub.api);
 			const tool = stub.tools.find((candidate) => candidate.name === "subagent");
-			const dispatched = await tool.execute(
-				"call-chain",
-				{ agent: "reviewer", task: "Review the change" },
-				new AbortController().signal,
-				() => {},
-				executionContext({ uiNotify }),
-			);
+			const dispatched = await runTool(tool, "call-chain", { agent: "reviewer", task: "Review the change" }, executionContext({ uiNotify }));
 			const parentRunId = dispatched.details.results[0].runId as number;
 
 			expect(capturedTasks).toHaveLength(1);
@@ -1964,11 +1504,8 @@ send({ type: "message_end", message: { role: "assistant", content: [{ type: "tex
 			expect(parentReport).toContain(`run #${parentRunId}`);
 			expect(parentReport).toContain("VERDICT: REVIEW_PASS");
 		} finally {
-			for (const controller of controllers) controller.abort();
-			await stub.hooks["session_shutdown"]?.({}, {});
-			for (const run of [...monitor.getRuns()]) monitor.removeRun(run.id);
-			process.argv[1] = previousScript;
-			if (childDir) rmSync(childDir, { recursive: true, force: true });
+			restoreChild();
+			await shutdownExtension(stub, { controllers });
 		}
 	});
 
@@ -1976,18 +1513,10 @@ send({ type: "message_end", message: { role: "assistant", content: [{ type: "tex
 		if (!testAgentDir) throw new Error("test agent directory was not initialized");
 		writeFileSync(join(testAgentDir, "pi-subagents.json"), JSON.stringify({
 			enabledAgents: ["explorer", "worker", "cleaner", "documenter", "reviewer"],
-			maxFixRounds: 1,
 			announcedFeatures: ["cleanerDefaulted", "documenterDefaulted"],
 		}), "utf8");
 		const stub = makeStub();
-		const capturedTasks: BackgroundTask[] = [];
-		const controllers: AbortController[] = [];
-		vi.spyOn(BackgroundTaskQueue.prototype, "enqueue").mockImplementation((task) => {
-			capturedTasks.push(task);
-			const controller = new AbortController();
-			controllers.push(controller);
-			return controller;
-		});
+		const { tasks: capturedTasks, controllers } = captureEnqueue();
 		const makeResult = (agent: string, task: string, text: string): any => ({
 			agent,
 			task,
@@ -2020,13 +1549,7 @@ send({ type: "message_end", message: { role: "assistant", content: [{ type: "tex
 		try {
 			register(stub.api);
 			const tool = stub.tools.find((candidate) => candidate.name === "subagent");
-			await tool.execute(
-				"call-doc-chain",
-				{ agent: "reviewer", task: "Review docs pipeline" },
-				new AbortController().signal,
-				() => {},
-				executionContext(),
-			);
+			await runTool(tool, "call-doc-chain", { agent: "reviewer", task: "Review docs pipeline" }, executionContext());
 			await capturedTasks[0](controllers[0].signal);
 			expect(capturedTasks).toHaveLength(1);
 
@@ -2043,20 +1566,14 @@ send({ type: "message_end", message: { role: "assistant", content: [{ type: "tex
 			const stepIds = [...content.matchAll(/^- #(\d+) /gmu)];
 			expect(stepIds).toHaveLength(4);
 		} finally {
-			for (const controller of controllers) controller.abort();
-			await stub.hooks["session_shutdown"]?.({}, {});
+			await shutdownExtension(stub, { controllers });
 		}
 	});
 
 	it("projects fix and re-review round budgets while completed children leave the monitor", async () => {
-		configureEnabledAgents(["worker", "documenter", "reviewer"], { maxFixRounds: 2 });
+		configureEnabledAgents(["worker", "documenter", "reviewer"]);
 		const stub = makeStub();
-		let queued!: BackgroundTask;
-		const controller = new AbortController();
-		vi.spyOn(BackgroundTaskQueue.prototype, "enqueue").mockImplementation((task) => {
-			queued = task;
-			return controller;
-		});
+		const { tasks, controllers } = captureEnqueue();
 		let fixStarted!: () => void;
 		const atFix = new Promise<void>((resolve) => {
 			fixStarted = resolve;
@@ -2102,20 +1619,14 @@ send({ type: "message_end", message: { role: "assistant", content: [{ type: "tex
 		try {
 			register(stub.api);
 			const tool = stub.tools.find((candidate) => candidate.name === "subagent");
-			const dispatched = await tool.execute(
-				"fix-stage-projection",
-				{ agent: "reviewer", task: "Gate stage projection" },
-				new AbortController().signal,
-				() => {},
-				executionContext(),
-			);
+			const dispatched = await runTool(tool, "fix-stage-projection", { agent: "reviewer", task: "Gate stage projection" }, executionContext());
 			const parentRunId = dispatched.details.results[0].runId as number;
 			const observedProjections: unknown[] = [];
 			unsubscribe = monitor.subscribe(() => {
 				const stages = monitor.findRun(parentRunId)?.workflowStages;
 				if (stages) observedProjections.push(stages.map((stage) => ({ ...stage })));
 			});
-			const workflow = queued(controller.signal);
+			const workflow = tasks[0](controllers[0].signal);
 			await atFix;
 			expect(monitor.findRun(parentRunId)?.workflowStages).toEqual([
 				{ agent: "reviewer", relation: "review", status: "changes" },
@@ -2160,21 +1671,13 @@ send({ type: "message_end", message: { role: "assistant", content: [{ type: "tex
 			unsubscribe();
 			releaseFix();
 			releaseReReview();
-			controller.abort();
-			await stub.hooks["session_shutdown"]?.({}, {});
+			await shutdownExtension(stub, { controllers });
 		}
 	});
 
 	it("runs every auto-fix round in the triggering reviewer's explicit cwd", async () => {
 		const stub = makeStub();
-		const capturedTasks: BackgroundTask[] = [];
-		const controllers: AbortController[] = [];
-		vi.spyOn(BackgroundTaskQueue.prototype, "enqueue").mockImplementation((task) => {
-			capturedTasks.push(task);
-			const controller = new AbortController();
-			controllers.push(controller);
-			return controller;
-		});
+		const { tasks: capturedTasks, controllers } = captureEnqueue();
 		const outerRepo = mkdtempSync(join(tmpdir(), "pi-subagents-chain-outer-"));
 		const targetRepo = mkdtempSync(join(tmpdir(), "pi-subagents-chain-target-"));
 		const makeResult = (agent: string, task: string, text: string): any => ({
@@ -2196,13 +1699,7 @@ send({ type: "message_end", message: { role: "assistant", content: [{ type: "tex
 		try {
 			register(stub.api);
 			const tool = stub.tools.find((candidate) => candidate.name === "subagent");
-			await tool.execute(
-				"call-chain-cwd",
-				{ agent: "reviewer", task: "Review target repo", cwd: targetRepo },
-				new AbortController().signal,
-				() => {},
-				{ ...executionContext(), cwd: outerRepo },
-			);
+			await runTool(tool, "call-chain-cwd", { agent: "reviewer", task: "Review target repo", cwd: targetRepo }, { ...executionContext(), cwd: outerRepo });
 			await capturedTasks[0](controllers[0].signal);
 			expect(capturedTasks).toHaveLength(1);
 
@@ -2214,8 +1711,7 @@ send({ type: "message_end", message: { role: "assistant", content: [{ type: "tex
 			expect(stub.messages).toHaveLength(1);
 			expect(stub.messages[0].message.content).toContain("final PASS");
 		} finally {
-			for (const controller of controllers) controller.abort();
-			await stub.hooks["session_shutdown"]?.({}, {});
+			await shutdownExtension(stub, { controllers });
 			rmSync(outerRepo, { recursive: true, force: true });
 			rmSync(targetRepo, { recursive: true, force: true });
 		}
@@ -2223,14 +1719,7 @@ send({ type: "message_end", message: { role: "assistant", content: [{ type: "tex
 
 	it("serializes concurrent auto-fix chains that share a repository", async () => {
 		const stub = makeStub();
-		const capturedTasks: BackgroundTask[] = [];
-		const controllers: AbortController[] = [];
-		vi.spyOn(BackgroundTaskQueue.prototype, "enqueue").mockImplementation((task) => {
-			capturedTasks.push(task);
-			const controller = new AbortController();
-			controllers.push(controller);
-			return controller;
-		});
+		const { tasks: capturedTasks, controllers } = captureEnqueue();
 		const repo = mkdtempSync(join(tmpdir(), "pi-subagents-chain-serialized-"));
 		const makeResult = (agent: string, task: string, text: string): any => ({
 			agent,
@@ -2266,8 +1755,8 @@ send({ type: "message_end", message: { role: "assistant", content: [{ type: "tex
 			register(stub.api);
 			const tool = stub.tools.find((candidate) => candidate.name === "subagent");
 			await Promise.all([
-				tool.execute("chain-a", { agent: "reviewer", task: "Review A", cwd: repo }, new AbortController().signal, () => {}, executionContext()),
-				tool.execute("chain-b", { agent: "reviewer", task: "Review B", cwd: repo }, new AbortController().signal, () => {}, executionContext()),
+				runTool(tool, "chain-a", { agent: "reviewer", task: "Review A", cwd: repo }, executionContext()),
+				runTool(tool, "chain-b", { agent: "reviewer", task: "Review B", cwd: repo }, executionContext()),
 			]);
 			expect(capturedTasks).toHaveLength(2);
 			const chains = [
@@ -2287,8 +1776,7 @@ send({ type: "message_end", message: { role: "assistant", content: [{ type: "tex
 			expect(stub.messages).toHaveLength(2);
 		} finally {
 			for (const release of workerReleases) release();
-			for (const controller of controllers) controller.abort();
-			await stub.hooks["session_shutdown"]?.({}, {});
+			await shutdownExtension(stub, { controllers });
 			rmSync(repo, { recursive: true, force: true });
 		}
 	});
@@ -2326,71 +1814,35 @@ send({ type: "message_end", message: { role: "assistant", content: [{ type: "tex
 		register(stub.api);
 		const tool = stub.tools.find((candidate) => candidate.name === "subagent");
 		const stopTool = stub.tools.find((candidate) => candidate.name === "subagent_stop");
-		const dispatched = await tool.execute(
-			"call-chain-stop",
-			{ agent: "reviewer", task: "Review the change" },
-			new AbortController().signal,
-			() => {},
-			executionContext(),
-		);
+		const dispatched = await runTool(tool, "call-chain-stop", { agent: "reviewer", task: "Review the change" }, executionContext());
 		const runId = dispatched.details.results[0].runId;
 		await vi.waitFor(() => expect(activeWorkerOptions).toBeDefined());
 
-		await stopTool.execute(
-			"stop-chain",
-			{ id: String(runId) },
-			new AbortController().signal,
-			() => {},
-			executionContext(),
-		);
+		await runTool(stopTool, "stop-chain", { id: String(runId) }, executionContext());
 		expect(stub.messages).toHaveLength(1);
 		expect(stub.messages[0].message.content).toContain("CURRENT FIX PARTIAL");
 		expect(stub.messages[0].message.content).not.toContain("OLD INITIAL REVIEW");
-		await stub.hooks["session_shutdown"]?.({}, {});
+		await shutdownExtension(stub);
 	});
 
 	it("stops the chain when a re-review fails, without starting another fix round", async () => {
 		vi.useFakeTimers();
 		vi.setSystemTime(0);
 		const stub = makeStub();
-		const capturedTasks: BackgroundTask[] = [];
-		const controllers: AbortController[] = [];
-		vi.spyOn(BackgroundTaskQueue.prototype, "enqueue").mockImplementation((task) => {
-			capturedTasks.push(task);
-			const controller = new AbortController();
-			controllers.push(controller);
-			return controller;
-		});
+		const { tasks: capturedTasks, controllers } = captureEnqueue();
 
-		let childDir: string | undefined;
-		const previousScript = process.argv[1];
-		try {
-			childDir = mkdtempSync(join(tmpdir(), "pi-subagents-chain-fail-child-"));
-			const childScript = join(childDir, "fake-pi-child.mjs");
-			writeFileSync(
-				childScript,
-				fakeRpcScript({
-					onPrompt: `if (input.includes("Auto-fix round")) {
+			const restoreChild = fakeChild(`if (input.includes("Auto-fix round")) {
 	send({ type: "message_end", message: { role: "assistant", content: [{ type: "text", text: "fixed" }], stopReason: "stop" } });
 } else if (input.includes("Re-review after auto-fix round")) {
 	send({ type: "message_end", message: { role: "assistant", content: [{ type: "text", text: "crashed mid-review" }], stopReason: "error" } });
 } else {
 	send({ type: "message_end", message: { role: "assistant", content: [{ type: "text", text: "REQUEST_CHANGES\\nVERDICT: REVIEW_FAIL" }], stopReason: "stop" } });
-}`,
-				}),
-				"utf8",
-			);
-			process.argv[1] = childScript;
+}`);
+		try {
 
 			register(stub.api);
 			const tool = stub.tools.find((candidate) => candidate.name === "subagent");
-			await tool.execute(
-				"call-chain-fail",
-				{ agent: "reviewer", task: "Review the change" },
-				new AbortController().signal,
-				() => {},
-				executionContext(),
-			);
+			await runTool(tool, "call-chain-fail", { agent: "reviewer", task: "Review the change" }, executionContext());
 
 			await capturedTasks[0](controllers[0].signal);
 			expect(capturedTasks).toHaveLength(1);
@@ -2406,11 +1858,8 @@ send({ type: "message_end", message: { role: "assistant", content: [{ type: "tex
 			expect(content).not.toContain("Auto-fix round 2");
 			expect(monitor.getRuns()).toHaveLength(0);
 		} finally {
-			for (const controller of controllers) controller.abort();
-			await stub.hooks["session_shutdown"]?.({}, {});
-			for (const run of [...monitor.getRuns()]) monitor.removeRun(run.id);
-			process.argv[1] = previousScript;
-			if (childDir) rmSync(childDir, { recursive: true, force: true });
+			restoreChild();
+			await shutdownExtension(stub, { controllers });
 		}
 	});
 
@@ -2420,18 +1869,10 @@ send({ type: "message_end", message: { role: "assistant", content: [{ type: "tex
 		if (!testAgentDir) throw new Error("test agent directory was not initialized");
 		writeFileSync(join(testAgentDir, "pi-subagents.json"), JSON.stringify({
 			enabledAgents: ["reviewer"],
-			maxFixRounds: 2,
 			announcedFeatures: ["cleanerDefaulted", "documenterDefaulted"],
 		}), "utf8");
 		const stub = makeStub();
-		const capturedTasks: BackgroundTask[] = [];
-		const controllers: AbortController[] = [];
-		vi.spyOn(BackgroundTaskQueue.prototype, "enqueue").mockImplementation((task) => {
-			capturedTasks.push(task);
-			const controller = new AbortController();
-			controllers.push(controller);
-			return controller;
-		});
+		const { tasks: capturedTasks, controllers } = captureEnqueue();
 		vi.spyOn(spawn, "runSingleAgentWithMainFallback").mockResolvedValue({
 			agent: "reviewer",
 			task: "Gate without worker",
@@ -2444,13 +1885,7 @@ send({ type: "message_end", message: { role: "assistant", content: [{ type: "tex
 		try {
 			register(stub.api);
 			const tool = stub.tools.find((candidate) => candidate.name === "subagent");
-			await tool.execute(
-				"call-no-worker",
-				{ agent: "reviewer", task: "Gate without worker" },
-				new AbortController().signal,
-				() => {},
-				executionContext(),
-			);
+			await runTool(tool, "call-no-worker", { agent: "reviewer", task: "Gate without worker" }, executionContext());
 			await capturedTasks[0](controllers[0].signal);
 			expect(capturedTasks).toHaveLength(1);
 			vi.advanceTimersByTime(150);
@@ -2458,105 +1893,26 @@ send({ type: "message_end", message: { role: "assistant", content: [{ type: "tex
 			expect(stub.messages[0].message.content).toContain("VERDICT: REVIEW_FAIL");
 			expect(monitor.getRuns().find((run) => run.activity === "auto-fix chain running")).toBeUndefined();
 		} finally {
-			for (const controller of controllers) controller.abort();
-			await stub.hooks["session_shutdown"]?.({}, {});
+			await shutdownExtension(stub, { controllers });
 		}
 	});
 
-	it("delivers a REVIEW_FAIL review directly when maxFixRounds is 0", async () => {
-		vi.useFakeTimers();
-		vi.setSystemTime(0);
-		if (!testAgentDir) throw new Error("test agent directory was not initialized");
-		writeFileSync(join(testAgentDir, "pi-subagents.json"), JSON.stringify({ maxFixRounds: 0 }), "utf8");
-		const stub = makeStub();
-		const capturedTasks: BackgroundTask[] = [];
-		const controllers: AbortController[] = [];
-		vi.spyOn(BackgroundTaskQueue.prototype, "enqueue").mockImplementation((task) => {
-			capturedTasks.push(task);
-			const controller = new AbortController();
-			controllers.push(controller);
-			return controller;
-		});
-
-		let childDir: string | undefined;
-		const previousScript = process.argv[1];
-		try {
-			childDir = mkdtempSync(join(tmpdir(), "pi-subagents-no-loop-child-"));
-			const childScript = join(childDir, "fake-pi-child.mjs");
-			writeFileSync(
-				childScript,
-				fakeRpcScript({
-					onPrompt: `send({ type: "message_end", message: { role: "assistant", content: [{ type: "text", text: "REQUEST_CHANGES\\nVERDICT: REVIEW_FAIL" }], stopReason: "stop" } });`,
-				}),
-				"utf8",
-			);
-			process.argv[1] = childScript;
-
-			register(stub.api);
-			const tool = stub.tools.find((candidate) => candidate.name === "subagent");
-			await tool.execute(
-				"call-no-loop",
-				{ agent: "reviewer", task: "Review the change" },
-				new AbortController().signal,
-				() => {},
-				executionContext(),
-			);
-
-			await capturedTasks[0](controllers[0].signal);
-			// Only the review task was enqueued — no chain task.
-			expect(capturedTasks).toHaveLength(1);
-			vi.advanceTimersByTime(150);
-			expect(stub.messages).toHaveLength(1);
-			expect(stub.messages[0].message.content).toContain("### [reviewer] completed");
-			expect(monitor.getRuns().find((run) => run.activity === "auto-fix chain running")).toBeUndefined();
-		} finally {
-			for (const controller of controllers) controller.abort();
-			await stub.hooks["session_shutdown"]?.({}, {});
-			for (const run of [...monitor.getRuns()]) monitor.removeRun(run.id);
-			process.argv[1] = previousScript;
-			if (childDir) rmSync(childDir, { recursive: true, force: true });
-		}
-	});
 
 	it("delivers a dispatch-crashed reviewer as a failure, never as a phantom fix chain", async () => {
 		vi.useFakeTimers();
 		vi.setSystemTime(0);
 		const stub = makeStub();
 		const uiNotify = vi.fn();
-		const capturedTasks: BackgroundTask[] = [];
-		const controllers: AbortController[] = [];
-		vi.spyOn(BackgroundTaskQueue.prototype, "enqueue").mockImplementation((task) => {
-			capturedTasks.push(task);
-			const controller = new AbortController();
-			controllers.push(controller);
-			return controller;
-		});
+		const { tasks: capturedTasks, controllers } = captureEnqueue();
 
-		let childDir: string | undefined;
-		const previousScript = process.argv[1];
+		// Point argv[1] at a fake child anyway: if the rejection below fails to
+		// intercept, the test fails on assertions instead of spawning real pi.
+		const restoreChild = fakeChild(`send({ type: "message_end", message: { role: "assistant", content: [{ type: "text", text: "REQUEST_CHANGES\\nVERDICT: REVIEW_FAIL" }], stopReason: "stop" } });`);
+
 		try {
-			// Point argv[1] at a fake child anyway: if the rejection below fails to
-			// intercept, the test fails on assertions instead of spawning real pi.
-			childDir = mkdtempSync(join(tmpdir(), "pi-subagents-crash-child-"));
-			const childScript = join(childDir, "fake-pi-child.mjs");
-			writeFileSync(
-				childScript,
-				fakeRpcScript({
-					onPrompt: `send({ type: "message_end", message: { role: "assistant", content: [{ type: "text", text: "REQUEST_CHANGES\\nVERDICT: REVIEW_FAIL" }], stopReason: "stop" } });`,
-				}),
-				"utf8",
-			);
-			process.argv[1] = childScript;
-
 			register(stub.api);
 			const tool = stub.tools.find((candidate) => candidate.name === "subagent");
-			await tool.execute(
-				"call-crash",
-				{ agent: "reviewer", task: "Review the change" },
-				new AbortController().signal,
-				() => {},
-				executionContext({ uiNotify }),
-			);
+			await runTool(tool, "call-crash", { agent: "reviewer", task: "Review the change" }, executionContext({ uiNotify }));
 			expect(capturedTasks).toHaveLength(1);
 
 			// The dispatch layer throws (spawn infra, fs, ...): the crash result must
@@ -2577,11 +1933,8 @@ send({ type: "message_end", message: { role: "assistant", content: [{ type: "tex
 			expect(uiNotify).toHaveBeenCalledWith("✗ reviewer dispatch failed: spawn infra exploded", "error");
 			expect(monitor.getRuns().find((run) => run.activity === "auto-fix chain running")).toBeUndefined();
 		} finally {
-			for (const controller of controllers) controller.abort();
-			await stub.hooks["session_shutdown"]?.({}, {});
-			for (const run of [...monitor.getRuns()]) monitor.removeRun(run.id);
-			process.argv[1] = previousScript;
-			if (childDir) rmSync(childDir, { recursive: true, force: true });
+			restoreChild();
+			await shutdownExtension(stub, { controllers });
 		}
 	});
 
@@ -2590,38 +1943,14 @@ send({ type: "message_end", message: { role: "assistant", content: [{ type: "tex
 		vi.setSystemTime(0);
 		const stub = makeStub();
 		const uiNotify = vi.fn();
-		const capturedTasks: BackgroundTask[] = [];
-		const controllers: AbortController[] = [];
-		vi.spyOn(BackgroundTaskQueue.prototype, "enqueue").mockImplementation((task) => {
-			capturedTasks.push(task);
-			const controller = new AbortController();
-			controllers.push(controller);
-			return controller;
-		});
+		const { tasks: capturedTasks, controllers } = captureEnqueue();
 
-		let childDir: string | undefined;
-		const previousScript = process.argv[1];
+			const restoreChild = fakeChild(`send({ type: "message_end", message: { role: "assistant", content: [{ type: "text", text: "I found issues.\\nVERDICT: REVIEW_FAIL" }], stopReason: "error" } });`);
 		try {
-			childDir = mkdtempSync(join(tmpdir(), "pi-subagents-partial-child-"));
-			const childScript = join(childDir, "fake-pi-child.mjs");
-			writeFileSync(
-				childScript,
-				fakeRpcScript({
-					onPrompt: `send({ type: "message_end", message: { role: "assistant", content: [{ type: "text", text: "I found issues.\\nVERDICT: REVIEW_FAIL" }], stopReason: "error" } });`,
-				}),
-				"utf8",
-			);
-			process.argv[1] = childScript;
 
 			register(stub.api);
 			const tool = stub.tools.find((candidate) => candidate.name === "subagent");
-			await tool.execute(
-				"call-crash2",
-				{ agent: "reviewer", task: "Review the change" },
-				new AbortController().signal,
-				() => {},
-				executionContext({ uiNotify }),
-			);
+			await runTool(tool, "call-crash2", { agent: "reviewer", task: "Review the change" }, executionContext({ uiNotify }));
 			expect(capturedTasks).toHaveLength(1);
 
 			// The child crashed (non-zero exit, error stop reason) after emitting a
@@ -2638,11 +1967,8 @@ send({ type: "message_end", message: { role: "assistant", content: [{ type: "tex
 			expect(uiNotify).toHaveBeenCalledTimes(1);
 			expect(monitor.getRuns().find((run) => run.activity === "auto-fix chain running")).toBeUndefined();
 		} finally {
-			for (const controller of controllers) controller.abort();
-			await stub.hooks["session_shutdown"]?.({}, {});
-			for (const run of [...monitor.getRuns()]) monitor.removeRun(run.id);
-			process.argv[1] = previousScript;
-			if (childDir) rmSync(childDir, { recursive: true, force: true });
+			restoreChild();
+			await shutdownExtension(stub, { controllers });
 		}
 	});
 });
@@ -2683,12 +2009,7 @@ describe("before_agent_start injection", () => {
 			"MALICIOUS PROJECT SYSTEM PROMPT",
 		].join("\n"), "utf8");
 		const stub = makeStub();
-		let queued!: BackgroundTask;
-		const controller = new AbortController();
-		vi.spyOn(BackgroundTaskQueue.prototype, "enqueue").mockImplementation((task) => {
-			queued = task;
-			return controller;
-		});
+		const { tasks, controllers } = captureEnqueue();
 		const run = vi.spyOn(spawn, "runSingleAgentWithMainFallback").mockResolvedValue({
 			agent: "worker",
 			task: "safe task",
@@ -2713,21 +2034,14 @@ describe("before_agent_start injection", () => {
 			expect(injection.systemPrompt).not.toContain("MALICIOUS PROJECT");
 
 			const tool = stub.tools.find((candidate) => candidate.name === "subagent");
-			await tool.execute(
-				"untrusted-dispatch",
-				{ agent: "worker", task: "safe task" },
-				new AbortController().signal,
-				() => {},
-				untrustedCtx,
-			);
-			await queued(controller.signal);
+			await runTool(tool, "untrusted-dispatch", { agent: "worker", task: "safe task" }, untrustedCtx);
+			await tasks[0](controllers[0].signal);
 			expect(run).toHaveBeenCalledTimes(1);
 			const options = run.mock.calls[0]![0]!;
 			expect(options.agent!.source).toBe("builtin");
 			expect(options.agent!.systemPrompt).not.toContain("MALICIOUS PROJECT");
 		} finally {
-			controller.abort();
-			await stub.hooks["session_shutdown"]?.({}, {});
+			await shutdownExtension(stub, { controllers });
 			rmSync(project, { recursive: true, force: true });
 		}
 	});
@@ -2766,13 +2080,7 @@ describe("selected agent model dispatch", () => {
 			} as any);
 		register(stub.api);
 		const tool = stub.tools.find((candidate) => candidate.name === "subagent");
-		await tool.execute(
-			"call-model",
-			{ agent: "reviewer", task: "Review the change" },
-			new AbortController().signal,
-			() => {},
-			{ ...executionContext({ uiNotify }), model: AVAILABLE[0], modelRegistry: { getAvailable: () => AVAILABLE } },
-		);
+		await runTool(tool, "call-model", { agent: "reviewer", task: "Review the change" }, { ...executionContext({ uiNotify }), model: AVAILABLE[0], modelRegistry: { getAvailable: () => AVAILABLE } });
 		expect(captured).toHaveLength(1);
 		await captured[0](controller.signal);
 		expect(runSpy).toHaveBeenCalledTimes(1);

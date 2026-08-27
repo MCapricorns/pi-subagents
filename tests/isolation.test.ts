@@ -510,7 +510,6 @@ describe("logical worktree reuse and guarded finalization", () => {
 	it("runs reviewer and documenter inside the worktree before one final integration", async () => {
 		writeFileSync(join(agentDir, "pi-subagents.json"), JSON.stringify({
 			enabledAgents: ["worker", "documenter", "reviewer"],
-			maxFixRounds: 1,
 			announcedFeatures: ["cleanerDefaulted", "documenterDefaulted"],
 		}), "utf8");
 		const root = mkdtempSync(join(tmpdir(), "pi-subagents-isolation-managed-"));
@@ -566,7 +565,6 @@ describe("logical worktree reuse and guarded finalization", () => {
 	it("runs isolated workflow stages in parallel but waits to integrate behind the shared repository lane", async () => {
 		writeFileSync(join(agentDir, "pi-subagents.json"), JSON.stringify({
 			enabledAgents: ["worker", "reviewer"],
-			maxFixRounds: 0,
 			announcedFeatures: ["cleanerDefaulted", "documenterDefaulted"],
 		}), "utf8");
 		const root = mkdtempSync(join(tmpdir(), "pi-subagents-isolation-managed-lane-"));
@@ -780,7 +778,6 @@ describe("shutdown and destructive-stop integration", () => {
 		writeFileSync(join(agentDir, "pi-subagents.json"), JSON.stringify({
 			enabledAgents: ["worker", "reviewer"],
 			maxConcurrency: 2,
-			maxFixRounds: 0,
 			announcedFeatures: ["cleanerDefaulted", "documenterDefaulted"],
 		}), "utf8");
 		const root = mkdtempSync(join(tmpdir(), "pi-subagents-isolation-stop-all-lane-"));
