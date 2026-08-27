@@ -1,25 +1,21 @@
 /**
  * Interactive configuration wizard for /subagents-setup.
  *
- * The UI intentionally has no backup pool or global thinking menu. Each agent
- * gets one optional model override; failures hand directly to the current main
- * model. Thinking defaults to Auto and manual choices are limited to levels Pi
- * reports as supported by the selected model.
+ * The wizard stays one level deep and exposes only what most users touch:
+ * which agents run, the model each runs on, and the delegation directive
+ * toggle. Everything else (per-agent thinking, agent scope, idle timeout,
+ * result lines, notifications) is config-file-only; model failures hand
+ * directly to the current main model, and thinking defaults to capability-
+ * aware Auto.
  */
 
 import { stat } from "node:fs/promises";
-import type { Api, Model } from "@earendil-works/pi-ai";
 import type { ExtensionCommandContext } from "@earendil-works/pi-coding-agent";
 import {
-	AGENT_SCOPE_VALUES,
 	BUILTIN_AGENT_NAMES,
 	DEFAULT_CONFIG,
 	DEFAULT_ENABLED_AGENTS,
-	DEFAULT_IDLE_TIMEOUT_SEC,
-	DEFAULT_THINKING_LEVEL,
-	type AgentScope,
 	type SubagentsConfig,
-	type ThinkingLevel,
 	errorMessage,
 	getConfigPath,
 	loadConfig,
@@ -31,28 +27,9 @@ import {
 	availableModelsInScope,
 	buildModelPickerItems,
 	currentModelRef,
-	findModelByRef,
 	modelRef,
-	resolveThinkingLevel,
-	supportedThinkingLevels,
 } from "./models.ts";
 import { promptSelectMany, promptSelectOne } from "./ui.ts";
-import { discoverAgents } from "./agents.ts";
-
-const AUTO_THINKING = "__auto_thinking__";
-
-function actualAgentThinkingDefault(
-	ctx: ExtensionCommandContext,
-	config: SubagentsConfig,
-	agentName: string,
-): ThinkingLevel {
-	const { agents } = discoverAgents(ctx.cwd, {
-		scope: config.agentScope,
-		enabledNames: config.enabledAgents,
-		projectTrusted: ctx.isProjectTrusted(),
-	});
-	return agents.find((agent) => agent.name === agentName)?.thinking ?? DEFAULT_THINKING_LEVEL;
-}
 
 /** Short, selection-friendly descriptions for the built-in agents. */
 const MODULE_HINTS: Record<string, string> = {
@@ -121,61 +98,6 @@ async function pickAgentModel(
 	return pickConfiguredModel(ctx, `Model for "${agentName}"?`, currentRef, escNote);
 }
 
-const THINKING_LEVEL_HINTS: Record<ThinkingLevel, string> = {
-	off: "no reasoning tokens",
-	minimal: "minimal reasoning",
-	low: "light reasoning",
-	medium: "balanced reasoning",
-	high: "deep reasoning",
-	xhigh: "extra-deep reasoning",
-	max: "strongest reasoning",
-};
-
-function effectiveModelForChoice(
-	ctx: ExtensionCommandContext,
-	choice: string,
-): Model<Api> | undefined {
-	if (choice === CURRENT_MAIN_MODEL) return ctx.model;
-	return findModelByRef(availableModelsInScope(ctx), choice);
-}
-
-/** Auto is the default. Manual rows are exactly the levels Pi exposes for the
- * selected model; unsupported xhigh/max entries never appear. */
-async function pickAgentStrength(
-	ctx: ExtensionCommandContext,
-	agentName: string,
-	model: Model<Api> | undefined,
-	current: ThinkingLevel | undefined,
-	agentDefault: ThinkingLevel,
-	escNote = "cancels this setup pass",
-): Promise<ThinkingLevel | typeof AUTO_THINKING | undefined> {
-	const supported = supportedThinkingLevels(model);
-	const automatic = resolveThinkingLevel(model, agentDefault);
-	// No model metadata, or a non-reasoning model whose only valid value is off:
-	// Auto is already the complete and least surprising choice.
-	if (supported.length <= 1) return AUTO_THINKING;
-
-	const currentEffective = current ? resolveThinkingLevel(model, current) : undefined;
-	const modelName = model ? modelRef(model) : "current main model";
-	const options = [
-		{
-			value: AUTO_THINKING,
-			label: `auto — ${automatic} for ${modelName}${current === undefined ? " (current, recommended)" : " (recommended)"}`,
-		},
-		...supported.map((level) => ({
-			value: level,
-			label: `${level} — ${THINKING_LEVEL_HINTS[level]}${current !== undefined && currentEffective === level ? " (current)" : ""}`,
-		})),
-	];
-	return promptSelectOne(
-		ctx,
-		`Thinking for "${agentName}"?`,
-		`Only levels supported by ${modelName} are shown • Enter selects • Esc ${escNote}`,
-		options,
-		current === undefined ? AUTO_THINKING : currentEffective,
-	) as Promise<ThinkingLevel | typeof AUTO_THINKING | undefined>;
-}
-
 async function pickAgentToConfigure(
 	ctx: ExtensionCommandContext,
 	enabledAgents: readonly string[],
@@ -195,11 +117,10 @@ async function pickAgentToConfigure(
 interface ConfiguredAgentChoice {
 	name: string;
 	model: string;
-	strength: ThinkingLevel | typeof AUTO_THINKING;
 }
 
-/** Configure one agent while preserving the UI back stack: thinking → model →
- * agent selection. Esc from agent selection ends this configuration pass. */
+/** Configure agents while preserving the UI back stack: model selection returns
+ * to the agent picker on Esc; agent-picker Esc ends this configuration pass. */
 async function configureOneAgent(
 	ctx: ExtensionCommandContext,
 	config: SubagentsConfig,
@@ -207,27 +128,14 @@ async function configureOneAgent(
 	while (true) {
 		const name = await pickAgentToConfigure(ctx, config.enabledAgents);
 		if (name === undefined) return undefined;
-
-		while (true) {
-			const modelChoice = await pickAgentModel(
-				ctx,
-				name,
-				config.agentModels[name],
-				"returns to agent selection",
-			);
-			if (modelChoice === undefined) break;
-			const model = effectiveModelForChoice(ctx, modelChoice);
-			const strength = await pickAgentStrength(
-				ctx,
-				name,
-				model,
-				config.agentThinkingLevels[name],
-				actualAgentThinkingDefault(ctx, config, name),
-				"returns to model selection",
-			);
-			if (strength === undefined) continue;
-			return { name, model: modelChoice, strength };
-		}
+		const model = await pickAgentModel(
+			ctx,
+			name,
+			config.agentModels[name],
+			"returns to agent selection",
+		);
+		if (model === undefined) continue;
+		return { name, model };
 	}
 }
 
@@ -237,40 +145,6 @@ async function pickInjection(ctx: ExtensionCommandContext, current: boolean): Pr
 	const choice = await ctx.ui.select("Proactive dispatch injection?", [current ? `${on} (current)` : on, current ? off : `${off} (current)`]);
 	if (choice === undefined) return undefined;
 	return choice.startsWith("On");
-}
-
-const IDLE_TIMEOUT_STEPS = [0, 30, 60, 90, 120, 180, 300, 600];
-
-async function pickCount(
-	ctx: ExtensionCommandContext,
-	title: string,
-	steps: readonly number[],
-	current: number,
-	defaultValue: number,
-): Promise<number | undefined> {
-	const values = [...new Set([...steps, current])].sort((a, b) => a - b);
-	const options = values.map((value) => {
-		const tags = [value === current ? "current" : "", value === defaultValue ? "default" : ""]
-			.filter(Boolean)
-			.join(", ");
-		return tags ? `${value} (${tags})` : String(value);
-	});
-	const choice = await ctx.ui.select(title, options);
-	return choice === undefined ? undefined : Number.parseInt(choice, 10);
-}
-
-async function pickScope(ctx: ExtensionCommandContext, current: AgentScope): Promise<AgentScope | undefined> {
-	const labels: Record<AgentScope, string> = {
-		user: "user — built-in + ~/.pi/agent/agents (default)",
-		project: "project — built-in + nearest .pi/agents only",
-		both: "both — user agents, overridden by project agents",
-	};
-	const options = AGENT_SCOPE_VALUES.map((scope) =>
-		scope === current ? `${labels[scope]} (current)` : labels[scope],
-	);
-	const choice = await ctx.ui.select("Which agent directories to discover from?", options);
-	if (choice === undefined) return undefined;
-	return AGENT_SCOPE_VALUES.find((scope) => choice.startsWith(scope));
 }
 
 function keepAgentEntries<T>(record: Record<string, T>, enabled: readonly string[]): Record<string, T> {
@@ -291,16 +165,6 @@ async function runFullSetup(ctx: ExtensionCommandContext, configPath: string, ba
 
 	const injection = await pickInjection(ctx, base.proactiveInjection);
 	if (injection === undefined) return false;
-	const scope = await pickScope(ctx, base.agentScope);
-	if (scope === undefined) return false;
-	const idleTimeoutSec = await pickCount(
-		ctx,
-		"Idle timeout in seconds? (0 = disabled)",
-		IDLE_TIMEOUT_STEPS,
-		base.idleTimeoutSec,
-		DEFAULT_IDLE_TIMEOUT_SEC,
-	);
-	if (idleTimeoutSec === undefined) return false;
 
 	const next: SubagentsConfig = {
 		enabledAgents: enabled,
@@ -310,49 +174,20 @@ async function runFullSetup(ctx: ExtensionCommandContext, configPath: string, ba
 		notifyOnReviewPass: base.notifyOnReviewPass,
 		maxResultLines: base.maxResultLines,
 		proactiveInjection: injection,
-		agentScope: scope,
-		idleTimeoutSec,
+		agentScope: base.agentScope,
+		idleTimeoutSec: base.idleTimeoutSec,
 	};
 	await saveConfig(next, configPath);
 	ctx.ui.notify(`pi-subagents configured with Auto thinking. Saved to ${configPath}`, "info");
 	return true;
 }
 
-async function updateRuntimeSetting(
-	ctx: ExtensionCommandContext,
-	config: SubagentsConfig,
-): Promise<SubagentsConfig | undefined> {
-	while (true) {
-		const choice = await ctx.ui.select("Runtime setting", [
-			"Proactive injection",
-			"Agent scope",
-			"Idle timeout",
-		]);
-		if (choice === undefined) return undefined;
-		const next = { ...config };
-		if (choice.startsWith("Proactive")) {
-			const value = await pickInjection(ctx, config.proactiveInjection);
-			if (value === undefined) continue;
-			next.proactiveInjection = value;
-		} else if (choice.startsWith("Agent scope")) {
-			const value = await pickScope(ctx, config.agentScope);
-			if (value === undefined) continue;
-			next.agentScope = value;
-		} else {
-			const value = await pickCount(ctx, "Idle timeout in seconds?", IDLE_TIMEOUT_STEPS, config.idleTimeoutSec, DEFAULT_IDLE_TIMEOUT_SEC);
-			if (value === undefined) continue;
-			next.idleTimeoutSec = value;
-		}
-		return next;
-	}
-}
-
 async function runMenu(ctx: ExtensionCommandContext, configPath: string, config: SubagentsConfig): Promise<void> {
 	while (true) {
 		const choice = await ctx.ui.select("pi-subagents settings", [
 			"Enable/disable agents",
-			"Configure an agent (model + thinking)",
-			"Runtime settings",
+			"Configure agent models",
+			"Proactive injection",
 			"Full re-setup",
 		]);
 		if (choice === undefined) return;
@@ -395,17 +230,14 @@ async function runMenu(ctx: ExtensionCommandContext, configPath: string, config:
 			next.agentModels = keepAgentEntries(next.agentModels, enabled);
 			next.agentThinkingLevels = keepAgentEntries(next.agentThinkingLevels, enabled);
 		} else if (choice.startsWith("Configure")) {
-			// Per-agent loop: thinking Esc returns to that agent's model picker;
-			// model Esc returns to the agent picker; agent-picker Esc saves completed
-			// choices and returns to this settings menu.
+			// Per-agent loop: model Esc returns to the agent picker; agent-picker
+			// Esc saves completed choices and returns to this settings menu.
 			let configuredAny = false;
 			while (true) {
 				const picked = await configureOneAgent(ctx, next);
 				if (!picked) break;
 				configuredAny = true;
 				next.agentModels = applyAgentModelChoice(next.agentModels, picked.name, picked.model);
-				if (picked.strength === AUTO_THINKING) delete next.agentThinkingLevels[picked.name];
-				else next.agentThinkingLevels[picked.name] = picked.strength;
 			}
 			if (!configuredAny) continue;
 			await saveConfig(next, configPath);
@@ -413,9 +245,9 @@ async function runMenu(ctx: ExtensionCommandContext, configPath: string, config:
 			config = next;
 			continue;
 		} else {
-			const updated = await updateRuntimeSetting(ctx, next);
-			if (updated === undefined) continue;
-			next = updated;
+			const injection = await pickInjection(ctx, next.proactiveInjection);
+			if (injection === undefined) continue;
+			next.proactiveInjection = injection;
 		}
 
 		await saveConfig(next, configPath);
