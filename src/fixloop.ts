@@ -149,7 +149,9 @@ export function getManagedWorkflowPlan(
  * Build the worker task brief for one fix round from a reviewer's findings.
  * The worker gets the full review text — findings plus their fix instructions
  * — and closes every finding either by implementing the instruction or by
- * shipping a sounder fix with an explicit per-finding pushback.
+ * shipping a sounder fix with an explicit per-finding pushback. The standing
+ * pushback and release-boundary contract lives in the worker system prompt;
+ * the brief carries only what is specific to this round.
  */
 export function buildFixTaskBrief(reviewerResult: SingleResult, round: number, maxRounds: number): string {
 	const review = getResultOutput(reviewerResult);
@@ -162,15 +164,11 @@ export function buildFixTaskBrief(reviewerResult: SingleResult, round: number, m
 		review,
 		`---`,
 		``,
-		`Each finding in the reviewer's report carries a fix instruction. Close EVERY finding — there is no severity triage; all of them get fixed.`,
-		`You own the fix: when an instruction is factually wrong, clearly out of scope, or a sounder fix exists, implement YOUR fix instead,`,
-		`then push back explicitly per finding — cite it, refute the instruction's reasoning, and state what you shipped instead.`,
-		`A pushback without a working alternative or concrete reasoning will be re-opened.`,
-		`Do NOT refactor unrelated code beyond what the findings require.`,
-		`Synchronize any existing README/docs/examples/comments directly affected by your fixes; do not broaden into standalone documentation maintenance.`,
-		`Do NOT commit, push, publish, tag, or release; do not bump versions. The parent chain still owns re-review and any conditional final documentation sync.`,
-		`After editing, run the project's format/build/tests when they exist and report`,
-		`exactly what you changed (paths + short rationale) plus any pushback, so a reviewer can verify.`,
+		`Close EVERY finding — there is no severity triage; all of them get fixed. Each finding carries a fix instruction:`,
+		`follow it, or ship a sounder fix and push back per finding with your reasoning.`,
+		`Do NOT refactor unrelated code. Synchronize any existing README/docs/examples/comments directly affected by your fixes.`,
+		`Run the project's format/build/tests when they exist, then report exactly what you changed (paths + short rationale)`,
+		`plus any pushback, so a reviewer can verify.`,
 		remaining > 0
 			? `A reviewer will re-review your changes automatically after you finish.`
 			: `This is the last auto-fix round; the workflow conditionally runs any needed final documentation sync and then delivers.`,
@@ -210,11 +208,11 @@ export function buildFinalDocumenterBrief(
 		`Final documentation sync: the review gate settled and you are the last managed stage before delivery.`,
 		``,
 		...reportSections,
-		`Inspect the actual git diff (the complete pending diff) and relevant implementation; the reports are only leads.`,
-		`Apply every documentation note the reviews recorded, then synchronize stale README/docs, examples, API comments, docstrings, and explanatory comments with the behavior that will be committed.`,
-		`Change documentation surfaces only; never alter runtime behavior or tests to make prose true.`,
-		`Make zero edits when the diff creates no documentation drift.`,
-		`Do NOT commit, push, publish, tag, or release; do not bump versions. The parent workflow delivers directly after you; no fresh reviewer runs.`,
+		`Inspect the actual git diff and relevant implementation; the reports are only leads.`,
+		`Apply every documentation note the reviews recorded, then synchronize stale README/docs, examples, API comments, docstrings,`,
+		`and explanatory comments with the behavior that will be committed.`,
+		`Change documentation surfaces only; make zero edits when the diff creates no documentation drift.`,
+		`The workflow delivers directly after you; no fresh reviewer runs.`,
 		`Report exact documentation/comment paths changed, or state explicitly that no sync was needed.`,
 	].join("\n");
 }
@@ -314,15 +312,13 @@ export function buildFinalReviewBrief(
 		`---`,
 		``,
 		`Run \`git status\` and \`git diff\` and inspect the actual pending code; the report is context, not proof.`,
-		`Remain read-only. Verify correctness, regressions, and tests.`,
-		`Attach a concrete fix instruction to EVERY gate finding: what to change, where, and how to verify the fix.`,
-		`A worker will implement your instructions unless it can justify a sounder fix and push back, so make each instruction specific enough to act on.`,
+		`Remain read-only. Attach a concrete fix instruction to EVERY gate finding: what to change, where, and how to verify the fix`,
+		`— a worker will implement your instructions unless it can justify a sounder fix and push back.`,
 		...(options.documenterPending
 			? [
-				`A conditional documentation sync is available AFTER this gate, so documentation drift is not a code-gate finding.`,
-				`If documentation is stale, add a separate short "## Documentation notes" list and emit the standalone line`,
-				`DOCUMENTATION: NEEDED. If no documentation update is needed, emit DOCUMENTATION: CLEAN instead.`,
-				`Always emit exactly one of those standalone documentation lines; fail the gate only for code or test findings.`,
+				`A conditional documentation sync is available AFTER this gate, so documentation drift is not a code-gate finding:`,
+				`record it under "## Documentation notes" and emit the standalone line DOCUMENTATION: NEEDED,`,
+				`or DOCUMENTATION: CLEAN when no documentation update is needed.`,
 			]
 			: [
 				`No documenter is pending, so documentation drift is an ordinary gate finding.`,
@@ -356,15 +352,14 @@ export function buildReReviewBrief(
 		review,
 		`---`,
 		``,
-		`The worker's report (what it changed, plus any pushback where it replaced your fix instruction with its own fix):`,
+		`The worker's report (what it changed, plus any pushback where it replaced your fix instruction):`,
 		`---`,
 		workerReport,
 		`---`,
 		``,
 		`Rule on EVERY previous finding: resolved, or still open. Judge the code as it now stands — a finding is`,
 		`resolved when the pending diff fixes it soundly, whether or not the worker followed your fix instruction.`,
-		`A finding the worker pushed back on must be adjudicated ONCE — accept the worker's fix unless you can`,
-		`concretely refute its reasoning; never simply restate the finding for another round.`,
+		`Adjudicate each pushback once: accept the worker's fix unless you can concretely refute its reasoning.`,
 		`Run \`git diff\` to see what changed, then add NEW findings only for defects this round's edits introduced or exposed.`,
 		`Re-review never opens findings unrelated to this round's edits; issues the earlier review missed belong to a fresh gate.`,
 		`Do NOT re-open a finding you verified as resolved.`,

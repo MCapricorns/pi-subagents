@@ -20,14 +20,11 @@ import {
 	type CompletionMessageItem,
 } from "./completion.ts";
 import { type ThinkingLevel } from "./config.ts";
+import { threadRecordFromThread, upsertThreadRecord, type ThreadRecord } from "./durable.ts";
 import { isRunActiveStatus, monitor } from "./monitor.ts";
-import {
-	persistRecoveryRecords,
-	recoveryRecordFromFinalization,
-	type RecoveryRecord,
-} from "./recovery.ts";
 import type { RpcRunControl } from "./rpc-run.ts";
-import type { SingleResult } from "./spawn.ts";
+import type { StartBackgroundInternal } from "./thread-lifecycle.ts";
+import { isFailedResult, type SingleResult } from "./spawn.ts";
 import type { IsolationMode, WorktreeFinalization, WorktreeIsolation } from "./worktree.ts";
 
 export type ThreadState =
@@ -41,7 +38,7 @@ export type ThreadState =
 	| "failed"
 	| "stopped";
 
-export type ThreadLifecycleOperation = "park" | "resume" | "fork" | "stop" | "settle";
+export type ThreadLifecycleOperation = "park" | "resume" | "stop" | "settle";
 
 export interface SubagentThread {
 	id: number;
@@ -79,10 +76,6 @@ export interface SubagentThread {
 	park: () => Promise<"queued" | "active">;
 	/** Installed by dispatch so the control tool can restart the same logical id. */
 	resume: (objective?: string, ctx?: ExtensionContext) => Promise<SingleResult>;
-	/** Create a new logical thread from this thread's retained Pi session branch. */
-	fork: (objective?: string, ctx?: ExtensionContext) => Promise<SingleResult>;
-	forkedFromRunId?: number;
-	forkChildRunIds: number[];
 	/** Dispatch-owned, generation-guarded worktree settlement hook. Its apply
 	 * runs under the canonical original-repository lane. */
 	finalizeIsolation: (generation: number, result?: SingleResult) => Promise<WorktreeFinalization | undefined>;
@@ -98,6 +91,13 @@ export interface SubagentRuntime {
 	getActiveTools: () => string[];
 	/** False after session_shutdown; guards delivery and queue work. */
 	sessionActive: boolean;
+	/** The process-wide background dispatcher. Set at tool registration so
+	 * threads restored from the durable manifest can resume before any dispatch. */
+	dispatcher?: StartBackgroundInternal;
+	/** Run ids restored from the durable manifest at load; consumed by the
+	 * one-time session-start notice. */
+	restoredRunIds: number[];
+	restoredNotified: boolean;
 	/** Deliver a batch of completion messages to the main window, waking it only
 	 * when the batch needs a turn. */
 	sendCompletionGroup: (items: CompletionMessageItem[]) => void;
@@ -111,7 +111,7 @@ export interface SubagentRuntime {
 	registerRunResult: (runId: number, result: SingleResult) => void;
 	/** Logical threads outlive process attempts and completed generations. */
 	threads: Map<number, SubagentThread>;
-	/** Resume/fork setup that has claimed a thread but has not yet enqueued its
+	/** Resume setup that has claimed a thread but has not yet enqueued its
 	 * next generation. Shutdown invalidates these claims and waits for cleanup. */
 	preflightOperations: Set<Promise<void>>;
 	/** Every session directory retained for this parent session, including
@@ -131,6 +131,8 @@ export function createRuntime(pi: ExtensionAPI, configPath: string): SubagentRun
 		backgroundQueue,
 		getActiveTools: () => pi.getActiveTools(),
 		sessionActive: true,
+		restoredRunIds: [],
+		restoredNotified: false,
 		sendCompletionGroup: (items) => {
 			if (!runtime.sessionActive || items.length === 0) return;
 			// A result arriving for one run does not mean sibling runs are done.
@@ -203,61 +205,86 @@ export function createRuntime(pi: ExtensionAPI, configPath: string): SubagentRun
 			if (!runtime.sessionActive) return;
 			runtime.sessionActive = false;
 			const shutdownThreads = [...runtime.threads.values()];
+			const liveStates = new Set(["queued", "resuming", "running", "steering", "interrupting"]);
+			const previousStates = new Map(shutdownThreads.map((thread) => [thread.id, thread.state] as const));
 			// Invalidate every lifecycle claim synchronously before the first await.
-			// Resume/fork preflight checks both this version and sessionActive, then
+			// Resume preflight checks both this version and sessionActive, then
 			// cleans any worktree/session it created before resolving its tracker.
+			// A generation already inside its settlement keeps its own claim: it
+			// finalizes its worktree and persists its terminal record itself.
+			const interrupting = shutdownThreads.filter((thread) =>
+				!thread.retired &&
+				thread.lifecycleOperation !== "settle" &&
+				liveStates.has(thread.state),
+			);
 			for (const thread of shutdownThreads) {
 				thread.lifecycleVersion++;
+				if (thread.retired) {
+					thread.lifecycleOperation = "stop";
+					continue;
+				}
+				if (thread.lifecycleOperation === "settle") continue;
 				thread.lifecycleOperation = "stop";
-				thread.retired = true;
-				thread.retireOnSettle = true;
-				thread.state = "stopped";
+				// Deliberately NOT retireOnSettle: shutdown interrupts to the last
+				// checkpoint but keeps the session/worktree resumable across reload.
+				thread.retireOnSettle = false;
+				if (liveStates.has(thread.state)) thread.state = "stopped";
 			}
 			const preflights = [...runtime.preflightOperations];
 			runtime.completionBatcher.dispose();
 			runtime.backgroundQueue.cancelAll();
 			// Await live RPC process-tree cleanup and continuation preflight rollback
-			// before removing sessions/worktrees or clearing ownership maps.
+			// before persisting records or releasing ownership maps.
 			await Promise.all([
 				Promise.all(
-					shutdownThreads.map((thread) =>
+					interrupting.map((thread) =>
 						thread.control.stop("Parent session shut down").catch(() => undefined),
 					),
 				),
 				Promise.allSettled(preflights),
 				runtime.backgroundQueue.waitForIdle(),
 			]);
-			// Parked work owns no queue task, so shutdown is its final settlement.
-			// Active/stopped tasks may already have finalized; the handle and callback
-			// are idempotent and generation-guarded.
-			const recoveryRecords: RecoveryRecord[] = [];
+			// Persist one record per non-retired thread, then keep exactly the
+			// artifacts those records reference. A thread whose settlement finished
+			// during the wait above already wrote its own terminal record; the
+			// lastResult-derived state below matches it.
+			const records: ThreadRecord[] = [];
 			for (const thread of runtime.threads.values()) {
-				const finalization = await thread.finalizeIsolation(thread.generation).catch(() => undefined);
-				if (finalization?.status === "retained") {
-					recoveryRecords.push(recoveryRecordFromFinalization(thread.id, finalization));
-					if (!thread.isolationFailureNotified) {
-						thread.isolationFailureNotified = true;
-						try {
-							thread.notifyIsolationFailure?.(finalization);
-						} catch {
-							/* the parent UI may already be shutting down */
-						}
-					}
+				if (thread.retired) continue;
+				const previous = previousStates.get(thread.id) ?? thread.state;
+				let state: "parked" | "completed" | "failed";
+				if (previous === "completed" || previous === "failed") {
+					state = previous;
+				} else if (thread.lifecycleOperation === "settle" && thread.lastResult) {
+					state = isFailedResult(thread.lastResult) ? "failed" : "completed";
+				} else {
+					state = "parked";
 				}
+				records.push(threadRecordFromThread(thread, state));
 			}
-			// Persist before tearing down the old runtime. A /new, /resume, or quit
-			// must not make the only recovery paths unreachable.
-			await persistRecoveryRecords(runtime.configPath, recoveryRecords).catch(() => undefined);
-			runtime.settledRuns.clear();
-			runtime.settledListeners.clear();
-			runtime.runControllers.clear();
+			await Promise.all(
+				records.map((record) => upsertThreadRecord(runtime.configPath, record).catch(() => undefined)),
+			);
+			// Retained-failure recovery records are persisted by the finalization
+			// itself; shutdown only drops sessions no record claims anymore.
+			const referenced = new Set(
+				records.flatMap((record) =>
+					[record.sessionDir, record.worktree?.tempDir].filter(Boolean) as string[],
+				),
+			);
 			for (const sessionDir of runtime.sessionDirs) {
+				if (referenced.has(sessionDir)) continue;
 				try {
 					rmSync(sessionDir, { recursive: true, force: true });
 				} catch {
-					/* best-effort */
+					/* best-effort; the state-root sweep catches leftovers later */
 				}
 			}
+			runtime.settledRuns.clear();
+			runtime.settledListeners.clear();
+			runtime.runControllers.clear();
+			// sessionDirs entries still referenced by records stay owned by the
+			// manifest; the next process re-registers them at restore.
 			runtime.sessionDirs.clear();
 			runtime.preflightOperations.clear();
 			runtime.threads.clear();

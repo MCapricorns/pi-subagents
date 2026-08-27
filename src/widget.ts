@@ -98,7 +98,7 @@ function runPrimaryLine(
 	// A chain child shows its role in the chain plus a task-derived label; the
 	// templated fix brief itself would only repeat the parent review's content.
 	const continuation = run.parentRunId === undefined
-		? continuationLabel(run.continuationKind, run.forkedFromRunId)
+		? continuationLabel(run.continuationKind)
 		: undefined;
 	const taskSource = run.parentRunId !== undefined
 		? [run.relationLabel, run.label].filter((part): part is string => Boolean(part)).join(" · ")
@@ -215,8 +215,8 @@ function runActivityLine(run: RunView, theme: Theme, width: number, indent: stri
 
 /** Render active runs as compact workflow-aware trees. Stable managed parents
  * retain their stage timeline while the current internal child supplies exact
- * model/thinking/activity telemetry. Fork labels include their source id; other
- * control ids remain available through status. */
+ * model/thinking/activity telemetry. Control ids remain available through
+ * status. */
 export function formatActiveRunLines(
 	runs: readonly RunView[],
 	theme: Theme,

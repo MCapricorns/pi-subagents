@@ -16,8 +16,8 @@ intentional cleanup and duplicate-code consolidation to `cleaner`, documentation
 synchronization to `documenter`, and independent checks to `reviewer`. Each role
 runs in its own child process with a clean context, works in the background, and
 returns its result automatically. Active top-level work can be steered or
-retargeted; managed stages can be parked, resumed, stopped, or forked without
-losing retained context.
+retargeted; managed stages can be parked, resumed, or stopped without losing
+retained context, and parked/settled threads survive a pi reload or restart.
 
 ```text
 You
@@ -66,7 +66,7 @@ more of it.
 | A basic launcher often gives you… | pi-subagents gives you… |
 | --- | --- |
 | One generic child role | Five focused engineering roles |
-| A one-shot prompt | Retained, steerable, resumable, forkable threads |
+| A one-shot prompt | Retained, steerable, resumable threads that survive reloads |
 | Concurrent writers in one checkout | Git worktree isolation for parallel workers |
 | A review report you must act on manually | Independent worker/cleaner gate, bounded fix rounds, and conditional docs sync |
 | Manual polling or follow-up | Automatic result delivery that resumes the main agent |
@@ -154,7 +154,7 @@ guidance does this automatically when the main agent dispatches on your behalf.
 
 ### Tool, plugin, skill, and context inheritance
 
-Every initial dispatch, managed stage, retained resume, fork, startup retry,
+Every initial dispatch, managed stage, retained resume, startup retry,
 and selected-to-main fallback snapshots the parent session's currently active
 tools. Roles without an explicit tool list (such as shipped `worker` and
 `cleaner`) inherit that complete set. An explicit role list remains its Pi
@@ -175,7 +175,7 @@ inside each child Pi process.
 
 Each child is an independent Pi session and uses Pi's normal global/project
 `compaction` settings. Auto-compaction therefore remains enabled by default when
-a child's model context approaches its limit. Retained resume/fork sessions keep
+a child's model context approaches its limit. Retained resume sessions keep
 their existing conversation and compaction summaries instead of starting over.
 
 ## Everyday workflows
@@ -210,7 +210,10 @@ subagent({
 Independent tasks run up to a fixed limit of `4` concurrent sub-agent processes.
 One parallel call may contain at most that many tasks and is rejected if it
 exceeds the limit. Accepted background work from separate calls waits in the
-shared queue when all slots are busy.
+shared queue when all slots are busy. The limit protects manual dispatches only:
+once a generation's top-level child settles and the runtime continues into its
+own managed stages (gate review, auto-fix rounds, documentation sync), that
+generation releases its slot, so long fix chains never starve new dispatches.
 
 ### Run an independent quality gate
 
@@ -344,8 +347,7 @@ patch or worktree when possible and records recovery information in:
 ~/.pi/agent/pi-subagents-recovery.json
 ```
 
-A parked isolated thread keeps its worktree. Resume continues there. Forking an
-isolated checkpoint is available after that checkpoint has settled and integrated.
+A parked isolated thread keeps its worktree. Resume continues there.
 
 ## Follow, redirect, or stop a run
 
@@ -357,16 +359,15 @@ main agent.
 
 | Tool | What it does |
 | --- | --- |
-| `subagent_control` | `steer`, `retarget`, `park`, `resume`, or `fork` a logical thread. |
+| `subagent_control` | `steer`, `retarget`, `park`, or `resume` a logical thread. |
 | `subagent_status` | Show active and recent runs, or return the full result for one id. |
 | `subagent_wait` | Look up a result in the current turn. It is non-blocking by default; use `timeoutMs` only when you must wait in-turn. |
-| `subagent_stop` | Destructively cancel work, deliver partial output, and retire that thread's retained session. Independent forks survive. |
+| `subagent_stop` | Destructively cancel work, deliver partial output, and retire that thread's retained session. |
 
 ```ts
 subagent_control({ action: "steer", id: 7, instruction: "Check the Windows path too." });
 subagent_control({ action: "park", id: 7 });
 subagent_control({ action: "resume", id: 7, objective: "Finish the tests." });
-subagent_control({ action: "fork", id: 7, objective: "Try the smaller design instead." });
 ```
 
 Use `steer` or `retarget` only while the top-level RPC child is active. `steer`
@@ -375,9 +376,8 @@ generation's objective and replaces it in the same session. During an automatic
 documenter, reviewer, or fix stage, use `park` or `stop`. `resume` without an
 `objective` continues the currently displayed goal; supplying one appends that
 explicit goal to the retained conversation and makes it the new displayed goal.
-It never clears prior context. `fork` follows the same objective rule on a copied
-branch while leaving its source unchanged. Widget labels distinguish retained,
-appended, retargeted, and forked objectives.
+It never clears prior context. Widget labels distinguish retained, appended,
+and retargeted objectives.
 
 Use `park` to preserve the newest active stage and release its process slot;
 parking during documentation retains the documenter's partial/session, not an
@@ -389,12 +389,37 @@ worktree finalization to the same one-time lifecycle owner. `stop-all` interrupt
 every lane holder before waiting for finalization, avoiding self-deadlock when an
 isolated apply is queued behind shared work.
 
-Every control operation is bounded: park, stop, resume, and fork never wait
+Every control operation is bounded: park, stop, and resume never wait
 indefinitely on a generation that is still settling (for example an isolated
 apply queued behind the managed repository lane). Stop proceeds after a bounded
 deadline once it owns the lifecycle, a still-running integration continues in the
 background, and a durable recovery record is persisted pointing at the retained
 worktree/patch so stopped work is never lost.
+
+## Survive reloads and restarts
+
+Retained sessions, worktree checkpoints, and thread state live next to your pi
+agent config, never in the OS temp directory:
+
+```text
+~/.pi/agent/pi-subagents-threads.json   # durable thread manifest
+~/.pi/agent/pi-subagents-state/         # retained sessions and worktree temp state
+```
+
+When pi reloads (or the process crashes and restarts), the extension restores
+parked and settled threads from that manifest: `subagent_status` lists them
+again, `subagent_control resume` continues one with its full retained context,
+and a one-time notice reports how many threads were restored. New run ids never
+collide with restored ones. A reload that interrupts a live run converts it to a
+restorable checkpoint instead of losing it, and child processes orphaned by the
+reload are killed so the on-disk session is the single source of truth.
+
+Retention is fixed, not configurable: settled results stay resumable for 7 days,
+parked work (which may hold unintegrated changes) for 30 days. Expired records
+are removed at load together with their artifacts. `subagent_stop` removes a
+thread's record immediately. Startup also sweeps leaked temp directories whose
+owning process is gone and state-root directories no record references, so
+crashes between creation and the first checkpoint do not accumulate garbage.
 
 ## Results and live status
 
@@ -430,8 +455,8 @@ A managed root keeps its original top-level role and workflow-wide elapsed time,
 but omits model/thinking because several model stages own it. The active nested
 row shows the current role, relation, selected/fallback model, thinking, stage
 elapsed, and activity. Completed internal rows can disappear while their stage
-remains visible on the parent until the workflow settles. Standalone,
-resume/retarget, and fork labels retain their existing semantics; narrow layouts
+remains visible on the parent until the workflow settles. Standalone and
+resume/retarget labels retain their existing semantics; narrow layouts
 prioritize the current stage and elapsed tail. Adjacent workflows add no blank
 separator rows.
 
@@ -493,8 +518,8 @@ subagent({
   even when its ACK is lost.
 - **Idle watchdog:** a run with no RPC output for `idleTimeoutSec` is terminated;
   selected-model failures can continue on the current main model.
-- **Retained context:** model handoff, park/resume, retarget, and fork build on the
-  same session history instead of repeating discovery.
+- **Retained context:** model handoff, park/resume, retarget, and cross-reload
+  restore build on the same session history instead of repeating discovery.
 - **Visible failures:** process crashes, partial parallel starts, model failures,
   and Git integration failures are returned as failures rather than silent hangs.
 - **Safe status text:** live tool activity is credential-redacted and stripped of

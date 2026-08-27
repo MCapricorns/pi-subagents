@@ -8,7 +8,7 @@ import { monitor } from "../src/monitor.ts";
 import { persistRecoveryRecords } from "../src/recovery.ts";
 import * as spawn from "../src/spawn.ts";
 import { fakeRpcScript } from "./fake-rpc.ts";
-import { makeStub } from "./test-helpers.ts";
+import { makeStub, waitFor } from "./test-helpers.ts";
 
 function executionContext(overrides: { uiNotify?: ReturnType<typeof vi.fn> } = {}): any {
 	return {
@@ -94,10 +94,8 @@ describe("extension registration", () => {
 		expect(tool.parameters.properties.isolation).toBeDefined();
 		expect(tool.parameters.properties.tasks.items.properties.isolation).toBeDefined();
 		const control = stub.tools.find((t) => t.name === "subagent_control");
-		expect(control.description).toContain("fork copies");
 		expect(control.description).toContain("Managed downstream documenter/reviewer/fix stages");
 		expect(control.promptSnippet).toContain("park/stop a managed downstream stage");
-		expect(JSON.stringify(control.parameters.properties.action)).toContain("fork");
 	});
 
 	it("wires recovery, widget install, and config migration through session_start", async () => {
@@ -1058,6 +1056,50 @@ describe("managed post-writer workflows", () => {
 		...overrides,
 	});
 
+	it("releases the concurrency slot for a managed continuation so manual dispatches are not starved", async () => {
+		configureEnabledAgents(["worker", "reviewer", "explorer"]);
+		const stub = makeStub();
+		const hangUntilAborted = (signal?: AbortSignal): Promise<void> =>
+			new Promise<void>((resolveHang) => {
+				if (signal?.aborted) return resolveHang();
+				signal?.addEventListener("abort", () => resolveHang(), { once: true });
+			});
+		let explorerStarts = 0;
+		let reviewerStarts = 0;
+		vi.spyOn(spawn, "runSingleAgentWithMainFallback").mockImplementation(async (options: any) => {
+			if (options.agentName === "worker") return makeResult("worker", options.task, "implemented");
+			if (options.agentName === "reviewer") {
+				// Hold the gate review so the chain stays inside its suspended continuation.
+				reviewerStarts++;
+				await hangUntilAborted(options.signal);
+				return makeResult("reviewer", options.task, "VERDICT: REVIEW_PASS");
+			}
+			explorerStarts++;
+			if (explorerStarts <= 3) await hangUntilAborted(options.signal);
+			return makeResult("explorer", options.task, "scouted");
+		});
+
+		try {
+			register(stub.api);
+			const tool = stub.tools.find((candidate) => candidate.name === "subagent")!;
+			const ctx = executionContext();
+			// One chain (worker → held gate review) plus three stuck explorers
+			// exhaust all four manual slots; the chain's continuation must then
+			// suspend its slot so a fifth dispatch still starts immediately.
+			await tool.execute("chain", { agent: "worker", task: "Chain owner" }, new AbortController().signal, () => {}, ctx);
+			for (const task of ["Stuck one", "Stuck two", "Stuck three"]) {
+				await tool.execute("fill", { agent: "explorer", task }, new AbortController().signal, () => {}, ctx);
+			}
+			await waitFor(() => reviewerStarts === 1 && explorerStarts === 3);
+
+			const fifth = await tool.execute("fifth", { agent: "explorer", task: "Fifth dispatch" }, new AbortController().signal, () => {}, ctx);
+			expect(fifth.details.results[0].runId).toBeGreaterThan(0);
+			await waitFor(() => explorerStarts === 4);
+		} finally {
+			await stub.hooks["session_shutdown"]?.({}, {});
+		}
+	});
+
 	it("re-reads parent shells and active plugins for every managed stage", async () => {
 		configureEnabledAgents(["worker", "documenter", "reviewer"], { maxFixRounds: 1 });
 		const stub = makeStub();
@@ -1267,8 +1309,6 @@ describe("managed post-writer workflows", () => {
 				expect(options.task).toContain(`${topAgent} report src/change.ts`);
 				expect(options.task).toContain("VERDICT: REVIEW_PASS");
 				expect(options.task).toContain("Inspect the actual git diff");
-				expect(options.task).toContain("Do NOT commit, push, publish, tag, or release");
-				expect(options.task).toContain("do not bump versions");
 				return makeResult("documenter", options.task, "documentation report README.md");
 			}
 			expect(options.agentName).toBe("reviewer");
@@ -1934,7 +1974,6 @@ send({ type: "message_end", message: { role: "assistant", content: [{ type: "tex
 			expect(options.task).toContain("Final documentation sync");
 			expect(options.task).toContain("fixed src/cache.ts");
 			expect(options.task).toContain("VERDICT: REVIEW_PASS");
-			expect(options.task).toContain("Do NOT commit, push, publish, tag, or release");
 			return makeResult("documenter", options.task, "updated README.md");
 		});
 

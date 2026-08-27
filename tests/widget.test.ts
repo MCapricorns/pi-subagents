@@ -244,12 +244,10 @@ describe("formatActiveRunLines", () => {
 	});
 
 	it.each([
-		["retarget", "retarget", undefined, "retarget: replacement objective"],
-		["retained resume", "resume-retained", undefined, "resume: current objective"],
-		["appended resume", "resume-appended", undefined, "resume: appended objective"],
-		["retained fork", "fork-retained", 7, "fork #7: current objective"],
-		["appended fork", "fork-appended", 7, "fork #7: appended objective"],
-	] as const)("keeps %s semantics visible beside a path-heavy task at 80 columns", (_name, kind, sourceRunId, label) => {
+		["retarget", "retarget", "retarget: replacement objective"],
+		["retained resume", "resume-retained", "resume: current objective"],
+		["appended resume", "resume-appended", "resume: appended objective"],
+	] as const)("keeps %s semantics visible beside a path-heavy task at 80 columns", (_name, kind, label) => {
 		const store = new MonitorStore();
 		const id = store.addRun("worker", "Original objective");
 		store.removeRun(id);
@@ -262,7 +260,6 @@ describe("formatActiveRunLines", () => {
 			"shared",
 			{ elapsedMs: 61_000, continuationKind: kind },
 		);
-		store.findRun(id)!.forkedFromRunId = sourceRunId;
 		const [line] = formatActiveRunLines(store.getRuns(), theme, 80, 100_000);
 		expect(visibleWidth(line)).toBeLessThanOrEqual(80);
 		expect(line).toContain(label);

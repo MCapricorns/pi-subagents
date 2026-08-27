@@ -29,13 +29,19 @@ interface PendingTask {
 
 /** How many sub-agent processes may run at once, and how many tasks one
  * parallel `subagent` call may contain. Fixed by design: the queue sheds load
- * by waiting, so the knob bought nothing worth its maintenance. */
+ * by waiting, so the knob bought nothing worth its maintenance. Only manually
+ * dispatched top-level generations hold slots; runtime-initiated managed
+ * continuations (gate reviews, auto-fix rounds, documentation sync) suspend
+ * their task's slot so they never starve manual dispatches. */
 export const MAX_CONCURRENT_SUBAGENTS = 4;
 
 export class BackgroundTaskQueue {
 	private concurrency: number;
 	private readonly pending: PendingTask[] = [];
 	private readonly active = new Set<AbortController>();
+	/** Active tasks that no longer count toward the concurrency limit. They keep
+	 * every other guarantee: abortable, awaited by waitForTask/waitForIdle. */
+	private readonly suspended = new Set<AbortController>();
 	private readonly completions = new WeakMap<AbortController, Promise<void>>();
 	private readonly idleWaiters = new Set<() => void>();
 	private stopped = false;
@@ -71,6 +77,16 @@ export class BackgroundTaskQueue {
 		return this.completions.get(controller) ?? Promise.resolve();
 	}
 
+	/** Stop counting a running task toward the concurrency limit. Its body keeps
+	 * running under the same abort signal; completion still releases everything
+	 * waitForTask/waitForIdle promise. Frees a slot for queued work immediately. */
+	suspend(controller: AbortController | undefined): void {
+		if (!controller || this.stopped) return;
+		if (!this.active.delete(controller)) return;
+		this.suspended.add(controller);
+		this.drain();
+	}
+
 	/** Cancel one queued/running task. Queued entries are removed immediately;
 	 * active entries resolve waitForTask only after their body and error handler
 	 * have quiesced and the concurrency slot has been released. */
@@ -89,7 +105,7 @@ export class BackgroundTaskQueue {
 
 	/** Resolve once no queued or running task remains. */
 	waitForIdle(): Promise<void> {
-		if (this.pending.length === 0 && this.active.size === 0) return Promise.resolve();
+		if (this.pending.length === 0 && this.active.size === 0 && this.suspended.size === 0) return Promise.resolve();
 		return new Promise<void>((resolve) => this.idleWaiters.add(resolve));
 	}
 
@@ -104,6 +120,7 @@ export class BackgroundTaskQueue {
 			entry.complete();
 		}
 		for (const controller of this.active) controller.abort();
+		for (const controller of this.suspended) controller.abort();
 		this.resolveIdleWaiters();
 	}
 
@@ -145,6 +162,7 @@ export class BackgroundTaskQueue {
 				})
 				.finally(() => {
 					this.active.delete(entry.controller);
+					this.suspended.delete(entry.controller);
 					entry.complete();
 					this.drain();
 					this.resolveIdleWaiters();
@@ -153,7 +171,7 @@ export class BackgroundTaskQueue {
 	}
 
 	private resolveIdleWaiters(): void {
-		if (this.pending.length > 0 || this.active.size > 0) return;
+		if (this.pending.length > 0 || this.active.size > 0 || this.suspended.size > 0) return;
 		for (const resolve of this.idleWaiters) resolve();
 		this.idleWaiters.clear();
 	}

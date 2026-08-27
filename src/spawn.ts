@@ -10,7 +10,7 @@
 
 import { createHash, randomUUID } from "node:crypto";
 import { type Dirent, mkdirSync, readdirSync, realpathSync, rmSync, statSync, writeFileSync } from "node:fs";
-import { mkdtemp, rm } from "node:fs/promises";
+import { mkdir, mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { basename, join, resolve } from "node:path";
 import type { Message } from "@earendil-works/pi-ai";
@@ -330,6 +330,12 @@ export function buildResumePrompt(task: string, reason: string): string {
 	return `You are resuming an earlier sub-agent session after ${reason}. Your earlier work — searches, reads, edits, and reasoning — is preserved in this session's history above; review it before acting. Current objective: ${task}. Pick up exactly where you left off and finish it. Do NOT redo searches, reads, or edits you already completed unless a step clearly failed. Continue now.`;
 }
 
+/** Create a fresh private session directory under the given root. */
+export async function createSessionDir(root: string = tmpdir()): Promise<string> {
+	await mkdir(root, { recursive: true });
+	return mkdtemp(join(root, "pi-subagent-session-"));
+}
+
 export function buildFallbackResumeReason(fromModel?: string): string {
 	return fromModel
 		? `the selected model (${fromModel}) failed at the model/provider level, so the current main model is continuing`
@@ -349,6 +355,10 @@ export interface RunSingleOptions {
 	startupRetryDelaysMs?: readonly number[];
 	sessionDir?: string;
 	sessionId?: string;
+	/** Parent directory for a fresh session directory. Defaults to the OS temp
+	 * dir; dispatch passes the durable state root so retained sessions survive
+	 * reloads and restarts. */
+	sessionRoot?: string;
 	/** Initial RPC prompt. Kept under the old name to limit caller churn. */
 	stdinText?: string;
 	/** Refresh parent-derived tools immediately before every startup retry and
@@ -459,8 +469,17 @@ export async function runSingleAgentWithMainFallback(
 	const startupDelays = customStartupDelays ?? SUBAGENT_STARTUP_RETRY_DELAYS_MS;
 
 	const sessionId = options.sessionId ?? randomUUID();
-	const sessionDir = options.sessionDir ?? (await mkdtemp(join(tmpdir(), "pi-subagent-session-")));
+	const sessionDir = options.sessionDir ?? (await createSessionDir(options.sessionRoot));
 	const baseOptions: RunSingleOptions = { ...options, sessionDir, sessionId };
+	if (!options.sessionDir) {
+		// Surface the fresh session immediately so the dispatching thread can
+		// persist a durable checkpoint before the child settles.
+		try {
+			options.onLive?.({ kind: "session", sessionId, sessionDir });
+		} catch {
+			/* never throw from event handling */
+		}
+	}
 
 	const dispatchFailure = async (error: unknown): Promise<SingleResult> => {
 		const errorMessage = error instanceof Error ? error.message : String(error);

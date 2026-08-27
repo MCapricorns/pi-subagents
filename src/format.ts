@@ -100,11 +100,6 @@ export function formatCompletionBlock(
 	const startupRetryNote = result.startupRetries
 		? ` (recovered after ${result.startupRetries} startup retr${result.startupRetries === 1 ? "y" : "ies"} — concurrent pi startup race)`
 		: "";
-	const relations = [
-		result.forkedFromRunId !== undefined ? `forked from #${result.forkedFromRunId}` : undefined,
-		(result.forkChildRunIds?.length ?? 0) > 0 ? `fork children ${result.forkChildRunIds!.map((id) => `#${id}`).join(", ")}` : undefined,
-	].filter((value): value is string => Boolean(value));
-	const relationNote = relations.length > 0 ? ` · ${relations.join(" · ")}` : "";
 	const runNote = result.runId !== undefined ? ` · run #${result.runId}` : "";
 	const lines = [`### [${result.agent}] ${status}${usage ? ` (${usage})` : ""}${fallbackNote}${startupRetryNote}${runNote}`, "", `Task: ${formatTaskSummary(result.task, 80, false)}`, ""];
 	if (result.isolation === "worktree") {
@@ -118,13 +113,11 @@ export function formatCompletionBlock(
 							? "worktree · changes applied, but cleanup failed; recovery artifacts retained"
 							: "worktree · integration failed; recovery artifacts retained"
 						: "worktree · isolated";
-		lines.push(`Isolation: ${isolation}${relationNote}`);
+		lines.push(`Isolation: ${isolation}`);
 		if (result.integrationWorktreePath) lines.push(`Retained worktree: ${result.integrationWorktreePath}`);
 		if (result.integrationPatchPath) lines.push(`Retained patch: ${result.integrationPatchPath}`);
 		if (result.integrationError) lines.push(`Integration error: ${result.integrationError}`);
 		lines.push("");
-	} else if (relations.length > 0) {
-		lines.push(`Relation: ${relations.join(" · ")}`, "");
 	}
 	lines.push(text);
 	// Failed-tool diagnostics are deliberate opt-in via subagent_status: agents

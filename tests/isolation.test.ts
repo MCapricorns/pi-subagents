@@ -7,6 +7,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { loadBuiltinAgents } from "../src/agents.ts";
 import { BackgroundTaskQueue, type BackgroundTask } from "../src/background.ts";
 import { isWorktreeCapableAgent } from "../src/dispatch.ts";
+import { readThreadRecords } from "../src/durable.ts";
 import register from "../src/index.ts";
 import { monitor } from "../src/monitor.ts";
 import { readRecoveryRecords } from "../src/recovery.ts";
@@ -101,6 +102,8 @@ function fakeWorktree(root: string, final: WorktreeFinalization = {
 		tempDir: join(root, `${label}-temp`),
 		patchPath: join(root, `${label}-temp`, "changes.patch"),
 		head: "deadbeef",
+		integrationBaseHead: "deadbeef",
+		getContinuationCheckpoint: () => undefined,
 		get state() {
 			return state;
 		},
@@ -710,7 +713,7 @@ describe("logical worktree reuse and guarded finalization", () => {
 		}
 	});
 
-	it("aborts a documenter on shutdown without stale delivery and finalizes once", async () => {
+	it("aborts a documenter on shutdown without stale delivery and keeps the worktree resumable", async () => {
 		writeFileSync(join(agentDir, "pi-subagents.json"), JSON.stringify({
 			enabledAgents: ["worker", "documenter", "reviewer"],
 			announcedFeatures: ["cleanerDefaulted", "documenterDefaulted"],
@@ -745,13 +748,18 @@ describe("logical worktree reuse and guarded finalization", () => {
 			});
 		});
 		const { stub, subagent } = registered();
-		await execute(subagent, { agent: "worker", task: "shutdown in docs", isolation: "worktree" }, root);
+		const dispatched = await execute(subagent, { agent: "worker", task: "shutdown in docs", isolation: "worktree" }, root);
+		const runId = dispatched.details.results[0].runId;
 		await waitFor(() => documenterStarted);
 		await stub.hooks["session_shutdown"]?.({}, {});
 		activeStubs = activeStubs.filter((candidate) => candidate !== stub);
 
 		expect(stub.messages).toHaveLength(0);
-		expect(handle.finalizeMock).toHaveBeenCalledTimes(1);
+		// Shutdown interrupts the workflow to its checkpoint instead of
+		// finalizing: the worktree and its partial docs stage stay resumable.
+		expect(handle.finalizeMock).not.toHaveBeenCalled();
+		const records = await readThreadRecords(join(agentDir, "pi-subagents.json"));
+		expect(records).toContainEqual(expect.objectContaining({ runId, state: "parked" }));
 		rmSync(root, { recursive: true, force: true });
 	});
 
@@ -1025,10 +1033,8 @@ describe("shutdown and destructive-stop integration", () => {
 		rmSync(root, { recursive: true, force: true });
 	});
 
-	it.each(["resume", "fork"] as const)(
-		"invalidates and rolls back an isolated %s preflight before clearing the runtime",
-		async (action) => {
-			const root = mkdtempSync(join(tmpdir(), `pi-subagents-isolation-shutdown-${action}-`));
+	it("invalidates and rolls back an isolated resume preflight before clearing the runtime", async () => {
+			const root = mkdtempSync(join(tmpdir(), "pi-subagents-isolation-shutdown-resume-"));
 			const firstHandle = fakeWorktree(root, undefined, "source");
 			const childHandle = fakeWorktree(root, undefined, "continuation");
 			const childCreation = deferred<WorktreeIsolation>();
@@ -1054,7 +1060,7 @@ describe("shutdown and destructive-stop integration", () => {
 			const runId = dispatched.details.results[0].runId;
 			await queued[0].task(queued[0].controller.signal);
 
-			const controlling = execute(control, { action, id: runId }, root);
+			const controlling = execute(control, { action: "resume", id: runId }, root);
 			await waitFor(() => create.mock.calls.length === 2);
 			const shuttingDown = stub.hooks["session_shutdown"]?.({}, {});
 			childCreation.resolve(childHandle);
@@ -1064,10 +1070,18 @@ describe("shutdown and destructive-stop integration", () => {
 			expect(result.content[0].text).toMatch(/changed|shut down/i);
 			expect(childHandle.discardMock).toHaveBeenCalledTimes(1);
 			expect(queued).toHaveLength(1);
-			expect(existsSync(retained.dir)).toBe(false);
-			rmSync(root, { recursive: true, force: true });
-		},
-	);
+			// The settled source keeps its retained session for cross-reload
+			// resume: shutdown persists its record instead of deleting context.
+			// (A resume preflight interrupted mid-claim restores as parked; a
+			// completed source keeps its terminal state.)
+			expect(existsSync(retained.dir)).toBe(true);
+			const records = await readThreadRecords(join(agentDir, "pi-subagents.json"));
+			expect(records).toContainEqual(expect.objectContaining({
+				runId,
+				sessionId: retained.id,
+				sessionDir: retained.dir,
+			}));
+	});
 
 	it("persists recovery metadata when shutdown cannot discard a preflight continuation", async () => {
 		const root = mkdtempSync(join(tmpdir(), "pi-subagents-isolation-shutdown-discard-"));
@@ -1114,7 +1128,7 @@ describe("shutdown and destructive-stop integration", () => {
 		rmSync(root, { recursive: true, force: true });
 	});
 
-	it("best-effort integrates a parked worktree during parent session shutdown", async () => {
+	it("keeps a parked worktree resumable across parent session shutdown", async () => {
 		const root = mkdtempSync(join(tmpdir(), "pi-subagents-isolation-shutdown-parent-"));
 		const { execFileSync } = await import("node:child_process");
 		const git = (args: string[]) => execFileSync("git", args, { cwd: root, stdio: "ignore" });
@@ -1130,10 +1144,19 @@ describe("shutdown and destructive-stop integration", () => {
 			return emptyResult("parked", { parked: true });
 		});
 		const { stub, subagent } = registered();
-		await execute(subagent, { agent: "worker", task: "parked", isolation: "worktree" }, root);
+		const dispatched = await execute(subagent, { agent: "worker", task: "parked", isolation: "worktree" }, root);
+		const runId = dispatched.details.results[0].runId;
 		await waitFor(() => monitor.getRuns().some((run) => run.status === "parked"));
 		await stub.hooks["session_shutdown"]?.({}, {});
-		expect(readFileSync(join(root, "parked.txt"), "utf8")).toBe("parked worker edit\n");
+		// Shutdown interrupts to the parked checkpoint but deliberately does not
+		// integrate: the isolated edit stays in its worktree for a later resume.
+		expect(readFileSync(join(root, "parked.txt"), "utf8")).toBe("base\n");
+		const records = await readThreadRecords(join(agentDir, "pi-subagents.json"));
+		expect(records).toContainEqual(expect.objectContaining({
+			runId,
+			state: "parked",
+			worktree: expect.objectContaining({ state: "active" }),
+		}));
 		rmSync(root, { recursive: true, force: true });
 	});
 

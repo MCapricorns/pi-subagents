@@ -8,7 +8,6 @@ import {
 	persistRecoveryRecords,
 	readRecoveryRecords,
 } from "../src/recovery.ts";
-import { createRuntime } from "../src/runtime.ts";
 
 const roots: string[] = [];
 
@@ -17,7 +16,7 @@ afterEach(() => {
 });
 
 describe("durable worktree recovery handoff", () => {
-	it("persists shutdown conflicts and announces them in the next session", async () => {
+	it("persists retained finalizations durably and announces them in the next session", async () => {
 		const root = mkdtempSync(join(tmpdir(), "pi-subagents-recovery-"));
 		roots.push(root);
 		const configPath = join(root, "pi-subagents.json");
@@ -25,22 +24,16 @@ describe("durable worktree recovery handoff", () => {
 		const patchPath = join(root, "retained.patch");
 		mkdirSync(worktreePath);
 		writeFileSync(patchPath, "patch", "utf8");
-		const runtime = createRuntime({ sendMessage: vi.fn() } as any, configPath);
-		runtime.threads.set(7, {
-			id: 7,
-			generation: 1,
-			control: { stop: vi.fn(async () => {}) },
-			finalizeIsolation: vi.fn(async () => ({
-				status: "retained",
-				integrated: false,
-				hadChanges: true,
-				worktreePath,
-				patchPath,
-				error: "patch does not apply",
-			})),
-		} as any);
-
-		await runtime.shutdown();
+		// Retained finalizations persist their recovery record from the
+		// finalization itself (thread-lifecycle), not from session shutdown.
+		await persistRecoveryRecords(configPath, [{
+			runId: 7,
+			createdAt: Date.now(),
+			integrated: false,
+			worktreePath,
+			patchPath,
+			error: "patch does not apply",
+		}]);
 		const records = await readRecoveryRecords(configPath);
 		expect(records).toEqual([
 			expect.objectContaining({

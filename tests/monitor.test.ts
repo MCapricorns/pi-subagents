@@ -199,6 +199,29 @@ describe("MonitorStore.removeRun", () => {
 	});
 });
 
+describe("MonitorStore.restoreRun", () => {
+	it("re-registers a durable thread with its stable id and historical time", () => {
+		const store = new MonitorStore();
+		store.addRun("worker", "current session work"); // id 1
+		store.restoreRun({ id: 9, agent: "worker", task: "restored task", status: "parked", elapsedMs: 5_000 });
+		const row = store.findRun(9);
+		expect(row?.status).toBe("parked");
+		expect(row?.elapsedMs).toBe(5_000);
+		expect(row?.label).toBe(runLabel("restored task"));
+		// Fresh allocations continue above the restored id.
+		expect(store.reserveRunId()).toBe(10);
+	});
+
+	it("is idempotent for an already-restored id", () => {
+		const store = new MonitorStore();
+		store.restoreRun({ id: 3, agent: "worker", task: "a", status: "parked" });
+		store.restoreRun({ id: 3, agent: "worker", task: "b", status: "parked" });
+		const rows = store.getRuns().filter((run) => run.id === 3);
+		expect(rows).toHaveLength(1);
+		expect(rows[0]!.task).toBe("a");
+	});
+});
+
 describe("formatTaskSummary", () => {
 	it("collapses whitespace and trims the task", () => {
 		expect(formatTaskSummary("  Review\n\tsrc/index.ts   carefully.  ")).toBe("Review src/index.ts carefully.");

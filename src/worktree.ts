@@ -19,7 +19,7 @@ export type IsolationMode = "shared" | "worktree";
 const WORKTREE_TEMP_DIR_PREFIX = "pi-subagent-worktree-";
 
 /** Short stable identity of one isolated worktree group (the mkdtemp suffix).
- * Continuation/fork generations create a fresh worktree, so the identity
+ * Continuation generations create a fresh worktree, so the identity
  * visibly changes when the group's filesystem boundary changes. */
 export function worktreeGroupId(worktree: Pick<WorktreeIsolation, "tempDir">): string {
 	const base = worktree.tempDir.split(/[\\/]/).filter(Boolean).pop() ?? worktree.tempDir;
@@ -213,6 +213,28 @@ export interface WorktreeCheckpoint {
 	patch: Buffer;
 }
 
+export interface WorktreeCheckpointRef {
+	baseHead: string;
+	commit: string;
+}
+
+/** Persistable projection of one worktree handle: enough to rebuild the
+ * handle after a reload or restart. Patch bytes are deliberately omitted —
+ * only the checkpoint commit, which lives in the shared repository object
+ * store, is needed to seed a continuation. */
+export interface WorktreeSnapshot {
+	originalCwd: string;
+	originalRoot: string;
+	cwd: string;
+	worktreePath: string;
+	tempDir: string;
+	patchPath: string;
+	head: string;
+	integrationBaseHead: string;
+	state: "active" | "retained" | "integrated" | "no_changes";
+	checkpoint?: WorktreeCheckpointRef;
+}
+
 export interface WorktreeCreateOptions {
 	runner?: CommandRunner;
 	/** Test hook; production uses the OS temp directory. */
@@ -244,7 +266,12 @@ export interface WorktreeIsolation {
 	readonly tempDir: string;
 	readonly patchPath: string;
 	readonly head: string;
+	/** Diff base for final integration; a continuation baseline commit when
+	 * the generation was seeded with already-integrated work. */
+	readonly integrationBaseHead: string;
 	readonly state: "active" | "finalizing" | WorktreeFinalizationStatus;
+	/** Checkpoint retained after finalization for continuation resumes. */
+	getContinuationCheckpoint(): WorktreeCheckpoint | undefined;
 	/** Capture the complete isolated filesystem state for a fresh continuation.
 	 * The synthetic commit lets Git merge an already-committed seed without
 	 * attempting to apply the same patch twice. */
@@ -410,11 +437,24 @@ class GitWorktreeIsolation implements WorktreeIsolation {
 		private readonly runner: CommandRunner,
 		/** May be a synthetic tree commit representing a seed that the parent
 		 * checkout already contains. Finalization then integrates only new edits. */
-		private readonly integrationBaseHead: string = head,
-	) {}
+		readonly integrationBaseHead: string = head,
+		restored?: {
+			state: WorktreeIsolation["state"];
+			checkpoint?: WorktreeCheckpoint;
+		},
+	) {
+		if (restored) {
+			this.currentState = restored.state;
+			if (restored.checkpoint) this.continuationCheckpoint = cloneCheckpoint(restored.checkpoint);
+		}
+	}
 
 	get state(): WorktreeIsolation["state"] {
 		return this.currentState;
+	}
+
+	getContinuationCheckpoint(): WorktreeCheckpoint | undefined {
+		return this.continuationCheckpoint ? cloneCheckpoint(this.continuationCheckpoint) : undefined;
 	}
 
 	async snapshotCheckpoint(): Promise<WorktreeCheckpoint> {
@@ -719,4 +759,104 @@ export async function createWorktreeIsolation(
 			retainedPaths,
 		);
 	}
+}
+
+/** Snapshot only states whose filesystem or repository objects still exist.
+ * Transient (`finalizing`) and discarded handles are not persistable. */
+export function worktreeSnapshot(worktree: WorktreeIsolation): WorktreeSnapshot | undefined {
+	const state = worktree.state;
+	if (state !== "active" && state !== "retained" && state !== "integrated" && state !== "no_changes") {
+		return undefined;
+	}
+	const checkpoint = worktree.getContinuationCheckpoint();
+	return {
+		originalCwd: worktree.originalCwd,
+		originalRoot: worktree.originalRoot,
+		cwd: worktree.cwd,
+		worktreePath: worktree.worktreePath,
+		tempDir: worktree.tempDir,
+		patchPath: worktree.patchPath,
+		head: worktree.head,
+		integrationBaseHead: worktree.integrationBaseHead,
+		state,
+		...(checkpoint && checkpoint.patch.length > 0
+			? { checkpoint: { baseHead: checkpoint.baseHead, commit: checkpoint.commit } }
+			: {}),
+	};
+}
+
+/** Validate an untrusted persisted snapshot; null when it is unusable. */
+export function normalizeWorktreeSnapshot(value: unknown): WorktreeSnapshot | null {
+	if (!value || typeof value !== "object") return null;
+	const raw = value as Record<string, unknown>;
+	const fields: Record<string, string> = {};
+	for (const key of [
+		"originalCwd",
+		"originalRoot",
+		"cwd",
+		"worktreePath",
+		"tempDir",
+		"patchPath",
+		"head",
+		"integrationBaseHead",
+	] as const) {
+		if (typeof raw[key] !== "string" || !raw[key]) return null;
+		fields[key] = raw[key] as string;
+	}
+	if (raw.state !== "active" && raw.state !== "retained" && raw.state !== "integrated" && raw.state !== "no_changes") {
+		return null;
+	}
+	let checkpoint: WorktreeCheckpointRef | undefined;
+	if (raw.checkpoint && typeof raw.checkpoint === "object") {
+		const rawCheckpoint = raw.checkpoint as Record<string, unknown>;
+		if (typeof rawCheckpoint.baseHead !== "string" || !rawCheckpoint.baseHead) return null;
+		if (typeof rawCheckpoint.commit !== "string" || !rawCheckpoint.commit) return null;
+		checkpoint = { baseHead: rawCheckpoint.baseHead, commit: rawCheckpoint.commit };
+	}
+	return {
+		originalCwd: fields.originalCwd!,
+		originalRoot: fields.originalRoot!,
+		cwd: fields.cwd!,
+		worktreePath: fields.worktreePath!,
+		tempDir: fields.tempDir!,
+		patchPath: fields.patchPath!,
+		head: fields.head!,
+		integrationBaseHead: fields.integrationBaseHead!,
+		state: raw.state,
+		...(checkpoint ? { checkpoint } : {}),
+	};
+}
+
+/** Rebuild a handle from a persisted snapshot. Returns undefined when the
+ * on-disk worktree that an active/retained snapshot promises is gone; settled
+ * states (integrated/no_changes) intentionally need no filesystem. The
+ * restored checkpoint carries no patch bytes — only its commit is consumed by
+ * continuation seeds. */
+export async function restoreWorktreeIsolation(
+	snapshot: WorktreeSnapshot,
+	options: { runner?: CommandRunner } = {},
+): Promise<WorktreeIsolation | undefined> {
+	if (
+		(snapshot.state === "active" || snapshot.state === "retained") &&
+		!existsSync(snapshot.worktreePath)
+	) {
+		return undefined;
+	}
+	return new GitWorktreeIsolation(
+		snapshot.originalCwd,
+		snapshot.originalRoot,
+		snapshot.cwd,
+		snapshot.worktreePath,
+		snapshot.tempDir,
+		snapshot.patchPath,
+		snapshot.head,
+		options.runner ?? runCommand,
+		snapshot.integrationBaseHead,
+		{
+			state: snapshot.state,
+			...(snapshot.checkpoint
+				? { checkpoint: { ...snapshot.checkpoint, patch: Buffer.alloc(0) } }
+				: {}),
+		},
+	);
 }

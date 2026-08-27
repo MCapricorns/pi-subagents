@@ -1,6 +1,6 @@
 /**
  * Thread controls and lookup tools around the subagent runtime:
- * subagent_control (steer/retarget/park/resume/fork), subagent_wait (in-turn
+ * subagent_control (steer/retarget/park/resume), subagent_wait (in-turn
  * result lookup), subagent_status, and destructive subagent_stop.
  */
 
@@ -10,6 +10,7 @@ import { Text } from "@earendil-works/pi-tui";
 import { existsSync } from "node:fs";
 import { Type } from "typebox";
 import { DEFAULT_MAX_RESULT_LINES, loadConfig } from "./config.ts";
+import { removeThreadRecord } from "./durable.ts";
 import { formatCompletionBlock, formatUsage, matchRunIds } from "./format.ts";
 import { emptyUsage } from "./rpc-run.ts";
 import {
@@ -46,7 +47,7 @@ function renderFirstLine(result: { content?: unknown }, label: string, theme: an
 
 export function registerLookupTools(pi: ExtensionAPI, runtime: SubagentRuntime): void {
 	const SubagentControlParams = Type.Object({
-		action: StringEnum(["steer", "retarget", "park", "resume", "fork"] as const, {
+		action: StringEnum(["steer", "retarget", "park", "resume"] as const, {
 			description: "Control operation for the logical sub-agent thread.",
 		}),
 		id: Type.Integer({ minimum: 1, description: "Stable run id shown by subagent dispatch/status output." }),
@@ -54,7 +55,7 @@ export function registerLookupTools(pi: ExtensionAPI, runtime: SubagentRuntime):
 			Type.String({ description: "Instruction queued by steer after the current child tool batch." }),
 		),
 		objective: Type.Optional(
-			Type.String({ description: "Replacement objective for retarget; optional appended objective for resume/fork. Omit on resume/fork to continue the current retained objective." }),
+			Type.String({ description: "Replacement objective for retarget; optional appended objective for resume. Omit on resume to continue the current retained objective." }),
 		),
 	});
 
@@ -68,15 +69,13 @@ export function registerLookupTools(pi: ExtensionAPI, runtime: SubagentRuntime):
 			"Managed downstream documenter/reviewer/fix stages are controlled by the parent queue rather than its settled RPC control: use park or stop there, then resume with an objective to redirect retained context.",
 			"park aborts to a stable checkpoint, terminates the child, preserves context, and releases its concurrency slot.",
 			"resume restarts a parked, completed, or failed retained thread with the same run id and cumulative active time; omit objective to continue the current goal, or provide one to append it to retained context and make it the displayed current goal.",
-			"fork copies a parked/completed/failed retained session branch into a new logical thread and run id; an isolated checkpoint must be settled and integrated first; omit objective to continue the current goal, or provide one to append a new branch goal.",
 		].join(" "),
-		promptSnippet: "Control a subagent thread: steer/retarget an active top-level child; park/stop a managed downstream stage; resume or fork retained context.",
+		promptSnippet: "Control a subagent thread: steer/retarget an active top-level child; park/stop a managed downstream stage; resume retained context.",
 		promptGuidelines: [
 			"Use subagent_control steer to refine an active top-level RPC child without restarting it; the instruction is delivered after its current tool batch.",
 			"Use subagent_control retarget only while that top-level child is active. During a managed downstream stage, park it and resume with a replacement objective instead.",
 			"Use subagent_control park to checkpoint useful context while releasing the process/concurrency slot, and resume to continue the same run id later. Resume without objective keeps the current goal; resume with objective appends that goal to retained context.",
-			"Use subagent_control fork only on a parked or settled retained thread; isolated work must settle and integrate before it can fork. Fork creates a new run id while leaving the source untouched.",
-			"Use subagent_stop only for destructive cancellation; it retires that thread's retained session without retiring independent forks.",
+			"Use subagent_stop only for destructive cancellation; it retires that thread's retained session.",
 		],
 		parameters: SubagentControlParams,
 
@@ -164,24 +163,6 @@ export function registerLookupTools(pi: ExtensionAPI, runtime: SubagentRuntime):
 							? "the same retained session and prior context are preserved"
 							: "no prior child session existed, so only the logical run and objective are continued";
 						return { content: [{ type: "text", text: `Resumed run #${thread.id}, ${mode}; ${context}, and cumulative active time is preserved. Completion will arrive automatically.` }], details: {}, terminate: true };
-					}
-					case "fork": {
-						const objective = params.objective === undefined ? undefined : nonBlank(params.objective);
-						if (params.objective !== undefined && !objective) {
-							return { content: [{ type: "text", text: "fork objective must be non-blank when provided." }], details: {} };
-						}
-						const pending = await thread.fork(objective, ctx);
-						if (pending.exitCode !== -1 || pending.runId === undefined) {
-							return { content: [{ type: "text", text: getResultOutput(pending) }], details: {} };
-						}
-						return {
-							content: [{
-								type: "text",
-								text: `Forked run #${thread.id} into new run #${pending.runId}; ${objective ? `appended branch objective: ${formatTaskSummary(objective, 80, false)}` : `continuing current objective: ${formatTaskSummary(thread.task, 80, false)}`}. Retained context is copied, the source is unchanged, and child completion will arrive automatically.`,
-							}],
-							details: { sourceRunId: thread.id, childRunId: pending.runId, result: pending },
-							terminate: true,
-						};
 					}
 				}
 			} catch (error) {
@@ -431,8 +412,6 @@ export function registerLookupTools(pi: ExtensionAPI, runtime: SubagentRuntime):
 						: undefined;
 					const metadata = [
 						activeThread?.isolation === "worktree" ? `worktree ${active.integrationStatus ?? activeThread.worktree?.state ?? "active"}` : undefined,
-						activeThread?.forkedFromRunId !== undefined ? `forked from #${activeThread.forkedFromRunId}` : undefined,
-						(activeThread?.forkChildRunIds.length ?? 0) > 0 ? `forks ${activeThread!.forkChildRunIds.map((id) => `#${id}`).join(",")}` : undefined,
 					].filter(Boolean).join(" · ");
 					const stageStatus = activeChild
 						? monitor.summarize(activeChild)
@@ -462,8 +441,6 @@ export function registerLookupTools(pi: ExtensionAPI, runtime: SubagentRuntime):
 				const parts = [
 					`#${run.id} ${monitor.summarize(run)}`,
 					run.label,
-					thread?.forkedFromRunId !== undefined ? `forked from #${thread.forkedFromRunId}` : undefined,
-					(thread?.forkChildRunIds.length ?? 0) > 0 ? `forks ${thread!.forkChildRunIds.map((id) => `#${id}`).join(",")}` : undefined,
 					run.activity ?? statusLabel(run.status),
 				].filter(Boolean);
 				return `- ${parts.join(" · ")}`;
@@ -475,13 +452,8 @@ export function registerLookupTools(pi: ExtensionAPI, runtime: SubagentRuntime):
 				const retainedStage = run?.managedWorkflow && thread.agentName !== run.agent
 					? ` · retained stage ${thread.agentName}`
 					: "";
-				const relations = [
-					thread.forkedFromRunId !== undefined ? `forked from #${thread.forkedFromRunId}` : undefined,
-					thread.forkChildRunIds.length > 0 ? `forks ${thread.forkChildRunIds.map((id) => `#${id}`).join(",")}` : undefined,
-				].filter(Boolean);
-				const relation = relations.length > 0 ? ` · ${relations.join(" · ")}` : "";
 				const isolation = thread.isolation === "worktree" ? ` · worktree ${thread.worktree?.state ?? "active"}` : "";
-				return `- #${thread.id} ${owner} · ${run?.label ?? runLabel(thread.task)} · parked${thread.sessionDir ? " · context retained" : " · not started"}${retainedStage}${isolation}${relation}`;
+				return `- #${thread.id} ${owner} · ${run?.label ?? runLabel(thread.task)} · parked${thread.sessionDir ? " · context retained" : " · not started"}${retainedStage}${isolation}`;
 			});
 			const completed = [...runtime.settledRuns.entries()].slice(-5);
 			const completedLines = completed.map(([id, result]) => {
@@ -491,12 +463,7 @@ export function registerLookupTools(pi: ExtensionAPI, runtime: SubagentRuntime):
 					? `${result.model ?? "?"} (main after ${result.modelFallbackFrom} failed)`
 					: (result.model ?? "?");
 				const isolation = result.isolation === "worktree" ? ` · worktree ${result.integrationStatus ?? "unknown"}` : "";
-				const relations = [
-					result.forkedFromRunId !== undefined ? `forked from #${result.forkedFromRunId}` : undefined,
-					(result.forkChildRunIds?.length ?? 0) > 0 ? `forks ${result.forkChildRunIds!.map((childId) => `#${childId}`).join(",")}` : undefined,
-				].filter(Boolean);
-				const relation = relations.length > 0 ? ` · ${relations.join(" · ")}` : "";
-				return `- #${id} ${result.agent}${label ? ` · ${label}` : ""} · ${isFailedResult(result) ? "failed" : "completed"} · ${model}${isolation}${relation}${usage ? ` · ${usage}` : ""}`;
+				return `- #${id} ${result.agent}${label ? ` · ${label}` : ""} · ${isFailedResult(result) ? "failed" : "completed"} · ${model}${isolation}${usage ? ` · ${usage}` : ""}`;
 			});
 
 			const sections: string[] = [];
@@ -506,7 +473,7 @@ export function registerLookupTools(pi: ExtensionAPI, runtime: SubagentRuntime):
 			sections.push(parkedLines.length > 0 ? parkedLines.join("\n") : "(none)");
 			sections.push(`### Finished this session (${runtime.settledRuns.size})`);
 			sections.push(completedLines.length > 0 ? completedLines.join("\n") : "(none)");
-			sections.push("Pass a run id to subagent_status for the full result, use subagent_control to steer/park/resume/fork, or subagent_wait for active work.");
+			sections.push("Pass a run id to subagent_status for the full result, use subagent_control to steer/park/resume, or subagent_wait for active work.");
 			return { content: [{ type: "text", text: sections.join("\n\n") }], details: {} };
 		},
 
@@ -551,7 +518,7 @@ export function registerLookupTools(pi: ExtensionAPI, runtime: SubagentRuntime):
 
 		async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
 			// Start config I/O without yielding: every target below must be claimed
-			// synchronously before a resume/fork preflight can cross its next await.
+			// synchronously before a resume preflight can cross its next await.
 			const configPromise = loadConfig(runtime.configPath).catch(() => undefined);
 			const completionResults: SingleResult[] = [];
 			const candidateIds = params.all === true
@@ -610,7 +577,7 @@ export function registerLookupTools(pi: ExtensionAPI, runtime: SubagentRuntime):
 					["queued", "resuming", "running", "steering", "interrupting"].includes(previousState);
 				const stopVersion = ++thread.lifecycleVersion;
 				// Stop-all claims every target before the first await. This invalidates
-				// all concurrent resume/fork preflights as one synchronous operation.
+				// all concurrent resume preflights as one synchronous operation.
 				thread.lifecycleOperation = "stop";
 				thread.retired = true;
 				thread.retireOnSettle = true;
@@ -756,6 +723,9 @@ export function registerLookupTools(pi: ExtensionAPI, runtime: SubagentRuntime):
 				if (stoppedResult) completionResults.push(stoppedResult);
 				monitor.removeRun(runId);
 				runtime.retireThreadSession(thread);
+				// The destructive retire removes the durable record with the session;
+				// an id never resurrects after subagent_stop.
+				await removeThreadRecord(runtime.configPath, runId).catch(() => undefined);
 				if (thread.lifecycleVersion === stopVersion && thread.lifecycleOperation === "stop") {
 					thread.lifecycleOperation = undefined;
 				}

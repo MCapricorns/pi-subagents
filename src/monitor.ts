@@ -19,7 +19,7 @@ import type { IsolationMode, WorktreeFinalizationStatus } from "./worktree.ts";
 // ---------------------------------------------------------------------------
 
 export type RunStatus = "queued" | "running" | "steering" | "interrupting" | "parked" | "done" | "failed";
-export type ContinuationKind = "resume-retained" | "resume-appended" | "fork-retained" | "fork-appended" | "retarget";
+export type ContinuationKind = "resume-retained" | "resume-appended" | "retarget";
 export type WorkflowStageStatus = "done" | "active" | "pending" | "changes" | "failed";
 
 /** Ephemeral projection of one real or currently planned managed stage. It is
@@ -57,8 +57,6 @@ export interface RunView {
 	/** Short worktree-group identity (mkdtemp suffix) shared by every run inside
 	 * one isolated worktree; changes when a continuation worktree is created. */
 	worktreeId?: string;
-	forkedFromRunId?: number;
-	forkChildRunIds?: number[];
 	status: RunStatus;
 	usage: UsageStats;
 	/** Concise current activity ("thinking", "read src/index.ts"); last writer wins. */
@@ -94,7 +92,6 @@ export interface RunChainMeta {
 	parentRunId?: number;
 	isolation?: IsolationMode;
 	worktreeId?: string;
-	forkedFromRunId?: number;
 	continuationKind?: ContinuationKind;
 }
 
@@ -325,12 +322,10 @@ export function formatElapsed(run: RunView, now: number = Date.now()): string {
 	return formatDuration(elapsedMilliseconds(run, now));
 }
 
-export function continuationLabel(kind: ContinuationKind | undefined, sourceRunId?: number): string | undefined {
+export function continuationLabel(kind: ContinuationKind | undefined): string | undefined {
 	switch (kind) {
 		case "resume-retained": return "resume: current objective";
 		case "resume-appended": return "resume: appended objective";
-		case "fork-retained": return `fork${sourceRunId === undefined ? "" : ` #${sourceRunId}`}: current objective`;
-		case "fork-appended": return `fork${sourceRunId === undefined ? "" : ` #${sourceRunId}`}: appended objective`;
 		case "retarget": return "retarget: replacement objective";
 		default: return undefined;
 	}
@@ -452,6 +447,26 @@ export class MonitorStore {
 		return this.nextId++;
 	}
 
+	/** Keep newly allocated ids above a restored id so reload-restored threads
+	 * never collide with runs started in the current process. */
+	ensureNextIdAbove(id: number): void {
+		if (id >= this.nextId) this.nextId = id + 1;
+	}
+
+	/** Re-register a durable thread restored from a previous process. The row
+	 * keeps its stable id and historical elapsed time. */
+	restoreRun(view: Pick<RunView, "id" | "agent" | "task" | "status"> & Partial<RunView>): void {
+		if (this.find(view.id)) return;
+		this.runs.push({
+			label: runLabel(view.task),
+			usage: emptyUsage(),
+			elapsedMs: 0,
+			...view,
+		});
+		this.ensureNextIdAbove(view.id);
+		this.notify();
+	}
+
 	addRun(agent: string, task: string, model?: string, thinking?: string, meta?: RunChainMeta): number {
 		const id = this.reserveRunId();
 		this.runs.push({
@@ -468,7 +483,6 @@ export class MonitorStore {
 			...(meta?.relationLabel ? { relationLabel: meta.relationLabel } : {}),
 			...(meta?.parentRunId !== undefined ? { parentRunId: meta.parentRunId } : {}),
 			...(meta?.isolation ? { isolation: meta.isolation, integrationStatus: meta.isolation === "worktree" ? "pending" : undefined, ...(meta.worktreeId ? { worktreeId: meta.worktreeId } : {}) } : {}),
-			...(meta?.forkedFromRunId !== undefined ? { forkedFromRunId: meta.forkedFromRunId } : {}),
 			...(meta?.continuationKind ? { continuationKind: meta.continuationKind } : {}),
 		});
 		this.notify();
@@ -582,16 +596,6 @@ export class MonitorStore {
 		this.notify();
 	}
 
-	setForkRelation(sourceRunId: number, childRunId: number): void {
-		const source = this.find(sourceRunId);
-		if (source) {
-			source.forkChildRunIds ??= [];
-			if (!source.forkChildRunIds.includes(childRunId)) source.forkChildRunIds.push(childRunId);
-		}
-		const child = this.find(childRunId);
-		if (child) child.forkedFromRunId = sourceRunId;
-		this.notify();
-	}
 
 	/** Update the objective shown for a queued retarget or resumed generation. */
 	setTask(id: number, task: string): void {
@@ -706,7 +710,7 @@ export class MonitorStore {
 	summarize(run: RunView): string {
 		const usage = formatUsageCompact(run.usage);
 		const parts = [run.managedWorkflow ? `${run.agent} workflow` : run.agent];
-		const continuation = continuationLabel(run.continuationKind, run.forkedFromRunId);
+		const continuation = continuationLabel(run.continuationKind);
 		if (continuation) parts.push(continuation);
 		if (run.relationLabel) parts.push(run.relationLabel);
 		if (!run.managedWorkflow && run.model) parts.push(run.model);

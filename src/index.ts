@@ -29,6 +29,7 @@ import { buildDelegationDirective } from "./prompt.ts";
 import { createRuntime } from "./runtime.ts";
 import { runSetup } from "./setup.ts";
 import { currentSubagentDepth } from "./spawn.ts";
+import { bootstrapDurableState } from "./thread-lifecycle.ts";
 import { registerLookupTools } from "./tools.ts";
 import { clearActiveRunsWidget } from "./widget.ts";
 
@@ -76,6 +77,12 @@ export default function (pi: ExtensionAPI): void {
 	});
 
 	registerAnnouncements(pi, runtime);
+
+	// Durable bootstrap: restore parked/settled threads from the manifest so a
+	// reload or restart keeps status and resume working, then age out old
+	// records and sweep leaked temp/state directories. Fire-and-forget; every
+	// stage is best-effort and never blocks registration.
+	void bootstrapDurableState(runtime);
 
 	// Proactive dispatch: inject the delegation directive into the parent system prompt.
 	pi.on("before_agent_start", async (event, ctx) => {

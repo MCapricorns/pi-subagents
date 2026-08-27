@@ -2,7 +2,7 @@
 
 import { SessionManager } from "@earendil-works/pi-coding-agent";
 import { existsSync } from "node:fs";
-import { mkdtemp, rm } from "node:fs/promises";
+import { mkdir, mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -43,12 +43,17 @@ export async function forkRetainedSession(options: {
 	targetCwd?: string;
 	sessionDir: string;
 	sessionId: string;
+	/** Parent directory for the cloned branch. Defaults to the OS temp dir;
+	 * dispatch passes the durable state root. */
+	targetRoot?: string;
 }): Promise<ForkedSession> {
 	const sourceSessionFile = await findRetainedSessionFile(
 		options.sessionDir,
 		options.sessionId,
 	);
-	const sessionDir = await mkdtemp(join(tmpdir(), "pi-subagent-session-fork-"));
+	const root = options.targetRoot ?? tmpdir();
+	await mkdir(root, { recursive: true });
+	const sessionDir = await mkdtemp(join(root, "pi-subagent-session-fork-"));
 	try {
 		// Supplying the new directory makes createBranchedSession write there.
 		// cwdOverride rewrites the cloned header so a settled isolated session can

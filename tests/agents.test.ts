@@ -81,7 +81,7 @@ describe("shipped specialist agents", () => {
 		expect(documenter?.systemPrompt).toContain("Never commit, push, publish, tag, or release");
 		expect(documenter?.systemPrompt).toContain("zero edits is valid");
 		expect(documenter?.systemPrompt).toContain("DOCUMENTATION: NEEDED");
-		expect(documenter?.systemPrompt).toContain("top-level documenter delivers directly");
+		expect(documenter?.systemPrompt).toContain("delivers directly after you");
 		expect(documenter?.systemPrompt).toContain("no fresh reviewer runs");
 	});
 

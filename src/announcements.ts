@@ -40,6 +40,14 @@ export function registerAnnouncements(pi: ExtensionAPI, runtime: SubagentRuntime
 		pruneResultArtifacts();
 		await announceRecoveryRecords(runtime.configPath, ctx);
 		await migrateUnavailableAgentModels(ctx, runtime);
+		if (!runtime.restoredNotified && runtime.restoredRunIds.length > 0) {
+			runtime.restoredNotified = true;
+			const ids = runtime.restoredRunIds.map((id) => `#${id}`).join(", ");
+			ctx.ui.notify(
+				`pi-subagents: restored ${runtime.restoredRunIds.length} resumable thread${runtime.restoredRunIds.length === 1 ? "" : "s"} from the previous session (${ids}). subagent_status lists them; subagent_control resume continues one.`,
+				"info",
+			);
+		}
 		if (ctx.mode !== "tui") return;
 		installActiveRunsWidget(ctx);
 	});

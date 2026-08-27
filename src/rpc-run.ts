@@ -16,6 +16,7 @@ import { StringDecoder } from "node:string_decoder";
 import type { Message } from "@earendil-works/pi-ai";
 import { SUBAGENT_TOOL_NAMES, type AgentConfig } from "./agents.ts";
 import type { ThinkingLevel } from "./config.ts";
+import { writeTempOwnerMarker } from "./temp-hygiene.ts";
 import type { IsolationMode, WorktreeFinalizationStatus } from "./worktree.ts";
 
 export const DEPTH_ENV_VAR = "PI_SUBAGENT_DEPTH";
@@ -95,15 +96,13 @@ export interface RpcSingleResult {
 	/** Retained only when integration/cleanup failed; never contains patch data. */
 	integrationWorktreePath?: string;
 	integrationPatchPath?: string;
-	/** Session-fork relationships between stable logical run ids. */
-	forkedFromRunId?: number;
-	forkChildRunIds?: number[];
 }
 
 export type SubagentLiveEvent =
 	| { kind: "status"; status: "queued" | "running" | "steering" | "interrupting" | "parked" | "done" | "failed" }
 	| { kind: "model"; model?: string; thinking?: ThinkingLevel; fallbackFrom?: string }
 	| { kind: "usage"; usage: UsageStats; model?: string }
+	| { kind: "session"; sessionId: string; sessionDir: string }
 	| { kind: "tool_start"; toolCallId?: string; toolName: string; args: unknown }
 	| { kind: "tool_end"; toolCallId?: string; toolName: string; isError: boolean }
 	| { kind: "thinking" }
@@ -141,6 +140,7 @@ export class RpcRunControl {
 	private parkRequested = false;
 	private stopRequested = false;
 	private stopMessage = "Subagent was aborted";
+	private childPids = new Set<number>();
 
 	constructor(
 		objective: string,
@@ -168,6 +168,17 @@ export class RpcRunControl {
 
 	getStopMessage(): string {
 		return this.stopMessage;
+	}
+
+	/** Pids of every child process this generation spawned. Persisted with the
+	 * thread record so a later load can kill orphans that still hold the
+	 * retained session. */
+	noteChildPid(pid: number): void {
+		if (Number.isInteger(pid) && pid > 0) this.childPids.add(pid);
+	}
+
+	getChildPids(): number[] {
+		return [...this.childPids];
 	}
 
 	/** Update a not-yet-started/retrying objective without launching a process. */
@@ -369,6 +380,7 @@ export async function writeChildRetryPolicyExtension(
 	modelRef?: string,
 ): Promise<ChildRetryPolicyExtension> {
 	const dir = await mkdtemp(join(tmpdir(), "pi-subagents-policy-"));
+	writeTempOwnerMarker(dir);
 	const filePath = join(dir, "no-provider-retries.mjs");
 	const slash = modelRef?.indexOf("/") ?? -1;
 	const selectedProvider = slash > 0 ? modelRef!.slice(0, slash) : undefined;
@@ -398,6 +410,7 @@ export async function writeChildRetryPolicyExtension(
 
 async function writePromptToTempFile(agentName: string, prompt: string): Promise<{ dir: string; filePath: string }> {
 	const dir = await mkdtemp(join(tmpdir(), "pi-subagents-"));
+	writeTempOwnerMarker(dir);
 	const safeName = agentName.replace(/[^\w.-]+/g, "_");
 	const filePath = join(dir, `prompt-${safeName}.md`);
 	try {
@@ -862,6 +875,7 @@ export async function runRpcAgentAttempt(options: RunRpcAttemptOptions): Promise
 	};
 
 	if (attemptToken !== undefined) control?.attach(attemptToken, attemptControl);
+	if (proc.pid !== undefined) control?.noteChildPid(proc.pid);
 	control?.markStarting();
 
 	const processLine = (rawLine: string): void => {

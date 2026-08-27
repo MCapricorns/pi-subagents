@@ -137,16 +137,13 @@ describe("buildFixTaskBrief", () => {
 		expect(brief).toContain("carries a fix instruction");
 		expect(brief).toContain("Close EVERY finding");
 		expect(brief).toContain("no severity triage");
-		expect(brief).toContain("implement YOUR fix instead");
-		expect(brief).toContain("push back explicitly per finding");
-		expect(brief).toContain("will be re-opened");
+		expect(brief).toContain("push back per finding");
 	});
 
 	it("notes a re-review will follow and requires directly affected docs to stay synchronized", () => {
 		const brief = buildFixTaskBrief(reviewResult("VERDICT: REVIEW_FAIL"), 1, 2);
 		expect(brief).toContain("re-review your changes automatically");
 		expect(brief).toContain("directly affected by your fixes");
-		expect(brief).toContain("Do NOT commit, push, publish, tag, or release");
 	});
 });
 
@@ -162,8 +159,7 @@ describe("buildFinalDocumenterBrief", () => {
 		expect(brief).toContain("Apply every documentation note");
 		expect(brief).toContain("Inspect the actual git diff");
 		expect(brief).toContain("Change documentation surfaces only");
-		expect(brief).toContain("Do NOT commit, push, publish, tag, or release");
-		expect(brief).toContain("Make zero edits");
+		expect(brief).toContain("make zero edits");
 		expect(brief).toContain("no fresh reviewer runs");
 	});
 
@@ -187,7 +183,6 @@ describe("managed handoff briefs", () => {
 		expect(brief).toContain("actual pending code");
 		expect(brief).toContain("Remain read-only");
 		expect(brief).toContain("fix instruction to EVERY gate finding");
-		expect(brief).toContain("specific enough to act on");
 		expect(brief).toContain("VERDICT: REVIEW_PASS");
 		expect(brief).toContain("documentation drift is an ordinary gate finding");
 		expect(brief).not.toContain("Documentation notes");
@@ -259,8 +254,7 @@ describe("buildReReviewBrief", () => {
 		expect(brief).toContain("pushback where it replaced your fix instruction");
 		expect(brief).toContain("Judge the code as it now stands");
 		expect(brief).toContain("whether or not the worker followed your fix instruction");
-		expect(brief).toContain("adjudicated ONCE");
-		expect(brief).toContain("never simply restate the finding");
+		expect(brief).toContain("Adjudicate each pushback once");
 		expect(brief).toContain("defects this round's");
 		expect(brief).toContain("never opens findings unrelated to this round's edits");
 		expect(brief).not.toContain("genuinely missed");

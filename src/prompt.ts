@@ -75,7 +75,7 @@ export function buildDelegationDirective(
 			]
 			: []),
 		"Brief each child with the complete goal, exact paths, constraints, and expected output; it has no conversation memory.",
-		"Children are leaf processes without delegation tools; use `subagent_control fork` on a parked/settled thread for an independent continuation.",
+		"Children are leaf processes without delegation tools; use `subagent_control resume` on a parked/settled thread to continue its retained context.",
 		...(hasMultiple
 			? [
 				"Dispatch independent work in one `tasks` array and let the resumed main agent start dependent work only after prerequisites finish.",

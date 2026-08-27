@@ -24,7 +24,7 @@ describe("buildDelegationDirective", () => {
 		expect(directive).toContain("isolated Pi child processes and context windows");
 		expect(directive).toContain("complete goal, exact paths, constraints, and expected output");
 		expect(directive).toContain("leaf processes without delegation tools");
-		expect(directive).toContain("subagent_control fork");
+		expect(directive).toContain("subagent_control resume");
 	});
 
 	it("keeps the default injected directive below the prompt budget", () => {

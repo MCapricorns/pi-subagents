@@ -288,7 +288,9 @@ send({ type: "message_end", message: { role: "assistant", content: [{ type: "tex
 		expect(existsSync(retainedDir)).toBe(true);
 		await stub.hooks["session_shutdown"]?.({}, {});
 		activeStub = undefined;
-		expect(existsSync(retainedDir)).toBe(false);
+		// Shutdown persists the settled thread's durable record, so its retained
+		// session stays resumable across reloads instead of being deleted.
+		expect(existsSync(retainedDir)).toBe(true);
 	});
 
 	it("does not launch downstream work when park wins after top-level RPC settlement", async () => {

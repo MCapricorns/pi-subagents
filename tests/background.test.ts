@@ -245,4 +245,58 @@ describe("BackgroundTaskQueue", () => {
 		gate.resolve();
 		await nextTask();
 	});
+
+	it("frees a slot when a running task suspends itself", async () => {
+		const queue = new BackgroundTaskQueue(1);
+		const suspendedTask = deferred();
+		let secondStarted = false;
+		const controller = queue.enqueue(async () => {
+			await suspendedTask.promise;
+		});
+		queue.enqueue(async () => {
+			secondStarted = true;
+		});
+		expect(secondStarted).toBe(false);
+
+		queue.suspend(controller);
+		await nextTask();
+		expect(secondStarted).toBe(true);
+
+		// waitForTask still resolves only after the suspended body quiesces.
+		let completed = false;
+		const completion = queue.waitForTask(controller).then(() => {
+			completed = true;
+		});
+		expect(completed).toBe(false);
+		suspendedTask.resolve();
+		await completion;
+		expect(completed).toBe(true);
+	});
+
+	it("keeps a suspended task abortable and counted by waitForIdle", async () => {
+		const queue = new BackgroundTaskQueue(1);
+		const gate = deferred();
+		let aborted = false;
+		const controller = queue.enqueue(async (signal) => {
+			signal.addEventListener("abort", () => {
+				aborted = true;
+			});
+			queue.suspend(controller);
+			await gate.promise;
+		});
+		await nextTask();
+
+		let idle = false;
+		void queue.waitForIdle().then(() => {
+			idle = true;
+		});
+		expect(idle).toBe(false);
+
+		queue.cancel(controller);
+		expect(aborted).toBe(true);
+		gate.resolve();
+		await nextTask();
+		await queue.waitForIdle();
+		expect(idle).toBe(true);
+	});
 });
