@@ -1,4 +1,4 @@
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it, vi } from "vitest";
@@ -84,17 +84,17 @@ describe("setup model picker helpers", () => {
 });
 
 describe("configured-agent flow", () => {
-	it("configures an agent model without a thinking screen and keeps stored thinking levels", async () => {
+	it("shows Auto plus only the effective model's supported thinking levels", async () => {
 		const dir = mkdtempSync(join(tmpdir(), "pi-subagents-setup-agent-"));
 		const configPath = join(dir, "pi-subagents.json");
+		const projectAgents = join(dir, ".pi", "agents");
+		mkdirSync(projectAgents, { recursive: true });
 		writeFileSync(
-			configPath,
-			JSON.stringify({
-				enabledAgents: ["explorer"],
-				agentThinkingLevels: { explorer: "high" },
-			}),
+			join(projectAgents, "explorer.md"),
+			"---\nname: explorer\ndescription: project override\nthinking: high\n---\nProject explorer prompt.\n",
 			"utf8",
 		);
+		writeFileSync(configPath, JSON.stringify({ enabledAgents: ["explorer"], agentScope: "project" }), "utf8");
 		const model = {
 			provider: "anthropic",
 			id: "selected",
@@ -111,7 +111,7 @@ describe("configured-agent flow", () => {
 			select: vi.fn(async (title: string, options: string[]) => {
 				if (title !== "pi-subagents settings") return undefined;
 				return settingsMenuVisits++ === 0
-					? options.find((option) => option.startsWith("Configure agent models"))
+					? options.find((option) => option.startsWith("Configure an agent"))
 					: undefined;
 			}),
 			custom: pickerDriver((component, screen) => {
@@ -119,9 +119,6 @@ describe("configured-agent flow", () => {
 				if (screen.includes("Configure which agent?")) {
 					agentPickerVisits += 1;
 					component.handleInput(agentPickerVisits === 1 ? "enter" : "escape");
-				} else if (screen.includes("Model for")) {
-					component.handleInput("down");
-					component.handleInput("enter");
 				} else {
 					component.handleInput("enter");
 				}
@@ -129,10 +126,17 @@ describe("configured-agent flow", () => {
 		}, [model], model);
 		try {
 			await runSetup(ctx, configPath);
-			expect(screens.some((screen) => screen.includes("Thinking for"))).toBe(false);
+			const thinkingScreen = screens.find((screen) => screen.includes('Thinking for "explorer"?'));
+			expect(thinkingScreen).toContain("auto — high");
+			expect(thinkingScreen).toContain("off — no reasoning tokens");
+			expect(thinkingScreen).toContain("minimal — minimal reasoning");
+			expect(thinkingScreen).toContain("low — light reasoning");
+			expect(thinkingScreen).toContain("high — deep reasoning");
+			expect(thinkingScreen).not.toContain("medium —");
+			expect(thinkingScreen).not.toContain("xhigh —");
+			expect(thinkingScreen).not.toContain("max —");
 			const saved = JSON.parse(readFileSync(configPath, "utf8"));
-			expect(saved.agentModels.explorer).toBe("anthropic/selected");
-			expect(saved.agentThinkingLevels).toEqual({ explorer: "high" });
+			expect(saved.agentThinkingLevels).toEqual({});
 			expect(agentPickerVisits).toBe(2);
 		} finally {
 			rmSync(dir, { recursive: true, force: true });
@@ -165,7 +169,7 @@ describe("configured-agent flow", () => {
 			select: vi.fn(async (title: string, options: string[]) => {
 				if (title !== "pi-subagents settings") return undefined;
 				return settingsMenuVisits++ === 0
-					? options.find((option) => option.startsWith("Configure agent models"))
+					? options.find((option) => option.startsWith("Configure an agent"))
 					: undefined;
 			}),
 			custom: pickerDriver((component, screen) => {
@@ -207,7 +211,7 @@ describe("configured-agent flow", () => {
 });
 
 describe("setup back navigation", () => {
-	it("walks model → agent → settings on Esc without changing config", async () => {
+	it("walks thinking → model → agent → settings on Esc without changing config", async () => {
 		const dir = mkdtempSync(join(tmpdir(), "pi-subagents-setup-back-stack-"));
 		const configPath = join(dir, "pi-subagents.json");
 		const original = existingConfig({
@@ -226,13 +230,14 @@ describe("setup back navigation", () => {
 		const screens: string[] = [];
 		let settingsVisits = 0;
 		let agentVisits = 0;
+		let modelVisits = 0;
 		const notify = vi.fn();
 		const ctx = setupContext(dir, {
 			notify,
 			select: vi.fn(async (title: string, options: string[]) => {
 				if (title !== "pi-subagents settings") return undefined;
 				return settingsVisits++ === 0
-					? options.find((option) => option.startsWith("Configure agent models"))
+					? options.find((option) => option.startsWith("Configure an agent"))
 					: undefined;
 			}),
 			custom: pickerDriver((component, screen) => {
@@ -240,6 +245,9 @@ describe("setup back navigation", () => {
 				if (screen.includes("Configure which agent?")) {
 					agentVisits += 1;
 					component.handleInput(agentVisits === 1 ? "enter" : "escape");
+				} else if (screen.includes('Model for "explorer"?')) {
+					modelVisits += 1;
+					component.handleInput(modelVisits === 1 ? "enter" : "escape");
 				} else {
 					component.handleInput("escape");
 				}
@@ -247,9 +255,11 @@ describe("setup back navigation", () => {
 		}, [model], model);
 		try {
 			await runSetup(ctx, configPath);
-			expect(screens.map((screen) => (screen.includes("Model for") ? "model" : "agent")))
-				.toEqual(["agent", "model", "agent"]);
-			expect(screens.some((screen) => screen.includes("Thinking for"))).toBe(false);
+			expect(screens.map((screen) =>
+				screen.includes("Thinking for") ? "thinking"
+					: screen.includes("Model for") ? "model"
+						: "agent"
+			)).toEqual(["agent", "model", "thinking", "model", "agent"]);
 			expect(JSON.parse(readFileSync(configPath, "utf8"))).toEqual(original);
 			expect(notify).not.toHaveBeenCalled();
 		} finally {

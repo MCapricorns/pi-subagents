@@ -203,7 +203,9 @@ Each agent runs on the current main model or one picked in `/subagents-setup`
 or fails at the provider level, the **same retained session** continues on the
 main model — finished searches, reads, and edits are preserved; ordinary task
 failures do not trigger a handoff. Thinking defaults to **Auto**: the role's
-preference, clamped to what the effective model supports. There is no separate
+preference, clamped to what the effective model supports. `/subagents-setup` →
+*Configure an agent* also offers a manual strength per agent, listing only the
+levels that model supports. There is no separate
 vision mode: assign a multimodal model and name the image paths in the task.
 
 Every dispatch, managed stage, resume, retry, and fallback snapshots the
@@ -216,8 +218,9 @@ stripped so children stay leaves. An empty snapshot starts the child with
 
 ## Configuration
 
-`/subagents-setup` stays one level deep: enabled agents, per-agent models, and
-the delegation-injection toggle. Everything else is config-file only, stored at
+`/subagents-setup` stays one level deep: enabled agents, per-agent models and
+thinking strengths, and the delegation-injection toggle. Everything else is
+config-file only, stored at
 `~/.pi/agent/pi-subagents.json` (follows `PI_CODING_AGENT_DIR`):
 
 ```json
