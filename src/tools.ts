@@ -106,7 +106,7 @@ export function registerLookupTools(pi: ExtensionAPI, runtime: SubagentRuntime):
 						const context = hadRetainedSession
 							? "the same retained session and prior context are preserved"
 							: "no prior child session existed, so only the logical run and objective are continued";
-						return { content: [{ type: "text", text: `Resumed run #${thread.id}, ${mode}; ${context}, and cumulative active time is preserved. Completion will arrive automatically.` }], details: {}, terminate: true };
+						return { content: [{ type: "text", text: `Resumed run #${thread.id}, ${mode}; ${context}, and cumulative active time is preserved. It runs in the background — keep working; the result resumes you automatically.` }], details: {} };
 					}
 				}
 			} catch (error) {

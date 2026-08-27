@@ -129,7 +129,7 @@ send({ type: "message_end", message: { role: "assistant", content: [{ type: "tex
 		expect(existsSync(retainedDir)).toBe(false);
 	});
 
-	it("stops during documenter and publishes its partial instead of the old writer", async () => {
+	it("stops during the managed gate and publishes its partial instead of the old writer", async () => {
 		writeFileSync(join(testDir, "pi-subagents.json"), JSON.stringify({
 			enabledAgents: ["worker", "documenter", "reviewer"],
 			announcedFeatures: ["cleanerDefaulted", "documenterDefaulted"],
@@ -145,22 +145,19 @@ send({ type: "message_end", message: { role: "assistant", content: [{ type: "tex
 			usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, cost: 0, contextTokens: 0, turns: 1 },
 			...extra,
 		});
-		let documenterStarted = false;
+		let reviewerStarted = false;
 		vi.spyOn(spawn, "runSingleAgentWithMainFallback").mockImplementation(async (options: any) => {
 			options.onLive?.({ kind: "status", status: "running" });
 			if (options.agentName === "worker") {
 				options.control?.markSettled();
 				return result("worker", options.task, "OLD WRITER OUTPUT");
 			}
-			if (options.agentName === "reviewer") {
-				return result("reviewer", options.task, "APPROVE\nVERDICT: REVIEW_PASS");
-			}
-			documenterStarted = true;
+			reviewerStarted = true;
 			await new Promise<void>((resolveAborted) => {
 				if (options.signal.aborted) resolveAborted();
 				else options.signal.addEventListener("abort", () => resolveAborted(), { once: true });
 			});
-			return result("documenter", options.task, "CURRENT DOCUMENTER PARTIAL", {
+			return result("reviewer", options.task, "CURRENT REVIEWER PARTIAL", {
 				exitCode: 1,
 				stopReason: "aborted",
 				errorMessage: "stopped",
@@ -168,13 +165,13 @@ send({ type: "message_end", message: { role: "assistant", content: [{ type: "tex
 		});
 
 		const { stub, subagent, stop } = registerWithScript(script);
-		const dispatched = await execute(subagent, { agent: "worker", task: "Stop in documentation" });
+		const dispatched = await execute(subagent, { agent: "worker", task: "Stop in the gate" });
 		const runId = dispatched.details.results[0].runId;
-		await waitFor(() => documenterStarted);
+		await waitFor(() => reviewerStarted);
 		await execute(stop, { id: String(runId) });
 
 		expect(stub.messages).toHaveLength(1);
-		expect(stub.messages[0].message.content).toContain("CURRENT DOCUMENTER PARTIAL");
+		expect(stub.messages[0].message.content).toContain("CURRENT REVIEWER PARTIAL");
 		expect(stub.messages[0].message.content).not.toContain("OLD WRITER OUTPUT");
 	});
 

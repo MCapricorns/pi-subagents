@@ -42,6 +42,7 @@ import {
 	failedStartResult,
 	formatCompletionBlock,
 	modelLevelTakeoverNote,
+	reviewFailFollowUpNote,
 	queuedResult,
 } from "./format.ts";
 import {
@@ -249,27 +250,6 @@ export function isWorktreeCapableAgent(agent: AgentConfig): boolean {
 	return isWriteCapableAgent(agent);
 }
 
-/** A direct reviewer otherwise cannot infer enabled-role availability from its
- * isolated task. Managed internal gates receive the same contract in their
- * generated briefs. Advisory reviews still emit neither machine marker. */
-function withEnabledDocumenterReviewContract(agent: AgentConfig): AgentConfig {
-	return {
-		...agent,
-		systemPrompt: `${agent.systemPrompt.trimEnd()}\n\nRuntime workflow context: documenter is enabled. In gate reviews, documentation drift is non-gating: emit DOCUMENTATION: NEEDED with ## Documentation notes, or DOCUMENTATION: CLEAN when no sync is needed. Advisory reviews still emit neither VERDICT nor DOCUMENTATION markers.`.trim(),
-	};
-}
-
-/** The dispatcher explicitly requested a report-only review: forbid the gate
- * markers at the source and (in dispatch) refuse to chain on them anyway. */
-function withAdvisoryReviewContract(agent: AgentConfig): AgentConfig {
-	return {
-		...agent,
-		systemPrompt: `${agent.systemPrompt.trimEnd()}
-
-Runtime workflow context: this dispatch is advisory. Report findings only; do not emit VERDICT or DOCUMENTATION markers — the runtime will not act on them.`.trim(),
-	};
-}
-
 export interface DispatchEnvironment {
 	ctx: ExtensionContext;
 	config: SubagentsConfig;
@@ -299,7 +279,6 @@ export interface StartBackgroundOptions {
 	environment?: DispatchEnvironment;
 	seed?: SessionSeed;
 	resumeReservation?: ResumeReservation;
-	advisoryReview?: boolean;
 }
 
 export type StartBackgroundInternal = (
@@ -429,15 +408,7 @@ export function createBackgroundDispatcher(options: BackgroundDispatcherOptions)
 		if (!discoveredAgent) return failedStartResult(agentName, task, `Unknown agent: "${agentName}".`);
 		const resolveLiveAgentTools = (candidate: AgentConfig): AgentConfig =>
 			resolveAgentTools({ ...candidate, tools: discoveredAgent.tools }, runtime.getActiveTools());
-		const resolvedAgent = resolveLiveAgentTools(discoveredAgent);
-		const advisoryReview = startOptions.advisoryReview ?? existingThread?.advisoryReview ?? false;
-		const agent = agentName === "reviewer"
-			? advisoryReview
-				? withAdvisoryReviewContract(resolvedAgent)
-				: runAgents.some((candidate) => candidate.name === "documenter")
-					? withEnabledDocumenterReviewContract(resolvedAgent)
-					: resolvedAgent
-			: resolvedAgent;
+		const agent = resolveLiveAgentTools(discoveredAgent);
 		if (isolation === "worktree" && !isWorktreeCapableAgent(agent)) {
 			return {
 				...failedStartResult(agentName, task, `Agent "${agentName}" is read-only; worktree isolation is available only to write-capable agents such as worker, cleaner, or documenter.`),
@@ -531,7 +502,6 @@ export function createBackgroundDispatcher(options: BackgroundDispatcherOptions)
 			thread.executionCwd = executionCwd;
 			thread.thinkingLevel = thinkingLevel;
 			thread.isolation = isolation;
-			thread.advisoryReview = advisoryReview;
 			thread.worktree = worktree;
 			thread.state = "queued";
 			thread.control = control;
@@ -555,7 +525,6 @@ export function createBackgroundDispatcher(options: BackgroundDispatcherOptions)
 				executionCwd,
 				thinkingLevel,
 				isolation,
-				advisoryReview,
 				worktree,
 				state: "queued",
 				control,
@@ -673,13 +642,13 @@ export function createBackgroundDispatcher(options: BackgroundDispatcherOptions)
 				if (thread.lifecycleOperation === "stop") return;
 
 				// A shutdown can win in the microtask gap after the top-level RPC
-				// settles. Do not launch an obsolete documenter/reviewer or replace the
+				// settles. Do not launch an obsolete downstream gate or replace the
 				// stable top-level session with an aborted downstream attempt.
 				if (backgroundSignal.aborted || lifecycleInterrupted() || !runtime.sessionActive) return;
 
 				if (thread.retireOnSettle) runtime.retireThreadSession(thread);
 				let workflowOutcome: ManagedWorkflowOutcome | undefined;
-				const workflowPlan = getManagedWorkflowPlan(result, workflowAvailability, thread.advisoryReview);
+				const workflowPlan = getManagedWorkflowPlan(result, workflowAvailability);
 					if (workflowPlan && runtime.sessionActive) {
 						// The continuation is runtime-initiated (gate review,
 						// documentation sync): release this generation's
@@ -804,6 +773,9 @@ export function createBackgroundDispatcher(options: BackgroundDispatcherOptions)
 						if (needsFullFinal) {
 							block += `\n\n${formatCompletionBlock(result, runConfig.maxResultLines, originalCwd)}`;
 						}
+						if (finalVerdict === "fail") {
+							block += `\n\n${reviewFailFollowUpNote()}`;
+						}
 						if (modelLevel) block += `\n\n${modelLevelTakeoverNote(result, { runId })}`;
 						runtime.sendCompletionGroup([{
 							agent: `managed workflow (${result.agent})`,
@@ -819,7 +791,9 @@ export function createBackgroundDispatcher(options: BackgroundDispatcherOptions)
 						agent: result.agent,
 						block: modelLevel
 							? `${formatCompletionBlock(result, runConfig.maxResultLines, result.projectCwd ?? originalCwd)}\n\n${modelLevelTakeoverNote(result, { runId })}`
-							: formatCompletionBlock(result, runConfig.maxResultLines, result.projectCwd ?? originalCwd),
+							: result.agent === "reviewer" && reviewVerdict(getResultOutput(result)) === "fail"
+								? `${formatCompletionBlock(result, runConfig.maxResultLines, result.projectCwd ?? originalCwd)}\n\n${reviewFailFollowUpNote()}`
+								: formatCompletionBlock(result, runConfig.maxResultLines, result.projectCwd ?? originalCwd),
 						triggerTurn: completionTriggersTurn(result, runConfig.notifyOnReviewPass),
 						usage: result.usage,
 					};
@@ -1293,7 +1267,6 @@ function createRestoredThread(
 		executionCwd: record.executionCwd,
 		...(record.thinkingLevel ? { thinkingLevel: record.thinkingLevel as ThinkingLevel } : {}),
 		isolation: record.isolation,
-		advisoryReview: false,
 		worktree,
 		state,
 		control: new RpcRunControl(record.task, record.generation),

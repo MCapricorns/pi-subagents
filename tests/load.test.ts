@@ -78,17 +78,15 @@ describe("extension registration", () => {
 
 		const tool = stub.tools.find((t) => t.name === "subagent");
 		expect(tool.promptGuidelines).toBeUndefined();
-		expect(tool.description).toContain("fan-out breadth is yours — extra tasks queue for the next free process slot");
-		expect(tool.description).toContain("explorer for broad read-only reconnaissance (a retrieval index, never a gate)");
-		expect(tool.description).toContain("cleaner as a separate explicitly authorized cleanup/removal/simplification/deduplication entry");
-		expect(tool.description).toContain("documenter for explicit docs/comments work or conditional final diff sync");
-		expect(tool.description).toContain("reviewer for generic read-only assessments and independent code gates");
-		expect(tool.description).toContain("resolve the findings yourself (fix inline or dispatch a briefed worker) without waiting for the user");
-		expect(tool.description).toContain("top-level documenter delivers directly");
-		expect(tool.description).toContain("DOCUMENTATION: NEEDED");
-		expect(tool.description).toContain("do not poll");
+		expect(tool.description).toContain("Dispatching never blocks your turn");
+		expect(tool.description).toContain("Put every genuinely independent unit in one `tasks` array");
+		expect(tool.description).toContain("parallel workers default to detached Git worktrees");
+		expect(tool.description).toContain("a failing gate is fixed by the reviewer itself in a write-enabled continuation of the same session and re-reviewed until it passes");
+		expect(tool.description).toContain("A REVIEW_FAIL from a gate you dispatched directly returns its findings to you");
+		expect(tool.description).toContain("never poll or restate delivered results");
 		expect(tool.description).toContain("continues the retained session on the current main model");
-		expect(tool.promptSnippet).toContain("results resume automatically");
+		expect(tool.description).not.toContain("DOCUMENTATION:");
+		expect(tool.promptSnippet).toContain("never blocks your turn");
 		expect(`${tool.description}\n${tool.promptSnippet}`).not.toMatch(/[\u4e00-\u9fff]/u);
 		expect(tool.parameters.properties.task).toMatchObject({ minLength: 1, pattern: "\\S" });
 		expect(tool.parameters.properties.tasks.items.properties.task).toMatchObject({ minLength: 1, pattern: "\\S" });
@@ -322,7 +320,7 @@ describe("registered tool background dispatch", () => {
 			const summary = "Inspect cache-read metrics";
 			const dispatch = await runTool(tool, "call-valid", { agent: "worker", task }, executionContext());
 
-			expect(dispatch.terminate).toBe(true);
+			expect(dispatch.terminate).toBeUndefined();
 			expect(capturedTasks).toHaveLength(1);
 			const runId = dispatch.details.results[0].runId;
 			expect(runId).toBeTypeOf("number");
@@ -644,7 +642,7 @@ send({
 					],
 				}, executionContext());
 
-			expect(dispatch.terminate).toBe(true);
+			expect(dispatch.terminate).toBeUndefined();
 			expect(capturedTasks).toHaveLength(2);
 			const runIds = dispatch.details.results.map((result: any) => result.runId as number);
 			const renderedDispatch = renderToolResult(tool, dispatch);
@@ -825,7 +823,7 @@ describe("managed post-writer workflows", () => {
 	});
 
 	it("re-reads parent shells and active plugins for every managed stage", async () => {
-		configureEnabledAgents(["worker", "documenter", "reviewer"]);
+		configureEnabledAgents(["worker", "reviewer"]);
 		const stub = makeStub();
 		stub.activeTools = ["read", "powershell", "edit", "write", "custom_extension"];
 		const { tasks, controllers } = captureEnqueue();
@@ -834,11 +832,8 @@ describe("managed post-writer workflows", () => {
 				stub.activeTools = ["read", "bash", "edit", "write", "custom_extension"];
 				return makeResult("worker", options.task, "implemented");
 			}
-			if (options.agentName === "reviewer") {
-				stub.activeTools = ["read", "bash", "powershell", "edit", "write", "custom_extension"];
-				return makeResult("reviewer", options.task, "DOCUMENTATION: NEEDED\nVERDICT: REVIEW_PASS");
-			}
-			return makeResult("documenter", options.task, "docs synchronized");
+			stub.activeTools = ["read", "bash", "powershell", "edit", "write", "custom_extension"];
+			return makeResult("reviewer", options.task, "APPROVE\nVERDICT: REVIEW_PASS");
 		});
 
 		try {
@@ -849,7 +844,7 @@ describe("managed post-writer workflows", () => {
 
 			const calls = run.mock.calls.map(([options]) => options);
 			expect(calls.map((options) => options.agentName)).toEqual([
-				"worker", "reviewer", "documenter",
+				"worker", "reviewer",
 			]);
 			expect(calls[0].agent.tools).toEqual([
 				"read", "powershell", "edit", "write", "custom_extension",
@@ -857,20 +852,16 @@ describe("managed post-writer workflows", () => {
 			expect(calls[1].agent.tools).toEqual([
 				"read", "grep", "find", "ls", "bash", "custom_extension",
 			]);
-			expect(calls[2].agent.tools).toEqual([
-				"read", "grep", "find", "ls", "bash", "powershell", "edit", "write", "custom_extension",
-			]);
 		} finally {
 			await shutdownExtension(stub, { controllers });
 		}
 	});
 
 	it("keeps parent and active-stage widget telemetry attributed to their actual roles", async () => {
-		configureEnabledAgents(["worker", "documenter", "reviewer"]);
+		configureEnabledAgents(["worker", "reviewer"]);
 		const stub = makeStub();
 		const { tasks, controllers } = captureEnqueue();
 		const workerUsage = { input: 100, output: 10, cacheRead: 0, cacheWrite: 0, cost: 1, contextTokens: 0, turns: 1 };
-		const documenterUsage = { input: 20, output: 2, cacheRead: 0, cacheWrite: 0, cost: 0.01, contextTokens: 0, turns: 1 };
 		const reviewerUsage = { input: 30, output: 3, cacheRead: 0, cacheWrite: 0, cost: 0.2, contextTokens: 0, turns: 1 };
 		let reviewerStarted!: () => void;
 		const atReviewer = new Promise<void>((resolve) => {
@@ -879,14 +870,6 @@ describe("managed post-writer workflows", () => {
 		let releaseReviewer!: () => void;
 		const reviewerRelease = new Promise<void>((resolve) => {
 			releaseReviewer = resolve;
-		});
-		let documenterStarted!: () => void;
-		const atDocumenter = new Promise<void>((resolve) => {
-			documenterStarted = resolve;
-		});
-		let releaseDocumenter!: () => void;
-		const documenterRelease = new Promise<void>((resolve) => {
-			releaseDocumenter = resolve;
 		});
 		vi.spyOn(spawn, "runSingleAgentWithMainFallback").mockImplementation(async (options: any) => {
 			const publish = (model: string, thinking: string, usage: typeof workerUsage): void => {
@@ -902,20 +885,10 @@ describe("managed post-writer workflows", () => {
 					usage: workerUsage,
 				});
 			}
-			if (options.agentName === "documenter") {
-				publish("deepseek/ds-doc", "low", documenterUsage);
-				documenterStarted();
-				await documenterRelease;
-				return makeResult("documenter", options.task, "docs synchronized", {
-					model: "deepseek/ds-doc",
-					thinking: "low",
-					usage: documenterUsage,
-				});
-			}
 			publish("xai/grok-reviewer", "xhigh", reviewerUsage);
 			reviewerStarted();
 			await reviewerRelease;
-			return makeResult("reviewer", options.task, "DOCUMENTATION: NEEDED\nVERDICT: REVIEW_PASS", {
+			return makeResult("reviewer", options.task, "APPROVE\nVERDICT: REVIEW_PASS", {
 				model: "xai/grok-reviewer",
 				thinking: "xhigh",
 				usage: reviewerUsage,
@@ -927,6 +900,11 @@ describe("managed post-writer workflows", () => {
 			const tool = stub.tools.find((candidate) => candidate.name === "subagent");
 			const dispatched = await runTool(tool, "widget-attribution", { agent: "worker", task: "Implement widget attribution" }, executionContext());
 			const parentRunId = dispatched.details.results[0].runId as number;
+			const observedProjections: unknown[] = [];
+			const unsubscribe = monitor.subscribe(() => {
+				const stages = monitor.findRun(parentRunId)?.workflowStages;
+				if (stages) observedProjections.push(stages.map((stage) => ({ ...stage })));
+			});
 			const workflow = tasks[0](controllers[0].signal);
 			await atReviewer;
 
@@ -941,7 +919,6 @@ describe("managed post-writer workflows", () => {
 				workflowStages: [
 					{ agent: "worker", relation: "implement", status: "done" },
 					{ agent: "reviewer", relation: "review", status: "active" },
-					{ agent: "documenter", relation: "docs", status: "pending" },
 				],
 			});
 			expect(reviewer).toMatchObject({
@@ -951,55 +928,32 @@ describe("managed post-writer workflows", () => {
 				usage: reviewerUsage,
 				relationLabel: "final review",
 			});
-			expect(monitor.getRuns()).not.toContainEqual(expect.objectContaining({
-				agent: "documenter",
-				model: "openai/gpt-worker",
-			}));
 
 			releaseReviewer();
-			await atDocumenter;
-			expect(monitor.findRun(parentRunId)?.workflowStages).toEqual([
+			await workflow;
+			unsubscribe();
+			expect(observedProjections).toContainEqual([
 				{ agent: "worker", relation: "implement", status: "done" },
 				{ agent: "reviewer", relation: "review", status: "done" },
-				{ agent: "documenter", relation: "docs", status: "active" },
 			]);
-			expect(monitor.getRuns()).not.toContainEqual(expect.objectContaining({
-				parentRunId,
-				agent: "reviewer",
-			}));
-			expect(monitor.getRuns()).toContainEqual(expect.objectContaining({
-				parentRunId,
-				agent: "documenter",
-				relationLabel: "final documentation sync",
-			}));
-			releaseDocumenter();
-			await workflow;
 		} finally {
 			releaseReviewer();
-			releaseDocumenter();
 			await shutdownExtension(stub, { controllers });
 		}
 	});
 
 	it.each([
-		["worker", ["worker", "reviewer", "documenter"]],
-		["cleaner", ["cleaner", "reviewer", "documenter"]],
-	] as const)("runs successful top-level %s through its reviewer and conservative docs fallback", async (topAgent, expectedOrder) => {
+		["worker", ["worker", "reviewer"]],
+		["cleaner", ["cleaner", "reviewer"]],
+	] as const)("runs a successful top-level %s through one reviewer gate and delivers", async (topAgent, expectedOrder) => {
 		configureEnabledAgents(["explorer", "worker", "cleaner", "documenter", "reviewer"]);
 		const stub = makeStub();
 		const { tasks, controllers } = captureEnqueue();
 		const topTask = `${topAgent} top-level task`;
 		const run = vi.spyOn(spawn, "runSingleAgentWithMainFallback").mockImplementation(async (options: any) => {
 			if (options.task === topTask) return makeResult(topAgent, options.task, `${topAgent} report src/change.ts`);
-			if (options.agentName === "documenter") {
-				expect(options.task).toContain(`${topAgent} report src/change.ts`);
-				expect(options.task).toContain("VERDICT: REVIEW_PASS");
-				expect(options.task).toContain("Inspect the actual git diff");
-				return makeResult("documenter", options.task, "documentation report README.md");
-			}
 			expect(options.agentName).toBe("reviewer");
 			expect(options.task).toContain(`${topAgent} report src/change.ts`);
-			expect(options.task).not.toContain("documentation report README.md");
 			return makeResult("reviewer", options.task, "APPROVE\nVERDICT: REVIEW_PASS");
 		});
 
@@ -1021,7 +975,7 @@ describe("managed post-writer workflows", () => {
 			const content = stub.messages[0].message.content as string;
 			expect(content).toContain("## Managed workflow:");
 			expect(content).toContain("final review · PASS");
-			expect(content).toContain("final documentation sync · completed");
+			expect(content).not.toContain("final documentation sync");
 			expect(content).not.toContain(`- #${parentRunId} `);
 			const stepIds = [...content.matchAll(/^- #(\d+) /gmu)].map((match) => Number(match[1]));
 			expect(stepIds).toHaveLength(expectedOrder.length);
@@ -1032,22 +986,22 @@ describe("managed post-writer workflows", () => {
 		}
 	});
 
-	it("skips pending documenter when the post-writer gate reports DOCUMENTATION: CLEAN", async () => {
+	it("keeps documentation drift an ordinary gate finding with no marker contract", async () => {
 		configureEnabledAgents(["worker", "documenter", "reviewer"]);
 		const stub = makeStub();
 		const { tasks, controllers } = captureEnqueue();
 		const run = vi.spyOn(spawn, "runSingleAgentWithMainFallback").mockImplementation(async (options: any) => {
 			if (options.agentName === "worker") return makeResult("worker", options.task, "implemented src/cache.ts");
 			expect(options.agentName).toBe("reviewer");
-			expect(options.task).toContain("DOCUMENTATION: NEEDED");
-			expect(options.task).toContain("DOCUMENTATION: CLEAN");
-			return makeResult("reviewer", options.task, "DOCUMENTATION: CLEAN\nAPPROVE\nVERDICT: REVIEW_PASS");
+			expect(options.task).toContain("including documentation drift");
+			expect(options.task).not.toContain("DOCUMENTATION:");
+			return makeResult("reviewer", options.task, "APPROVE\nVERDICT: REVIEW_PASS");
 		});
 
 		try {
 			register(stub.api);
 			const tool = stub.tools.find((candidate) => candidate.name === "subagent");
-			await runTool(tool, "post-writer-clean", { agent: "worker", task: "Implement src/cache.ts" }, executionContext());
+			await runTool(tool, "post-writer-gate", { agent: "worker", task: "Implement src/cache.ts" }, executionContext());
 			await tasks[0](controllers[0].signal);
 
 			expect(run.mock.calls.map(([options]) => options.agentName)).toEqual(["worker", "reviewer"]);
@@ -1059,46 +1013,111 @@ describe("managed post-writer workflows", () => {
 		}
 	});
 
-	it("never writes docs after a terminal REVIEW_FAIL gate", async () => {
+	it("converges a failing gate through reviewer fix stages and fresh re-reviews", async () => {
 		configureEnabledAgents(["worker", "documenter", "reviewer"]);
 		const stub = makeStub();
 		const { tasks, controllers } = captureEnqueue();
+		const sessionDir = mkdtempSync(join(tmpdir(), "pi-subagents-gate-session-"));
+		const calls: Array<{ agentName: string; stdinText?: string; sessionId?: string }> = [];
 		const run = vi.spyOn(spawn, "runSingleAgentWithMainFallback").mockImplementation(async (options: any) => {
+			calls.push({
+				agentName: options.agentName,
+				stdinText: options.stdinText,
+				sessionId: options.sessionId,
+			});
 			if (options.agentName === "worker") return makeResult("worker", options.task, "implemented");
-			return makeResult(
-				"reviewer",
-				options.task,
-				"## Documentation notes\n- README stale\nDOCUMENTATION: NEEDED\nREQUEST_CHANGES\nVERDICT: REVIEW_FAIL",
-			);
+			if (options.stdinText === undefined) {
+				// Fresh gate context: first scan fails, the re-review after the fix passes.
+				const firstScan = calls.filter((call) => call.agentName === "reviewer" && call.stdinText === undefined).length === 1;
+				if (!firstScan) return makeResult("reviewer", options.task, "APPROVE\nVERDICT: REVIEW_PASS");
+				return makeResult(
+					"reviewer",
+					options.task,
+					"- src/a.ts:10 — off-by-one breaks the loop — Fix: guard the empty range and re-run vitest\nVERDICT: REVIEW_FAIL",
+					{ sessionId: "gate-session", sessionDir },
+				);
+			}
+			// Reviewer fix stage: continues the failing gate's session with write access.
+			expect(options.sessionId).toBe("gate-session");
+			expect(options.stdinText).toContain("full write access in this same session");
+			expect(options.agent.tools).toContain("edit");
+			expect(options.agent.systemPrompt).toContain("FIX STAGE");
+			return makeResult("reviewer", options.task, "## Fixed\n- src/a.ts — guarded the empty range\n## Verification\n- vitest 3 passed", {
+				sessionId: "gate-session",
+				sessionDir,
+			});
 		});
 
 		try {
 			register(stub.api);
 			const tool = stub.tools.find((candidate) => candidate.name === "subagent");
-			await runTool(tool, "post-writer-fail-no-docs", { agent: "worker", task: "Implement then fail gate" }, executionContext());
+			await runTool(tool, "gate-converge", { agent: "worker", task: "Implement then converge" }, executionContext());
 			await tasks[0](controllers[0].signal);
 
-			// The failing gate ends the workflow: findings return to the main
-			// agent and no documenter starts despite DOCUMENTATION: NEEDED.
-			expect(run.mock.calls.map(([options]) => options.agentName)).toEqual(["worker", "reviewer"]);
+			expect(calls.map((call) => call.agentName)).toEqual(["worker", "reviewer", "reviewer", "reviewer"]);
+			expect(calls[2]!.stdinText).toContain("Apply every one of your own fix instructions");
+			expect(calls[3]!.stdinText).toBeUndefined();
+			expect(run.mock.calls[3]![0].task).toContain("re-scan the COMPLETE pending diff from scratch");
 			expect(stub.messages).toHaveLength(1);
-			expect(stub.messages[0].message.content).toContain("final FAIL");
-			expect(stub.messages[0].message.content).not.toContain("final documentation sync");
+			const content = stub.messages[0].message.content as string;
+			expect(content).toContain("final review · FAIL");
+			expect(content).toContain("review fix · completed");
+			expect(content).toContain("re-review · PASS");
+			expect(content).toContain("final PASS");
+			expect(content).toMatch(/^Per-run details: subagent_status( #\d+){4}$/m);
+			expect(content).not.toContain("findings are yours to resolve now");
 		} finally {
 			await shutdownExtension(stub, { controllers });
+			rmSync(sessionDir, { recursive: true, force: true });
 		}
 	});
 
-	it("treats a malformed post-writer review as a failed gate and never starts documenter", async () => {
+	it("hands a still-failing gate back to the main agent after the fix-round cap", async () => {
+		configureEnabledAgents(["worker", "documenter", "reviewer"]);
+		const stub = makeStub();
+		const { tasks, controllers } = captureEnqueue();
+		const sessionDir = mkdtempSync(join(tmpdir(), "pi-subagents-gate-session-cap-"));
+		const run = vi.spyOn(spawn, "runSingleAgentWithMainFallback").mockImplementation(async (options: any) => {
+			if (options.agentName === "worker") return makeResult("worker", options.task, "implemented");
+			if (options.stdinText === undefined) {
+				return makeResult("reviewer", options.task, "NEW FINDING\nVERDICT: REVIEW_FAIL", {
+					sessionId: "gate-session",
+					sessionDir,
+				});
+			}
+			return makeResult("reviewer", options.task, "## Fixed\n- patched", { sessionId: "gate-session", sessionDir });
+		});
+
+		try {
+			register(stub.api);
+			const tool = stub.tools.find((candidate) => candidate.name === "subagent");
+			await runTool(tool, "gate-cap", { agent: "worker", task: "Never converges" }, executionContext());
+			await tasks[0](controllers[0].signal);
+
+			// worker + gate + 3 × (fix + re-review); the capped failing re-review
+			// returns to the main agent with the fix-now note.
+			expect(run.mock.calls).toHaveLength(8);
+			expect(stub.messages).toHaveLength(1);
+			const content = stub.messages[0].message.content as string;
+			expect(content).toContain("re-review 3 · FAIL");
+			expect(content).toContain("final FAIL");
+			expect(content).toContain("findings are yours to resolve now");
+		} finally {
+			await shutdownExtension(stub, { controllers });
+			rmSync(sessionDir, { recursive: true, force: true });
+		}
+	});
+
+	it("treats a malformed post-writer review as a failed gate and never starts another child", async () => {
 		configureEnabledAgents(["worker", "documenter", "reviewer"]);
 		const stub = makeStub();
 		const { tasks, controllers } = captureEnqueue();
 		const run = vi.spyOn(spawn, "runSingleAgentWithMainFallback").mockImplementation(async (options: any) => {
 			if (options.agentName === "worker") return makeResult("worker", options.task, "implemented");
 			if (options.agentName === "reviewer") {
-				return makeResult("reviewer", options.task, "DOCUMENTATION: NEEDED\nMalformed gate without verdict");
+				return makeResult("reviewer", options.task, "Malformed gate without verdict");
 			}
-			throw new Error("A malformed gate must not authorize documenter");
+			throw new Error("A malformed gate must not authorize any downstream child");
 		});
 
 		let unsubscribe = (): void => {};
@@ -1154,17 +1173,14 @@ describe("managed post-writer workflows", () => {
 		}
 	});
 
-	it("conservatively runs one docs sync after a direct REVIEW_PASS with no documentation marker", async () => {
+	it("delivers a direct REVIEW_PASS without chaining any child or docs contract", async () => {
+		vi.useFakeTimers();
 		configureEnabledAgents(["worker", "documenter", "reviewer"]);
 		const stub = makeStub();
 		const { tasks, controllers } = captureEnqueue();
 		const run = vi.spyOn(spawn, "runSingleAgentWithMainFallback").mockImplementation(async (options: any) => {
-			if (options.agentName === "documenter") {
-				expect(options.task).toContain("Final documentation sync");
-				expect(options.task).toContain("DIRECT PASS REPORT");
-				return makeResult("documenter", options.task, "SYNCED README.md");
-			}
-			return makeResult("reviewer", options.task, "DIRECT PASS REPORT\nVERDICT: REVIEW_PASS");
+			expect(options.agent.systemPrompt).not.toContain("Runtime workflow context");
+			return makeResult("reviewer", options.task, "DIRECT PASS REPORT\nAPPROVE\nVERDICT: REVIEW_PASS");
 		});
 
 		try {
@@ -1172,70 +1188,39 @@ describe("managed post-writer workflows", () => {
 			const tool = stub.tools.find((candidate) => candidate.name === "subagent");
 			await runTool(tool, "direct-pass", { agent: "reviewer", task: "Gate pending diff" }, executionContext());
 			await tasks[0](controllers[0].signal);
-
-			expect(run.mock.calls.map(([options]) => options.agentName)).toEqual(["reviewer", "documenter"]);
-			expect(stub.messages).toHaveLength(1);
-			expect(stub.messages[0].message.content).toContain("reviewer → documenter");
-			expect(stub.messages[0].message.content).toContain("pre-documentation review · PASS");
-			expect(stub.messages[0].message.content).toContain("final documentation sync · completed");
-			expect(stub.messages[0].message.content).not.toContain("final review");
-		} finally {
-			await shutdownExtension(stub, { controllers });
-		}
-	});
-
-	it("delivers a direct REVIEW_PASS with DOCUMENTATION: CLEAN without starting documenter", async () => {
-		vi.useFakeTimers();
-		configureEnabledAgents(["worker", "documenter", "reviewer"]);
-		const stub = makeStub();
-		const { tasks, controllers } = captureEnqueue();
-		const run = vi.spyOn(spawn, "runSingleAgentWithMainFallback").mockImplementation(async (options: any) => {
-			expect(options.agent.systemPrompt).toContain("Runtime workflow context: documenter is enabled");
-			expect(options.agent.systemPrompt).toContain("documentation drift is non-gating");
-			return makeResult("reviewer", options.task, "DOCUMENTATION: CLEAN\nAPPROVE\nVERDICT: REVIEW_PASS");
-		});
-
-		try {
-			register(stub.api);
-			const tool = stub.tools.find((candidate) => candidate.name === "subagent");
-			await runTool(tool, "direct-clean-pass", { agent: "reviewer", task: "Gate pending diff" }, executionContext());
-			await tasks[0](controllers[0].signal);
 			vi.advanceTimersByTime(150);
 
 			expect(run.mock.calls.map(([options]) => options.agentName)).toEqual(["reviewer"]);
 			expect(stub.messages).toHaveLength(1);
-			expect(stub.messages[0].message.content).toContain("DOCUMENTATION: CLEAN");
+			expect(stub.messages[0].message.content).toContain("VERDICT: REVIEW_PASS");
 			expect(stub.messages[0].message.content).not.toContain("Managed workflow");
 		} finally {
 			await shutdownExtension(stub, { controllers });
 		}
 	});
 
-	it("delivers an advisory re-verification directly even when a verdict leaks through", async () => {
+	it("delivers a direct REVIEW_FAIL re-verification with the fix-now note and no chain", async () => {
 		vi.useFakeTimers();
 		vi.setSystemTime(0);
 		configureEnabledAgents(["worker", "documenter", "reviewer"]);
 		const stub = makeStub();
 		const { tasks, controllers } = captureEnqueue();
-		const run = vi.spyOn(spawn, "runSingleAgentWithMainFallback").mockImplementation(async (options: any) => {
-			expect(options.agent.systemPrompt).toContain("this dispatch is advisory");
-			// The reviewer ignores the advisory contract and emits a gate verdict anyway.
-			return makeResult("reviewer", options.task, "OPEN FINDING\nVERDICT: REVIEW_FAIL");
-		});
+		const run = vi.spyOn(spawn, "runSingleAgentWithMainFallback").mockImplementation(async (options: any) =>
+			// A re-verification gate over work the main agent already fixed itself.
+			makeResult("reviewer", options.task, "OPEN FINDING\nVERDICT: REVIEW_FAIL"));
 
 		try {
 			register(stub.api);
 			const tool = stub.tools.find((candidate) => candidate.name === "subagent");
-			await runTool(tool, "advisory-reverify", { agent: "reviewer", task: "Re-verify the pending diff after my fixes.", advisory: true }, executionContext());
+			await runTool(tool, "reverify", { agent: "reviewer", task: "Re-verify the pending diff after my fixes." }, executionContext());
 			await tasks[0](controllers[0].signal);
 			vi.advanceTimersByTime(150);
 
 			expect(run.mock.calls.map(([options]) => options.agentName)).toEqual(["reviewer"]);
 			expect(stub.messages).toHaveLength(1);
 			expect(stub.messages[0].message.content).toContain("VERDICT: REVIEW_FAIL");
+			expect(stub.messages[0].message.content).toContain("findings are yours to resolve now");
 			expect(stub.messages[0].message.content).not.toContain("Managed workflow");
-			expect(stub.messages[0].message.content).not.toContain("Auto-fix chain");
-			expect(monitor.getRuns().find((run2) => run2.activity === "auto-fix chain running")).toBeUndefined();
 		} finally {
 			await shutdownExtension(stub, { controllers });
 		}
@@ -1267,7 +1252,7 @@ describe("managed post-writer workflows", () => {
 
 	it.each([
 		[["worker", "reviewer"], ["worker", "reviewer"]],
-		[["worker", "documenter"], ["worker", "documenter"]],
+		[["worker", "documenter"], ["worker"]],
 		[["worker"], ["worker"]],
 	] as const)("honors disabled downstream roles: %j", async (enabledAgents, expectedOrder) => {
 		vi.useFakeTimers();
@@ -1338,7 +1323,7 @@ describe("managed post-writer workflows", () => {
 		}
 	});
 
-	it("keeps root/nested empty-repo documenters behind a writer workflow when reviewer is disabled", async () => {
+	it("keeps a shared-checkout documenter behind a running writer across nested paths", async () => {
 		configureEnabledAgents(["worker", "documenter"]);
 		const { execFileSync } = await import("node:child_process");
 		const repo = mkdtempSync(join(tmpdir(), "pi-subagents-empty-lane-"));
@@ -1353,23 +1338,19 @@ describe("managed post-writer workflows", () => {
 			releaseWriter = resolveWriter;
 		});
 		vi.spyOn(spawn, "runSingleAgentWithMainFallback").mockImplementation(async (options: any) => {
-			if (options.task === "Writer before docs") {
+			if (options.task === "Writer first") {
 				order.push("writer");
 				await writerGate;
 				return makeResult("worker", options.task, "writer report");
 			}
-			if (options.task === "Standalone docs") {
-				order.push("standalone documenter");
-				return makeResult("documenter", options.task, "standalone docs report");
-			}
-			order.push("managed documenter");
-			return makeResult("documenter", options.task, "managed docs report");
+			order.push("standalone documenter");
+			return makeResult("documenter", options.task, "standalone docs report");
 		});
 
 		try {
 			register(stub.api);
 			const tool = stub.tools.find((candidate) => candidate.name === "subagent");
-			await runTool(tool, "writer-docs", { agent: "worker", task: "Writer before docs", cwd: repo }, executionContext());
+			await runTool(tool, "writer-first", { agent: "worker", task: "Writer first", cwd: repo }, executionContext());
 			await runTool(tool, "standalone-docs", { agent: "documenter", task: "Standalone docs", cwd: nested }, executionContext());
 			const writerRun = queued[0](controllers[0].signal);
 			await vi.waitFor(() => expect(order).toEqual(["writer"]));
@@ -1379,7 +1360,7 @@ describe("managed post-writer workflows", () => {
 
 			releaseWriter();
 			await Promise.all([writerRun, documenterRun]);
-			expect(order).toEqual(["writer", "managed documenter", "standalone documenter"]);
+			expect(order).toEqual(["writer", "standalone documenter"]);
 		} finally {
 			releaseWriter();
 			await shutdownExtension(stub, { controllers });
@@ -1410,12 +1391,14 @@ describe("managed workflow dispatch", () => {
 			vi.advanceTimersByTime(150);
 
 			// No managed continuation: the failing gate is one plain, turn-triggering
-			// completion so the main agent can resolve the findings itself.
+			// completion carrying the findings and the fix-now note, so the main
+			// agent can resolve them itself.
 			expect(capturedTasks).toHaveLength(1);
 			expect(stub.messages).toHaveLength(1);
 			const content = stub.messages[0].message.content as string;
 			expect(content).toContain("### [reviewer] completed");
 			expect(content).toContain("VERDICT: REVIEW_FAIL");
+			expect(content).toContain("findings are yours to resolve now");
 			expect(content).not.toContain("Managed workflow");
 			expect(stub.messages[0].options).toEqual({ deliverAs: "steer", triggerTurn: true });
 			expect(monitor.getRuns()).toHaveLength(0);

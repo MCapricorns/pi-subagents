@@ -50,8 +50,6 @@ export interface SubagentThread {
 	executionCwd: string;
 	thinkingLevel?: ThinkingLevel;
 	isolation: IsolationMode;
-	/** Report-only reviewer dispatch: verdicts never chain into a managed workflow. */
-	advisoryReview: boolean;
 	worktree?: WorktreeIsolation;
 	state: ThreadState;
 	control: RpcRunControl;

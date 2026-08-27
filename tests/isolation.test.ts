@@ -507,7 +507,7 @@ describe("logical worktree reuse and guarded finalization", () => {
 		rmSync(root, { recursive: true, force: true });
 	});
 
-	it("runs reviewer and documenter inside the worktree before one final integration", async () => {
+	it("runs the reviewer inside the worktree before one final integration", async () => {
 		writeFileSync(join(agentDir, "pi-subagents.json"), JSON.stringify({
 			enabledAgents: ["worker", "documenter", "reviewer"],
 			announcedFeatures: ["cleanerDefaulted", "documenterDefaulted"],
@@ -539,9 +539,8 @@ describe("logical worktree reuse and guarded finalization", () => {
 			expect(options.cwd).toBe(handle.cwd);
 			expect(handle.finalizeMock).not.toHaveBeenCalled();
 			if (options.agentName === "worker") return result("worker", options.task, "worker report src/a.ts");
-			if (options.agentName === "reviewer") return result("reviewer", options.task, "APPROVE\nVERDICT: REVIEW_PASS");
 			expect(options.agent.systemPrompt).toContain("temporary detached Git worktree");
-			return result("documenter", options.task, "docs report README.md");
+			return result("reviewer", options.task, "APPROVE\nVERDICT: REVIEW_PASS");
 		});
 		const { stub, subagent, status } = registered();
 		const dispatched = await execute(subagent, {
@@ -552,8 +551,8 @@ describe("logical worktree reuse and guarded finalization", () => {
 		const parentRunId = dispatched.details.results[0].runId;
 		await queued(controller.signal);
 
-		expect(run.mock.calls.map(([options]) => options.agentName)).toEqual(["worker", "reviewer", "documenter"]);
-		expect(order).toEqual(["worker", "reviewer", "documenter", "integrate"]);
+		expect(run.mock.calls.map(([options]) => options.agentName)).toEqual(["worker", "reviewer"]);
+		expect(order).toEqual(["worker", "reviewer", "integrate"]);
 		expect(handle.finalizeMock).toHaveBeenCalledTimes(1);
 		expect(stub.messages).toHaveLength(1);
 		expect(stub.messages[0].message.content).toContain("## Managed workflow:");
@@ -653,7 +652,7 @@ describe("logical worktree reuse and guarded finalization", () => {
 		}
 	});
 
-	it("aborts a documenter on shutdown without stale delivery and keeps the worktree resumable", async () => {
+	it("aborts a managed gate on shutdown without stale delivery and keeps the worktree resumable", async () => {
 		writeFileSync(join(agentDir, "pi-subagents.json"), JSON.stringify({
 			enabledAgents: ["worker", "documenter", "reviewer"],
 			announcedFeatures: ["cleanerDefaulted", "documenterDefaulted"],
@@ -670,33 +669,30 @@ describe("logical worktree reuse and guarded finalization", () => {
 			usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, cost: 0, contextTokens: 0, turns: 1 },
 			...extra,
 		});
-		let documenterStarted = false;
+		let reviewerStarted = false;
 		vi.spyOn(spawnModule, "runSingleAgentWithMainFallback").mockImplementation(async (options: any) => {
 			if (options.agentName === "worker") return result("worker", options.task, "OLD WRITER REPORT");
-			if (options.agentName === "reviewer") {
-				return result("reviewer", options.task, "APPROVE\nVERDICT: REVIEW_PASS");
-			}
-			documenterStarted = true;
+			reviewerStarted = true;
 			await new Promise<void>((resolveAborted) => {
 				if (options.signal.aborted) resolveAborted();
 				else options.signal.addEventListener("abort", () => resolveAborted(), { once: true });
 			});
-			return result("documenter", options.task, "NEWEST DOC PARTIAL", {
+			return result("reviewer", options.task, "NEWEST REVIEW PARTIAL", {
 				exitCode: 1,
 				stopReason: "aborted",
 				errorMessage: "Parent session shut down",
 			});
 		});
 		const { stub, subagent } = registered();
-		const dispatched = await execute(subagent, { agent: "worker", task: "shutdown in docs", isolation: "worktree" }, root);
+		const dispatched = await execute(subagent, { agent: "worker", task: "shutdown in gate", isolation: "worktree" }, root);
 		const runId = dispatched.details.results[0].runId;
-		await waitFor(() => documenterStarted);
+		await waitFor(() => reviewerStarted);
 		await stub.hooks["session_shutdown"]?.({}, {});
 		activeStubs = activeStubs.filter((candidate) => candidate !== stub);
 
 		expect(stub.messages).toHaveLength(0);
 		// Shutdown interrupts the workflow to its checkpoint instead of
-		// finalizing: the worktree and its partial docs stage stay resumable.
+		// finalizing: the worktree and its partial gate stage stay resumable.
 		expect(handle.finalizeMock).not.toHaveBeenCalled();
 		const records = await readThreadRecords(join(agentDir, "pi-subagents.json"));
 		expect(records).toContainEqual(expect.objectContaining({ runId, state: "parked" }));

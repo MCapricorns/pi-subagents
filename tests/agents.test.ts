@@ -64,11 +64,10 @@ describe("shipped specialist agents", () => {
 		expect(worker?.systemPrompt).toContain("Never commit, push, publish, tag, release, or bump");
 		expect(worker?.systemPrompt).toContain("parent workflow owns the independent review gate");
 		expect(worker?.systemPrompt).toContain("directly affected by your change");
-		expect(worker?.systemPrompt).toContain("conditional final documentation sync");
 		expect(worker?.systemPrompt).toContain("deletes complexity rather than rearranges it");
 	});
 
-	it("ships documenter as a low-cost write-capable two-mode documentation specialist", () => {
+	it("ships documenter as a low-cost write-capable drift-sync specialist", () => {
 		const documenter = loadBuiltinAgents().find((agent) => agent.name === "documenter");
 		expect(documenter).toMatchObject({
 			model: "claude-haiku-4-5",
@@ -76,22 +75,24 @@ describe("shipped specialist agents", () => {
 			source: "builtin",
 		});
 		expect(documenter?.tools).toEqual(["read", "grep", "find", "ls", "bash", "edit", "write"]);
-		expect(documenter?.description).toContain("two modes");
-		expect(documenter?.systemPrompt).toContain("Pre-commit diff sync");
+		expect(documenter?.description).toContain("explicitly requested or drift-driven");
+		expect(documenter?.systemPrompt).toContain("Post-change diff sync");
 		expect(documenter?.systemPrompt).toContain("Standalone documentation maintenance");
 		expect(documenter?.systemPrompt).toContain("never change runtime behavior");
 		expect(documenter?.systemPrompt).toContain("Never commit, push, publish, tag, or release");
 		expect(documenter?.systemPrompt).toContain("zero edits is valid");
-		expect(documenter?.systemPrompt).toContain("DOCUMENTATION: NEEDED");
 		expect(documenter?.systemPrompt).toContain("delivers directly after you");
 		expect(documenter?.systemPrompt).toContain("no fresh reviewer runs");
 	});
 
-	it("requires gate fix instructions and hands findings back to the caller", () => {
+	it("requires gate fix instructions and hands direct-gate findings back to the caller", () => {
 		const reviewer = loadBuiltinAgents().find((agent) => agent.name === "reviewer");
 		expect(reviewer?.systemPrompt).toContain("concrete fix instruction");
 		expect(reviewer?.systemPrompt).toContain("how to verify the fix");
-		expect(reviewer?.systemPrompt).toContain("the report returns to the main agent");
+		expect(reviewer?.systemPrompt).toContain("Complete finding set in ONE pass");
+		expect(reviewer?.systemPrompt).toContain("never ration findings across rounds");
+		expect(reviewer?.systemPrompt).toContain("Fix stage (runtime-granted)");
+		expect(reviewer?.systemPrompt).toContain("a fix stage never emits a verdict");
 		const worker = loadBuiltinAgents().find((agent) => agent.name === "worker");
 		expect(worker?.systemPrompt).toContain("reviewer findings");
 		expect(worker?.systemPrompt).toContain("push back in your report");
@@ -105,10 +106,9 @@ describe("shipped specialist agents", () => {
 		expect(reviewer?.systemPrompt).toContain("do **not** emit `VERDICT: REVIEW_*`");
 		expect(reviewer?.systemPrompt).toContain("Gate review");
 		expect(reviewer?.systemPrompt).toContain("Use `VERDICT: REVIEW_FAIL` when any gate finding remains");
-		expect(reviewer?.systemPrompt).toContain("returns the findings to the main agent for the fix decision");
-		expect(reviewer?.systemPrompt).toContain("DOCUMENTATION: NEEDED");
-		expect(reviewer?.systemPrompt).toContain("DOCUMENTATION: CLEAN");
-		expect(reviewer?.systemPrompt).toContain("missing marker conservatively as NEEDED");
+		expect(reviewer?.systemPrompt).toContain("continues into your write-enabled fix stage");
+		expect(reviewer?.systemPrompt).toContain("Documentation drift is an ordinary finding");
+		expect(reviewer?.systemPrompt).not.toContain("DOCUMENTATION:");
 		expect(reviewer?.systemPrompt).toContain("code judo");
 		expect(reviewer?.systemPrompt).toContain("Do not approve merely because behavior seems correct");
 		expect(reviewer?.systemPrompt).not.toMatch(/\bBash\b/u);

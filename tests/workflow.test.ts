@@ -1,9 +1,8 @@
 import { describe, expect, it } from "vitest";
 import {
-	buildFinalDocumenterBrief,
 	buildFinalReviewBrief,
+	buildReviewerFixBrief,
 	canStartManagedWorkflow,
-	documentationDisposition,
 	formatManagedWorkflowSummary,
 	getManagedWorkflowPlan,
 	workflowAgentAvailability,
@@ -27,25 +26,14 @@ function reviewResult(text: string, overrides: Partial<SingleResult> = {}): Sing
 	};
 }
 
-describe("documentationDisposition", () => {
-	it("accepts only standalone lines and lets the last valid marker win", () => {
-		expect(documentationDisposition("DOCUMENTATION: CLEAN")).toBe("clean");
-		expect(documentationDisposition("\tDOCUMENTATION: needed\r")).toBe("needed");
-		expect(documentationDisposition("Use DOCUMENTATION: CLEAN when done")).toBeUndefined();
-		expect(documentationDisposition("DOCUMENTATION: NEEDED is one option")).toBeUndefined();
-		expect(documentationDisposition("DOCUMENTATION: NEEDED\nnotes\nDOCUMENTATION: CLEAN")).toBe("clean");
-	});
-});
-
 describe("managed workflow planning", () => {
 	const role = (name: string, tools?: string[]) => ({ name, tools });
 	const available = (...names: string[]) => workflowAgentAvailability(names.map((name) => role(name)));
 
-	it.each(["worker", "cleaner"])("routes a successful %s through whichever downstream role exists", (agent) => {
+	it.each(["worker", "cleaner"])("routes a successful %s through the gate only when a reviewer exists", (agent) => {
 		const result = reviewResult("done", { agent });
-		expect(getManagedWorkflowPlan(result, available("documenter", "reviewer"))?.kind).toBe("post-writer");
-		expect(getManagedWorkflowPlan(result, available("reviewer"))?.kind).toBe("post-writer");
-		expect(getManagedWorkflowPlan(result, available("documenter"))?.kind).toBe("post-writer");
+		expect(getManagedWorkflowPlan(result, available("reviewer"))).toBeDefined();
+		expect(getManagedWorkflowPlan(result, available("documenter"))).toBeUndefined();
 		expect(getManagedWorkflowPlan(result, available())).toBeUndefined();
 	});
 
@@ -55,21 +43,11 @@ describe("managed workflow planning", () => {
 		expect(getManagedWorkflowPlan(result, available("documenter", "reviewer"))).toBeUndefined();
 	});
 
-	it("runs direct-pass docs only for NEEDED or a conservatively missing marker", () => {
-		const missing = reviewResult("APPROVE\nVERDICT: REVIEW_PASS");
-		const needed = reviewResult("DOCUMENTATION: NEEDED\nAPPROVE\nVERDICT: REVIEW_PASS");
-		const clean = reviewResult("DOCUMENTATION: CLEAN\nAPPROVE\nVERDICT: REVIEW_PASS");
-		const roles = available("worker", "documenter", "reviewer");
-		expect(getManagedWorkflowPlan(missing, roles)?.kind).toBe("review-pass-sync");
-		expect(getManagedWorkflowPlan(needed, roles)?.kind).toBe("review-pass-sync");
-		expect(getManagedWorkflowPlan(clean, roles)).toBeUndefined();
-		expect(getManagedWorkflowPlan(missing, available("worker", "reviewer"))).toBeUndefined();
-	});
-
-	it("never turns advisory or failed reviewer output into writes", () => {
+	it("never turns any reviewer output — pass, fail, or advisory — into a chained child", () => {
 		const roles = available("worker", "documenter", "reviewer");
 		expect(getManagedWorkflowPlan(reviewResult("advisory only"), roles)).toBeUndefined();
 		expect(getManagedWorkflowPlan(reviewResult("DOCUMENTATION: NEEDED\nadvisory only"), roles)).toBeUndefined();
+		expect(getManagedWorkflowPlan(reviewResult("DOCUMENTATION: NEEDED\nAPPROVE\nVERDICT: REVIEW_PASS"), roles)).toBeUndefined();
 		expect(getManagedWorkflowPlan(reviewResult("VERDICT: REVIEW_FAIL", { exitCode: 1 }), roles)).toBeUndefined();
 	});
 
@@ -85,6 +63,7 @@ describe("managed workflow planning", () => {
 		expect(canStartManagedWorkflow(role("documenter", ["edit"]), available())).toBe(true);
 		expect(canStartManagedWorkflow(role("custom-writer", ["write"]), available())).toBe(true);
 		expect(canStartManagedWorkflow(role("custom-reader", ["read"]), available())).toBe(false);
+		// A documenter is itself write-capable, so a reviewer still needs the lane.
 		expect(canStartManagedWorkflow(role("reviewer", ["read"]), available("documenter"))).toBe(true);
 		expect(canStartManagedWorkflow(role("reviewer", ["read"]), available("worker"))).toBe(true);
 		expect(canStartManagedWorkflow(role("reviewer", ["read"]), available("cleaner"))).toBe(true);
@@ -93,58 +72,27 @@ describe("managed workflow planning", () => {
 	});
 });
 
-describe("buildFinalDocumenterBrief", () => {
-	it("hands the terminal writer and gate review to a non-releasing final sync", () => {
-		const brief = buildFinalDocumenterBrief(
-			reviewResult("Fixed src/cache.ts", { agent: "worker" }),
-			reviewResult("## Documentation notes\n- README stale\nAPPROVE\nVERDICT: REVIEW_PASS"),
-		);
-		expect(brief).toContain("Final documentation sync");
-		expect(brief).toContain("Fixed src/cache.ts");
-		expect(brief).toContain("README stale");
-		expect(brief).toContain("Apply every documentation note");
-		expect(brief).toContain("Inspect the actual git diff");
-		expect(brief).toContain("Change documentation surfaces only");
-		expect(brief).toContain("make zero edits");
-		expect(brief).toContain("no fresh reviewer runs");
-	});
-
-	it("accepts a single lead: review-only for a direct pass, writer-only when reviewer is disabled", () => {
-		const reviewOnly = buildFinalDocumenterBrief(undefined, reviewResult("pass report\nVERDICT: REVIEW_PASS"));
-		expect(reviewOnly).toContain("pass report");
-		expect(reviewOnly).not.toContain("The last writer");
-		const writerOnly = buildFinalDocumenterBrief(reviewResult("writer report", { agent: "worker" }), undefined);
-		expect(writerOnly).toContain("writer report");
-		expect(writerOnly).not.toContain("final gate review");
-	});
-});
-
 describe("managed handoff briefs", () => {
-	it("gives the gate reviewer the writer report and an explicit verdict contract", () => {
-		const brief = buildFinalReviewBrief(
-			reviewResult("worker report", { agent: "worker" }),
-			{ documenterPending: false },
-		);
+	it("gives the gate reviewer the writer report and an executable fix contract", () => {
+		const brief = buildFinalReviewBrief(reviewResult("worker report", { agent: "worker" }));
 		expect(brief).toContain("worker report");
 		expect(brief).toContain("actual pending code");
 		expect(brief).toContain("Remain read-only");
 		expect(brief).toContain("fix instruction to EVERY gate finding");
-		expect(brief).toContain("the report returns to the main agent");
+		expect(brief).toContain("continues into your own write-enabled fix stage");
 		expect(brief).toContain("VERDICT: REVIEW_PASS");
-		expect(brief).toContain("documentation drift is an ordinary gate finding");
+		expect(brief).toContain("including documentation drift");
 		expect(brief).not.toContain("Documentation notes");
+		expect(brief).not.toContain("DOCUMENTATION:");
 	});
 
-	it("routes documentation drift to the pending final documenter instead of the gate", () => {
-		const brief = buildFinalReviewBrief(
-			reviewResult("worker report", { agent: "worker" }),
-			{ documenterPending: true },
-		);
-		expect(brief).toContain("conditional documentation sync");
-		expect(brief).toContain("## Documentation notes");
-		expect(brief).toContain("DOCUMENTATION: NEEDED");
-		expect(brief).toContain("DOCUMENTATION: CLEAN");
-		expect(brief).toContain("not a code-gate finding");
+	it("briefs the reviewer fix stage on its own failing review", () => {
+		const brief = buildReviewerFixBrief("- src/a.ts:10 — race on shutdown — Fix: await the controller");
+		expect(brief).toContain("full write access in this same session");
+		expect(brief).toContain("Apply every one of your own fix instructions");
+		expect(brief).toContain("- src/a.ts:10 — race on shutdown — Fix: await the controller");
+		expect(brief).toContain("narrowest decisive checks");
+		expect(brief).toContain("Do not emit another VERDICT");
 	});
 });
 
@@ -159,17 +107,14 @@ describe("formatManagedWorkflowSummary", () => {
 		const summary = formatManagedWorkflowSummary([
 			step({ agent: "worker", messages: [assistant("changed src/index.ts")] }, "initial implementation", 2),
 			step({ messages: [assistant("APPROVE\nVERDICT: REVIEW_PASS")] }, "final review", 3),
-			step({ agent: "documenter", messages: [assistant("updated README.md")] }, "final documentation sync", 4),
 		]);
-		expect(summary).toContain("## Managed workflow: worker → reviewer → documenter — final completed");
+		expect(summary).toContain("## Managed workflow: worker → reviewer — final PASS");
 		expect(summary).toContain("- #2 worker · initial implementation · completed");
 		expect(summary).toContain("- #3 reviewer · final review · PASS");
-		expect(summary).toContain("- #4 documenter · final documentation sync · completed");
 		expect(summary).not.toContain("src/index.ts");
-		expect(summary).not.toContain("README.md");
 		expect(summary).not.toContain("changed:");
-		expect(summary).toContain("Totals: 3 runs");
-		expect(summary).toContain("Per-run details: subagent_status #2 #3 #4");
+		expect(summary).toContain("Totals: 2 runs");
+		expect(summary).toContain("Per-run details: subagent_status #2 #3");
 		expect(summary).not.toContain("failed tools");
 	});
 
@@ -182,6 +127,18 @@ describe("formatManagedWorkflowSummary", () => {
 		expect(summary).toContain("worker → reviewer");
 		expect(summary).toContain("final NO_VERDICT");
 		expect(summary).toContain("reviewer · final review · NO_VERDICT");
+	});
+
+	it("renders a reviewer fix stage as completed work, not a missing verdict", () => {
+		const summary = formatManagedWorkflowSummary([
+			step({ agent: "worker", messages: [assistant("changed src/a.ts")] }, "initial implementation", 1),
+			step({ messages: [assistant("VERDICT: REVIEW_FAIL")] }, "final review", 2),
+			step({ messages: [assistant("## Fixed\n- src/a.ts — guarded the empty range")] }, "review fix", 3),
+		]);
+		expect(summary).toContain("worker → reviewer → reviewer — final completed");
+		expect(summary).toContain("- #2 reviewer · final review · FAIL");
+		expect(summary).toContain("- #3 reviewer · review fix · completed");
+		expect(summary).toContain("Totals: 3 runs");
 	});
 
 	it("lets terminal integration/process failure override a stray reviewer pass", () => {

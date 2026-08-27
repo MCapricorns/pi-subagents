@@ -19,22 +19,25 @@ model dies, how results come back — stays with you. pi-subagents owns that
 burden:
 
 - **The main model actually delegates.** A lean delegation directive is injected
-  into its system prompt: substantive work goes to children so the main context
-  stays lean for orchestration, trivial work stays inline, and nothing is
-  re-explained twice. No custom prompts needed.
+  into its system prompt: child contexts are cheap and yours is scarce —
+  non-trivial implementation defaults to `worker`, trivial work stays inline,
+  and dispatching never blocks or ends the main turn, so it can fire several
+  dispatches and keep working while they run.
 - **Fan-out is the model's call, not a cap.** One parallel dispatch carries as
   many tasks as the work genuinely decomposes into. The runtime paces execution
   at four concurrent child processes; extra tasks simply queue, so wide batches
   never fail and never flood your context (results deliver compact, with the
   full text on disk).
-- **Quality gates are built in.** Successful worker/cleaner runs continue
-  through one independent reviewer gate, and `REVIEW_FAIL` findings return to
-  the main agent with concrete fix instructions — it resolves them itself,
-  without stopping to ask you. No black-box auto-fix chain edits code behind
-  your back.
+- **Quality gates are built in and converge by themselves.** Successful
+  worker/cleaner runs continue through one independent reviewer gate. A failing
+  gate is fixed by the reviewer itself — the same retained session gets write
+  access, applies its own fix instructions, and a fresh gate re-scans the
+  complete diff — looping until the gate passes (bounded rounds; a still-failing
+  gate returns to the main agent with every finding and fix instruction). No
+  guessing what satisfies the reviewer.
 - **Documentation stops drifting.** Writers sync the docs they directly affect;
-  after a passing gate, the documenter runs only when the reviewer actually
-  reports drift.
+  documentation drift is an ordinary gate finding, and dispatching the
+  documenter for real remaining drift stays the main agent's decision.
 - **Parallel edits are safe.** Parallel workers default to isolated Git
   worktrees and integrate back without touching your index; shared-checkout
   writers serialize through one repository lane.
@@ -50,11 +53,11 @@ burden:
 You
  └─ pi main agent
      ├─ explorer ─── retrieval index only (never an automatic gate)
-     ├─ worker ───── implements ─┬─▶ reviewer ─┬─ docs CLEAN → deliver
-     ├─ cleaner ──── cleans up ──┘             └─ NEEDED/missing → documenter
-     ├─ documenter ─ explicit docs/comments task → deliver
-     └─ reviewer ─── advisory report (no VERDICT), or managed gate
-          └─ REVIEW_FAIL → findings + fix instructions → main agent fixes
+     ├─ worker ───── implements ─┬─▶ reviewer ─ PASS → deliver
+     ├─ cleaner ──── cleans up ──┘            └─ FAIL → reviewer fixes itself
+     ├─ documenter ─ explicit docs/comments task → deliver                │
+     └─ reviewer ─── advisory report (no VERDICT), or managed gate ◀──────┘
+          └─ direct REVIEW_FAIL → findings + fix instructions → main agent fixes
 
 Worker and cleaner update existing docs/comments they directly affect. The stable
 parent returns one final result when its complete managed workflow settles.
@@ -89,10 +92,10 @@ directly for exact control.
 | Agent | Access | Best for |
 | --- | --- | --- |
 | `explorer` | Read-only | Broad search, unfamiliar-area mapping, symbol/dependency tracing. Fast model, returns a retrieval index — never proof. |
-| `worker` | Full | A self-contained implementation, fix, refactor, or test task carried through verification. |
+| `worker` | Full | The default route for any non-trivial, self-contained implementation, fix, refactor, or test task carried through verification. |
 | `cleaner` | Full | Explicitly authorized cleanup, removal, simplification, deduplication. Every safe proven cut applies without item-by-item approval. |
-| `documenter` | Docs/comments | Conditional final diff sync, or an explicit standalone docs/comments task. May make zero edits; never changes runtime behavior. |
-| `reviewer` | Read-only | Audits, code-health checks, plans, PR/issue validation, and independent gates. |
+| `documenter` | Docs/comments | Standalone docs/comments work, including syncing real drift a change left behind. May make zero edits; never changes runtime behavior. |
+| `reviewer` | Read-only (review) / full (fix stage) | Audits, code-health checks, plans, PR/issue validation, and independent gates; a failing managed gate continues into the reviewer's own write-enabled fix stage. |
 
 A good brief carries the goal, exact paths, constraints, and expected output —
 the injected delegation guidance does this automatically when the main agent
@@ -115,7 +118,7 @@ subagent({
 
 The main agent owns the breadth — there is no per-call task cap. The runtime
 runs four child processes at once and queues the rest; a generation that moves
-on to its managed stages (gate review, docs sync) releases its slot, so managed
+on to its managed stages (gate review, fix rounds) releases its slot, so managed
 work never starves new dispatches. One child owns one coherent deliverable and
 its files; dependent work starts only after its prerequisite delivers.
 
@@ -125,17 +128,22 @@ its files; dependent work starts only after its prerequisite delivers.
 subagent({ agent: "reviewer", task: "Gate the current diff for correctness, regressions, and missing tests." });
 ```
 
-A gate ends with `VERDICT: REVIEW_PASS` or `REVIEW_FAIL`, plus
-`DOCUMENTATION: CLEAN`/`NEEDED` when documenter is enabled. Only `REVIEW_PASS`
-continues to documentation: CLEAN delivers immediately; NEEDED or a missing
-marker runs one final docs sync. A `REVIEW_FAIL` delivers the full findings —
-each with a concrete fix instruction — straight back to the main agent, which
-resolves them itself (inline or via a worker it briefs) without waiting for you;
-only a genuinely destructive or scope-changing fix is worth asking about.
+A gate ends with exactly one verdict line: `VERDICT: REVIEW_PASS` or
+`REVIEW_FAIL`. Every gate finding carries a concrete fix instruction, and the
+reviewer must surface the complete finding set in one pass — never rationing
+findings across later rounds.
 
-Re-verifying your own fixes? Dispatch with `advisory: true`: the report comes
-back to the main window and never starts anything, even if a verdict slips
-through. Generic audits and read-only reviews are advisory by default: no
+A failing **managed** gate (after a top-level worker/cleaner) converges inside
+the workflow: the same retained reviewer session continues with write access,
+applies its own fix instructions, and a fresh gate re-scans the complete diff.
+The loop repeats until the gate passes — bounded to three fix rounds, after
+which the still-failing gate returns to the main agent with every finding.
+
+A failing gate **you dispatched directly** returns the full findings to the
+main agent, which resolves them itself (inline or via a worker it briefs)
+without waiting for you; only a genuinely destructive or scope-changing fix is
+worth asking about. Re-verifying your own fixes is just another direct gate
+dispatch. Generic audits and read-only reviews are advisory by default: no
 `VERDICT`, no edits.
 
 `cleaner` is dispatch-authorized cleanup: asking for an audit never silently
