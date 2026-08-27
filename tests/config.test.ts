@@ -16,10 +16,10 @@ import {
 } from "../src/config.ts";
 
 describe("normalizeConfig", () => {
-	it("ships five built-ins but keeps documenter opt-in on a fresh install", () => {
+	it("ships five built-ins and enables all of them on a fresh install", () => {
 		const config = normalizeConfig(undefined);
 		expect(BUILTIN_AGENT_NAMES).toEqual(["explorer", "worker", "cleaner", "documenter", "reviewer"]);
-		expect(DEFAULT_ENABLED_AGENTS).toEqual(["explorer", "worker", "cleaner", "reviewer"]);
+		expect(DEFAULT_ENABLED_AGENTS).toEqual([...BUILTIN_AGENT_NAMES]);
 		expect(config.enabledAgents).toEqual([...DEFAULT_ENABLED_AGENTS]);
 		expect(config.proactiveInjection).toBe(true);
 		expect(config.agentScope).toBe("user");

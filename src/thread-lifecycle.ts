@@ -220,16 +220,19 @@ export function ownsResumeReservation(
 	);
 }
 
-/** Fire-and-forget durable checkpoint write. The live session keeps working
- * when the manifest is unwritable; only cross-reload resume is degraded. */
+/** Fire-and-forget durable checkpoint. Parked threads stay resumable across
+ * reloads; a settled thread drops its record so the manifest only exists
+ * while unfinished work needs it. The live session keeps working when the
+ * manifest is unwritable; only cross-reload resume is degraded. */
 export function persistThreadCheckpoint(
 	runtime: SubagentRuntime,
 	thread: SubagentThread,
 	state: "parked" | "completed" | "failed",
 ): void {
-	void upsertThreadRecord(runtime.configPath, threadRecordFromThread(thread, state)).catch(
-		() => undefined,
-	);
+	const write = state === "parked"
+		? upsertThreadRecord(runtime.configPath, threadRecordFromThread(thread, state))
+		: removeThreadRecord(runtime.configPath, thread.id);
+	void write.catch(() => undefined);
 }
 
 const WORKTREE_ISOLATION_INSTRUCTIONS =
@@ -1320,15 +1323,20 @@ function createRestoredThread(
 	return thread;
 }
 
-/** Rebuild parked and settled threads from the durable manifest after a reload
- * or restart. Orphaned children recorded by the previous process are killed
- * first; records whose retained session vanished drop out with their
- * artifacts. Returns the restored run ids. */
+/** Rebuild interrupted (parked) threads from the durable manifest after a
+ * reload or restart. Orphaned children recorded by the previous process are
+ * killed first; records whose retained session vanished — and settled records
+ * left by older versions, which hold no work worth resuming — drop out with
+ * their artifacts. Returns the restored run ids. */
 export async function restoreDurableThreads(runtime: SubagentRuntime): Promise<number[]> {
 	const records = await readThreadRecords(runtime.configPath);
 	const restoredIds: number[] = [];
 	for (const record of records) {
 		if (runtime.threads.has(record.runId) || monitor.findRun(record.runId)) continue;
+		if (record.state !== "parked") {
+			await discardRestoredRecord(runtime, record);
+			continue;
+		}
 		// A child orphaned by reload/crash may still hold the retained session.
 		// The on-disk session checkpoint is what survives; kill the writer.
 		for (const pid of record.childPids) {
@@ -1348,33 +1356,29 @@ export async function restoreDurableThreads(runtime: SubagentRuntime): Promise<n
 		// A worktree thread whose isolated filesystem is gone cannot continue its
 		// isolation invariant; surface it as failed instead of pretending.
 		const state: ThreadState = worktree
-			? record.state
+			? "parked"
 			: record.isolation === "worktree" && record.worktree
 				? "failed"
-				: record.state;
+				: "parked";
 		const thread = createRestoredThread(runtime, record, worktree, state);
 		runtime.threads.set(record.runId, thread);
 		runtime.sessionDirs.add(record.sessionDir!);
-		if (state === "parked") {
-			monitor.restoreRun({
-				id: record.runId,
-				agent: record.agentName,
-				task: record.task,
-				status: "parked",
-				elapsedMs: record.elapsedMs,
-				isolation: record.isolation,
-				...(record.worktree
-					? {
-						integrationStatus: record.worktree.state === "active"
-							? ("pending" as const)
-							: record.worktree.state,
-						...(worktree ? { worktreeId: worktreeGroupId(worktree) } : {}),
-					}
-					: {}),
-			});
-		} else if (thread.lastResult) {
-			runtime.registerRunResult(record.runId, thread.lastResult);
-		}
+		monitor.restoreRun({
+			id: record.runId,
+			agent: record.agentName,
+			task: record.task,
+			status: "parked",
+			elapsedMs: record.elapsedMs,
+			isolation: record.isolation,
+			...(record.worktree
+				? {
+					integrationStatus: record.worktree.state === "active"
+						? ("pending" as const)
+						: record.worktree.state,
+					...(worktree ? { worktreeId: worktreeGroupId(worktree) } : {}),
+				}
+				: {}),
+		});
 		restoredIds.push(record.runId);
 	}
 	return restoredIds;

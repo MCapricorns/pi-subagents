@@ -307,9 +307,9 @@ async function runMenu(ctx: ExtensionCommandContext, configPath: string, config:
 					next.agentThinkingLevels.cleaner = config.agentThinkingLevels.reviewer;
 				}
 			}
-			// Documenter intentionally follows the faster explorer route. Fresh
-			// installs leave it unselected; enabling it later inherits any explorer
-			// overrides instead of silently choosing a stronger model.
+			// Documenter intentionally follows the faster explorer route. When it
+			// is re-enabled after being explicitly disabled, it inherits any
+			// explorer overrides instead of silently choosing a stronger model.
 			if (!config.enabledAgents.includes("documenter") && enabled.includes("documenter")) {
 				if (!next.agentModels.documenter && config.agentModels.explorer) {
 					next.agentModels.documenter = config.agentModels.explorer;

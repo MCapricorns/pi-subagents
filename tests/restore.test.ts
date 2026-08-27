@@ -5,6 +5,7 @@ import { SessionManager } from "@earendil-works/pi-coding-agent";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { readThreadRecords, upsertThreadRecord, type ThreadRecord } from "../src/durable.ts";
 import { monitor } from "../src/monitor.ts";
+import { RpcRunControl } from "../src/rpc-run.ts";
 import { createRuntime, type SubagentRuntime } from "../src/runtime.ts";
 import { restoreDurableThreads } from "../src/thread-lifecycle.ts";
 import * as tempHygieneModule from "../src/temp-hygiene.ts";
@@ -98,7 +99,7 @@ describe("durable thread restore", () => {
 		expect(await restoreDurableThreads(runtime)).toEqual([]);
 	});
 
-	it("seeds settled results for restored completed threads", async () => {
+	it("discards settled records left by older versions, with their artifacts", async () => {
 		const session = createSession("C:/repo");
 		await upsertThreadRecord(runtime.configPath, record({
 			runId: 6,
@@ -115,10 +116,51 @@ describe("durable thread restore", () => {
 			},
 		}));
 
-		await restoreDurableThreads(runtime);
-		expect(runtime.threads.get(6)?.state).toBe("completed");
+		const restored = await restoreDurableThreads(runtime);
+		expect(restored).toEqual([]);
+		expect(runtime.threads.size).toBe(0);
 		expect(monitor.findRun(6)).toBeUndefined();
-		expect(runtime.settledRuns.get(6)).toBeDefined();
+		expect(runtime.settledRuns.get(6)).toBeUndefined();
+		// Settled work holds nothing worth resuming: its session goes away too.
+		expect(existsSync(session.dir)).toBe(false);
+		expect(await readThreadRecords(runtime.configPath)).toEqual([]);
+	});
+
+	it("shutdown persists only interrupted threads and deletes settled sessions", async () => {
+		const parkedSession = createSession("C:/repo");
+		const settledSession = createSession("C:/repo");
+		const makeThread = (runId: number, state: "parked" | "completed", session: { id: string; dir: string }) =>
+			({
+				id: runId,
+				generation: 1,
+				agentName: "worker",
+				task: "t",
+				cwd: "C:/repo",
+				executionCwd: "C:/repo",
+				isolation: "shared",
+				advisoryReview: false,
+				state,
+				control: new RpcRunControl("t", 1),
+				generationCompletion: Promise.resolve(),
+				lifecycleVersion: 0,
+				elapsedMs: 100,
+				sessionId: session.id,
+				sessionDir: session.dir,
+				resume: async () => { throw new Error("unused"); },
+				finalizeIsolation: async () => undefined,
+			}) as const;
+		runtime.threads.set(7, makeThread(7, "parked", parkedSession));
+		runtime.threads.set(8, makeThread(8, "completed", settledSession));
+		runtime.sessionDirs.add(parkedSession.dir);
+		runtime.sessionDirs.add(settledSession.dir);
+
+		await runtime.shutdown();
+
+		expect((await readThreadRecords(runtime.configPath)).map((entry) => entry.runId)).toEqual([7]);
+		expect(existsSync(parkedSession.dir)).toBe(true);
+		// A settled thread has nothing left to resume: its session goes away
+		// and the manifest shrinks back to unfinished work only.
+		expect(existsSync(settledSession.dir)).toBe(false);
 	});
 
 	it("drops records whose retained session vanished, with their artifacts", async () => {

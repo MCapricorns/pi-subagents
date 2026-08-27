@@ -72,9 +72,10 @@ Requires **pi >= 0.83.0** and **Node.js >= 22.19.0**.
 pi install npm:@ferris1225/pi-subagents
 ```
 
-Open pi and run `/subagents-setup` to pick agents and models. Fresh installs
-enable `explorer`, `worker`, `cleaner`, and `reviewer`; `documenter` is opt-in.
-Then just ask:
+Open pi and run `/subagents-setup` to pick agents, models, and thinking
+strengths. Fresh installs enable all five built-in agents on the current main
+model, and until a config file exists each session start points you at
+`/subagents-setup`. Then just ask:
 
 ```text
 Map how authentication works, fix the refresh race, run the tests, and review the diff.
@@ -162,7 +163,7 @@ Every dispatch returns a stable `#id` — the handle for all control tools:
 
 | Tool | What it does |
 | --- | --- |
-| `subagent_control` | `resume` a parked/settled thread with its full retained context, optionally with a new `objective` appended. |
+| `subagent_control` | `resume` a parked/settled thread with its full retained context, optionally with a new `objective` appended. Only interrupted (parked) threads survive a reload. |
 | `subagent_status` | List active and recent runs, or return one run's full result and failed-tool diagnostics. |
 | `subagent_wait` | Non-blocking in-turn lookup; `timeoutMs` only when you must wait. |
 | `subagent_stop` | Destructively cancel, deliver the partial output, retire the thread. |
@@ -171,12 +172,14 @@ Every dispatch returns a stable `#id` — the handle for all control tools:
 subagent_control({ action: "resume", id: 7, objective: "Finish the tests." });
 ```
 
-Threads are durable: parked/settled sessions, worktree checkpoints, and state
-live under `~/.pi/agent/` (not the OS temp directory) and are restored when pi
-reloads or restarts — a reload interrupts a live run into a restorable
-checkpoint instead of losing it. Settled results stay resumable for 7 days,
-parked work for 30. All control operations are bounded; they never hang on a
-generation that is still settling.
+Threads are durable while work is unfinished: parked sessions, worktree
+checkpoints, and state live under `~/.pi/agent/` (not the OS temp directory)
+and are restored when pi reloads or restarts — a reload interrupts a live run
+into a restorable checkpoint instead of losing it. A thread that completes or
+fails cleanly drops its durable record, so the threads manifest exists only
+while interrupted work needs it; parked work stays resumable for 30 days. All
+control operations are bounded; they never hang on a generation that is still
+settling.
 
 ## Results and live status
 

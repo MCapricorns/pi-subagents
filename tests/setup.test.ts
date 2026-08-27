@@ -476,8 +476,7 @@ describe("full setup flow", () => {
 		try {
 			await runSetup(ctx, configPath);
 			const config = JSON.parse(readFileSync(configPath, "utf8"));
-			expect(config.enabledAgents).toEqual(["explorer", "worker", "cleaner", "reviewer"]);
-			expect(config.enabledAgents).not.toContain("documenter");
+			expect(config.enabledAgents).toEqual(["explorer", "worker", "cleaner", "documenter", "reviewer"]);
 			expect(config.agentModels).toEqual({});
 			expect(config.agentThinkingLevels).toEqual({});
 			expect(config).not.toHaveProperty("agentBackupModels");
@@ -486,10 +485,9 @@ describe("full setup flow", () => {
 			expect(selectTitles).toEqual(["Proactive dispatch injection?"]);
 			expect(screens.some((screen) => screen.includes("cleaner — apply proven cleanup and deduplicate"))).toBe(true);
 			expect(screens.some((screen) => screen.includes("documenter — sync diff"))).toBe(true);
-			for (const agent of ["explorer", "worker", "cleaner", "reviewer"]) {
+			for (const agent of ["explorer", "worker", "cleaner", "documenter", "reviewer"]) {
 				expect(screens.some((screen) => screen.includes(`Model for "${agent}"?`))).toBe(true);
 			}
-			expect(screens.some((screen) => screen.includes('Model for "documenter"?'))).toBe(false);
 			expect(screens.some((screen) => screen.includes("Primary/Backup"))).toBe(false);
 			expect(screens.some((screen) => screen.includes("Thinking strength"))).toBe(false);
 			expect(notify).toHaveBeenCalledWith(expect.stringContaining("Auto thinking"), "info");

@@ -11,7 +11,6 @@ import {
 	referencedDurablePaths,
 	removeThreadRecord,
 	restoredResultFromSummary,
-	SETTLED_RECORD_MAX_AGE_MS,
 	STATE_DIR_NAME,
 	THREADS_MANIFEST_FILE_NAME,
 	threadRecordFromThread,
@@ -139,24 +138,16 @@ describe("thread manifest", () => {
 		expect(restoredResultFromSummary(makeRecord({ resultSummary: undefined }))).toBeUndefined();
 	});
 
-	it("prunes expired records with their artifacts but keeps parked work", async () => {
+	it("prunes expired records with their artifacts but keeps fresh parked work", async () => {
 		const root = mkdtempSync(join(tmpdir(), "pi-subagents-durable-prune-"));
 		roots.push(root);
 		const configPath = join(root, "pi-subagents.json");
-		const now = 10 * SETTLED_RECORD_MAX_AGE_MS;
-		const settledSession = join(root, "session-settled");
+		const now = 10 * PARKED_RECORD_MAX_AGE_MS;
 		const parkedSession = join(root, "session-parked");
 		const ancientSession = join(root, "session-ancient");
-		mkdirSync(settledSession);
 		mkdirSync(parkedSession);
 		mkdirSync(ancientSession);
 
-		await upsertThreadRecord(configPath, makeRecord({
-			runId: 1,
-			state: "completed",
-			updatedAt: now - SETTLED_RECORD_MAX_AGE_MS - 1,
-			sessionDir: settledSession,
-		}));
 		await upsertThreadRecord(configPath, makeRecord({
 			runId: 2,
 			state: "parked",
@@ -173,7 +164,6 @@ describe("thread manifest", () => {
 		await pruneThreadRecords(configPath, now);
 		const records = await readThreadRecords(configPath);
 		expect(records.map((record) => record.runId)).toEqual([2]);
-		expect(existsSync(settledSession)).toBe(false);
 		expect(existsSync(ancientSession)).toBe(false);
 		expect(existsSync(parkedSession)).toBe(true);
 	});

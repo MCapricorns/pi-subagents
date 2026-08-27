@@ -1,13 +1,15 @@
 /**
- * Durable thread state: a manifest next to the config that lets parked and
- * settled sub-agent threads survive pi reloads and restarts, plus the durable
+ * Durable thread state: a manifest next to the config that lets interrupted
+ * (parked) sub-agent threads survive pi reloads and restarts, plus the durable
  * state root that keeps their retained sessions and isolated worktrees out of
  * the OS temp directory.
  *
- * Records are small path/state snapshots, never full transcripts; the retained
- * Pi session files and worktrees they point at remain the actual context.
- * Writes are atomic (tmp+rename) and serialized through the same
- * withFileMutationQueue as the recovery manifest.
+ * Only parked threads are ever recorded: a thread that settles normally drops
+ * its record, so the manifest file exists exactly while unfinished work needs
+ * it and disappears on its own. Records are small path/state snapshots, never
+ * full transcripts; the retained Pi session files and worktrees they point at
+ * remain the actual context. Writes are atomic (tmp+rename) and serialized
+ * through the same withFileMutationQueue as the recovery manifest.
  */
 
 import { withFileMutationQueue } from "@earendil-works/pi-coding-agent";
@@ -29,9 +31,9 @@ export const THREADS_MANIFEST_FILE_NAME = "pi-subagents-threads.json";
 const THREADS_MANIFEST_VERSION = 1;
 export const STATE_DIR_NAME = "pi-subagents-state";
 
-/** Fixed retention: settled results stop being resumable after a week,
- * parked work (which may hold unintegrated changes) after a month. */
-export const SETTLED_RECORD_MAX_AGE_MS = 7 * 24 * 60 * 60 * 1_000;
+/** Fixed retention: parked work (which may hold unintegrated changes) stops
+ * being resumable after a month. Older manifests may still carry settled
+ * records from previous versions; restore discards them on sight. */
 export const PARKED_RECORD_MAX_AGE_MS = 30 * 24 * 60 * 60 * 1_000;
 
 /** Result excerpts are for status display after restore, not full transcripts. */
@@ -297,7 +299,7 @@ async function discardRecordArtifacts(record: ThreadRecord): Promise<void> {
 }
 
 /** Drop records past their retention age along with their artifacts. Runs at
- * extension load; the fixed ages honor the no-config-knobs policy. */
+ * extension load; the fixed age honors the no-config-knobs policy. */
 export async function pruneThreadRecords(
 	configPath: string,
 	now = Date.now(),
@@ -309,8 +311,7 @@ export async function pruneThreadRecords(
 		let changed = false;
 		const kept: ThreadRecord[] = [];
 		for (const record of records) {
-			const maxAge = record.state === "parked" ? PARKED_RECORD_MAX_AGE_MS : SETTLED_RECORD_MAX_AGE_MS;
-			if (now - record.updatedAt <= maxAge) {
+			if (now - record.updatedAt <= PARKED_RECORD_MAX_AGE_MS) {
 				kept.push(record);
 				continue;
 			}

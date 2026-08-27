@@ -952,14 +952,14 @@ describe("shutdown and destructive-stop integration", () => {
 			expect(result.content[0].text).toMatch(/changed|shut down/i);
 			expect(childHandle.discardMock).toHaveBeenCalledTimes(1);
 			expect(queued).toHaveLength(1);
-			// The settled source keeps its retained session for cross-reload
-			// resume: shutdown persists its record instead of deleting context.
-			// (A resume preflight interrupted mid-claim restores as parked; a
-			// completed source keeps its terminal state.)
+			// A resume preflight interrupted mid-claim is genuinely unfinished
+			// work: it restores as parked with its retained session intact.
+			// (A source that had already settled would instead drop its record.)
 			expect(existsSync(retained.dir)).toBe(true);
 			const records = await readThreadRecords(join(agentDir, "pi-subagents.json"));
 			expect(records).toContainEqual(expect.objectContaining({
 				runId,
+				state: "parked",
 				sessionId: retained.id,
 				sessionDir: retained.dir,
 			}));

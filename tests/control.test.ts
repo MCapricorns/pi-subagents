@@ -123,9 +123,10 @@ send({ type: "message_end", message: { role: "assistant", content: [{ type: "tex
 		expect(existsSync(retainedDir)).toBe(true);
 		await stub.hooks["session_shutdown"]?.({}, {});
 		activeStub = undefined;
-		// Shutdown persists the settled thread's durable record, so its retained
-		// session stays resumable across reloads instead of being deleted.
-		expect(existsSync(retainedDir)).toBe(true);
+		// A settled thread holds nothing worth resuming across reloads: shutdown
+		// drops its durable record and deletes the retained session. Only
+		// interrupted (parked) work survives into the next process.
+		expect(existsSync(retainedDir)).toBe(false);
 	});
 
 	it("stops during documenter and publishes its partial instead of the old writer", async () => {

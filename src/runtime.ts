@@ -20,7 +20,7 @@ import {
 	type CompletionMessageItem,
 } from "./completion.ts";
 import { type ThinkingLevel } from "./config.ts";
-import { threadRecordFromThread, upsertThreadRecord, type ThreadRecord } from "./durable.ts";
+import { removeThreadRecord, threadRecordFromThread, upsertThreadRecord, type ThreadRecord } from "./durable.ts";
 import { isRunActiveStatus, monitor } from "./monitor.ts";
 import type { RpcRunControl } from "./rpc-run.ts";
 import type { StartBackgroundInternal } from "./thread-lifecycle.ts";
@@ -242,10 +242,14 @@ export function createRuntime(pi: ExtensionAPI, configPath: string): SubagentRun
 				Promise.allSettled(preflights),
 				runtime.backgroundQueue.waitForIdle(),
 			]);
-			// Persist one record per non-retired thread, then keep exactly the
-			// artifacts those records reference. A thread whose settlement finished
-			// during the wait above already wrote its own terminal record; the
-			// lastResult-derived state below matches it.
+			// Only interrupted (parked) threads stay resumable across reloads:
+			// each keeps its durable record and retained artifacts. Settled
+			// threads drop their record — the manifest exists only while
+			// unfinished work needs it — and their sessions are deleted now. A
+			// thread whose settlement finished during the wait above already
+			// wrote (or removed) its own record; the lastResult-derived state
+			// below matches it.
+			const settledIds: number[] = [];
 			const records: ThreadRecord[] = [];
 			for (const thread of runtime.threads.values()) {
 				if (thread.retired) continue;
@@ -258,11 +262,13 @@ export function createRuntime(pi: ExtensionAPI, configPath: string): SubagentRun
 				} else {
 					state = "parked";
 				}
-				records.push(threadRecordFromThread(thread, state));
+				if (state === "parked") records.push(threadRecordFromThread(thread, state));
+				else settledIds.push(thread.id);
 			}
-			await Promise.all(
-				records.map((record) => upsertThreadRecord(runtime.configPath, record).catch(() => undefined)),
-			);
+			await Promise.all([
+				...records.map((record) => upsertThreadRecord(runtime.configPath, record).catch(() => undefined)),
+				...settledIds.map((runId) => removeThreadRecord(runtime.configPath, runId).catch(() => undefined)),
+			]);
 			// Retained-failure recovery records are persisted by the finalization
 			// itself; shutdown only drops sessions no record claims anymore.
 			const referenced = new Set(

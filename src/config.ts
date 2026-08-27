@@ -16,7 +16,7 @@ import { getAgentDir, withFileMutationQueue } from "@earendil-works/pi-coding-ag
 export const BUILTIN_AGENT_NAMES = ["explorer", "worker", "cleaner", "documenter", "reviewer"] as const;
 
 /** Agents enabled out of the box on a fresh install. */
-export const DEFAULT_ENABLED_AGENTS: readonly string[] = ["explorer", "worker", "cleaner", "reviewer"];
+export const DEFAULT_ENABLED_AGENTS: readonly string[] = ["explorer", "worker", "cleaner", "documenter", "reviewer"];
 
 export const AGENT_SCOPE_VALUES = ["user", "project", "both"] as const;
 export type AgentScope = (typeof AGENT_SCOPE_VALUES)[number];

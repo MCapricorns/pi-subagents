@@ -1,6 +1,7 @@
 /** Session-start recovery, stale-config migration, and widget installation. */
 
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
+import { existsSync } from "node:fs";
 import { loadConfig, saveConfig } from "./config.ts";
 import { availableModelsInScope, filterUnavailableModelOverrides } from "./models.ts";
 import { announceRecoveryRecords } from "./recovery.ts";
@@ -38,13 +39,19 @@ async function migrateUnavailableAgentModels(
 export function registerAnnouncements(pi: ExtensionAPI, runtime: SubagentRuntime): void {
 	pi.on("session_start", async (_event, ctx) => {
 		pruneResultArtifacts();
+		if (!existsSync(runtime.configPath)) {
+			ctx.ui.notify(
+				"pi-subagents: no configuration yet — run /subagents-setup to pick agents, models, and thinking strengths. Defaults (all five agents on the main model) apply until then.",
+				"info",
+			);
+		}
 		await announceRecoveryRecords(runtime.configPath, ctx);
 		await migrateUnavailableAgentModels(ctx, runtime);
 		if (!runtime.restoredNotified && runtime.restoredRunIds.length > 0) {
 			runtime.restoredNotified = true;
 			const ids = runtime.restoredRunIds.map((id) => `#${id}`).join(", ");
 			ctx.ui.notify(
-				`pi-subagents: restored ${runtime.restoredRunIds.length} resumable thread${runtime.restoredRunIds.length === 1 ? "" : "s"} from the previous session (${ids}). subagent_status lists them; subagent_control resume continues one.`,
+				`pi-subagents: restored ${runtime.restoredRunIds.length} interrupted thread${runtime.restoredRunIds.length === 1 ? "" : "s"} from the previous session (${ids}). subagent_status lists them; subagent_control resume continues one.`,
 				"info",
 			);
 		}

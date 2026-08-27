@@ -98,6 +98,24 @@ describe("extension registration", () => {
 		expect(control.promptSnippet).toContain("Resume a parked or settled subagent thread");
 	});
 
+	it("points a first run without a config file at /subagents-setup", async () => {
+		if (!testAgentDir) throw new Error("test agent directory was not initialized");
+		const stub = makeStub();
+		register(stub.api);
+		const notify = vi.fn();
+		const setWidget = vi.fn();
+		expect(typeof stub.hooks["session_start"]).toBe("function");
+
+		await stub.hooks["session_start"]({}, { mode: "tui", hasUI: true, ui: { notify, setWidget } });
+		expect(notify).toHaveBeenCalledWith(expect.stringContaining("run /subagents-setup"), "info");
+
+		// Once the file exists the hint stays silent.
+		writeFileSync(join(testAgentDir, "pi-subagents.json"), JSON.stringify({}), "utf8");
+		notify.mockClear();
+		await stub.hooks["session_start"]({}, { mode: "tui", hasUI: true, ui: { notify, setWidget } });
+		expect(notify).not.toHaveBeenCalledWith(expect.stringContaining("/subagents-setup"), "info");
+	});
+
 	it("wires recovery, widget install, and config migration through session_start", async () => {
 		if (!testAgentDir) throw new Error("test agent directory was not initialized");
 		const configPath = join(testAgentDir, "pi-subagents.json");
@@ -1421,6 +1439,9 @@ describe("managed workflow dispatch", () => {
 	});
 
 	it("runs every managed stage in the triggering writer's explicit cwd", async () => {
+		// Pin the enabled set so the managed chain is exactly worker → reviewer
+		// regardless of the fresh-install default agent catalog.
+		configureEnabledAgents(["explorer", "worker", "reviewer"]);
 		const stub = makeStub();
 		const { tasks: capturedTasks, controllers } = captureEnqueue();
 		const outerRepo = mkdtempSync(join(tmpdir(), "pi-subagents-chain-outer-"));
@@ -1685,11 +1706,11 @@ describe("before_agent_start injection", () => {
 		expect(result).toBeDefined();
 		expect(result.systemPrompt.startsWith("BASE PROMPT")).toBe(true);
 		expect(result.systemPrompt).toContain("Sub-agent delegation");
-		// Fresh-install default enabled set: explorer, worker, cleaner, reviewer.
+		// Fresh-install default enabled set: every shipped agent.
 		expect(result.systemPrompt).toContain("- explorer:");
 		expect(result.systemPrompt).toContain("- worker:");
 		expect(result.systemPrompt).toContain("- cleaner:");
-		expect(result.systemPrompt).not.toContain("- documenter:");
+		expect(result.systemPrompt).toContain("- documenter:");
 		expect(result.systemPrompt).toContain("- reviewer:");
 		expect(result.systemPrompt).not.toContain("- plan:");
 	});
