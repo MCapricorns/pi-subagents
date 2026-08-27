@@ -56,6 +56,7 @@ describe("shipped specialist agents", () => {
 		expect(cleaner?.systemPrompt).not.toContain("Apply mode");
 		expect(cleaner?.systemPrompt).toContain("directly affected by the cleanup");
 		expect(cleaner?.systemPrompt).toContain("Never commit, push, publish, tag, release, or bump");
+		expect(cleaner?.systemPrompt).toContain("deleting whole categories of complexity");
 	});
 
 	it("keeps release ownership out of implementation children", () => {
@@ -64,6 +65,7 @@ describe("shipped specialist agents", () => {
 		expect(worker?.systemPrompt).toContain("parent workflow owns the independent review gate");
 		expect(worker?.systemPrompt).toContain("directly affected by your change");
 		expect(worker?.systemPrompt).toContain("conditional final documentation sync");
+		expect(worker?.systemPrompt).toContain("deletes complexity rather than rearranges it");
 	});
 
 	it("ships documenter as a low-cost write-capable two-mode documentation specialist", () => {
@@ -108,6 +110,8 @@ describe("shipped specialist agents", () => {
 		expect(reviewer?.systemPrompt).toContain("DOCUMENTATION: NEEDED");
 		expect(reviewer?.systemPrompt).toContain("DOCUMENTATION: CLEAN");
 		expect(reviewer?.systemPrompt).toContain("missing marker conservatively as NEEDED");
+		expect(reviewer?.systemPrompt).toContain("code judo");
+		expect(reviewer?.systemPrompt).toContain("Do not approve merely because behavior seems correct");
 		expect(reviewer?.systemPrompt).not.toMatch(/\bBash\b/u);
 	});
 

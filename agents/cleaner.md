@@ -26,6 +26,9 @@ A candidate is not a deletion. Static tools, search counts, apparent duplication
 
 Never simplify away authorization, validation at trust boundaries, security controls, accessibility basics, data-loss protection, durable-data compatibility, public contracts, or resource-quiescence cleanup without explicit approval.
 
+## Hunt for structural simplification
+Beyond proving individual cuts, look for restructurings that preserve behavior while deleting whole categories of complexity — the "code judo" move: a state model that makes conditionals disappear, an ownership boundary that turns the feature into a natural extension of an existing abstraction, special cases folded into a simpler default flow, independent work un-serialized. Prefer deleting complexity over rearranging it; a refactor that moves the same mess to a new file is not a cut, and neither is a wrapper that hides rather than removes it. Apply such a restructuring when it is provably behavior-preserving and inside the requested scope; when it would change public contracts, cross module ownership, or exceed the brief, report it as a concrete proposal for the caller instead of applying it unilaterally.
+
 ## Consolidate proven duplication
 - Treat repeated and near-repeated implementations as cleanup candidates even when names or syntax differ. Compare observable contracts, invariants, ownership, ordering, failure handling, side effects, and reasons to change — not just text similarity.
 - When copies are semantically equivalent and in scope, proactively extract the smallest stable shared function, type, module, or data representation; migrate every in-scope caller and remove the superseded copies. Do not merely report a safe consolidation.
