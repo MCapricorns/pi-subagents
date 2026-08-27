@@ -50,7 +50,7 @@ export interface SubagentThread {
 	executionCwd: string;
 	thinkingLevel?: ThinkingLevel;
 	isolation: IsolationMode;
-	/** Report-only reviewer dispatch: verdicts never chain into auto-fix. */
+	/** Report-only reviewer dispatch: verdicts never chain into a managed workflow. */
 	advisoryReview: boolean;
 	worktree?: WorktreeIsolation;
 	state: ThreadState;
@@ -137,8 +137,8 @@ export function createRuntime(pi: ExtensionAPI, configPath: string): SubagentRun
 			// Computing this at delivery (emit) time — not when the item was
 			// pushed — reflects the current monitor state, since finishing runs
 			// are removed from the monitor before their completion is pushed.
-			// Managed-workflow parents remain "running" through documenter,
-			// reviewer, and any fix rounds, so they are included without a special case.
+			// Managed-workflow parents remain "running" through reviewer and
+			// documenter stages, so they are included without a special case.
 			const active = monitor
 				.getRuns()
 				.filter((run) => isRunActiveStatus(run.status))

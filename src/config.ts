@@ -26,8 +26,10 @@ export const THINKING_LEVEL_VALUES = ["off", "minimal", "low", "medium", "high",
 export type ThinkingLevel = (typeof THINKING_LEVEL_VALUES)[number];
 export const DEFAULT_THINKING_LEVEL: ThinkingLevel = "high";
 
-/** How many lines of a sub-agent result the completion message may carry. Default: 80. */
-export const DEFAULT_MAX_RESULT_LINES = 80;
+/** How many lines of a sub-agent result the completion message may carry.
+ * Default: 40 — wide fan-outs multiply completion blocks, so deliveries stay
+ * compact and the full text lives in the on-disk result artifact. */
+export const DEFAULT_MAX_RESULT_LINES = 40;
 /** Upper bound accepted for maxResultLines (defensive clamp). */
 export const MAX_RESULT_LINES_LIMIT = 2000;
 

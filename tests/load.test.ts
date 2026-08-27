@@ -78,11 +78,12 @@ describe("extension registration", () => {
 
 		const tool = stub.tools.find((t) => t.name === "subagent");
 		expect(tool.promptGuidelines).toBeUndefined();
-		expect(tool.description).toContain("small known-target work in the main thread with direct tools");
+		expect(tool.description).toContain("fan-out breadth is yours — extra tasks queue for the next free process slot");
 		expect(tool.description).toContain("explorer for broad read-only reconnaissance (a retrieval index, never a gate)");
 		expect(tool.description).toContain("cleaner as a separate explicitly authorized cleanup/removal/simplification/deduplication entry");
 		expect(tool.description).toContain("documenter for explicit docs/comments work or conditional final diff sync");
 		expect(tool.description).toContain("reviewer for generic read-only assessments and independent code gates");
+		expect(tool.description).toContain("resolve the findings yourself (fix inline or dispatch a briefed worker) without waiting for the user");
 		expect(tool.description).toContain("top-level documenter delivers directly");
 		expect(tool.description).toContain("DOCUMENTATION: NEEDED");
 		expect(tool.description).toContain("do not poll");
@@ -736,9 +737,9 @@ send({ type: "message_end", message: { role: "assistant", content: [{ type: "tex
 			vi.advanceTimersByTime(150);
 			expect(stub.messages).toHaveLength(1);
 			const content = stub.messages[0].message.content as string;
-			expect(content).toContain("(output truncated to 80 lines; full result:");
-			expect(content).toContain("line 79");
-			expect(content).not.toContain("line 80");
+			expect(content).toContain("(output truncated to 40 lines; full result:");
+			expect(content).toContain("line 39");
+			expect(content).not.toContain("line 40");
 			const artifactPath = /full result: (.+)\)/.exec(content)?.[1];
 			expect(artifactPath).toBeTruthy();
 			expect(readFileSync(artifactPath!, "utf8")).toContain("line 99");
@@ -810,45 +811,36 @@ describe("managed post-writer workflows", () => {
 		const stub = makeStub();
 		stub.activeTools = ["read", "powershell", "edit", "write", "custom_extension"];
 		const { tasks, controllers } = captureEnqueue();
-		let reviewerCalls = 0;
 		const run = vi.spyOn(spawn, "runSingleAgentWithMainFallback").mockImplementation(async (options: any) => {
-			if (options.agentName === "reviewer") {
-				reviewerCalls++;
-				if (reviewerCalls === 1) {
-					stub.activeTools = ["read", "bash", "edit", "write", "custom_extension"];
-					return makeResult("reviewer", options.task, "OPEN FINDING\nVERDICT: REVIEW_FAIL");
-				}
-				return makeResult("reviewer", options.task, "RESOLVED\nVERDICT: REVIEW_PASS");
-			}
 			if (options.agentName === "worker") {
-				stub.activeTools = ["read", "powershell", "edit", "write", "custom_extension"];
-				return makeResult("worker", options.task, "fixed");
+				stub.activeTools = ["read", "bash", "edit", "write", "custom_extension"];
+				return makeResult("worker", options.task, "implemented");
 			}
-			stub.activeTools = ["read", "bash", "powershell", "edit", "write", "custom_extension"];
+			if (options.agentName === "reviewer") {
+				stub.activeTools = ["read", "bash", "powershell", "edit", "write", "custom_extension"];
+				return makeResult("reviewer", options.task, "DOCUMENTATION: NEEDED\nVERDICT: REVIEW_PASS");
+			}
 			return makeResult("documenter", options.task, "docs synchronized");
 		});
 
 		try {
 			register(stub.api);
 			const tool = stub.tools.find((candidate) => candidate.name === "subagent");
-			await runTool(tool, "adaptive-tools-chain", { agent: "reviewer", task: "Gate adaptive tools" }, executionContext());
+			await runTool(tool, "adaptive-tools-chain", { agent: "worker", task: "Implement adaptive tools" }, executionContext());
 			await tasks[0](controllers[0].signal);
 
 			const calls = run.mock.calls.map(([options]) => options);
 			expect(calls.map((options) => options.agentName)).toEqual([
-				"reviewer", "worker", "reviewer", "documenter",
+				"worker", "reviewer", "documenter",
 			]);
 			expect(calls[0].agent.tools).toEqual([
-				"read", "grep", "find", "ls", "powershell", "custom_extension",
+				"read", "powershell", "edit", "write", "custom_extension",
 			]);
 			expect(calls[1].agent.tools).toEqual([
-				"read", "bash", "edit", "write", "custom_extension",
+				"read", "grep", "find", "ls", "bash", "custom_extension",
 			]);
 			expect(calls[2].agent.tools).toEqual([
-				"read", "grep", "find", "ls", "powershell", "custom_extension",
-			]);
-			expect(calls[3].agent.tools).toEqual([
-				"read", "grep", "find", "ls", "powershell", "edit", "write", "custom_extension",
+				"read", "grep", "find", "ls", "bash", "powershell", "edit", "write", "custom_extension",
 			]);
 		} finally {
 			await shutdownExtension(stub, { controllers });
@@ -1068,12 +1060,9 @@ describe("managed post-writer workflows", () => {
 			await runTool(tool, "post-writer-fail-no-docs", { agent: "worker", task: "Implement then fail gate" }, executionContext());
 			await tasks[0](controllers[0].signal);
 
-			// The gate fails, the single fix round runs and re-fails, and no
-			// documenter ever starts despite DOCUMENTATION: NEEDED on a terminal FAIL.
-			expect(run.mock.calls.map(([options]) => options.agentName)).toEqual([
-				"worker", "reviewer",
-				"worker", "reviewer",
-			]);
+			// The failing gate ends the workflow: findings return to the main
+			// agent and no documenter starts despite DOCUMENTATION: NEEDED.
+			expect(run.mock.calls.map(([options]) => options.agentName)).toEqual(["worker", "reviewer"]);
 			expect(stub.messages).toHaveLength(1);
 			expect(stub.messages[0].message.content).toContain("final FAIL");
 			expect(stub.messages[0].message.content).not.toContain("final documentation sync");
@@ -1380,66 +1369,17 @@ describe("managed post-writer workflows", () => {
 		}
 	});
 
-	it("auto-fixes a post-writer failure and skips docs when the terminal re-review is CLEAN", async () => {
-		configureEnabledAgents(["worker", "documenter", "reviewer"]);
-		const stub = makeStub();
-		const { tasks, controllers } = captureEnqueue();
-		let workerCalls = 0;
-		let reviewerCalls = 0;
-		const run = vi.spyOn(spawn, "runSingleAgentWithMainFallback").mockImplementation(async (options: any) => {
-			if (options.agentName === "worker") {
-				workerCalls++;
-				return makeResult("worker", options.task, workerCalls === 1 ? "INITIAL WORKER REPORT" : "FIX WORKER REPORT");
-			}
-			if (options.agentName === "reviewer") {
-				reviewerCalls++;
-				return makeResult(
-					"reviewer",
-					options.task,
-					reviewerCalls === 1
-						? "OPEN FINDING\nDOCUMENTATION: NEEDED\nVERDICT: REVIEW_FAIL"
-						: "RESOLVED\nDOCUMENTATION: CLEAN\nVERDICT: REVIEW_PASS",
-				);
-			}
-			throw new Error(`Unexpected managed role: ${options.agentName}`);
-		});
-
-		try {
-			register(stub.api);
-			const tool = stub.tools.find((candidate) => candidate.name === "subagent");
-			await runTool(tool, "post-writer-fail", { agent: "worker", task: "Implement then gate" }, executionContext());
-			await tasks[0](controllers[0].signal);
-
-			expect(run.mock.calls.map(([options]) => options.agentName)).toEqual([
-				"worker", "reviewer", "worker", "reviewer",
-			]);
-			expect(run.mock.calls[2]![0].task).toContain("OPEN FINDING");
-			expect(run.mock.calls[3]![0].task).toContain("FIX WORKER REPORT");
-			expect(run.mock.calls[3]![0].task).not.toContain("DOC REPORT");
-			expect(run.mock.calls[3]![0].task).toContain("DOCUMENTATION: CLEAN");
-			expect(stub.messages).toHaveLength(1);
-			const content = stub.messages[0].message.content as string;
-			expect(content).toContain("1 fix round");
-			expect(content).toContain("re-review round 1 · PASS");
-			expect(content).not.toContain("final documentation sync");
-		} finally {
-			await shutdownExtension(stub, { controllers });
-		}
-	});
 });
 
-describe("auto-fix loop dispatch", () => {
-	it("intercepts a REVIEW_FAIL reviewer, runs the worker→re-review chain, and delivers it as one group", async () => {
+describe("managed workflow dispatch", () => {
+	it("delivers a REVIEW_FAIL reviewer directly instead of starting a fix chain", async () => {
 		vi.useFakeTimers();
 		vi.setSystemTime(0);
 		const stub = makeStub();
 		const uiNotify = vi.fn();
 		const { tasks: capturedTasks, controllers } = captureEnqueue();
 
-			const restoreChild = fakeChild(`let text = "REQUEST_CHANGES\\nVERDICT: REVIEW_FAIL";
-if (input.includes("Auto-fix round")) text = "all blockers fixed";
-else if (input.includes("Re-review after auto-fix round")) text = "APPROVE\\nVERDICT: REVIEW_PASS";
-send({ type: "message_end", message: { role: "assistant", content: [{ type: "text", text }], stopReason: "stop" } });`);
+			const restoreChild = fakeChild(`send({ type: "message_end", message: { role: "assistant", content: [{ type: "text", text: "REQUEST_CHANGES\\nVERDICT: REVIEW_FAIL" }], stopReason: "stop" } });`);
 		try {
 
 			register(stub.api);
@@ -1449,233 +1389,38 @@ send({ type: "message_end", message: { role: "assistant", content: [{ type: "tex
 
 			expect(capturedTasks).toHaveLength(1);
 			await capturedTasks[0](controllers[0].signal);
+			vi.advanceTimersByTime(150);
 
-			// The initial review and every fix/re-review stay in the same parent
-			// queue generation, so no intermediate task or completion is exposed.
+			// No managed continuation: the failing gate is one plain, turn-triggering
+			// completion so the main agent can resolve the findings itself.
 			expect(capturedTasks).toHaveLength(1);
 			expect(stub.messages).toHaveLength(1);
-			expect(uiNotify).not.toHaveBeenCalled();
 			const content = stub.messages[0].message.content as string;
-			// Condensed delivery: one summary block instead of every round's raw output.
-			expect(content).toContain("## Auto-fix chain: 1 round — final PASS");
-			expect(content).toContain("reviewer · initial review · FAIL");
-			expect(content).toContain("worker · fix round 1 · completed");
-			expect(content).toContain("reviewer · re-review round 1 · PASS");
-			expect(content).toContain("Totals:");
-			expect(content).toContain("subagent_status");
-			// A passing final re-review appends no full block; earlier rounds' full
-			// reports stay one subagent_status call away.
-			expect(content).not.toContain("### [worker]");
-			expect(content).not.toContain("Task: Review the change");
-			// The initial review is not delivered or notified yet (still held by the chain).
+			expect(content).toContain("### [reviewer] completed");
+			expect(content).toContain("VERDICT: REVIEW_FAIL");
+			expect(content).not.toContain("Managed workflow");
 			expect(stub.messages[0].options).toEqual({ deliverAs: "steer", triggerTurn: true });
-			// Internal rounds stay silent; the parent is the chain's only live row.
-			expect(uiNotify).not.toHaveBeenCalled();
 			expect(monitor.getRuns()).toHaveLength(0);
 
-			// Every step id in the summary resolves to that exact report. The stable
-			// parent id is separate and resolves to a copy of the final logical result
-			// whose embedded run id is still the parent, not the internal re-review.
-			const stepIds = [...content.matchAll(/^- #(\d+) /gmu)].map((match) => Number(match[1]));
-			expect(stepIds).toHaveLength(3);
-			expect(new Set(stepIds).size).toBe(3);
-			expect(stepIds).not.toContain(parentRunId);
+			// The parent id resolves to the delivered report.
 			const statusTool = stub.tools.find((candidate) => candidate.name === "subagent_status");
-			const lookup = async (id: number): Promise<string> => {
-				const result = await statusTool.execute(
-					`status-${id}`,
-					{ id: String(id) },
-					new AbortController().signal,
-					() => {},
-					executionContext(),
-				);
-				return result.content[0].text;
-			};
-			const initialReport = await lookup(stepIds[0]);
-			const workerReport = await lookup(stepIds[1]);
-			const reReviewReport = await lookup(stepIds[2]);
-			const parentReport = await lookup(parentRunId);
-			expect(initialReport).toContain(`run #${stepIds[0]}`);
-			expect(initialReport).toContain("REQUEST_CHANGES");
-			expect(workerReport).toContain(`run #${stepIds[1]}`);
-			expect(workerReport).toContain("all blockers fixed");
-			expect(reReviewReport).toContain(`run #${stepIds[2]}`);
-			expect(reReviewReport).toContain("VERDICT: REVIEW_PASS");
+			const result = await statusTool.execute(
+				"",
+				{ id: String(parentRunId) },
+				new AbortController().signal,
+				() => {},
+				executionContext(),
+			);
+			const parentReport = result.content[0].text;
 			expect(parentReport).toContain(`run #${parentRunId}`);
-			expect(parentReport).toContain("VERDICT: REVIEW_PASS");
+			expect(parentReport).toContain("VERDICT: REVIEW_FAIL");
 		} finally {
 			restoreChild();
 			await shutdownExtension(stub, { controllers });
 		}
 	});
 
-	it("runs the final documenter once after an auto-fix chain settles", async () => {
-		if (!testAgentDir) throw new Error("test agent directory was not initialized");
-		writeFileSync(join(testAgentDir, "pi-subagents.json"), JSON.stringify({
-			enabledAgents: ["explorer", "worker", "cleaner", "documenter", "reviewer"],
-			announcedFeatures: ["cleanerDefaulted", "documenterDefaulted"],
-		}), "utf8");
-		const stub = makeStub();
-		const { tasks: capturedTasks, controllers } = captureEnqueue();
-		const makeResult = (agent: string, task: string, text: string): any => ({
-			agent,
-			task,
-			exitCode: 0,
-			messages: [{ role: "assistant", content: [{ type: "text", text }], stopReason: "stop" }],
-			stderr: "",
-			usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, cost: 0, contextTokens: 0, turns: 1 },
-		});
-		const run = vi.spyOn(spawn, "runSingleAgentWithMainFallback").mockImplementation(async (options: any) => {
-			if (options.task === "Review docs pipeline") {
-				return makeResult("reviewer", options.task, "REQUEST_CHANGES\nDOCUMENTATION: NEEDED\nVERDICT: REVIEW_FAIL");
-			}
-			if (options.agentName === "worker") return makeResult("worker", options.task, "fixed src/cache.ts");
-			if (options.agentName === "reviewer") {
-				expect(options.task).toContain("fixed src/cache.ts");
-				expect(options.task).not.toContain("updated README.md");
-				return makeResult(
-					"reviewer",
-					options.task,
-					"## Documentation notes\n- README.md needs the new behavior\nDOCUMENTATION: NEEDED\nAPPROVE\nVERDICT: REVIEW_PASS",
-				);
-			}
-			expect(options.agentName).toBe("documenter");
-			expect(options.task).toContain("Final documentation sync");
-			expect(options.task).toContain("fixed src/cache.ts");
-			expect(options.task).toContain("VERDICT: REVIEW_PASS");
-			return makeResult("documenter", options.task, "updated README.md");
-		});
-
-		try {
-			register(stub.api);
-			const tool = stub.tools.find((candidate) => candidate.name === "subagent");
-			await runTool(tool, "call-doc-chain", { agent: "reviewer", task: "Review docs pipeline" }, executionContext());
-			await capturedTasks[0](controllers[0].signal);
-			expect(capturedTasks).toHaveLength(1);
-
-			expect(run.mock.calls.map(([options]) => options.agentName)).toEqual([
-				"reviewer",
-				"worker",
-				"reviewer",
-				"documenter",
-			]);
-			expect(stub.messages).toHaveLength(1);
-			const content = stub.messages[0].message.content as string;
-			expect(content).toContain("documenter · final documentation sync · completed");
-			expect(content).toContain("reviewer · re-review round 1 · PASS");
-			const stepIds = [...content.matchAll(/^- #(\d+) /gmu)];
-			expect(stepIds).toHaveLength(4);
-		} finally {
-			await shutdownExtension(stub, { controllers });
-		}
-	});
-
-	it("projects fix and re-review round budgets while completed children leave the monitor", async () => {
-		configureEnabledAgents(["worker", "documenter", "reviewer"]);
-		const stub = makeStub();
-		const { tasks, controllers } = captureEnqueue();
-		let fixStarted!: () => void;
-		const atFix = new Promise<void>((resolve) => {
-			fixStarted = resolve;
-		});
-		let releaseFix!: () => void;
-		const fixRelease = new Promise<void>((resolve) => {
-			releaseFix = resolve;
-		});
-		let reReviewStarted!: () => void;
-		const atReReview = new Promise<void>((resolve) => {
-			reReviewStarted = resolve;
-		});
-		let releaseReReview!: () => void;
-		const reReviewRelease = new Promise<void>((resolve) => {
-			releaseReReview = resolve;
-		});
-		const result = (agent: string, task: string, text: string): any => ({
-			agent,
-			task,
-			exitCode: 0,
-			messages: [{ role: "assistant", content: [{ type: "text", text }], stopReason: "stop" }],
-			stderr: "",
-			usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, cost: 0, contextTokens: 0, turns: 1 },
-		});
-		const run = vi.spyOn(spawn, "runSingleAgentWithMainFallback").mockImplementation(async (options: any) => {
-			if (options.task === "Gate stage projection") {
-				return result("reviewer", options.task, "DOCUMENTATION: NEEDED\nVERDICT: REVIEW_FAIL");
-			}
-			if (options.agentName === "worker") {
-				fixStarted();
-				await fixRelease;
-				return result("worker", options.task, "fixed src/cache.ts");
-			}
-			if (options.agentName === "reviewer") {
-				reReviewStarted();
-				await reReviewRelease;
-				return result("reviewer", options.task, "DOCUMENTATION: CLEAN\nVERDICT: REVIEW_PASS");
-			}
-			throw new Error("DOCUMENTATION: CLEAN must skip documenter");
-		});
-
-		let unsubscribe = (): void => {};
-		try {
-			register(stub.api);
-			const tool = stub.tools.find((candidate) => candidate.name === "subagent");
-			const dispatched = await runTool(tool, "fix-stage-projection", { agent: "reviewer", task: "Gate stage projection" }, executionContext());
-			const parentRunId = dispatched.details.results[0].runId as number;
-			const observedProjections: unknown[] = [];
-			unsubscribe = monitor.subscribe(() => {
-				const stages = monitor.findRun(parentRunId)?.workflowStages;
-				if (stages) observedProjections.push(stages.map((stage) => ({ ...stage })));
-			});
-			const workflow = tasks[0](controllers[0].signal);
-			await atFix;
-			expect(monitor.findRun(parentRunId)?.workflowStages).toEqual([
-				{ agent: "reviewer", relation: "review", status: "changes" },
-				{ agent: "worker", relation: "fix 1/1", status: "active" },
-				{ agent: "documenter", relation: "docs", status: "pending" },
-			]);
-			expect(monitor.getRuns()).toContainEqual(expect.objectContaining({
-				parentRunId,
-				agent: "worker",
-				relationLabel: "fix 1/1",
-			}));
-
-			releaseFix();
-			await atReReview;
-			expect(monitor.findRun(parentRunId)?.workflowStages).toEqual([
-				{ agent: "reviewer", relation: "review", status: "changes" },
-				{ agent: "worker", relation: "fix 1/1", status: "done" },
-				{ agent: "reviewer", relation: "re-review 1/1", status: "active" },
-				{ agent: "documenter", relation: "docs", status: "pending" },
-			]);
-			expect(monitor.getRuns()).not.toContainEqual(expect.objectContaining({
-				parentRunId,
-				agent: "worker",
-			}));
-			expect(monitor.getRuns()).toContainEqual(expect.objectContaining({
-				parentRunId,
-				agent: "reviewer",
-				relationLabel: "re-review 1/1",
-			}));
-
-			releaseReReview();
-			await workflow;
-			expect(run.mock.calls.map(([options]) => options.agentName)).toEqual([
-				"reviewer", "worker", "reviewer",
-			]);
-			expect(observedProjections).toContainEqual([
-				{ agent: "reviewer", relation: "review", status: "changes" },
-				{ agent: "worker", relation: "fix 1/1", status: "done" },
-				{ agent: "reviewer", relation: "re-review 1/1", status: "done" },
-			]);
-		} finally {
-			unsubscribe();
-			releaseFix();
-			releaseReReview();
-			await shutdownExtension(stub, { controllers });
-		}
-	});
-
-	it("runs every auto-fix round in the triggering reviewer's explicit cwd", async () => {
+	it("runs every managed stage in the triggering writer's explicit cwd", async () => {
 		const stub = makeStub();
 		const { tasks: capturedTasks, controllers } = captureEnqueue();
 		const outerRepo = mkdtempSync(join(tmpdir(), "pi-subagents-chain-outer-"));
@@ -1689,9 +1434,6 @@ send({ type: "message_end", message: { role: "assistant", content: [{ type: "tex
 			usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, cost: 0, contextTokens: 0, turns: 1 },
 		});
 		const run = vi.spyOn(spawn, "runSingleAgentWithMainFallback").mockImplementation(async (options: any) => {
-			if (options.task === "Review target repo") {
-				return makeResult("reviewer", options.task, "REQUEST_CHANGES\nVERDICT: REVIEW_FAIL");
-			}
 			if (options.agentName === "worker") return makeResult("worker", options.task, "fixed target repo");
 			return makeResult("reviewer", options.task, "APPROVE\nVERDICT: REVIEW_PASS");
 		});
@@ -1699,17 +1441,17 @@ send({ type: "message_end", message: { role: "assistant", content: [{ type: "tex
 		try {
 			register(stub.api);
 			const tool = stub.tools.find((candidate) => candidate.name === "subagent");
-			await runTool(tool, "call-chain-cwd", { agent: "reviewer", task: "Review target repo", cwd: targetRepo }, { ...executionContext(), cwd: outerRepo });
+			await runTool(tool, "call-chain-cwd", { agent: "worker", task: "Implement target repo", cwd: targetRepo }, { ...executionContext(), cwd: outerRepo });
 			await capturedTasks[0](controllers[0].signal);
 			expect(capturedTasks).toHaveLength(1);
 
-			expect(run).toHaveBeenCalledTimes(3);
+			expect(run).toHaveBeenCalledTimes(2);
 			for (const [options] of run.mock.calls) {
 				expect(options.defaultCwd).toBe(targetRepo);
 				expect(options.cwd).toBe(targetRepo);
 			}
 			expect(stub.messages).toHaveLength(1);
-			expect(stub.messages[0].message.content).toContain("final PASS");
+			expect(stub.messages[0].message.content).toContain("worker → reviewer");
 		} finally {
 			await shutdownExtension(stub, { controllers });
 			rmSync(outerRepo, { recursive: true, force: true });
@@ -1717,7 +1459,7 @@ send({ type: "message_end", message: { role: "assistant", content: [{ type: "tex
 		}
 	});
 
-	it("serializes concurrent auto-fix chains that share a repository", async () => {
+	it("serializes concurrent writer workflows that share a repository", async () => {
 		const stub = makeStub();
 		const { tasks: capturedTasks, controllers } = captureEnqueue();
 		const repo = mkdtempSync(join(tmpdir(), "pi-subagents-chain-serialized-"));
@@ -1734,9 +1476,6 @@ send({ type: "message_end", message: { role: "assistant", content: [{ type: "tex
 		let workerStarts = 0;
 		const workerReleases: Array<() => void> = [];
 		vi.spyOn(spawn, "runSingleAgentWithMainFallback").mockImplementation(async (options: any) => {
-			if (options.task === "Review A" || options.task === "Review B") {
-				return makeResult("reviewer", options.task, "REQUEST_CHANGES\nVERDICT: REVIEW_FAIL");
-			}
 			if (options.agentName === "worker") {
 				workerStarts++;
 				activeWorkers++;
@@ -1755,8 +1494,8 @@ send({ type: "message_end", message: { role: "assistant", content: [{ type: "tex
 			register(stub.api);
 			const tool = stub.tools.find((candidate) => candidate.name === "subagent");
 			await Promise.all([
-				runTool(tool, "chain-a", { agent: "reviewer", task: "Review A", cwd: repo }, executionContext()),
-				runTool(tool, "chain-b", { agent: "reviewer", task: "Review B", cwd: repo }, executionContext()),
+				runTool(tool, "chain-a", { agent: "worker", task: "Implement A", cwd: repo }, executionContext()),
+				runTool(tool, "chain-b", { agent: "worker", task: "Implement B", cwd: repo }, executionContext()),
 			]);
 			expect(capturedTasks).toHaveLength(2);
 			const chains = [
@@ -1765,6 +1504,8 @@ send({ type: "message_end", message: { role: "assistant", content: [{ type: "tex
 			];
 			await vi.waitFor(() => expect(workerStarts).toBe(1));
 			await new Promise((resolveDelay) => setTimeout(resolveDelay, 30));
+			// The first workflow holds the shared-repository lane through its gate,
+			// so the second writer cannot start yet.
 			expect(workerStarts).toBe(1);
 			expect(maxActiveWorkers).toBe(1);
 
@@ -1781,26 +1522,26 @@ send({ type: "message_end", message: { role: "assistant", content: [{ type: "tex
 		}
 	});
 
-	it("publishes the interrupted auto-fix sub-step partial instead of the old review", async () => {
+	it("publishes the interrupted gate partial instead of the old writer report", async () => {
 		const stub = makeStub();
-		let activeWorkerOptions: any;
+		let gateOptions: any;
 		vi.spyOn(spawn, "runSingleAgentWithMainFallback")
 			.mockResolvedValueOnce({
-				agent: "reviewer",
-				task: "Review the change",
+				agent: "worker",
+				task: "Implement the change",
 				exitCode: 0,
-				messages: [{ role: "assistant", content: [{ type: "text", text: "OLD INITIAL REVIEW\nVERDICT: REVIEW_FAIL" }], stopReason: "stop" }],
+				messages: [{ role: "assistant", content: [{ type: "text", text: "OLD WORKER REPORT" }], stopReason: "stop" }],
 				stderr: "",
 				usage: { input: 1, output: 1, cacheRead: 0, cacheWrite: 0, cost: 0, contextTokens: 2, turns: 1 },
 			} as any)
 			.mockImplementationOnce(async (options: any) => {
-				activeWorkerOptions = options;
+				gateOptions = options;
 				return new Promise((resolve) => {
 					const finish = () => resolve({
-						agent: "worker",
+						agent: "reviewer",
 						task: options.task,
 						exitCode: 1,
-						messages: [{ role: "assistant", content: [{ type: "text", text: "CURRENT FIX PARTIAL" }], stopReason: "aborted" }],
+						messages: [{ role: "assistant", content: [{ type: "text", text: "CURRENT GATE PARTIAL" }], stopReason: "aborted" }],
 						stderr: "",
 						usage: { input: 2, output: 2, cacheRead: 0, cacheWrite: 0, cost: 0, contextTokens: 4, turns: 1 },
 						stopReason: "aborted",
@@ -1814,53 +1555,15 @@ send({ type: "message_end", message: { role: "assistant", content: [{ type: "tex
 		register(stub.api);
 		const tool = stub.tools.find((candidate) => candidate.name === "subagent");
 		const stopTool = stub.tools.find((candidate) => candidate.name === "subagent_stop");
-		const dispatched = await runTool(tool, "call-chain-stop", { agent: "reviewer", task: "Review the change" }, executionContext());
+		const dispatched = await runTool(tool, "call-chain-stop", { agent: "worker", task: "Implement the change" }, executionContext());
 		const runId = dispatched.details.results[0].runId;
-		await vi.waitFor(() => expect(activeWorkerOptions).toBeDefined());
+		await vi.waitFor(() => expect(gateOptions).toBeDefined());
 
 		await runTool(stopTool, "stop-chain", { id: String(runId) }, executionContext());
 		expect(stub.messages).toHaveLength(1);
-		expect(stub.messages[0].message.content).toContain("CURRENT FIX PARTIAL");
-		expect(stub.messages[0].message.content).not.toContain("OLD INITIAL REVIEW");
+		expect(stub.messages[0].message.content).toContain("CURRENT GATE PARTIAL");
+		expect(stub.messages[0].message.content).not.toContain("OLD WORKER REPORT");
 		await shutdownExtension(stub);
-	});
-
-	it("stops the chain when a re-review fails, without starting another fix round", async () => {
-		vi.useFakeTimers();
-		vi.setSystemTime(0);
-		const stub = makeStub();
-		const { tasks: capturedTasks, controllers } = captureEnqueue();
-
-			const restoreChild = fakeChild(`if (input.includes("Auto-fix round")) {
-	send({ type: "message_end", message: { role: "assistant", content: [{ type: "text", text: "fixed" }], stopReason: "stop" } });
-} else if (input.includes("Re-review after auto-fix round")) {
-	send({ type: "message_end", message: { role: "assistant", content: [{ type: "text", text: "crashed mid-review" }], stopReason: "error" } });
-} else {
-	send({ type: "message_end", message: { role: "assistant", content: [{ type: "text", text: "REQUEST_CHANGES\\nVERDICT: REVIEW_FAIL" }], stopReason: "stop" } });
-}`);
-		try {
-
-			register(stub.api);
-			const tool = stub.tools.find((candidate) => candidate.name === "subagent");
-			await runTool(tool, "call-chain-fail", { agent: "reviewer", task: "Review the change" }, executionContext());
-
-			await capturedTasks[0](controllers[0].signal);
-			expect(capturedTasks).toHaveLength(1);
-
-			expect(stub.messages).toHaveLength(1);
-			const content = stub.messages[0].message.content as string;
-			expect(content).toContain("## Auto-fix chain: 1 round — final failed");
-			expect(content).toContain("reviewer · re-review round 1 · failed");
-			// The crashed final re-review's full report is appended so the main agent
-			// sees why the chain stopped.
-			expect(content).toContain("### [reviewer] failed");
-			// No second fix round: the crashed re-review ends the chain.
-			expect(content).not.toContain("Auto-fix round 2");
-			expect(monitor.getRuns()).toHaveLength(0);
-		} finally {
-			restoreChild();
-			await shutdownExtension(stub, { controllers });
-		}
 	});
 
 	it("delivers a REVIEW_FAIL review directly when worker is disabled", async () => {
@@ -1891,7 +1594,7 @@ send({ type: "message_end", message: { role: "assistant", content: [{ type: "tex
 			vi.advanceTimersByTime(150);
 			expect(stub.messages).toHaveLength(1);
 			expect(stub.messages[0].message.content).toContain("VERDICT: REVIEW_FAIL");
-			expect(monitor.getRuns().find((run) => run.activity === "auto-fix chain running")).toBeUndefined();
+			expect(monitor.getRuns().find((run) => run.activity === "managed workflow running")).toBeUndefined();
 		} finally {
 			await shutdownExtension(stub, { controllers });
 		}
@@ -1931,7 +1634,7 @@ send({ type: "message_end", message: { role: "assistant", content: [{ type: "tex
 			expect(content).toContain("spawn infra exploded");
 			expect(stub.messages[0].options).toEqual({ deliverAs: "steer", triggerTurn: true });
 			expect(uiNotify).toHaveBeenCalledWith("✗ reviewer dispatch failed: spawn infra exploded", "error");
-			expect(monitor.getRuns().find((run) => run.activity === "auto-fix chain running")).toBeUndefined();
+			expect(monitor.getRuns().find((run) => run.activity === "managed workflow running")).toBeUndefined();
 		} finally {
 			restoreChild();
 			await shutdownExtension(stub, { controllers });
@@ -1965,7 +1668,7 @@ send({ type: "message_end", message: { role: "assistant", content: [{ type: "tex
 			expect(content).toContain("VERDICT: REVIEW_FAIL");
 			expect(stub.messages[0].options).toEqual({ deliverAs: "steer", triggerTurn: true });
 			expect(uiNotify).toHaveBeenCalledTimes(1);
-			expect(monitor.getRuns().find((run) => run.activity === "auto-fix chain running")).toBeUndefined();
+			expect(monitor.getRuns().find((run) => run.activity === "managed workflow running")).toBeUndefined();
 		} finally {
 			restoreChild();
 			await shutdownExtension(stub, { controllers });

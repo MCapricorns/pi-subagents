@@ -21,101 +21,76 @@ describe("buildDelegationDirective", () => {
 	it("lists the catalog and preserves isolation, leaf, and self-contained brief rules", () => {
 		const directive = buildDelegationDirective([agent("explorer"), agent("worker"), agent("reviewer")]);
 		expect(directive).toContain("- explorer: explorer description");
-		expect(directive).toContain("isolated Pi child processes and context windows");
+		expect(directive).toContain("isolated leaf Pi child processes");
 		expect(directive).toContain("complete goal, exact paths, constraints, and expected output");
-		expect(directive).toContain("leaf processes without delegation tools");
+		expect(directive).toContain("cannot delegate");
 		expect(directive).toContain("subagent_control resume");
 	});
 
 	it("keeps the default injected directive below the prompt budget", () => {
 		const directive = buildDelegationDirective(loadBuiltinAgents());
-		expect(directive.length).toBeLessThan(6_000);
+		expect(directive.length).toBeLessThan(5_200);
 	});
 
-	it("mentions parallel only when multiple agents are enabled", () => {
+	it("states model-owned fan-out with queue pacing for any agent count", () => {
 		const single = buildDelegationDirective([agent("worker")]);
-		expect(single).not.toContain("one `tasks` array");
-		expect(single).not.toContain("documenter as the conservative final fallback");
-		expect(single).not.toContain("continue through the enabled reviewer gate");
-		const cleanerOnly = buildDelegationDirective([agent("cleaner")]);
-		expect(cleanerOnly).not.toContain("documenter as the conservative final fallback");
+		expect(single).toContain("one `tasks` array");
+		expect(single).toContain("no per-call cap");
+		expect(single).toContain("queue for the next free process slot");
+		expect(single).toContain("One child owns one coherent deliverable");
+		expect(single).not.toContain("documenter");
 		const multi = buildDelegationDirective([agent("explorer"), agent("worker")]);
-		expect(multi).toContain("one `tasks` array");
+		expect(multi).toContain("dependent work starts only after its prerequisite delivers");
 	});
 
-	it("keeps small known-target work inline and treats explorer as a retrieval index only", () => {
+	it("balances delegation with an inline trivial-work boundary", () => {
 		const directive = buildDelegationDirective([agent("explorer"), agent("worker"), agent("reviewer")]);
-		expect(directive).toContain("Keep small, known-target work in the main thread with direct tools");
-		expect(directive).toContain("Use `explorer` proactively");
-		expect(directive).toContain("lightweight retrieval index, never an automatic gate");
-		expect(directive).toContain("Re-read load-bearing files");
-		expect(directive).toContain("Use a stronger model/specialist");
+		expect(directive).toContain("Route substantive work to sub-agents");
+		expect(directive).toContain("inline only trivial work");
+		expect(directive).toContain("Use `explorer` for any broad or multi-file search");
+		expect(directive).toContain("retrieval index, never a gate");
 
 		const withoutExplorer = buildDelegationDirective([agent("worker")]);
-		expect(withoutExplorer).not.toContain("lightweight retrieval index");
+		expect(withoutExplorer).not.toContain("retrieval index");
 	});
 
-	it("routes only edit-authorized cleanup to cleaner and generic audits to reviewer", () => {
+	it("routes only edit-authorized cleanup to cleaner", () => {
 		const directive = buildDelegationDirective([agent("cleaner"), agent("reviewer")]);
-		expect(directive).toContain("user-authorized cleanup, removal, simplification, or duplicate-code consolidation");
-		expect(directive).toContain("applies every safe proven in-scope cut without item-by-item approval");
-		expect(directive).toContain("Read-only audits and code-health reviews");
-		expect(directive).toContain("reviews go to `reviewer`");
-		expect(directive).toContain("cannot authorize follow-up edits");
-		expect(directive).toContain("Never dispatch cleaner by PR count or as the pre-commit gate");
-		expect(directive).not.toContain("Audit mode");
-		expect(directive).not.toContain("Apply mode");
+		expect(directive).toContain("user-authorized cleanup or deduplication");
+		expect(directive).toContain("every safe proven cut without item-by-item approval");
+		expect(directive).toContain("never runs as a pre-commit gate or by PR count");
 	});
 
-	it("states conditional diff sync and reserves direct documenter for explicit docs work", () => {
+	it("reserves direct documenter for explicit docs work and describes the runtime sync", () => {
 		const directive = buildDelegationDirective([
 			agent("worker"),
 			agent("cleaner"),
 			agent("documenter"),
 			agent("reviewer"),
 		]);
-		expect(directive).toContain("explicit whole-codebase or standalone documentation/comment work");
-		expect(directive).toContain("delivers without an automatic reviewer");
-		expect(directive).toContain("worker/cleaner must sync existing docs they directly affect");
+		expect(directive).toContain("explicit standalone documentation work");
+		expect(directive).toContain("delivers without a gate");
+		expect(directive).toContain("writers sync docs they directly affect");
 		expect(directive).toContain("DOCUMENTATION: NEEDED or a missing marker");
 		expect(directive).toContain("never dispatch a duplicate");
-		expect(directive).toContain("never changes runtime behavior, versions, or release state");
-		expect(directive).toContain("one fresh read-only reviewer gate, independent of the writer");
-		expect(directive).toContain("DOCUMENTATION: CLEAN delivers immediately");
+		expect(directive).toContain("one fresh gate and then deliver once");
 	});
 
-	it("describes each reviewer/documenter writer workflow without inventing disabled roles", () => {
-		const reviewerOnly = buildDelegationDirective([agent("worker"), agent("reviewer")]);
-		expect(reviewerOnly).toContain(
-			"Successful top-level worker runs continue through the enabled reviewer gate and then deliver once",
-		);
-		expect(reviewerOnly).not.toContain("documenter");
-
-		const documenterOnly = buildDelegationDirective([agent("worker"), agent("documenter")]);
-		expect(documenterOnly).toContain(
-			"With reviewer disabled, successful top-level worker runs use documenter as the conservative final fallback",
-		);
-		expect(documenterOnly).not.toContain("continue through the enabled reviewer gate");
-
-		const both = buildDelegationDirective([agent("worker"), agent("documenter"), agent("reviewer")]);
-		expect(both).toContain("continue through the enabled reviewer gate");
-		expect(both).toContain("Only REVIEW_PASS can authorize documenter");
-	});
-
-	it("advertises auto-fix only when the worker role exists", () => {
-		const roles = [agent("worker"), agent("documenter"), agent("reviewer")];
-		expect(buildDelegationDirective(roles)).toContain(
-			"direct REVIEW_FAIL keeps bounded worker/reviewer auto-fix",
-		);
-		expect(buildDelegationDirective([agent("documenter"), agent("reviewer")])).toContain(
-			"cannot start fixes while worker is disabled",
-		);
-	});
-
-	it("does not advertise cleaner or documenter routing when each role is disabled", () => {
+	it("does not advertise documenter routing when the role is disabled", () => {
 		const directive = buildDelegationDirective([agent("explorer"), agent("worker"), agent("reviewer")]);
-		expect(directive).not.toContain("cleaner");
 		expect(directive).not.toContain("documenter");
+		expect(directive).not.toContain("cleaner");
+	});
+
+	it("returns REVIEW_FAIL findings to the main agent with an autonomous fix default", () => {
+		const directive = buildDelegationDirective([agent("worker"), agent("reviewer")]);
+		expect(directive).toContain("A REVIEW_FAIL — direct or from a managed gate — returns the findings to you");
+		expect(directive).toContain("without waiting for the user");
+		expect(directive).toContain("the runtime never auto-fixes");
+		expect(directive).toContain("Ask only for genuinely destructive or scope-changing fixes");
+		expect(directive).toContain("cannot authorize edits");
+		const noReviewer = buildDelegationDirective([agent("worker")]);
+		expect(noReviewer).not.toContain("REVIEW_FAIL");
 	});
 
 	it("preserves worktree constraints and selected-to-main continuation", () => {
@@ -125,19 +100,17 @@ describe("buildDelegationDirective", () => {
 			agent("documenter"),
 			agent("reviewer"),
 		]);
-		expect(directive).toContain("parallel worker tasks default to detached Git worktrees");
-		expect(directive).toContain("documenter defaults to shared");
+		expect(directive).toContain("parallel workers default to detached Git worktrees");
 		expect(directive).toContain("committed HEAD");
-		expect(directive).toContain("never falls back silently to shared");
+		expect(directive).toContain("never silently falls back to shared");
 		expect(directive).toContain("continues the same retained session on the current main model");
 		expect(directive).toContain("Ordinary tool/task failures stay on the selected model");
 	});
 
 	it("preserves automatic handoff without polling or result restatement", () => {
 		const directive = buildDelegationDirective([agent("explorer"), agent("worker"), agent("reviewer")]);
-		expect(directive).toContain("Never sleep, poll, or call `subagent_wait`");
-		expect(directive).toContain("explicit `timeoutMs`");
-		expect(directive).toContain("Do not restate, paraphrase, or re-summarize");
+		expect(directive).toContain("never sleep, poll, or call `subagent_wait`");
+		expect(directive).toContain("never a restatement");
 		expect(directive).toContain("use `subagent_status` to confirm that no runs remain active");
 	});
 
@@ -145,7 +118,6 @@ describe("buildDelegationDirective", () => {
 		const withoutReviewer = buildDelegationDirective([agent("explorer"), agent("worker")]);
 		expect(withoutReviewer).not.toContain("multi-model cross-review");
 		const withReviewer = buildDelegationDirective([agent("worker"), agent("reviewer")]);
-		expect(withReviewer).toContain("fresh read-only reviewer gate");
 		expect(withReviewer).toContain("multi-model cross-review");
 	});
 

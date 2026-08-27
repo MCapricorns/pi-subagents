@@ -63,8 +63,8 @@ describe("normalizeConfig", () => {
 		expect(config).not.toHaveProperty("thinkingLevel");
 	});
 
-	it("defaults maxResultLines to 80 and clamps invalid values", () => {
-		expect(DEFAULT_MAX_RESULT_LINES).toBe(80);
+	it("defaults maxResultLines to 40 and clamps invalid values", () => {
+		expect(DEFAULT_MAX_RESULT_LINES).toBe(40);
 		expect(normalizeConfig({ maxResultLines: 200 }).maxResultLines).toBe(200);
 		expect(normalizeConfig({ maxResultLines: 99_999 }).maxResultLines).toBe(MAX_RESULT_LINES_LIMIT);
 		expect(normalizeConfig({ maxResultLines: "many" }).maxResultLines).toBe(DEFAULT_MAX_RESULT_LINES);

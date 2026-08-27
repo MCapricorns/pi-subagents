@@ -27,12 +27,12 @@ interface PendingTask {
 	onError?: (error: unknown) => void | Promise<void>;
 }
 
-/** How many sub-agent processes may run at once, and how many tasks one
- * parallel `subagent` call may contain. Fixed by design: the queue sheds load
- * by waiting, so the knob bought nothing worth its maintenance. Only manually
- * dispatched top-level generations hold slots; runtime-initiated managed
- * continuations (gate reviews, auto-fix rounds, documentation sync) suspend
- * their task's slot so they never starve manual dispatches. */
+/** How many sub-agent processes may run at once. This paces execution only —
+ * it never rejects work, so a wider parallel `subagent` call simply queues.
+ * Fixed by design: the queue sheds load by waiting, so the knob bought nothing
+ * worth its maintenance. Only manually dispatched top-level generations hold
+ * slots; runtime-initiated managed continuations (gate reviews, documentation
+ * sync) suspend their task's slot so they never starve manual dispatches. */
 export const MAX_CONCURRENT_SUBAGENTS = 4;
 
 export class BackgroundTaskQueue {

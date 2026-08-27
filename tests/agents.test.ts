@@ -87,26 +87,25 @@ describe("shipped specialist agents", () => {
 		expect(documenter?.systemPrompt).toContain("no fresh reviewer runs");
 	});
 
-	it("requires gate fix instructions and worker pushback in the fix loop", () => {
+	it("requires gate fix instructions and hands findings back to the caller", () => {
 		const reviewer = loadBuiltinAgents().find((agent) => agent.name === "reviewer");
 		expect(reviewer?.systemPrompt).toContain("concrete fix instruction");
 		expect(reviewer?.systemPrompt).toContain("how to verify the fix");
-		expect(reviewer?.systemPrompt).toContain("judge the code as it now stands");
-		expect(reviewer?.systemPrompt).toContain("never issues unrelated to this round's edits");
+		expect(reviewer?.systemPrompt).toContain("the report returns to the main agent");
 		const worker = loadBuiltinAgents().find((agent) => agent.name === "worker");
-		expect(worker?.systemPrompt).toContain("reviewer's fix instructions");
+		expect(worker?.systemPrompt).toContain("reviewer findings");
 		expect(worker?.systemPrompt).toContain("push back in your report");
 		expect(worker?.systemPrompt).toContain("A deviation without reasoning will be re-opened");
 	});
 
-	it("keeps reviewer advisory reports separate from auto-fix gate verdicts", () => {
+	it("keeps reviewer advisory reports separate from gate verdicts", () => {
 		const reviewer = loadBuiltinAgents().find((agent) => agent.name === "reviewer");
 		expect(reviewer?.description).toContain("generic audits");
 		expect(reviewer?.systemPrompt).toContain("Advisory review");
 		expect(reviewer?.systemPrompt).toContain("do **not** emit `VERDICT: REVIEW_*`");
 		expect(reviewer?.systemPrompt).toContain("Gate review");
 		expect(reviewer?.systemPrompt).toContain("Use `VERDICT: REVIEW_FAIL` when any gate finding remains");
-		expect(reviewer?.systemPrompt).toContain("A `REQUEST_CHANGES` gate verdict starts");
+		expect(reviewer?.systemPrompt).toContain("returns the findings to the main agent for the fix decision");
 		expect(reviewer?.systemPrompt).toContain("DOCUMENTATION: NEEDED");
 		expect(reviewer?.systemPrompt).toContain("DOCUMENTATION: CLEAN");
 		expect(reviewer?.systemPrompt).toContain("missing marker conservatively as NEEDED");
@@ -119,7 +118,7 @@ describe("shipped specialist agents", () => {
 		for (const agent of loadBuiltinAgents()) {
 			expect(agent.systemPrompt).toContain("Do not repeat the task brief");
 			expect(agent.systemPrompt).toContain("transient tool failures");
-			expect(agent.systemPrompt).toContain("80-line delivery cap");
+			expect(agent.systemPrompt).toContain("40-line delivery cap");
 		}
 		const explorer = loadBuiltinAgents().find((agent) => agent.name === "explorer");
 		expect(explorer?.systemPrompt).toContain("## Findings");

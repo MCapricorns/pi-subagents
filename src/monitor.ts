@@ -73,7 +73,7 @@ export interface RunView {
 	continuationKind?: ContinuationKind;
 	/** When set, this is an internal managed-workflow step. */
 	groupId?: string;
-	/** Human-readable role within a chain, e.g. "fix round 1" or "re-review round 1". */
+	/** Human-readable role within a workflow, e.g. "final review" or "final documentation sync". */
 	relationLabel?: string;
 	/** Stable owning run whose row represents the whole managed workflow. */
 	parentRunId?: number;

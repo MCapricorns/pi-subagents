@@ -46,13 +46,12 @@ import {
 } from "./format.ts";
 import {
 	canStartManagedWorkflow,
-	formatChainSummary,
 	formatManagedWorkflowSummary,
 	getManagedWorkflowPlan,
 	workflowAgentAvailability,
 	type ManagedWorkflowOutcome,
 	type ManagedWorkflowPlan,
-} from "./fixloop.ts";
+} from "./workflow.ts";
 import {
 	availableModelsInScope,
 	currentModelRef,
@@ -678,23 +677,20 @@ export function createBackgroundDispatcher(options: BackgroundDispatcherOptions)
 				if (thread.retireOnSettle) runtime.retireThreadSession(thread);
 				let workflowOutcome: ManagedWorkflowOutcome | undefined;
 				const workflowPlan = getManagedWorkflowPlan(result, workflowAvailability, thread.advisoryReview);
-				if (workflowPlan && runtime.sessionActive) {
-					// The continuation is runtime-initiated (gate review, auto-fix
-					// rounds, documentation sync): release this generation's
-					// concurrency slot so managed chains never starve manual
-					// dispatches. Cancellation and quiescence guarantees are
-					// unchanged — the task stays abortable and awaited.
-					runtime.backgroundQueue.suspend(generationController);
-					thread.state = "running";
-					// The stable parent row now represents workflow ownership, not whichever
-					// model stage ran most recently. Internal rows own their exact role/model/
-					// thinking/timing telemetry and remain independently queryable.
-					monitor.setManagedWorkflow(runId, true);
-					monitor.setStatus(runId, "running");
-					monitor.setActivity(
-						runId,
-						workflowPlan.kind === "auto-fix" ? "auto-fix chain running" : "managed workflow running",
-					);
+					if (workflowPlan && runtime.sessionActive) {
+						// The continuation is runtime-initiated (gate review,
+						// documentation sync): release this generation's
+						// concurrency slot so managed chains never starve manual
+						// dispatches. Cancellation and quiescence guarantees are
+						// unchanged — the task stays abortable and awaited.
+						runtime.backgroundQueue.suspend(generationController);
+						thread.state = "running";
+						// The stable parent row now represents workflow ownership, not whichever
+						// model stage ran most recently. Internal rows own their exact role/model/
+						// thinking/timing telemetry and remain independently queryable.
+						monitor.setManagedWorkflow(runId, true);
+						monitor.setStatus(runId, "running");
+						monitor.setActivity(runId, "managed workflow running");
 					workflowOutcome = await runManagedWorkflow({
 						plan: workflowPlan,
 						initialResult: result,
@@ -797,9 +793,7 @@ export function createBackgroundDispatcher(options: BackgroundDispatcherOptions)
 
 					if (workflowOutcome) {
 						const lastStep = workflowOutcome.steps[workflowOutcome.steps.length - 1]!;
-						let block = workflowOutcome.kind === "auto-fix"
-							? formatChainSummary(workflowOutcome.steps, result)
-							: formatManagedWorkflowSummary(workflowOutcome.steps, result);
+						let block = formatManagedWorkflowSummary(workflowOutcome.steps, result);
 						const finalVerdict = lastStep.result.agent === "reviewer"
 							? reviewVerdict(getResultOutput(lastStep.result))
 							: undefined;
@@ -809,7 +803,7 @@ export function createBackgroundDispatcher(options: BackgroundDispatcherOptions)
 						}
 						if (modelLevel) block += `\n\n${modelLevelTakeoverNote(result, { runId })}`;
 						runtime.sendCompletionGroup([{
-							agent: `${workflowOutcome.kind === "auto-fix" ? "auto-fix chain" : "managed workflow"} (${result.agent})`,
+							agent: `managed workflow (${result.agent})`,
 							block,
 							triggerTurn: true,
 							usage: sumUsage(workflowOutcome.steps.map((step) => step.result.usage)),

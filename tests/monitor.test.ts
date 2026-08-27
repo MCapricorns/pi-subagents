@@ -154,12 +154,12 @@ describe("MonitorStore", () => {
 		const store = new MonitorStore();
 		const id = store.addRun("worker", "Fix the findings", undefined, undefined, {
 			groupId: "fix-3",
-			relationLabel: "fix round 1",
+			relationLabel: "final review",
 			parentRunId: 3,
 		});
 		const run = store.findRun(id);
 		expect(run?.groupId).toBe("fix-3");
-		expect(run?.relationLabel).toBe("fix round 1");
+		expect(run?.relationLabel).toBe("final review");
 		expect(run?.parentRunId).toBe(3);
 	});
 });
@@ -272,10 +272,10 @@ describe("formatTaskSummary", () => {
 			"explorer: trace how the batching pipeline drains and how completion messages are grouped, then report src/completion.ts",
 		);
 		const b = formatTaskSummary(
-			"explorer: trace how the batching pipeline drains and how completion messages are grouped, then report src/fixloop.ts",
+			"explorer: trace how the batching pipeline drains and how completion messages are grouped, then report src/workflow.ts",
 		);
 		expect(a).toBe("src/completion.ts");
-		expect(b).toBe("src/fixloop.ts");
+		expect(b).toBe("src/workflow.ts");
 	});
 
 	it("keeps the tail of an over-long single fragment", () => {
@@ -440,12 +440,12 @@ describe("MonitorStore.subscribe", () => {
 		const store = new MonitorStore();
 		store.addRun("worker", "Fix the bug", undefined, undefined, {
 			groupId: "fix-1",
-			relationLabel: "fix round 1",
+			relationLabel: "final review",
 		});
 		const run = store.getRuns()[0];
 		expect(run.groupId).toBe("fix-1");
-		expect(run.relationLabel).toBe("fix round 1");
-		expect(store.summarize(run)).toContain("fix round 1");
+		expect(run.relationLabel).toBe("final review");
+		expect(store.summarize(run)).toContain("final review");
 	});
 
 	it("omits chain metadata when not provided", () => {

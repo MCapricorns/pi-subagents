@@ -77,47 +77,46 @@ describe("formatActiveRunLines", () => {
 		expect(lines.every((line) => line.length > 0)).toBe(true);
 	});
 
-	it("renders an auto-fix timeline and nests current child telemetry under its stable parent", () => {
+	it("renders a managed workflow timeline and nests current child telemetry under its stable parent", () => {
 		const store = new MonitorStore();
-		const parent = store.addRun("reviewer", "Review src/index.ts", "xai/grok-parent", "xhigh");
+		const parent = store.addRun("worker", "Implement src/index.ts", "xai/grok-parent", "xhigh");
 		store.setStatus(parent, "running");
 		store.setManagedWorkflow(parent, true);
 		store.setWorkflowStages(parent, [
-			{ agent: "reviewer", relation: "review", status: "changes" },
-			{ agent: "worker", relation: "fix 1/1", status: "active" },
-			{ agent: "reviewer", relation: "re-review 1/1", status: "pending" },
+			{ agent: "worker", relation: "implement", status: "done" },
+			{ agent: "reviewer", relation: "review", status: "active" },
 			{ agent: "documenter", relation: "docs", status: "pending" },
 		]);
-		store.setActivity(parent, "auto-fix chain running");
-		const fix = store.addRun(
-			"worker",
-			"Auto-fix round 1 of 1 (triggered by a failed review).\n- src/index.ts:42 bug",
+		store.setActivity(parent, "managed workflow running");
+		const review = store.addRun(
+			"reviewer",
+			"Fresh code gate for a managed worker workflow.\n- src/index.ts:42 bug",
 			"openai/gpt-worker",
 			"max",
-			{ groupId: `fix-${parent}`, relationLabel: "fix 1/1", parentRunId: parent },
+			{ groupId: `workflow-${parent}`, relationLabel: "review", parentRunId: parent },
 		);
-		store.setStatus(fix, "running");
-		store.setActivity(fix, "edit src/index.ts");
-		const reReview = store.addRun(
-			"reviewer",
-			"Re-review after auto-fix round 1.",
+		store.setStatus(review, "running");
+		store.setActivity(review, "read src/index.ts");
+		const docs = store.addRun(
+			"documenter",
+			"Final documentation sync.",
 			"anthropic/claude-reviewer",
 			"high",
-			{ groupId: `fix-${parent}`, relationLabel: "re-review 1/1", parentRunId: parent },
+			{ groupId: `workflow-${parent}`, relationLabel: "docs", parentRunId: parent },
 		);
-		store.setStatus(reReview, "queued");
+		store.setStatus(docs, "queued");
 
 		const lines = formatActiveRunLines(store.getRuns(), theme, 120);
 		expect(lines).toHaveLength(5);
-		expect(lines[0]).toContain(`◆ #${parent} reviewer workflow · src/index.ts`);
+		expect(lines[0]).toContain(`◆ #${parent} worker workflow · src/index.ts`);
 		expect(lines[0]).not.toContain("grok-parent");
 		expect(lines[0]).not.toContain("/xhigh");
-		expect(lines[1]).toContain("! review ─ ● fix 1/1 ─ ○ re-review 1/1 ─ ○ docs");
+		expect(lines[1]).toContain("✓ implement ─ ● review ─ ○ docs");
 		// The timeline replaces the parent's generic workflow placeholder.
-		expect(lines.join("\n")).not.toContain("auto-fix chain running");
-		expect(lines[2]).toContain(`├ ● #${fix} worker · fix 1/1 · src/index.ts · gpt-worker/max`);
-		expect(lines[3]).toBe("      edit src/index.ts");
-		expect(lines[4]).toContain(`└ ○ #${reReview} reviewer · queued · re-review 1/1`);
+		expect(lines.join("\n")).not.toContain("managed workflow running");
+		expect(lines[2]).toContain(`├ ● #${review} reviewer · review · src/index.ts · gpt-worker/max`);
+		expect(lines[3]).toBe("      read src/index.ts");
+		expect(lines[4]).toContain(`└ ○ #${docs} documenter · queued · docs`);
 		expect(lines.join("\n")).not.toContain("claude-reviewer");
 	});
 
@@ -147,8 +146,7 @@ describe("formatActiveRunLines", () => {
 		store.setWorkflowStages(parent, [
 			{ agent: "worker", relation: "implement", status: "done" },
 			{ agent: "reviewer", relation: "review", status: "changes" },
-			{ agent: "worker", relation: "fix 2/2", status: "active" },
-			{ agent: "reviewer", relation: "re-review 2/2", status: "pending" },
+			{ agent: "documenter", relation: "docs", status: "active" },
 		]);
 		store.findRun(parent)!.startedAt = 1_000;
 		store.findRun(parent)!.activeSince = 1_000;
@@ -157,23 +155,23 @@ describe("formatActiveRunLines", () => {
 		expect(lines).toHaveLength(2);
 		for (const line of lines) expect(visibleWidth(line)).toBeLessThanOrEqual(34);
 		expect(lines[0]).toContain("1m01s");
-		expect(lines[1]).toContain("● fix 2/2");
+		expect(lines[1]).toContain("● docs");
 	});
 
 	it("renders a chain child at root level with its relation when the parent row is gone", () => {
 		const store = new MonitorStore();
 		const orphan = store.addRun(
-			"worker",
-			"Auto-fix round 1 of 1.\n- src/widget.ts:10 issue",
+			"documenter",
+			"Final documentation sync.\n- src/widget.ts:10 issue",
 			undefined,
 			undefined,
-			{ groupId: "fix-999", relationLabel: "fix round 2", parentRunId: 999 },
+			{ groupId: "workflow-999", relationLabel: "docs sync", parentRunId: 999 },
 		);
 		store.setStatus(orphan, "running");
 
 		const lines = formatActiveRunLines(store.getRuns(), theme, 120);
 		expect(lines).toHaveLength(1);
-		expect(lines[0]).toContain(`● #${orphan} worker · fix round 2 · src/widget.ts`);
+		expect(lines[0]).toContain(`● #${orphan} documenter · docs sync · src/widget.ts`);
 		expect(lines[0]).not.toContain("└");
 	});
 

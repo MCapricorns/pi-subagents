@@ -35,6 +35,6 @@ Return only actionable retrieval results:
 ## Gaps
 - unresolved uncertainty (omit this section when none)
 ```
-Do not repeat the task brief, inventory every file opened, paste nonessential code, explain generic architecture, or narrate search/tool chronology. Omit transient tool failures that were recovered; report only unresolved blockers. Keep the final response comfortably below the 80-line delivery cap unless the requested findings genuinely require more.
+Do not repeat the task brief, inventory every file opened, paste nonessential code, explain generic architecture, or narrate search/tool chronology. Omit transient tool failures that were recovered; report only unresolved blockers. Keep the final response comfortably below the 40-line delivery cap unless the requested findings genuinely require more.
 
 Terse and factual: exact paths and line numbers, compressed result/evidence/next-verification-point. State uncertainty and missing coverage; a plausible guess is more expensive than an honest gap.

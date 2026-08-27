@@ -14,20 +14,16 @@ import { Text } from "@earendil-works/pi-tui";
 import { resolve } from "node:path";
 import { Type } from "typebox";
 import { discoverAgents, resolveAgentTools, type AgentConfig } from "./agents.ts";
-import { MAX_CONCURRENT_SUBAGENTS } from "./background.ts";
 import { getStateRoot } from "./durable.ts";
 import { loadConfig } from "./config.ts";
 import { formatUsage, queuedResult } from "./format.ts";
 import {
 	buildFinalDocumenterBrief,
 	buildFinalReviewBrief,
-	buildFixTaskBrief,
-	buildReReviewBrief,
 	documentationDisposition,
-	MAX_FIX_ROUNDS,
 	type ChainStep,
 	type ManagedWorkflowOutcome,
-} from "./fixloop.ts";
+} from "./workflow.ts";
 import {
 	formatTaskSummary,
 	formatToolActivity,
@@ -374,48 +370,8 @@ export function registerSubagentTool(pi: ExtensionAPI, runtime: SubagentRuntime)
 			}
 		};
 
-		/** Bounded worker → reviewer fix rounds. A conditional documentation sync
-		 * deliberately stays out of the rounds: code fixes would invalidate it,
-		 * and the terminal review classifies whether the settled diff needs one. */
-		const runFixRounds = async (
-			triggeringReviewer: SingleResult,
-		): Promise<{ lastReview?: SingleResult; lastWorker?: SingleResult }> => {
-			let lastReviewer = triggeringReviewer;
-			const outcome: { lastReview?: SingleResult; lastWorker?: SingleResult } = {};
-			for (let round = 1; round <= MAX_FIX_ROUNDS; round++) {
-				if (!canContinue()) break;
-				const fixRelation = `fix ${round}/${MAX_FIX_ROUNDS}`;
-				const workerResult = await launchStep(
-					"worker",
-					buildFixTaskBrief(lastReviewer, round, MAX_FIX_ROUNDS),
-					`fix round ${round}`,
-					{ timelineRelation: fixRelation, childRelation: fixRelation },
-				);
-				if (isFailedResult(workerResult) || !canContinue()) break;
-				outcome.lastWorker = workerResult;
-
-				const reReviewRelation = `re-review ${round}/${MAX_FIX_ROUNDS}`;
-				const reviewResult = await launchStep(
-					"reviewer",
-					buildReReviewBrief(lastReviewer, round, workerResult, {
-						documenterPending: enabled("documenter"),
-					}),
-					`re-review round ${round}`,
-					{ timelineRelation: reReviewRelation, childRelation: reReviewRelation },
-				);
-				if (isFailedResult(reviewResult) || !canContinue()) break;
-				outcome.lastReview = reviewResult;
-				const verdict = reviewVerdict(getResultOutput(reviewResult));
-				// REVIEW_PASS settles. No verdict is advisory/malformed and must never
-				// trigger another writer. Only an explicit REVIEW_FAIL consumes a fix.
-				if (verdict !== "fail") break;
-				lastReviewer = reviewResult;
-			}
-			return outcome;
-		};
-
 		/** Run the low-cost final documentation sync only when the terminal REVIEW_PASS
-		 * reports drift or omits the new marker. A failed process, missing verdict, or
+		 * reports drift or omits the marker. A failed process, missing verdict, or
 		 * REVIEW_FAIL never writes docs. With no reviewer, retain the conservative
 		 * writer → documenter fallback. */
 		const runFinalDocumentation = async (
@@ -456,33 +412,21 @@ export function registerSubagentTool(pi: ExtensionAPI, runtime: SubagentRuntime)
 			// before this continuation starts. Preserve that stable checkpoint and
 			// never create an already-aborted downstream child.
 			if (!canContinue()) return { kind: request.plan.kind, steps };
-			if (request.plan.kind === "auto-fix") {
-				const fixOutcome = await runFixRounds(initialStepResult);
-				await runFinalDocumentation(fixOutcome.lastWorker, fixOutcome.lastReview ?? initialStepResult);
-			} else if (request.plan.kind === "review-pass-sync") {
+			if (request.plan.kind === "review-pass-sync") {
 				// The direct passing review already gated the pending code. Its
 				// disposition requested (or conservatively defaulted to) one docs sync.
 				await runFinalDocumentation(undefined, initialStepResult);
 			} else if (enabled("reviewer")) {
+				// A failing gate is not a workflow continuation: the REVIEW_FAIL
+				// report and its fix instructions are delivered to the main agent,
+				// which owns the fix decision.
 				const gateReview = await launchStep(
 					"reviewer",
 					buildFinalReviewBrief(initialStepResult, { documenterPending: enabled("documenter") }),
 					"final review",
 					{ stage: reviewStage },
 				);
-				let fixOutcome: Awaited<ReturnType<typeof runFixRounds>> = {};
-				if (
-					!isFailedResult(gateReview) &&
-					canContinue() &&
-					reviewVerdict(getResultOutput(gateReview)) === "fail" &&
-					enabled("worker")
-				) {
-					fixOutcome = await runFixRounds(gateReview);
-				}
-				await runFinalDocumentation(
-					fixOutcome.lastWorker ?? initialStepResult,
-					fixOutcome.lastReview ?? gateReview,
-				);
+				await runFinalDocumentation(initialStepResult, gateReview);
 			} else {
 				// No gate configured: the documenter is the only downstream stage.
 				await runFinalDocumentation(initialStepResult, undefined);
@@ -512,15 +456,15 @@ export function registerSubagentTool(pi: ExtensionAPI, runtime: SubagentRuntime)
 		name: "subagent",
 		label: "Subagent",
 		description: [
-			"Dispatch enabled specialized agents as isolated leaf Pi child processes, singly or in parallel; keep small known-target work in the main thread with direct tools.",
+			"Dispatch enabled specialized agents as isolated leaf Pi child processes, singly or in parallel; fan-out breadth is yours — extra tasks queue for the next free process slot.",
 			"Built-ins: explorer for broad read-only reconnaissance (a retrieval index, never a gate); worker for implementation; cleaner as a separate explicitly authorized cleanup/removal/simplification/deduplication entry; documenter for explicit docs/comments work or conditional final diff sync; reviewer for generic read-only assessments and independent code gates.",
-			"Work starts in the background. Successful worker/cleaner runs keep one enabled reviewer gate and bounded fix loop; documenter runs afterward only when REVIEW_PASS reports DOCUMENTATION: NEEDED or omits the marker, with a reviewer-disabled fallback. A top-level documenter delivers directly. Results resume the main agent and are already shown, so do not poll, duplicate downstream roles, or restate them.",
+			"Work starts in the background. Successful worker/cleaner runs keep one enabled reviewer gate; a REVIEW_FAIL is delivered to you with fix instructions — resolve the findings yourself (fix inline or dispatch a briefed worker) without waiting for the user; only a genuinely destructive or scope-changing fix is worth asking about. Documenter runs afterward only when REVIEW_PASS reports DOCUMENTATION: NEEDED or omits the marker, with a reviewer-disabled fallback. A top-level documenter delivers directly. Results resume the main agent and are already shown, so do not poll, duplicate downstream roles, or restate them.",
 			"Single tasks default to shared; parallel workers default to detached Git worktrees. Only write-capable agents can use worktree isolation, and failures never fall back silently to shared.",
 			"A selected-model or provider failure continues the retained session on the current main model; ordinary tool/task failures do not.",
 			"Use subagent_control to resume a parked or settled thread's retained context by stable run id; use subagent_stop for destructive cancellation.",
 		].join(" "),
 		promptSnippet:
-			"Dispatch isolated background agents for broad recon, self-contained implementation, authorized cleanup, explicit docs, or independent review; keep small known-target work on direct tools. Worker/cleaner gates and only needed/conservative docs sync run automatically, results resume automatically, and each workflow delivers once.",
+			"Dispatch isolated background agents for broad recon, self-contained implementation, authorized cleanup, explicit docs, or independent review; keep trivial work on direct tools. Worker/cleaner gates and only needed/conservative docs sync run automatically, REVIEW_FAIL findings return to you, results resume automatically, and each workflow delivers once.",
 		parameters: SubagentParams,
 
 		async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
@@ -581,19 +525,9 @@ export function registerSubagentTool(pi: ExtensionAPI, runtime: SubagentRuntime)
 
 			// Sub-agents intentionally detach from the foreground turn. This makes the
 			// editor available immediately; completion messages later wake the main agent.
+			// Fan-out breadth is the model's call; the background queue paces how many
+			// child processes actually run at once, so no per-call task cap is enforced.
 			if (params.tasks && params.tasks.length > 0) {
-				if (params.tasks.length > MAX_CONCURRENT_SUBAGENTS) {
-					return {
-						content: [
-							{
-								type: "text",
-								text: `Too many parallel tasks (${params.tasks.length}). Max is ${MAX_CONCURRENT_SUBAGENTS}.`,
-							},
-						],
-						details: makeDetails("parallel", true)([]),
-					};
-				}
-
 				const results: SingleResult[] = [];
 				// Preserve caller order (and deterministic completion batching) while
 				// preparing each isolated filesystem before its queue entry can start.
