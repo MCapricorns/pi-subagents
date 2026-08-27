@@ -49,6 +49,9 @@ describe("buildDelegationDirective", () => {
 		expect(directive).toContain("inline only trivial work");
 		expect(directive).toContain("Use `explorer` for any broad or multi-file search");
 		expect(directive).toContain("retrieval index, never a gate");
+		expect(directive).toContain("leads, not proof");
+		expect(directive).toContain("editing inline, deleting, or deciding something load-bearing");
+		expect(directive).toContain("a child you brief re-verifies them in its own context");
 
 		const withoutExplorer = buildDelegationDirective([agent("worker")]);
 		expect(withoutExplorer).not.toContain("retrieval index");

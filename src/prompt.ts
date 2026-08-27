@@ -43,7 +43,7 @@ export function buildDelegationDirective(
 		"Route substantive work to sub-agents so your context stays lean for orchestration; inline only trivial work — a one-shot lookup, a single focused read/edit, or an answer already in context.",
 		...(hasExplorer
 			? [
-				"Use `explorer` for any broad or multi-file search; it is a retrieval index, never a gate — re-read load-bearing files before acting on its findings.",
+				"Use `explorer` for any broad or multi-file search; it is a retrieval index, never a gate — its findings are leads, not proof. Before acting on them yourself — editing inline, deleting, or deciding something load-bearing — re-read the files involved; a child you brief re-verifies them in its own context.",
 			]
 			: []),
 		...(hasWorker
