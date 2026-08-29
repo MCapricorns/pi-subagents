@@ -1352,6 +1352,60 @@ describe("managed post-writer workflows", () => {
 		}
 	});
 
+	it("reports a lane-serialized shared writer truthfully instead of as slot queueing", async () => {
+		configureEnabledAgents(["worker", "reviewer"]);
+		const stub = makeStub();
+		const { tasks: queued, controllers } = captureEnqueue();
+		let releaseWriter!: () => void;
+		const writerGate = new Promise<void>((resolveWriter) => {
+			releaseWriter = resolveWriter;
+		});
+		vi.spyOn(spawn, "runSingleAgentWithMainFallback").mockImplementation(async (options: any) => {
+			if (options.task === "First shared writer") {
+				await writerGate;
+				return makeResult("worker", options.task, "writer report");
+			}
+			if (options.agentName === "reviewer") return makeResult("reviewer", options.task, "APPROVE\nVERDICT: REVIEW_PASS");
+			return makeResult("worker", options.task, "second writer report");
+		});
+
+		try {
+			register(stub.api);
+			const tool = stub.tools.find((candidate) => candidate.name === "subagent");
+			const statusTool = stub.tools.find((candidate) => candidate.name === "subagent_status");
+			const first = await runTool(tool, "lane-first", { agent: "worker", task: "First shared writer" }, executionContext());
+			const second = await runTool(tool, "lane-second", { agent: "worker", task: "Second shared writer" }, executionContext());
+			const firstId = first.details.results[0].runId as number;
+			const secondId = second.details.results[0].runId as number;
+			const firstRun = queued[0](controllers[0].signal, controllers[0]);
+			await waitFor(() => monitor.findRun(firstId)?.waitReason === "starting");
+			const secondRun = queued[1](controllers[1].signal, controllers[1]);
+			await waitFor(() => monitor.findRun(secondId)?.waitReason === "repository-lane");
+			expect(monitor.findRun(secondId)?.status).toBe("queued");
+
+			// A third dispatch's confirmation separates slot pacing from lane
+			// serialization so the model never reads the pool as exhausted.
+			const probe = await runTool(tool, "lane-probe", { agent: "worker", task: "Probe pacing" }, executionContext());
+			const confirmation = probe.content[0].text as string;
+			expect(confirmation).toContain("1 waiting for a free process slot");
+			expect(confirmation).toContain("waiting for the repository write lane — write serialization, not slot capacity");
+			expect(confirmation).toContain("Keep dispatching independent units");
+
+			const overview = await runTool(statusTool, "lane-status", {}, executionContext());
+			const overviewText = overview.content[0].text as string;
+			expect(overviewText).toContain("1 waiting for the repository write lane (write serialization, not slot capacity)");
+			expect(overviewText).toContain("dispatch is never capped");
+			expect(overviewText).toContain(`#${secondId} worker`);
+			expect(overviewText).toContain("waiting for the repository write lane");
+
+			releaseWriter();
+			await Promise.all([firstRun, secondRun]);
+		} finally {
+			releaseWriter();
+			await shutdownExtension(stub, { controllers });
+		}
+	});
+
 	it("keeps a shared-checkout documenter behind a running writer across nested paths", async () => {
 		configureEnabledAgents(["worker", "documenter"]);
 		const { execFileSync } = await import("node:child_process");

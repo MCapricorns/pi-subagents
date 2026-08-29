@@ -9,6 +9,7 @@ import {
 	formatToolActivity,
 	formatUsageCompact,
 	runLabel,
+	runWaitLabel,
 	statusLabel,
 } from "../src/monitor.ts";
 
@@ -35,6 +36,55 @@ describe("MonitorStore", () => {
 		const [a, b] = store.getRuns();
 		expect(a.label).toBe("src/index.ts");
 		expect(b.label).toBe("fixGridLayout");
+	});
+
+	it("tracks what a queued run waits for and clears the reason once it leaves the queue", () => {
+		const store = new MonitorStore();
+		const id = store.addRun("worker", "Fix src/cache.ts");
+		// A fresh dispatch enters the process queue.
+		expect(store.findRun(id)!.waitReason).toBe("process-slot");
+
+		// A shared writer that released its slot waits on the repository lane.
+		store.setWaitReason(id, "repository-lane");
+		expect(store.findRun(id)!.waitReason).toBe("repository-lane");
+
+		// The generation body owns a slot once it starts.
+		store.setWaitReason(id, "starting");
+		expect(store.findRun(id)!.waitReason).toBe("starting");
+
+		store.setStatus(id, "running");
+		expect(store.findRun(id)!.waitReason).toBeUndefined();
+		// A wait reason never applies to a run that is not queued.
+		store.setWaitReason(id, "process-slot");
+		expect(store.findRun(id)!.waitReason).toBeUndefined();
+	});
+
+	it("workflow-internal children are marked as starting, never slot-waiting", () => {
+		const store = new MonitorStore();
+		const id = store.addRun("reviewer", "Gate the diff", undefined, undefined, {
+			parentRunId: 1,
+			relationLabel: "review",
+			waitReason: "starting",
+		});
+		expect(store.findRun(id)!.waitReason).toBe("starting");
+	});
+
+	it("restartRun re-enters the process queue with a slot wait", () => {
+		const store = new MonitorStore();
+		const id = store.addRun("worker", "Original objective");
+		store.setStatus(id, "running");
+		expect(store.findRun(id)!.waitReason).toBeUndefined();
+		store.restartRun(id, "worker", "Resume objective");
+		expect(store.findRun(id)!.status).toBe("queued");
+		expect(store.findRun(id)!.waitReason).toBe("process-slot");
+	});
+
+	it("runWaitLabel states the true wait, and nothing for non-queued runs", () => {
+		expect(runWaitLabel({ status: "queued", waitReason: "process-slot" })).toBe("queued for a free process slot");
+		expect(runWaitLabel({ status: "queued", waitReason: "repository-lane" })).toBe("waiting for the repository write lane");
+		expect(runWaitLabel({ status: "queued", waitReason: "starting" })).toBe("starting");
+		expect(runWaitLabel({ status: "queued", waitReason: undefined })).toBe("queued for a free process slot");
+		expect(runWaitLabel({ status: "running", waitReason: undefined })).toBeUndefined();
 	});
 
 	it("beginTurn clears finished runs but keeps active ones", () => {

@@ -22,6 +22,16 @@ export type RunStatus = "queued" | "running" | "interrupting" | "parked" | "done
 export type ContinuationKind = "resume-retained" | "resume-appended";
 export type WorkflowStageStatus = "done" | "active" | "pending" | "changes" | "failed";
 
+/** Why a queued run has produced no output yet. Three genuinely different
+ * situations used to be reported as one "queued": waiting for a free process
+ * slot (real pool pacing), serialized behind the shared-checkout repository
+ * write lane (a slot is free — the wait is write serialization), and already
+ * starting its child process (a slot is held; output is seconds away).
+ * Conflating them taught the parent model that the pool was exhausted when it
+ * was not, so it stopped dispatching. Meaningful only while status is
+ * "queued"; cleared on every transition out of it. */
+export type RunWaitReason = "process-slot" | "repository-lane" | "starting";
+
 /** Ephemeral projection of one real or currently planned managed stage. It is
  * live monitor state only; durable results remain the per-run chain records. */
 export interface WorkflowStage {
@@ -58,6 +68,8 @@ export interface RunView {
 	 * one isolated worktree; changes when a continuation worktree is created. */
 	worktreeId?: string;
 	status: RunStatus;
+	/** What a queued run is actually waiting for; see RunWaitReason. */
+	waitReason?: RunWaitReason;
 	usage: UsageStats;
 	/** Concise current activity ("thinking", "read src/index.ts"); last writer wins. */
 	activity?: string;
@@ -93,6 +105,10 @@ export interface RunChainMeta {
 	isolation?: IsolationMode;
 	worktreeId?: string;
 	continuationKind?: ContinuationKind;
+	/** Initial wait reason; defaults to "process-slot" (a fresh dispatch enters
+	 * the process queue). Workflow-internal children pass "starting" because
+	 * they spawn immediately and never wait for a slot. */
+	waitReason?: RunWaitReason;
 }
 
 // ---------------------------------------------------------------------------
@@ -247,13 +263,16 @@ export const RUN_LABEL_MAX = 32;
 
 /**
  * Short content label for a run, derived from its task: the single most
- * distinguishing fragment (path, quoted phrase, symbol) so concurrent same-agent
- * runs are told apart by WHAT they do, not just their run id. A long path keeps
- * its tail (the filename is the recognisable part); a task with no recognizable
- * fragment falls back to a head slice of its prose. Grapheme-safe.
+ * distinguishing fragment so concurrent same-agent runs are told apart by WHAT
+ * they do, not just their run id. A file/directory path outranks other
+ * fragment kinds (a kebab-case word like "edge-case" never beats
+ * "tests/config.test.ts"); a long path keeps its tail (the filename is the
+ * recognisable part); a task with no recognizable fragment falls back to a
+ * head slice of its prose. Grapheme-safe.
  */
 export function runLabel(task: string): string {
-	const fragment = extractKeyFragments(task)[0];
+	const fragments = extractKeyFragments(task);
+	const fragment = fragments.find((candidate) => /[\\/]|\.[A-Za-z0-9]{1,5}$/.test(candidate)) ?? fragments[0];
 	const src = fragment ?? stripVTControlCharacters(task).replace(/\s+/g, " ").trim();
 	if (visibleWidth(src) <= RUN_LABEL_MAX) return src;
 	const chars = [...graphemeSegmenter.segment(src)].map((s) => s.segment);
@@ -476,6 +495,7 @@ export class MonitorStore {
 			model,
 			thinking,
 			status: "queued",
+			waitReason: meta?.waitReason ?? "process-slot",
 			usage: emptyUsage(),
 			elapsedMs: 0,
 			...(meta?.groupId ? { groupId: meta.groupId } : {}),
@@ -496,6 +516,7 @@ export class MonitorStore {
 		const isExecuting = status === "running" || status === "interrupting";
 		const now = Date.now();
 		run.status = status;
+		if (status !== "queued") run.waitReason = undefined;
 		if (isExecuting && !wasExecuting) {
 			run.startedAt ??= now;
 			run.activeSince = now;
@@ -509,6 +530,15 @@ export class MonitorStore {
 		}
 		this.notify();
 	}
+	/** Record what a still-queued run is actually waiting for, at the exact
+	 * transition owned by the caller (lane wait begins, child process starts). */
+	setWaitReason(id: number, waitReason: RunWaitReason): void {
+		const run = this.find(id);
+		if (!run || run.status !== "queued" || run.waitReason === waitReason) return;
+		run.waitReason = waitReason;
+		this.notify();
+	}
+
 	/** Switch a stable top-level row from one model run to workflow ownership.
 	 * The original role remains for identity; child rows show stage telemetry. */
 	setManagedWorkflow(id: number, active: boolean): void {
@@ -645,6 +675,7 @@ export class MonitorStore {
 					}
 					: {}),
 				status: "queued",
+				waitReason: "process-slot",
 				usage: emptyUsage(),
 				elapsedMs: meta?.elapsedMs ?? 0,
 				continuationKind: meta?.continuationKind,
@@ -662,6 +693,7 @@ export class MonitorStore {
 		if (isolation === "worktree" && meta?.worktreeId) run.worktreeId = meta.worktreeId;
 		else if (isolation !== "worktree") run.worktreeId = undefined;
 		run.status = "queued";
+		run.waitReason = "process-slot";
 		run.usage = emptyUsage();
 		run.activity = undefined;
 		run.managedWorkflow = undefined;
@@ -776,5 +808,20 @@ export function statusLabel(status: RunStatus): string {
 			return "done";
 		case "failed":
 			return "stopped";
+	}
+}
+
+/** Truthful description of why a queued run has produced no output yet, so a
+ * repository-lane wait or a starting child is never mistaken for an exhausted
+ * process pool. Undefined for runs that are not queued. */
+export function runWaitLabel(run: Pick<RunView, "status" | "waitReason">): string | undefined {
+	if (run.status !== "queued") return undefined;
+	switch (run.waitReason) {
+		case "repository-lane":
+			return "waiting for the repository write lane";
+		case "starting":
+			return "starting";
+		default:
+			return "queued for a free process slot";
 	}
 }

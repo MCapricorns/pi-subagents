@@ -553,6 +553,11 @@ export function createBackgroundDispatcher(options: BackgroundDispatcherOptions)
 			isolation === "shared" && canStartManagedWorkflow(agent, workflowAvailability);
 		const runGeneration = async (backgroundSignal: AbortSignal, controller: AbortController): Promise<void> => {
 				if (runtime.threads.get(runId)?.generation !== generation) return;
+				// The generation body owns a process slot from here (a lane wait, if
+				// any, was granted above). Recording the transition synchronously keeps
+				// every "queued" surface truthful: only runs still pending in the pool
+				// or behind the lane report a wait.
+				monitor.setWaitReason(runId, "starting");
 				// Model/thinking config may have changed while this generation sat
 				// queued behind the concurrency limit. Re-resolve the route at actual
 				// start so /subagents-setup edits apply to not-yet-started runs.
@@ -824,6 +829,9 @@ export function createBackgroundDispatcher(options: BackgroundDispatcherOptions)
 					// released up front; the lane itself still serializes same-repo
 					// writers, and abort/quiesce guarantees are unchanged.
 					runtime.backgroundQueue.suspend(controller);
+					// A lane wait is write serialization, not slot pacing: the model
+					// must never read it as an exhausted pool.
+					monitor.setWaitReason(runId, "repository-lane");
 					await runInManagedRepositoryLane(
 						originalCwd,
 						() => runGeneration(backgroundSignal, controller),

@@ -18,8 +18,10 @@ import {
 	isRunActiveStatus,
 	monitor,
 	runLabel,
+	runWaitLabel,
 	statusLabel,
 	type RunStatus,
+	type RunWaitReason,
 } from "./monitor.ts";
 import { persistRecoveryRecords, recoveryRecordFromFinalization } from "./recovery.ts";
 import type { SubagentRuntime, SubagentThread } from "./runtime.ts";
@@ -358,7 +360,7 @@ export function registerLookupTools(pi: ExtensionAPI, runtime: SubagentRuntime):
 					].filter(Boolean).join(" · ");
 					const stageStatus = activeChild
 						? monitor.summarize(activeChild)
-						: active.activity ?? statusLabel(active.status);
+						: active.activity ?? runWaitLabel(active) ?? statusLabel(active.status);
 					return {
 						content: [
 							{
@@ -367,7 +369,7 @@ export function registerLookupTools(pi: ExtensionAPI, runtime: SubagentRuntime):
 									? `Run #${active.id} ${owner} is parked with retained${retainedStage ? ` ${retainedStage} stage` : ""} context${metadata ? ` (${metadata})` : ""}. Use subagent_control resume to restart it, or subagent_stop to retire it.`
 									: managedDownstream
 										? `Run #${active.id} ${owner} is in a managed downstream stage (${stageStatus}${metadata ? ` · ${metadata}` : ""}). Use subagent_wait for its result or subagent_stop to cancel it.`
-										: `Run #${active.id} ${owner} is still active (${active.activity ?? statusLabel(active.status)}${metadata ? ` · ${metadata}` : ""}). Use subagent_wait to block for its result or subagent_stop to cancel it.`,
+										: `Run #${active.id} ${owner} is still active (${active.activity ?? runWaitLabel(active) ?? statusLabel(active.status)}${metadata ? ` · ${metadata}` : ""}). Use subagent_wait to block for its result or subagent_stop to cancel it.`,
 							},
 						],
 						details: {},
@@ -384,7 +386,7 @@ export function registerLookupTools(pi: ExtensionAPI, runtime: SubagentRuntime):
 				const parts = [
 					`#${run.id} ${monitor.summarize(run)}`,
 					run.label,
-					run.activity ?? statusLabel(run.status),
+					run.activity ?? runWaitLabel(run) ?? statusLabel(run.status),
 				].filter(Boolean);
 				return `- ${parts.join(" · ")}`;
 			});
@@ -410,12 +412,19 @@ export function registerLookupTools(pi: ExtensionAPI, runtime: SubagentRuntime):
 			});
 
 			const sections: string[] = [];
-			const queuedCount = activeRuns.filter((run) => run.status === "queued").length;
-			const runningCount = activeRuns.length - queuedCount;
-			const pacing = queuedCount > 0
-				? `${runningCount} running · ${queuedCount} queued for a free process slot`
-				: `${runningCount} running`;
-			sections.push(`### Active subagent runs (${pacing}; process capacity ${runtime.backgroundQueue.capacity} — queued runs start automatically, dispatch is never capped)`);
+			// Slot waits, repository-lane waits, and starting children are three
+			// different things; reporting them as one "queued" count taught the
+			// model the pool was exhausted while slots were free.
+			const queuedWith = (reason: RunWaitReason): number =>
+				activeRuns.filter((run) => run.status === "queued" && run.waitReason === reason).length;
+			const slotQueued = queuedWith("process-slot");
+			const laneQueued = queuedWith("repository-lane");
+			const runningCount = activeRuns.length - slotQueued - laneQueued;
+			const pacingParts = [`${runningCount} running`];
+			if (slotQueued > 0) pacingParts.push(`${slotQueued} queued for a free process slot`);
+			if (laneQueued > 0) pacingParts.push(`${laneQueued} waiting for the repository write lane (write serialization, not slot capacity)`);
+			const freeSlots = Math.max(0, runtime.backgroundQueue.capacity - runtime.backgroundQueue.activeCount);
+			sections.push(`### Active subagent runs (${pacingParts.join(" · ")}; process capacity ${runtime.backgroundQueue.capacity}, ${freeSlots} slot${freeSlots === 1 ? "" : "s"} free — queued runs start automatically, dispatch is never capped)`);
 			sections.push(activeLines.length > 0 ? activeLines.join("\n") : "(none)");
 			sections.push(`### Parked subagent threads (${parkedThreads.length})`);
 			sections.push(parkedLines.length > 0 ? parkedLines.join("\n") : "(none)");

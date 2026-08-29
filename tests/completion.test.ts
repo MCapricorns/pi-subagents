@@ -227,4 +227,19 @@ describe("formatActiveRunsFooter", () => {
 		expect(footer).toContain("6 other runs still active");
 		expect(footer).toContain("+2 more");
 	});
+
+	it("tags each waiting run with its true wait so pacing is never read as a stall or a full pool", () => {
+		const runs: ActiveRunFoot[] = [
+			{ id: 1, agent: "worker", wait: "process-slot" },
+			{ id: 2, agent: "worker", wait: "repository-lane" },
+			{ id: 3, agent: "worker", wait: "starting" },
+			{ id: 4, agent: "worker" },
+		];
+		const footer = formatActiveRunsFooter(runs);
+		expect(footer).toContain("#1 worker (queued, starts when a process slot frees)");
+		expect(footer).toContain("#2 worker (waiting for the repository write lane, not for a slot)");
+		expect(footer).toContain("#3 worker (starting)");
+		expect(footer).toContain("#4 worker.");
+		expect(footer).not.toContain("#4 worker (");
+	});
 });

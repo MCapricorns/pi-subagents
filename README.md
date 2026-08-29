@@ -126,8 +126,11 @@ subagent({
 
 The main agent owns the breadth — there is no per-call task cap. The runtime
 runs a machine-scaled pool of child processes at once and queues the rest;
-dispatch confirmations and `subagent_status` state the live running/queued
-counts and the slot capacity, so pacing is never mistaken for a limit. A
+dispatch confirmations and `subagent_status` state the live counts with each
+run's real wait reason — waiting for a free process slot, serialized behind
+the shared-checkout repository write lane, or already starting its child
+process — plus the slot capacity, so neither pacing nor write serialization is
+ever mistaken for a dispatch limit. A
 generation that moves on to its managed stages (gate review, fix rounds) or
 waits on the shared-checkout writer lane releases its slot, so neither managed
 work nor serialized writers starve new dispatches. Parallel write-capable
@@ -183,7 +186,9 @@ delivers without another gate.
   A genuine overlap keeps conflict markers in the checkout plus the retained
   worktree and patch for you to resolve.
 - Shared-checkout writers (and reviewers snapshotting their diff) serialize
-  through one repository lane, so two shared writers never race.
+  through one repository lane, so two shared writers never race. A run waiting
+  on that lane is reported as a repository-lane wait (its process slot is
+  already released), never as slot queueing.
 - Setup or integration failures keep the useful patch/worktree and record
   recovery info in `~/.pi/agent/pi-subagents-recovery.json`; a parked isolated
   thread keeps its worktree and resumes there.

@@ -28,6 +28,7 @@ import {
 	monitor,
 	statusIcon,
 	type RunChainMeta,
+	type RunWaitReason,
 	type WorkflowStage,
 	type WorkflowStageStatus,
 } from "./monitor.ts";
@@ -203,14 +204,33 @@ export function registerSubagentTool(pi: ExtensionAPI, runtime: SubagentRuntime)
 		(results: SingleResult[]): SubagentDetails => ({ mode, results, background });
 
 	/** Pacing note appended to dispatch confirmations whenever runs are actually
-	 * waiting: states the real slot capacity so ordinary queueing is never
-	 * mistaken for a hard dispatch limit. Empty when everything is running. */
+	 * waiting. Slot waits and repository-lane waits are stated separately with
+	 * the real capacity: a lane-serialized shared writer or a starting child
+	 * must never read as an exhausted pool, or the model stops dispatching while
+	 * slots are free. Empty when nothing is waiting. */
 	const queuePacingNote = (): string => {
 		const runs = monitor.getRuns();
-		const waiting = runs.filter((run) => run.status === "queued").length;
-		if (waiting === 0) return "";
-		const running = runs.filter((run) => run.status === "running" || run.status === "interrupting").length;
-		return ` Pacing: ${running} running · ${waiting} waiting for a free process slot (capacity ${runtime.backgroundQueue.capacity}); waiting runs start automatically as slots free — keep dispatching independent units.`;
+		const queuedWith = (reason: RunWaitReason): number =>
+			runs.filter((run) => run.status === "queued" && run.waitReason === reason).length;
+		const slotWaiting = queuedWith("process-slot");
+		const laneWaiting = queuedWith("repository-lane");
+		if (slotWaiting === 0 && laneWaiting === 0) return "";
+		const executing = runs.filter((run) =>
+			run.status === "running" || run.status === "interrupting" || (run.status === "queued" && run.waitReason === "starting"),
+		).length;
+		const capacity = runtime.backgroundQueue.capacity;
+		const freeSlots = Math.max(0, capacity - runtime.backgroundQueue.activeCount);
+		const parts = [`${executing} running`];
+		if (slotWaiting > 0) {
+			parts.push(`${slotWaiting} waiting for a free process slot (capacity ${capacity}); they start automatically as slots free`);
+		}
+		if (laneWaiting > 0) {
+			parts.push(
+				`${laneWaiting} shared-checkout writer${laneWaiting === 1 ? "" : "s"} waiting for the repository write lane — write serialization, not slot capacity` +
+					(slotWaiting === 0 ? ` (${freeSlots} of ${capacity} slots free; parallel writers avoid the lane via worktree isolation)` : ""),
+			);
+		}
+		return ` Pacing: ${parts.join(" · ")}. Keep dispatching independent units.`;
 	};
 
 	/** Launch one workflow-internal child in a fresh model context. It sees the
@@ -249,6 +269,9 @@ export function registerSubagentTool(pi: ExtensionAPI, runtime: SubagentRuntime)
 			...meta,
 			isolation: request.isolation,
 			...(request.worktreeId ? { worktreeId: request.worktreeId } : {}),
+			// Workflow-internal children spawn immediately: they never enter the
+			// process queue, so they must never be reported as slot-waiting.
+			waitReason: "starting",
 		});
 		const onLive = makeLiveHandler(runId);
 		const projectRoot = getProjectRoot(runtime.configPath, request.executionCwd);

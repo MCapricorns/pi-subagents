@@ -140,7 +140,12 @@ export function createRuntime(pi: ExtensionAPI, configPath: string): SubagentRun
 			const active = monitor
 				.getRuns()
 				.filter((run) => isRunActiveStatus(run.status))
-				.map((run) => ({ id: run.id, agent: run.agent, label: run.label, queued: run.status === "queued" }));
+				.map((run) => ({
+					id: run.id,
+					agent: run.agent,
+					label: run.label,
+					...(run.status === "queued" && run.waitReason ? { wait: run.waitReason } : {}),
+				}));
 			const message = {
 				customType: "subagent-result",
 				content: formatCompletionMessage(items) + formatActiveRunsFooter(active),

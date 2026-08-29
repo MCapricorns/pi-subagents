@@ -86,6 +86,17 @@ export class BackgroundTaskQueue {
 		return this.concurrency;
 	}
 
+	/** Tasks still waiting for a free slot (never started). */
+	get pendingCount(): number {
+		return this.pending.length;
+	}
+
+	/** Tasks currently holding a slot. Suspended tasks (lane waits, managed
+	 * workflow continuations) hold none and are excluded. */
+	get activeCount(): number {
+		return this.active.size;
+	}
+
 	/** Stop counting a running task toward the concurrency limit. Its body keeps
 	 * running under the same abort signal; completion still releases everything
 	 * waitForTask/waitForIdle promise. Frees a slot for queued work immediately.
