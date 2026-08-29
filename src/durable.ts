@@ -15,6 +15,7 @@
 import { withFileMutationQueue } from "@earendil-works/pi-coding-agent";
 import { existsSync, type Dirent, readdirSync, statSync } from "node:fs";
 import { mkdir, readFile, rename, rm, writeFile } from "node:fs/promises";
+import { uptime } from "node:os";
 import { dirname, join } from "node:path";
 import type { UsageStats } from "./rpc-run.ts";
 import type { SubagentThread } from "./runtime.ts";
@@ -44,6 +45,13 @@ export const PARKED_RECORD_MAX_AGE_MS = 30 * 24 * 60 * 60 * 1_000;
 
 /** Result excerpts are for status display after restore, not full transcripts. */
 const RESULT_SUMMARY_MAX_CHARS = 4_000;
+
+/** Boot-id comparisons allow this much slack. Uptime is reported at
+ * second granularity and wall-clock adjustments (NTP steps, suspend accounting
+ * that differs per platform) move the derived timestamp a little between
+ * processes. A reboot moves it by the whole previous uptime, so the distinction
+ * that matters here survives a tolerance this wide. */
+const BOOT_ID_TOLERANCE_MS = 60_000;
 
 export interface ThreadResultSummary {
 	agent: string;
@@ -77,7 +85,25 @@ export interface ThreadRecord {
 	sessionDir?: string;
 	worktree?: WorktreeSnapshot;
 	childPids: number[];
+	/** Boot this record's `childPids` were observed in; see `isCurrentBoot`. */
+	bootId?: number;
 	resultSummary?: ThreadResultSummary;
+}
+
+/** Approximate timestamp of the machine's current boot. */
+export function currentBootId(now = Date.now()): number {
+	return Math.round(now - uptime() * 1_000);
+}
+
+/** Whether a record's `childPids` can still name processes of this boot. Pids
+ * are only unique within a boot: after a restart the same number belongs to
+ * whatever claimed it, so restore must not signal them. Records written before
+ * this field existed carry no boot id and count as unverifiable — leaving a
+ * stray child alive costs a resumable session nothing, while killing an
+ * unrelated process tree is not recoverable. */
+export function isCurrentBoot(record: ThreadRecord, now = Date.now()): boolean {
+	if (record.bootId === undefined) return false;
+	return Math.abs(record.bootId - currentBootId(now)) <= BOOT_ID_TOLERANCE_MS;
 }
 
 interface ThreadsManifest {
@@ -154,6 +180,7 @@ function normalizeRecord(value: unknown): ThreadRecord | undefined {
 		childPids: Array.isArray(raw.childPids)
 			? raw.childPids.filter((pid): pid is number => typeof pid === "number" && Number.isInteger(pid) && pid > 0)
 			: [],
+		...(typeof raw.bootId === "number" && Number.isFinite(raw.bootId) ? { bootId: raw.bootId } : {}),
 		...(raw.resultSummary === undefined ? {} : { resultSummary: normalizeResultSummary(raw.resultSummary) }),
 	};
 }
@@ -264,6 +291,7 @@ export function threadRecordFromThread(
 		...(thread.sessionId && thread.sessionDir ? { sessionId: thread.sessionId, sessionDir: thread.sessionDir } : {}),
 		...(worktree ? { worktree } : {}),
 		childPids: thread.control?.getChildPids?.() ?? [],
+		bootId: currentBootId(now),
 		...(thread.lastResult ? { resultSummary: summarizeResult(thread.lastResult) } : {}),
 	};
 }
