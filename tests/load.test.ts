@@ -81,7 +81,7 @@ describe("extension registration", () => {
 		expect(tool.description).toContain("Dispatching never blocks your turn");
 		expect(tool.description).toContain("Put every genuinely independent unit in one `tasks` array");
 		expect(tool.description).toContain("parallel workers default to detached Git worktrees");
-		expect(tool.description).toContain("a failing gate is fixed by the reviewer itself in a write-enabled continuation of the same session and re-reviewed until it passes");
+		expect(tool.description).toContain("a failing gate is fixed by the reviewer itself in a write-enabled continuation of the same session and re-reviewed in bounded, converging rounds");
 		expect(tool.description).toContain("A REVIEW_FAIL from a gate you dispatched directly returns its findings to you");
 		expect(tool.description).toContain("never poll or restate delivered results");
 		expect(tool.description).toContain("continues the retained session on the current main model");
@@ -1057,7 +1057,7 @@ describe("managed post-writer workflows", () => {
 			expect(calls.map((call) => call.agentName)).toEqual(["worker", "reviewer", "reviewer", "reviewer"]);
 			expect(calls[2]!.stdinText).toContain("Apply every one of your own fix instructions");
 			expect(calls[3]!.stdinText).toBeUndefined();
-			expect(run.mock.calls[3]![0].task).toContain("re-scan the COMPLETE pending diff from scratch");
+			expect(run.mock.calls[3]![0].task).toContain("This gate CONVERGES");
 			expect(stub.messages).toHaveLength(1);
 			const content = stub.messages[0].message.content as string;
 			expect(content).toContain("final review · FAIL");
@@ -1094,12 +1094,12 @@ describe("managed post-writer workflows", () => {
 			await runTool(tool, "gate-cap", { agent: "worker", task: "Never converges" }, executionContext());
 			await tasks[0](controllers[0].signal);
 
-			// worker + gate + 3 × (fix + re-review); the capped failing re-review
+			// worker + gate + 2 × (fix + re-review); the capped failing re-review
 			// returns to the main agent with the fix-now note.
-			expect(run.mock.calls).toHaveLength(8);
+			expect(run.mock.calls).toHaveLength(6);
 			expect(stub.messages).toHaveLength(1);
 			const content = stub.messages[0].message.content as string;
-			expect(content).toContain("re-review 3 · FAIL");
+			expect(content).toContain("re-review 2 · FAIL");
 			expect(content).toContain("final FAIL");
 			expect(content).toContain("findings are yours to resolve now");
 		} finally {

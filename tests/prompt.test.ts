@@ -74,7 +74,7 @@ describe("buildDelegationDirective", () => {
 		expect(directive).toContain("syncing real drift a change left");
 		expect(directive).toContain("writers already sync what they directly affect");
 		expect(directive).not.toContain("DOCUMENTATION: NEEDED");
-		expect(directive).toContain("failing gates are fixed by the reviewer itself and re-reviewed until they pass");
+		expect(directive).toContain("failing gates are fixed by the reviewer itself in bounded fix/re-review rounds");
 	});
 
 	it("does not advertise documenter routing when the role is disabled", () => {

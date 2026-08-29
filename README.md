@@ -31,10 +31,10 @@ burden:
 - **Quality gates are built in and converge by themselves.** Successful
   worker/cleaner runs continue through one independent reviewer gate. A failing
   gate is fixed by the reviewer itself — the same retained session gets write
-  access, applies its own fix instructions, and a fresh gate re-scans the
-  complete diff — looping until the gate passes (bounded rounds; a still-failing
-  gate returns to the main agent with every finding and fix instruction). No
-  guessing what satisfies the reviewer.
+  access and applies its own fix instructions, then a converging re-review
+  verifies the fixes — bounded rounds; a still-failing gate returns to the main
+  agent with every finding and fix instruction. No guessing what satisfies the
+  reviewer.
 - **Documentation stops drifting.** Writers sync the docs they directly affect;
   documentation drift is an ordinary gate finding, and dispatching the
   documenter for real remaining drift stays the main agent's decision.
@@ -89,13 +89,13 @@ directly for exact control.
 
 ## The team
 
-| Agent | Access | Best for |
-| --- | --- | --- |
-| `explorer` | Read-only | Broad search, unfamiliar-area mapping, symbol/dependency tracing. Fast model, returns a retrieval index — never proof. |
-| `worker` | Full | The default route for any non-trivial, self-contained implementation, fix, refactor, or test task carried through verification. |
-| `cleaner` | Full | Explicitly authorized cleanup, removal, simplification, deduplication. Every safe proven cut applies without item-by-item approval. |
-| `documenter` | Docs/comments | Standalone docs/comments work, including syncing real drift a change left behind. May make zero edits; never changes runtime behavior. |
-| `reviewer` | Read-only (review) / full (fix stage) | Audits, code-health checks, plans, PR/issue validation, and independent gates; a failing managed gate continues into the reviewer's own write-enabled fix stage. |
+| Agent        | Access                                | Best for                                                                                                                                                         |
+| ------------ | ------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `explorer`   | Read-only                             | Broad search, unfamiliar-area mapping, symbol/dependency tracing. Fast model, returns a retrieval index — never proof.                                           |
+| `worker`     | Full                                  | The default route for any non-trivial, self-contained implementation, fix, refactor, or test task carried through verification.                                  |
+| `cleaner`    | Full                                  | Explicitly authorized cleanup, removal, simplification, deduplication. Every safe proven cut applies without item-by-item approval.                              |
+| `documenter` | Docs/comments                         | Standalone docs/comments work, including syncing real drift a change left behind. May make zero edits; never changes runtime behavior.                           |
+| `reviewer`   | Read-only (review) / full (fix stage) | Audits, code-health checks, plans, PR/issue validation, and independent gates; a failing managed gate continues into the reviewer's own write-enabled fix stage. |
 
 A good brief carries the goal, exact paths, constraints, and expected output —
 the injected delegation guidance does this automatically when the main agent
@@ -105,12 +105,18 @@ dispatches for you.
 
 ```ts
 // One task
-subagent({ agent: "worker", task: "Fix the cache invalidation bug in src/cache, add regression tests, run the checks." });
+subagent({
+  agent: "worker",
+  task: "Fix the cache invalidation bug in src/cache, add regression tests, run the checks.",
+});
 
 // Parallel: as many genuinely independent units as the work has
 subagent({
   tasks: [
-    { agent: "explorer", task: "Trace model fallback from dispatch to completion." },
+    {
+      agent: "explorer",
+      task: "Trace model fallback from dispatch to completion.",
+    },
     { agent: "worker", task: "Add edge-case tests for config migration." },
   ],
 });
@@ -125,7 +131,10 @@ its files; dependent work starts only after its prerequisite delivers.
 ## Review gates and fixes
 
 ```ts
-subagent({ agent: "reviewer", task: "Gate the current diff for correctness, regressions, and missing tests." });
+subagent({
+  agent: "reviewer",
+  task: "Gate the current diff for correctness, regressions, and missing tests.",
+});
 ```
 
 A gate ends with exactly one verdict line: `VERDICT: REVIEW_PASS` or
@@ -134,17 +143,18 @@ reviewer must surface the complete finding set in one pass — never rationing
 findings across later rounds.
 
 A failing **managed** gate (after a top-level worker/cleaner) converges inside
-the workflow: the same retained reviewer session continues with write access,
-applies its own fix instructions, and a fresh gate re-scans the complete diff.
-The loop repeats until the gate passes — bounded to three fix rounds, after
+the workflow: the same retained reviewer session continues with write access
+and applies its own fix instructions, then a fresh gate verifies the fixes and
+hunts regressions they introduced (re-reviews converge on the fixes instead of
+re-scanning the whole surface). The loop is bounded to two fix rounds, after
 which the still-failing gate returns to the main agent with every finding.
 
 A failing gate **you dispatched directly** returns the full findings to the
 main agent, which resolves them itself (inline or via a worker it briefs)
 without waiting for you; only a genuinely destructive or scope-changing fix is
-worth asking about. Re-verifying your own fixes is just another direct gate
-dispatch. Generic audits and read-only reviews are advisory by default: no
-`VERDICT`, no edits.
+worth asking about. It re-verifies once, then reports remaining findings and
+moves on — gate dispatches never loop. Generic audits and read-only reviews
+are advisory by default: no `VERDICT`, no edits.
 
 `cleaner` is dispatch-authorized cleanup: asking for an audit never silently
 authorizes code changes, and asking for cleanup never rewards speculative
@@ -169,12 +179,12 @@ delivers without another gate.
 
 Every dispatch returns a stable `#id` — the handle for all control tools:
 
-| Tool | What it does |
-| --- | --- |
+| Tool               | What it does                                                                                                                                                     |
+| ------------------ | ---------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `subagent_control` | `resume` a parked/settled thread with its full retained context, optionally with a new `objective` appended. Only interrupted (parked) threads survive a reload. |
-| `subagent_status` | List active and recent runs, or return one run's full result and failed-tool diagnostics. |
-| `subagent_wait` | Non-blocking in-turn lookup; `timeoutMs` only when you must wait. |
-| `subagent_stop` | Destructively cancel, deliver the partial output, retire the thread. |
+| `subagent_status`  | List active and recent runs, or return one run's full result and failed-tool diagnostics.                                                                        |
+| `subagent_wait`    | Non-blocking in-turn lookup; `timeoutMs` only when you must wait.                                                                                                |
+| `subagent_stop`    | Destructively cancel, deliver the partial output, retire the thread.                                                                                             |
 
 ```ts
 subagent_control({ action: "resume", id: 7, objective: "Finish the tests." });
@@ -201,6 +211,10 @@ child:
 ○ #23 worker · queued · redirect to ripgrep crates · 5m02s
 ```
 
+The widget is capped at ten lines: when many runs are live at once, extra rows
+collapse into a `… +N more (subagent_status)` marker so the editor area keeps
+its space; `subagent_status` always shows the full picture.
+
 Completions resume the main agent automatically with a compact block (40 lines
 by default; longer output lands unchanged in a temporary Markdown artifact
 reachable via `subagent_status`). Roles author result-only handoffs — outcome,
@@ -215,7 +229,7 @@ or fails at the provider level, the **same retained session** continues on the
 main model — finished searches, reads, and edits are preserved; ordinary task
 failures do not trigger a handoff. Thinking defaults to **Auto**: the role's
 preference, clamped to what the effective model supports. `/subagents-setup` →
-*Configure an agent* also offers a manual strength per agent, listing only the
+_Configure an agent_ also offers a manual strength per agent, listing only the
 levels that model supports. There is no separate
 vision mode: assign a multimodal model and name the image paths in the task.
 
@@ -247,16 +261,16 @@ config-file only, stored at
 }
 ```
 
-| Field | Meaning |
-| --- | --- |
-| `enabledAgents` | Agents available for discovery and delegation. `[]` disables all. |
-| `agentModels` | Optional `provider/model-id` per agent; missing = current main model. |
-| `agentThinkingLevels` | Optional manual level per agent; missing = Auto. |
-| `notifyOnReviewPass` | Deliver a standalone passing gate without waking the main agent. Default `false`. |
-| `maxResultLines` | Lines kept in a completion message before the artifact takes over. Default `40`. |
-| `proactiveInjection` | Inject the delegation directive into the main system prompt. Default `true`. |
-| `agentScope` | Discover `user`, `project`, or `both` agent directories. Default `user`. |
-| `idleTimeoutSec` | Seconds without child RPC output before termination; `0` disables. Default `90`. |
+| Field                 | Meaning                                                                           |
+| --------------------- | --------------------------------------------------------------------------------- |
+| `enabledAgents`       | Agents available for discovery and delegation. `[]` disables all.                 |
+| `agentModels`         | Optional `provider/model-id` per agent; missing = current main model.             |
+| `agentThinkingLevels` | Optional manual level per agent; missing = Auto.                                  |
+| `notifyOnReviewPass`  | Deliver a standalone passing gate without waking the main agent. Default `false`. |
+| `maxResultLines`      | Lines kept in a completion message before the artifact takes over. Default `40`.  |
+| `proactiveInjection`  | Inject the delegation directive into the main system prompt. Default `true`.      |
+| `agentScope`          | Discover `user`, `project`, or `both` agent directories. Default `user`.          |
+| `idleTimeoutSec`      | Seconds without child RPC output before termination; `0` disables. Default `90`.  |
 
 Invalid values fall back safely; stale keys (including the former
 `maxConcurrency`/`maxFixRounds` knobs) are dropped automatically. At session

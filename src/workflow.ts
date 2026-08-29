@@ -36,9 +36,10 @@ export interface ManagedWorkflowPlan {
 }
 
 /** Fixed cap on reviewer fix → re-review rounds inside one managed workflow.
- * The loop converges by itself when reviews pass; the cap only stops
- * pathological burn and hands the still-failing gate back to the main agent. */
-export const MAX_REVIEW_FIX_ROUNDS = 3;
+ * Re-reviews converge by construction (they verify fixes and fix regressions
+ * instead of re-scanning the whole surface); the cap only stops pathological
+ * burn and hands the still-failing gate back to the main agent. */
+export const MAX_REVIEW_FIX_ROUNDS = 2;
 
 /** Conservative pre-run check used to reserve one shared-repository lane
  * around a complete writer workflow or a reviewer that needs a stable diff. */
@@ -87,20 +88,18 @@ export function buildFinalReviewBrief(initialResult: SingleResult): string {
 		getResultOutput(initialResult),
 		`---`,
 		``,
-		`Run \`git status\` and \`git diff\` and inspect the actual pending code; the report is context, not proof.`,
+		`Run \`git status\` and \`git diff\` and judge the actual pending code; the report is context, not proof.`,
 		`Remain read-only. Attach a concrete fix instruction to EVERY gate finding — including documentation drift —:`,
-		`what to change, where, and how to verify the fix. A failing gate continues into your own write-enabled fix stage,`,
+		`what to change, where, and how to verify it. A failing gate continues into your own write-enabled fix stage,`,
 		`so make every instruction executable exactly as written.`,
-		`Surface the COMPLETE finding set in this one pass — scan the full changed surface before the verdict;`,
-		`do not ration findings across later rounds.`,
-		`This is an acceptance gate, not an advisory audit. End with exactly one standalone machine verdict line:`,
+		`End with exactly one standalone machine verdict line:`,
 		`VERDICT: REVIEW_PASS when no finding remains, otherwise VERDICT: REVIEW_FAIL.`,
 	].join("\n");
 }
 
 /** Build the follow-up brief for the reviewer fix stage: the same retained
  * reviewer session continues with its read-only boundary lifted and applies
- * its own fix instructions. The workflow continues with a fresh re-review. */
+ * its own fix instructions. The workflow continues with a converging re-review. */
 export function buildReviewerFixBrief(gateOutput: string): string {
 	return [
 		`Fix stage: your gate review returned REVIEW_FAIL. You now have full write access in this same session.`,
@@ -118,30 +117,30 @@ export function buildReviewerFixBrief(gateOutput: string): string {
 		`- each finding → the exact fix applied (path + what changed)`,
 		`## Verification`,
 		`- checks actually run and their results`,
-		`Do not emit another VERDICT; a fresh gate re-reviews the diff after you.`,
+		`Do not emit another VERDICT; a converging gate re-reviews the diff after you.`,
 	].join("\n");
 }
 
 /** Fresh gate over the updated diff after a fix round. The re-review runs in a
- * brand-new context so it cannot inherit the previous pass's blind spots, and
- * it must rescan the complete surface so new findings surface now, not in a
- * later round. */
+ * brand-new context but with a converging contract: verify the recorded fixes
+ * landed and hunt regressions the fixes introduced. It must not reopen new
+ * structural or style findings — the initial gate owned those — or every fresh
+ * scan would surface fresh nits forever and the loop would never end. */
 export function buildReReviewBrief(fixResult: SingleResult, round: number): string {
 	return [
-		`Fresh re-review after fix round ${round}: re-scan the COMPLETE pending diff from scratch.`,
-		`Earlier reviews and fix reports are context, not proof — do not inherit their conclusions.`,
+		`Re-review after fix round ${round}. This gate CONVERGES: it verifies fixes, it does not re-scan the whole surface.`,
 		``,
 		`The fix stage reported:`,
 		`---`,
 		getResultOutput(fixResult),
 		`---`,
 		``,
-		`Run \`git status\` and \`git diff\` and judge the actual pending code, including side effects of the fixes.`,
-		`Surface the complete finding set in this one pass — a defect this scan should have caught must not appear later.`,
-		`Remain read-only. Attach a concrete fix instruction to EVERY finding; a failing gate continues into another`,
-		`write-enabled fix stage.`,
+		`Verify every recorded fix actually landed in the code, and hunt regressions the fixes introduced in the touched`,
+		`code and its direct blast radius (\`git status\` + \`git diff\`). Do NOT open new structural, style, or pre-existing`,
+		`findings — the initial gate owned those; a remaining earlier finding counts only if its fix failed to land.`,
+		`Remain read-only. Attach a concrete fix instruction to every finding you do report.`,
 		`End with exactly one standalone machine verdict line:`,
-		`VERDICT: REVIEW_PASS when no finding remains, otherwise VERDICT: REVIEW_FAIL.`,
+		`VERDICT: REVIEW_PASS when nothing remains, otherwise VERDICT: REVIEW_FAIL.`,
 	].join("\n");
 }
 

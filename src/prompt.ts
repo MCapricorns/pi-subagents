@@ -54,7 +54,7 @@ export function buildDelegationDirective(
 			: []),
 		...(hasReviewer
 			? [
-				`\`reviewer\`: read-only assessments and gates${codeWriterNames.length > 0 ? `; successful ${codeWriterNames.join("/")} runs get one fresh gate, and failing gates are fixed by the reviewer itself and re-reviewed until they pass` : ""}. Advisory output has no VERDICT and cannot authorize edits.`,
+				`\`reviewer\`: read-only assessments and gates${codeWriterNames.length > 0 ? `; successful ${codeWriterNames.join("/")} runs get one fresh gate, and failing gates are fixed by the reviewer itself in bounded fix/re-review rounds that converge on the fixes (a still-failing gate returns to you)` : ""}. Advisory output has no VERDICT and cannot authorize edits.`,
 			]
 			: []),
 		`Parallelize by default: map the todo list onto ONE \`tasks\` dispatch. One child owns one deliverable and its files; only genuinely dependent work waits for its prerequisite.`,
@@ -72,7 +72,7 @@ export function buildDelegationDirective(
 		"Never report an unrun check as passed; surface unavailable checks and pre-existing failures, and inspect actual changes before reporting completion.",
 		...(hasReviewer
 			? [
-				"A REVIEW_FAIL from a gate you dispatched directly returns its findings to you: fix them inline or via a briefed worker without waiting for the user (ask only for genuinely destructive or scope-changing fixes), then re-verify.",
+				"A REVIEW_FAIL from a gate you dispatched directly returns its findings to you: fix them inline or via a briefed worker without waiting for the user (ask only for genuinely destructive or scope-changing fixes), then re-verify ONCE. If the gate still fails, report the remaining findings and move on — never loop gate dispatches.",
 				"Multi-model cross-review only when explicitly requested or for high-risk security, unsafe/FFI, persistence-migration, or concurrency changes.",
 			]
 			: []),

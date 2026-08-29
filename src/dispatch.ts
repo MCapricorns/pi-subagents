@@ -100,12 +100,13 @@ function workflowStageStatus(result: SingleResult, relation?: string): WorkflowS
 
 /** The runtime-granted write continuation of a failed gate: same reviewer
  * role, model, and retained session, but the read-only boundary is lifted for
- * this one stage so it applies its own fix instructions. */
+ * this one stage so it applies its own fix instructions. One line only: the
+ * full fix-stage contract is already in the retained session's prompt. */
 function withReviewerFixStageAgent(agent: AgentConfig): AgentConfig {
 	return {
 		...agent,
 		tools: undefined,
-		systemPrompt: `${agent.systemPrompt.trimEnd()}\n\nRuntime workflow context: FIX STAGE — your gate just returned REVIEW_FAIL. Your read-only boundary is lifted for this stage only: apply your own fix instructions exactly as you specified them, run the narrowest decisive checks, and report what changed. Never edit during a review and never emit a verdict in a fix stage.`,
+		systemPrompt: `${agent.systemPrompt.trimEnd()}\n\nRuntime workflow context: FIX STAGE — your gate just returned REVIEW_FAIL. Your read-only boundary is lifted for this stage only: apply your own fix instructions exactly as specified, verify, and report what changed; never edit during a review and never emit a verdict here.`,
 	};
 }
 
@@ -372,10 +373,9 @@ export function registerSubagentTool(pi: ExtensionAPI, runtime: SubagentRuntime)
 					"final review",
 					reviewStage,
 				);
-				// The failing gate owns its fixes until it passes: the same retained
+				// The failing gate owns its fixes: the same retained
 				// reviewer session applies its own fix instructions with write access,
-				// then a fresh gate re-scans the complete diff. Nobody outside the
-				// loop has to guess what satisfies the gate; the cap only stops
+				// then a converging re-review verifies the fixes. The cap only stops
 				// pathological burn and hands the still-failing gate to the main agent.
 				for (let round = 1; round <= MAX_REVIEW_FIX_ROUNDS; round++) {
 					const gateSession = gateReview.sessionId && gateReview.sessionDir
@@ -431,7 +431,7 @@ export function registerSubagentTool(pi: ExtensionAPI, runtime: SubagentRuntime)
 		description: [
 			"Dispatch enabled agents as isolated leaf Pi child processes, singly or in parallel. Dispatching never blocks your turn — runs proceed in the background and each completion resumes you automatically; never poll or restate delivered results.",
 			"Put every genuinely independent unit in one `tasks` array (no per-call cap; extras queue for a free process slot). Single tasks share the checkout; parallel workers default to detached Git worktrees — write-capable agents only, and setup failure never silently falls back to shared.",
-			"Successful worker/cleaner runs get one automatic reviewer gate; a failing gate is fixed by the reviewer itself in a write-enabled continuation of the same session and re-reviewed until it passes. A REVIEW_FAIL from a gate you dispatched directly returns its findings to you — fix them inline or via a briefed worker without waiting for the user.",
+			"Successful worker/cleaner runs get one automatic reviewer gate; a failing gate is fixed by the reviewer itself in a write-enabled continuation of the same session and re-reviewed in bounded, converging rounds. A REVIEW_FAIL from a gate you dispatched directly returns its findings to you — fix them inline or via a briefed worker without waiting for the user.",
 			"A configured child-model failure continues the retained session on the current main model. Resume a parked or settled thread with subagent_control by run id; use subagent_stop for destructive cancellation.",
 		].join(" "),
 		promptSnippet:

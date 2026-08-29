@@ -117,7 +117,7 @@ describe("shipped specialist agents", () => {
 	it("requires result-only handoffs without recovered tool noise", () => {
 		for (const agent of loadBuiltinAgents()) {
 			expect(agent.systemPrompt).toContain("Do not repeat the task brief");
-			expect(agent.systemPrompt).toContain("transient tool failures");
+			expect(agent.systemPrompt).not.toContain("transient tool failures");
 			expect(agent.systemPrompt).toContain("40-line delivery cap");
 		}
 		const explorer = loadBuiltinAgents().find((agent) => agent.name === "explorer");

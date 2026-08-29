@@ -15,6 +15,10 @@ import {
 
 export const SUBAGENTS_WIDGET_ID = "pi-subagents";
 
+/** The TUI caps string-array widgets at this many lines; a factory widget owns
+ * the same bound itself, or a wide parallel dispatch floods the editor area. */
+const MAX_WIDGET_LINES = 10;
+
 /** Keep the elapsed tail visible while clipping the descriptive left side. */
 function compactLine(left: string, right: string, width: number): string {
 	if (width <= 0) return "";
@@ -255,6 +259,11 @@ export function formatActiveRunLines(
 			lines.push(runPrimaryLine(child, theme, width, now, theme.fg("dim", `  ${connector}`), false));
 			lines.push(...runActivityLine(child, theme, width, "      "));
 		});
+	}
+	const hidden = lines.length - (MAX_WIDGET_LINES - 1);
+	if (hidden > 0) {
+		lines.length = MAX_WIDGET_LINES - 1;
+		lines.push(theme.fg("dim", `… +${hidden} more (subagent_status)`));
 	}
 	return lines;
 }

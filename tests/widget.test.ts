@@ -175,6 +175,20 @@ describe("formatActiveRunLines", () => {
 		expect(lines[0]).not.toContain("└");
 	});
 
+	it("caps output at the host widget budget with an overflow marker", () => {
+		const store = new MonitorStore();
+		// 7 queued roots × (primary + activity) exceeds the 10-line budget.
+		for (let index = 0; index < 7; index++) {
+			const id = store.addRun("explorer", `Map src/module-${index}.ts`);
+			store.setActivity(id, `grep pattern-${index}`);
+		}
+
+		const lines = formatActiveRunLines(store.getRuns(), theme, 120);
+		expect(lines).toHaveLength(10);
+		expect(lines.at(-1)).toContain("+5 more");
+		expect(lines.at(-1)).toContain("subagent_status");
+	});
+
 	it("marks queued runs as not started", () => {
 		const store = new MonitorStore();
 		const queued = store.addRun("worker", "Waiting for a slot to fix src/cache.ts");
