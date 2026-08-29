@@ -143,13 +143,34 @@ describe("shipped specialist agents", () => {
 		expect(explorer?.systemPrompt).toContain("plausible guess is more expensive");
 		expect(explorer?.systemPrompt).not.toMatch(/\bBash\b/u);
 	});
+
+	it("keeps shell guidance portable, since a child's terminal follows the host", () => {
+		// A child's shell slot follows the parent, so on Windows it is PowerShell,
+		// where these either do not exist or take different flags. Naming one
+		// teaches the child to burn turns on a command its terminal cannot run.
+		// `grep`/`find`/`ls` are exempt: those are Pi's own portable tools.
+		const posixOnly = /`(?:cat|sed|awk|which|touch|rm|cp|mv)\b/u;
+		for (const agent of loadBuiltinAgents()) {
+			expect(agent.systemPrompt, `${agent.name} names a POSIX-only command`).not.toMatch(posixOnly);
+			const constrainsShell = /\bshell\b/iu.test(agent.systemPrompt);
+			if (!constrainsShell) continue;
+			// A role that budgets shell use has to say the shell is not always Bash.
+			expect(agent.systemPrompt, `${agent.name} assumes one shell flavor`).toContain("PowerShell");
+		}
+	});
 });
 
 describe("parent tool inheritance", () => {
 	it.each([
 		["powershell only", ["read", "powershell", "edit", "write", "web_search", "query_docs"], ["powershell"]],
 		["bash only", ["read", "bash", "edit", "write", "web_search", "query_docs"], ["bash"]],
-		["both", ["read", "bash", "powershell", "edit", "write", "web_search", "query_docs"], ["bash", "powershell"]],
+		// One declared shell slot stays one shell: a parent running both leaves the
+		// choice to the host, so a Windows child gets pwsh and everyone else bash.
+		[
+			"both",
+			["read", "bash", "powershell", "edit", "write", "web_search", "query_docs"],
+			[process.platform === "win32" ? "powershell" : "bash"],
+		],
 		["neither", ["read", "edit", "write", "web_search", "query_docs"], []],
 	] as const)("keeps restricted built-ins while inheriting the parent %s shell and plugins", (_label, activeTools, expectedShells) => {
 		const builtins = loadBuiltinAgents().filter((agent) =>

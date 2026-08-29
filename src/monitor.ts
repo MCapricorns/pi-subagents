@@ -407,7 +407,11 @@ export function formatToolActivity(toolName: string, args: unknown): string {
 	};
 	let target: string;
 	switch (toolName) {
+		// Pi ships one shell tool per platform flavor, all with a `command`
+		// parameter: a Windows parent that swapped bash for powershell must still
+		// show the command it is running, not a bare tool name.
 		case "bash":
+		case "powershell":
 		case "shell":
 			target = pick("command");
 			break;

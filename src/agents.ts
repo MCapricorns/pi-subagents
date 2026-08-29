@@ -37,6 +37,10 @@ export interface AgentConfig {
 }
 
 const SHELL_TOOL_NAMES = new Set(["bash", "powershell"]);
+/** The shell that actually fits the host: PowerShell on Windows, Bash elsewhere.
+ * Only used to break a tie when the parent has both enabled — a parent running a
+ * single shell is followed as configured, whatever it is. */
+const NATIVE_SHELL_TOOL = process.platform === "win32" ? "powershell" : "bash";
 const PI_BUILTIN_TOOL_NAMES = new Set(["read", "bash", "powershell", "edit", "write", "grep", "find", "ls"]);
 export const SUBAGENT_TOOL_NAMES = [
 	"subagent",
@@ -48,7 +52,13 @@ const SUBAGENT_TOOL_NAME_SET = new Set<string>(SUBAGENT_TOOL_NAMES);
 /** Resolve every child against the parent's live tool selection. Roles without
  * an allowlist inherit the complete active set. Explicit lists keep only their
  * declared Pi built-ins, adapt an existing shell slot, and gain active extension/
- * SDK tools. pi-subagents controls are always removed so children stay leaves. */
+ * SDK tools. pi-subagents controls are always removed so children stay leaves.
+ *
+ * A declared shell is one slot, so it resolves to one shell: the parent's, and
+ * the host-native one when the parent runs both. A child never inherits a shell
+ * the parent does not have — Pi's `--tools` allowlist overrides the child's own
+ * `defaultTools` setting, so naming a shell the user disabled would hand it a
+ * terminal they deliberately turned off. */
 export function resolveAgentTools(
 	agent: AgentConfig,
 	activeToolNames: readonly string[],
@@ -56,7 +66,10 @@ export function resolveAgentTools(
 	const active = [...new Set(activeToolNames)].filter((tool) => !SUBAGENT_TOOL_NAME_SET.has(tool));
 	if (!agent.tools) return { ...agent, tools: active };
 
-	const activeShellTools = active.filter((tool) => SHELL_TOOL_NAMES.has(tool));
+	const parentShellTools = active.filter((tool) => SHELL_TOOL_NAMES.has(tool));
+	const activeShellTools = parentShellTools.length > 1 && parentShellTools.includes(NATIVE_SHELL_TOOL)
+		? [NATIVE_SHELL_TOOL]
+		: parentShellTools;
 	const tools: string[] = [];
 	let shellAdapted = false;
 	for (const tool of agent.tools) {
