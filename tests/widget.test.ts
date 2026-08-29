@@ -120,6 +120,22 @@ describe("formatActiveRunLines", () => {
 		expect(lines.join("\n")).not.toContain("claude-reviewer");
 	});
 
+	it("labels the fix stage as reviewer-owned work, not a separate fixer", () => {
+		const store = new MonitorStore();
+		const parent = store.addRun("worker", "Implement src/cache.ts");
+		store.setStatus(parent, "running");
+		store.setManagedWorkflow(parent, true);
+		store.setWorkflowStages(parent, [
+			{ agent: "worker", relation: "implement", status: "done" },
+			{ agent: "reviewer", relation: "review", status: "changes" },
+			{ agent: "reviewer", relation: "review fix", status: "active" },
+		]);
+		store.setActivity(parent, "managed workflow running");
+
+		const lines = formatActiveRunLines(store.getRuns(), theme, 120);
+		expect(lines[1]).toContain("! review ─ ● review fix");
+	});
+
 	it("removes conditionally skipped docs and distinguishes process failure from review changes", () => {
 		const store = new MonitorStore();
 		const parent = store.addRun("worker", "Implement src/cache.ts");

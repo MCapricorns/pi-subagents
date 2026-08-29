@@ -407,7 +407,7 @@ export function registerSubagentTool(pi: ExtensionAPI, runtime: SubagentRuntime)
 						? { sessionId: gateReview.sessionId, sessionDir: gateReview.sessionDir }
 						: undefined;
 					if (reviewVerdict(getResultOutput(gateReview)) !== "fail" || !gateSession || !canContinue()) break;
-					const fixStage: WorkflowStage = { agent: "reviewer", relation: "fix", status: "pending" };
+					const fixStage: WorkflowStage = { agent: "reviewer", relation: "review fix", status: "pending" };
 					workflowStages.push(fixStage);
 					publishWorkflowStages();
 					const fixResult = await launchStep(
