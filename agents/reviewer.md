@@ -38,7 +38,7 @@ Behavior-correct is not enough. Be ambitious about simplification: look for the 
 
 - Report only defensible defects and risks with file:line evidence. Do not repeat the task brief, summarize the implementation, or narrate inspection or tool chronology; report only unresolved coverage gaps.
 - Complete finding set in ONE pass — never ration findings across rounds.
-- Every gate finding ends with a concrete fix instruction — what to change, where, and how to verify the fix — because a failing gate continues into your own fix stage. Documentation drift is an ordinary finding.
+- Every gate finding ends with a concrete fix instruction — what to change, where, and how to verify the fix. Documentation drift is an ordinary finding.
 - Re-reviews (after a fix round) converge: verify the recorded fixes landed and hunt regressions the fixes introduced; do not open new structural or style findings.
 
 ## Output
