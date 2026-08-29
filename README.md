@@ -6,7 +6,7 @@
 ![platform](https://img.shields.io/badge/platform-Windows%20%7C%20macOS%20%7C%20Linux-lightgrey)
 ![pi](https://img.shields.io/badge/pi-extension-orange)
 
-A managed engineering team for [pi](https://github.com/earendil-works/pi): five
+A managed engineering team for [pi](https://github.com/earendil-works/pi): six
 specialized sub-agents, durable threads, automatic quality gates, and Git
 worktree isolation — installed once, then your main agent delegates on its own.
 
@@ -59,11 +59,12 @@ burden:
 ```text
 You
  └─ pi main agent
-     ├─ explorer ─── retrieval index only (never an automatic gate)
-     ├─ worker ───── implements ─┬─▶ reviewer ─ PASS → deliver
-     ├─ cleaner ──── cleans up ──┘            └─ FAIL → reviewer fixes itself
-     ├─ documenter ─ explicit docs/comments task → deliver                │
-     └─ reviewer ─── advisory report (no VERDICT), or managed gate ◀──────┘
+     ├─ explorer ──── retrieval index only (never an automatic gate)
+     ├─ worker ────── implements ─┬─▶ reviewer ─ PASS → deliver
+     ├─ cleaner ───── cleans up ──┘            └─ FAIL → reviewer fixes itself
+     ├─ documenter ── explicit docs/comments task → deliver               │
+     ├─ synthesizer ─ merges fan-out results/long sources into one brief  │
+     └─ reviewer ──── advisory report (no VERDICT), or managed gate ◀─────┘
           └─ direct REVIEW_FAIL → findings + fix instructions → main agent fixes
 
 Worker and cleaner update existing docs/comments they directly affect. The stable
@@ -83,7 +84,7 @@ pi install npm:@ferris1225/pi-subagents
 ```
 
 Open pi and run `/subagents-setup` to pick agents, models, and thinking
-strengths. Fresh installs enable all five built-in agents on the current main
+strengths. Fresh installs enable all six built-in agents on the current main
 model, and until a config file exists each session start points you at
 `/subagents-setup`. Then just ask:
 
@@ -102,6 +103,7 @@ directly for exact control.
 | `worker`     | Full                                  | The default route for any non-trivial, self-contained implementation, fix, refactor, or test task carried through verification.                                  |
 | `cleaner`    | Full                                  | Cleanup, removal, simplification, deduplication — requested by the user or dispatched proactively when finished work leaves dead code; the brief is its edit authorization and every safe proven cut applies. |
 | `documenter` | Docs/comments                         | Standalone docs/comments work, including syncing real drift a change left behind. May make zero edits; never changes runtime behavior.                           |
+| `synthesizer`| Read-only                             | Merging a fan-out's result artifacts or other long sources into one deduplicated brief with attribution — conflicts and gaps stay explicit, and the main context never re-reads the inputs. |
 | `reviewer`   | Read-only (review) / full (fix stage) | Audits, code-health checks, plans, PR/issue validation, and independent gates; a failing managed gate continues into the reviewer's own write-enabled fix stage. |
 
 A good brief carries the goal, exact paths, constraints, and expected output —
@@ -190,7 +192,9 @@ delivers without another gate.
 - Single tasks default to the shared checkout; every parallel write-capable
   agent (`worker`, `cleaner`, `documenter`, custom writers) defaults to a
   detached Git worktree (requires a committed `HEAD`; read-only agents reject
-  worktree mode), so parallel writers run concurrently.
+  worktree mode), so parallel writers run concurrently. A role file can pin its
+  own default with `isolation: worktree` (or `isolation: shared`) in the
+  frontmatter — an explicit per-dispatch `isolation` still wins.
 - An isolated workflow's reviewer and documenter run inside the same worktree;
   tracked, deleted, untracked, and binary changes integrate back exactly once
   after the workflow settles — nothing is staged and your index is untouched.
@@ -297,7 +301,7 @@ and thinking strength. Everything else is config-file only, stored at
 
 ```json
 {
-  "enabledAgents": ["explorer", "worker", "cleaner", "documenter", "reviewer"],
+  "enabledAgents": ["explorer", "worker", "cleaner", "documenter", "synthesizer", "reviewer"],
   "agentModels": { "explorer": "anthropic/claude-haiku-4-5" },
   "agentThinkingLevels": { "reviewer": "high" },
   "notifyOnReviewPass": false,
@@ -343,7 +347,10 @@ tools: read, bash
 ```
 
 `description` is the routing line the main model reads, and `thinking` is the
-role's Auto preference (a wizard choice overrides it). Models come only from
+role's Auto preference (a wizard choice overrides it). `isolation: worktree`
+(write-capable roles only) or `isolation: shared` pins the role's default
+isolation so dispatches never need the parameter; an explicit per-dispatch
+`isolation` still wins. Models come only from
 `/subagents-setup`; an agent file cannot pin one. An explicit `tools` list stays
 the capability boundary (shell slot follows the parent, active extension tools
 are appended), and omitting it inherits the parent's complete active set.

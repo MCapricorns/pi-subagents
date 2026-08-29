@@ -1,5 +1,6 @@
 /**
- * The `subagent` tool: dispatches explorer/worker/cleaner/documenter/reviewer agents as isolated pi
+ * The `subagent` tool: dispatches the enabled agents (explorer, worker, cleaner,
+ * documenter, synthesizer, reviewer, plus custom roles) as isolated pi
  * child processes, single or parallel. Owns the public dispatch contract,
  * per-run status tracking, the managed worker/cleaner → reviewer gate, and
  * internal step launching. Stable thread generations, final integration, and
@@ -109,17 +110,23 @@ const SubagentParams = Type.Object({
  * write-capable agents join them via isWriteCapableAgent on the execute path. */
 const WORKTREE_DEFAULT_AGENTS = new Set(["worker", "cleaner", "documenter"]);
 
-/** Resolve the default isolation for a dispatch. Parallel write-capable agents
- * get a detached worktree: shared writers serialize on the repository lane, so
- * defaulting them to shared would turn one parallel batch into a convoy that
- * also parks process slots. Explicit requests always win. */
+/** Resolve the default isolation for a dispatch. Precedence: an explicit
+ * per-call request, then the role's own frontmatter declaration (`worktree`
+ * honored for write-capable roles only; `shared` always), then the parallel
+ * write default — parallel write-capable agents get a detached worktree
+ * because shared writers serialize on the repository lane, so defaulting them
+ * to shared would turn one parallel batch into a convoy that also parks
+ * process slots. */
 export function defaultIsolationMode(
 	mode: "single" | "parallel",
 	agentName: string,
 	requested?: IsolationMode,
 	writeCapable = WORKTREE_DEFAULT_AGENTS.has(agentName),
+	declared?: IsolationMode,
 ): IsolationMode {
 	if (requested) return requested;
+	if (declared === "shared") return "shared";
+	if (declared === "worktree" && writeCapable) return "worktree";
 	return mode === "parallel" && writeCapable ? "worktree" : "shared";
 }
 
@@ -658,6 +665,7 @@ export function registerSubagentTool(pi: ExtensionAPI, runtime: SubagentRuntime)
 							item.agent,
 							item.isolation as IsolationMode | undefined,
 							catalogAgent ? isWriteCapableAgent(catalogAgent) : undefined,
+							catalogAgent?.isolation,
 						),
 						{ review: item.review as ReviewMode | undefined },
 					));
@@ -709,11 +717,18 @@ export function registerSubagentTool(pi: ExtensionAPI, runtime: SubagentRuntime)
 				};
 			}
 
+			const singleCatalogAgent = agents.find((candidate) => candidate.name === params.agent);
 			const result = await startBackground(
 				params.agent as string,
 				params.task as string,
 				params.cwd,
-				defaultIsolationMode("single", params.agent as string, params.isolation as IsolationMode | undefined),
+				defaultIsolationMode(
+					"single",
+					params.agent as string,
+					params.isolation as IsolationMode | undefined,
+					singleCatalogAgent ? isWriteCapableAgent(singleCatalogAgent) : undefined,
+					singleCatalogAgent?.isolation,
+				),
 				{ review: params.review as ReviewMode | undefined },
 			);
 			if (result.exitCode !== -1) {

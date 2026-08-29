@@ -39,7 +39,7 @@ export function registerAnnouncements(pi: ExtensionAPI, runtime: SubagentRuntime
 	pi.on("session_start", async (_event, ctx) => {
 		if (!existsSync(runtime.configPath)) {
 			ctx.ui.notify(
-				"pi-subagents: no configuration yet — run /subagents-setup to pick agents, models, and thinking strengths. Defaults (all five agents on the main model) apply until then.",
+				"pi-subagents: no configuration yet — run /subagents-setup to pick agents, models, and thinking strengths. Defaults (all built-in agents on the main model) apply until then.",
 				"info",
 			);
 		}

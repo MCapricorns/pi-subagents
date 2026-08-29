@@ -29,7 +29,7 @@ describe("buildDelegationDirective", () => {
 
 	it("keeps the default injected directive below the prompt budget", () => {
 		const directive = buildDelegationDirective(loadBuiltinAgents());
-		expect(directive.length).toBeLessThan(3_700);
+		expect(directive.length).toBeLessThan(3_900);
 	});
 
 	it("states default-parallel fan-out with queue pacing for any agent count", () => {
@@ -103,15 +103,27 @@ describe("buildDelegationDirective", () => {
 		expect(noReviewer).not.toContain("REVIEW_FAIL");
 	});
 
-	it("preserves worktree constraints in the directive", () => {
+	it("carries no isolation guidance — defaults and role frontmatter own it", () => {
 		const directive = buildDelegationDirective([
 			agent("worker"),
 			agent("cleaner"),
 			agent("documenter"),
 			agent("reviewer"),
 		]);
-		expect(directive).toContain('isolation: "worktree"');
-		expect(directive).toContain("committed HEAD");
+		expect(directive).not.toContain("isolation");
+		expect(directive).not.toContain("committed HEAD");
+	});
+
+	it("routes fan-out synthesis to synthesizer only when the role is enabled", () => {
+		const directive = buildDelegationDirective([
+			agent("explorer"),
+			agent("worker"),
+			agent("synthesizer"),
+		]);
+		expect(directive).toContain("pass the result-artifact paths to one synthesizer");
+		expect(directive).toContain("read its brief instead of every result yourself");
+		const withoutSynthesizer = buildDelegationDirective([agent("explorer"), agent("worker")]);
+		expect(withoutSynthesizer).not.toContain("synthesizer");
 	});
 
 	it("preserves non-blocking dispatch, automatic handoff, and no result restatement", () => {

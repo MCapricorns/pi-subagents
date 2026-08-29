@@ -16,6 +16,7 @@ import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { CONFIG_DIR_NAME, getAgentDir, parseFrontmatter } from "@earendil-works/pi-coding-agent";
 import { THINKING_LEVEL_VALUES, type AgentScope, type ThinkingLevel } from "./config.ts";
+import type { IsolationMode } from "./worktree.ts";
 
 export type AgentSource = "builtin" | "user" | "project";
 
@@ -27,6 +28,9 @@ export interface AgentConfig {
 	model?: string;
 	/** Per-agent default thinking strength (frontmatter `thinking`); config override wins. */
 	thinking?: ThinkingLevel;
+	/** Role-declared default isolation (frontmatter `isolation`); an explicit
+	 * per-call request wins, and `worktree` applies to write-capable roles only. */
+	isolation?: IsolationMode;
 	systemPrompt: string;
 	source: AgentSource;
 	filePath: string;
@@ -132,12 +136,17 @@ function loadAgentsFromDir(dir: string, source: AgentSource): AgentConfig[] {
 		const thinking = (THINKING_LEVEL_VALUES as readonly string[]).includes(rawThinking ?? "")
 			? (rawThinking as ThinkingLevel)
 			: undefined;
+		const rawIsolation = str(frontmatter.isolation)?.trim();
+		const isolation = rawIsolation === "worktree" || rawIsolation === "shared"
+			? (rawIsolation as IsolationMode)
+			: undefined;
 
 		agents.push({
 			name,
 			description,
 			tools: tools && tools.length > 0 ? tools : undefined,
 			...(thinking ? { thinking } : {}),
+			...(isolation ? { isolation } : {}),
 			systemPrompt: body,
 			source,
 			filePath,

@@ -304,6 +304,32 @@ describe("discoverAgents", () => {
 		expect(defaultIsolationMode("single", "explorer", "worktree")).toBe("worktree");
 	});
 
+	it("honors role-declared isolation between explicit requests and mode defaults", () => {
+		// A write-capable role that declares worktree self-isolates in every mode.
+		expect(defaultIsolationMode("single", "migrator", undefined, true, "worktree")).toBe("worktree");
+		expect(defaultIsolationMode("parallel", "migrator", undefined, true, "worktree")).toBe("worktree");
+		// A declared shared opts a writer out of the parallel worktree default.
+		expect(defaultIsolationMode("parallel", "worker", undefined, true, "shared")).toBe("shared");
+		// A worktree declaration on a read-only role is inert, not an error.
+		expect(defaultIsolationMode("parallel", "reader", undefined, false, "worktree")).toBe("shared");
+		// An explicit per-call request still beats the declaration.
+		expect(defaultIsolationMode("single", "migrator", "shared", true, "worktree")).toBe("shared");
+	});
+
+	it("parses a valid isolation declaration and ignores invalid ones", () => {
+		writeAgent(builtinDir, "explorer", "---\nname: explorer\ndescription: d\nisolation: worktree\n---\nb");
+		writeAgent(builtinDir, "worker", "---\nname: worker\ndescription: d\nisolation: shared\n---\nb");
+		writeAgent(builtinDir, "cleaner", "---\nname: cleaner\ndescription: d\nisolation: chroot\n---\nb");
+		writeAgent(builtinDir, "reviewer", "---\nname: reviewer\ndescription: d\n---\nb");
+
+		const { agents } = discoverAgents(cwd, { scope: "user", builtinDir });
+		const byName = new Map(agents.map((a) => [a.name, a]));
+		expect(byName.get("explorer")?.isolation).toBe("worktree");
+		expect(byName.get("worker")?.isolation).toBe("shared");
+		expect(byName.get("cleaner")?.isolation).toBeUndefined();
+		expect(byName.get("reviewer")?.isolation).toBeUndefined();
+	});
+
 	it("user agents override builtin agents of the same name", () => {
 		writeAgent(builtinDir, "explorer", "---\nname: explorer\ndescription: builtin version\n---\nb");
 		writeAgent(join(agentDir, "agents"), "explorer", "---\nname: explorer\ndescription: user version\n---\nb");

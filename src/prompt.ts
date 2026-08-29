@@ -24,6 +24,7 @@ export function buildDelegationDirective(
 	const hasCleaner = agents.some((agent) => agent.name === "cleaner");
 	const hasDocumenter = agents.some((agent) => agent.name === "documenter");
 	const hasReviewer = agents.some((agent) => agent.name === "reviewer");
+	const hasSynthesizer = agents.some((agent) => agent.name === "synthesizer");
 	const codeWriterNames = [
 		...(hasWorker ? ["worker"] : []),
 		...(hasCleaner ? ["cleaner"] : []),
@@ -47,9 +48,11 @@ export function buildDelegationDirective(
 				`\`reviewer\`: read-only assessments and gates${codeWriterNames.length > 0 ? `; successful ${codeWriterNames.join("/")} runs get one fresh gate, and failing gates are fixed by the reviewer itself in bounded fix/re-review rounds (a still-failing gate returns to you). Pass \`review: "none"\` for mechanical, low-risk edits you verify yourself; keep the default gate whenever behavior can change` : ""}. Advisory output has no VERDICT and cannot authorize edits.`,
 			]
 			: []),
+		...(hasSynthesizer
+			? ["`synthesizer`: after a wide fan-out, pass the result-artifact paths to one synthesizer and read its brief instead of every result yourself."]
+			: []),
 		`Parallelize by default: map the todo list onto ONE \`tasks\` dispatch. One child owns one deliverable and its files; only genuinely dependent work waits for its prerequisite.`,
 		"Brief each child completely — goal, exact paths, constraints, expected output; it has no conversation memory and cannot delegate. Resume parked threads with `subagent_control resume`.",
-		`Request \`isolation: "worktree"\` only for write-capable agents in a repo with committed HEAD.`,
 	];
 
 	const handoffRules = [

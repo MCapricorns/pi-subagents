@@ -43,6 +43,7 @@ const MODULE_HINTS: Record<string, string> = {
 	worker: "implement / fix / refactor / test (full tools)",
 	cleaner: "apply proven cleanup and deduplicate code (full tools)",
 	documenter: "sync diff or whole-codebase comments/docs (docs write)",
+	synthesizer: "merge fan-out results/long sources into one brief (read-only)",
 	reviewer: "read-only audits and pre-commit gates",
 };
 
@@ -282,26 +283,23 @@ async function runMenu(ctx: ExtensionCommandContext, configPath: string, config:
 			const enabled = await pickEnabledAgents(ctx, config.enabledAgents);
 			if (enabled === undefined) continue;
 			next.enabledAgents = enabled;
-			// Newly enabling cleaner inherits the reviewer's configured model and
-			// thinking level, so the file reflects what cleaner will actually run
-			// instead of silently falling back to the current main model.
-			if (!config.enabledAgents.includes("cleaner") && enabled.includes("cleaner")) {
-				if (!next.agentModels.cleaner && config.agentModels.reviewer) {
-					next.agentModels.cleaner = config.agentModels.reviewer;
+			// A newly enabled role inherits a kindred role's configured model and
+			// thinking level, so the file reflects what it will actually run
+			// instead of silently falling back to the current main model: cleaner
+			// follows the reviewer; documenter and synthesizer intentionally
+			// follow the faster explorer route.
+			const modelInheritance: ReadonlyArray<[agent: string, from: string]> = [
+				["cleaner", "reviewer"],
+				["documenter", "explorer"],
+				["synthesizer", "explorer"],
+			];
+			for (const [agent, from] of modelInheritance) {
+				if (config.enabledAgents.includes(agent) || !enabled.includes(agent)) continue;
+				if (!next.agentModels[agent] && config.agentModels[from]) {
+					next.agentModels[agent] = config.agentModels[from];
 				}
-				if (!next.agentThinkingLevels.cleaner && config.agentThinkingLevels.reviewer) {
-					next.agentThinkingLevels.cleaner = config.agentThinkingLevels.reviewer;
-				}
-			}
-			// Documenter intentionally follows the faster explorer route. When it
-			// is re-enabled after being explicitly disabled, it inherits any
-			// explorer overrides instead of silently choosing a stronger model.
-			if (!config.enabledAgents.includes("documenter") && enabled.includes("documenter")) {
-				if (!next.agentModels.documenter && config.agentModels.explorer) {
-					next.agentModels.documenter = config.agentModels.explorer;
-				}
-				if (!next.agentThinkingLevels.documenter && config.agentThinkingLevels.explorer) {
-					next.agentThinkingLevels.documenter = config.agentThinkingLevels.explorer;
+				if (!next.agentThinkingLevels[agent] && config.agentThinkingLevels[from]) {
+					next.agentThinkingLevels[agent] = config.agentThinkingLevels[from];
 				}
 			}
 			next.agentModels = keepAgentEntries(next.agentModels, enabled);

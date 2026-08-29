@@ -13,10 +13,10 @@ import { dirname, join } from "node:path";
 import { getAgentDir, withFileMutationQueue } from "@earendil-works/pi-coding-agent";
 
 /** Full catalog of agents shipped with the package (selectable in /subagents-setup). */
-export const BUILTIN_AGENT_NAMES = ["explorer", "worker", "cleaner", "documenter", "reviewer"] as const;
+export const BUILTIN_AGENT_NAMES = ["explorer", "worker", "cleaner", "documenter", "synthesizer", "reviewer"] as const;
 
 /** Agents enabled out of the box on a fresh install. */
-export const DEFAULT_ENABLED_AGENTS: readonly string[] = ["explorer", "worker", "cleaner", "documenter", "reviewer"];
+export const DEFAULT_ENABLED_AGENTS: readonly string[] = [...BUILTIN_AGENT_NAMES];
 
 export const AGENT_SCOPE_VALUES = ["user", "project", "both"] as const;
 export type AgentScope = (typeof AGENT_SCOPE_VALUES)[number];
@@ -45,7 +45,7 @@ export const DEFAULT_IDLE_TIMEOUT_SEC = 90;
 export const IDLE_TIMEOUT_SEC_LIMIT = 600;
 
 export interface SubagentsConfig {
-	/** Agent names that are discoverable and injected. Fresh-install default: explorer, worker, cleaner, reviewer. */
+	/** Agent names that are discoverable and injected. Fresh-install default: every built-in agent. */
 	enabledAgents: string[];
 	/** Per-agent model override, keyed by agent name, as "provider/model-id". */
 	agentModels: Record<string, string>;
