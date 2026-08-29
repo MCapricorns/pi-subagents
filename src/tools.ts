@@ -63,6 +63,9 @@ export function registerLookupTools(pi: ExtensionAPI, runtime: SubagentRuntime):
 		parameters: SubagentControlParams,
 
 		async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
+			// A thread parked by the previous process exists only once restore has
+			// read the manifest; resuming before that would deny a live run id.
+			await runtime.durableRestore;
 			const thread = runtime.threads.get(params.id);
 			if (!thread) {
 				return { content: [{ type: "text", text: `No subagent thread matches run #${params.id}.` }], details: {} };
@@ -265,6 +268,7 @@ export function registerLookupTools(pi: ExtensionAPI, runtime: SubagentRuntime):
 		parameters: SubagentStatusParams,
 
 		async execute(_toolCallId, params, signal, _onUpdate, ctx) {
+			await runtime.durableRestore;
 			const config = await loadConfig(runtime.configPath);
 			const requested = params.id?.trim();
 
@@ -431,6 +435,7 @@ export function registerLookupTools(pi: ExtensionAPI, runtime: SubagentRuntime):
 		parameters: SubagentStopParams,
 
 		async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
+			await runtime.durableRestore;
 			// Start config I/O without yielding: every target below must be claimed
 			// synchronously before a resume preflight can cross its next await.
 			const configPromise = loadConfig(runtime.configPath).catch(() => undefined);

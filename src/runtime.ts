@@ -94,6 +94,13 @@ export interface SubagentRuntime {
 	/** The process-wide background dispatcher. Set at tool registration so
 	 * threads restored from the durable manifest can resume before any dispatch. */
 	dispatcher?: StartBackgroundInternal;
+	/** Resolves when the load-time durable restore pass has finished. Everything
+	 * that answers "which threads exist" awaits it — the lookup tools, a fresh
+	 * dispatch before it allocates a run id, and the restored-thread notice — so
+	 * a reload can never report parked work as missing, or hand a new run an id a
+	 * record still owns, while the manifest is being read. Resolved by default;
+	 * `bootstrapDurableState` publishes the real pass. */
+	durableRestore: Promise<void>;
 	/** Run ids restored from the durable manifest at load; consumed by the
 	 * one-time session-start notice. */
 	restoredRunIds: number[];
@@ -131,6 +138,7 @@ export function createRuntime(pi: ExtensionAPI, configPath: string): SubagentRun
 		backgroundQueue,
 		getActiveTools: () => pi.getActiveTools(),
 		sessionActive: true,
+		durableRestore: Promise.resolve(),
 		restoredRunIds: [],
 		restoredNotified: false,
 		sendCompletionGroup: (items) => {

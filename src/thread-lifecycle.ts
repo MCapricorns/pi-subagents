@@ -1391,26 +1391,37 @@ export async function restoreDurableThreads(runtime: SubagentRuntime): Promise<n
 
 /** Load-time durable bootstrap: restore threads, age out expired records, and
  * sweep leaked temp/state directories. Every stage is best-effort so a broken
- * manifest never blocks extension registration. */
-export async function bootstrapDurableState(runtime: SubagentRuntime): Promise<void> {
-	try {
-		runtime.restoredRunIds = await restoreDurableThreads(runtime);
-	} catch {
-		/* restore is best-effort */
-	}
-	try {
-		await pruneThreadRecords(runtime.configPath);
-	} catch {
-		/* retention is best-effort */
-	}
-	try {
-		sweepProjectTempDirs(join(dirname(runtime.configPath), PROJECT_ROOTS_DIR_NAME));
-	} catch {
-		/* temp hygiene is best-effort */
-	}
-	try {
-		await pruneStaleProjectRoots(runtime.configPath);
-	} catch {
-		/* project-root hygiene is best-effort */
-	}
+ * manifest never blocks extension registration.
+ *
+ * Restore is published on the runtime as `durableRestore` before this returns,
+ * so callers that must see restored threads await that pass alone and never the
+ * hygiene sweeps behind it. Hygiene still runs after restore: pruning decides
+ * what to delete from the records restore has already claimed. */
+export function bootstrapDurableState(runtime: SubagentRuntime): Promise<void> {
+	const restore = (async () => {
+		try {
+			runtime.restoredRunIds = await restoreDurableThreads(runtime);
+		} catch {
+			/* restore is best-effort */
+		}
+	})();
+	runtime.durableRestore = restore;
+	return (async () => {
+		await restore;
+		try {
+			await pruneThreadRecords(runtime.configPath);
+		} catch {
+			/* retention is best-effort */
+		}
+		try {
+			sweepProjectTempDirs(join(dirname(runtime.configPath), PROJECT_ROOTS_DIR_NAME));
+		} catch {
+			/* temp hygiene is best-effort */
+		}
+		try {
+			await pruneStaleProjectRoots(runtime.configPath);
+		} catch {
+			/* project-root hygiene is best-effort */
+		}
+	})();
 }

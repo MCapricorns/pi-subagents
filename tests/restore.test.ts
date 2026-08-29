@@ -5,9 +5,11 @@ import { SessionManager } from "@earendil-works/pi-coding-agent";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { readThreadRecords, upsertThreadRecord, type ThreadRecord } from "../src/durable.ts";
 import { monitor } from "../src/monitor.ts";
-import { RpcRunControl } from "../src/rpc-run.ts";
-import { createRuntime, type SubagentRuntime } from "../src/runtime.ts";
-import { restoreDurableThreads } from "../src/thread-lifecycle.ts";
+import { emptyUsage, RpcRunControl } from "../src/rpc-run.ts";
+import { createRuntime, type SubagentRuntime, type SubagentThread } from "../src/runtime.ts";
+import { bootstrapDurableState, restoreDurableThreads } from "../src/thread-lifecycle.ts";
+import { registerLookupTools } from "../src/tools.ts";
+import { executionContext, makeStub, runTool } from "./test-helpers.ts";
 import * as tempHygieneModule from "../src/temp-hygiene.ts";
 import * as worktreeModule from "../src/worktree.ts";
 import type { WorktreeIsolation } from "../src/worktree.ts";
@@ -59,6 +61,36 @@ function record(overrides: Partial<ThreadRecord>): ThreadRecord {
 		elapsedMs: 12_000,
 		childPids: [],
 		...overrides,
+	};
+}
+
+/** A parked thread as restore installs one: resumable, with retained context. */
+function restorableThread(runId: number): SubagentThread {
+	return {
+		id: runId,
+		generation: 1,
+		agentName: "worker",
+		task: "resume me",
+		cwd: "C:/repo",
+		executionCwd: "C:/repo",
+		isolation: "shared",
+		state: "parked",
+		control: new RpcRunControl("resume me", 1),
+		generationCompletion: Promise.resolve(),
+		lifecycleVersion: 0,
+		elapsedMs: 12_000,
+		sessionId: "session",
+		sessionDir: "C:/state/sessions/session",
+		resume: async () => ({
+			agent: "worker",
+			task: "resume me",
+			exitCode: -1,
+			messages: [],
+			stderr: "",
+			usage: emptyUsage(),
+			isolation: "shared",
+		}),
+		finalizeIsolation: async () => undefined,
 	};
 }
 
@@ -278,5 +310,57 @@ describe("durable thread restore", () => {
 		await restoreDurableThreads(runtime);
 		expect(kill).toHaveBeenCalledWith(424242);
 		expect(kill).toHaveBeenCalledWith(424243);
+	});
+
+	it("publishes the restore pass before returning, so readers can wait for it", async () => {
+		const session = createSession("C:/repo");
+		await upsertThreadRecord(runtime.configPath, record({
+			updatedAt: Date.now(),
+			sessionId: session.id,
+			sessionDir: session.dir,
+		}));
+
+		const bootstrap = bootstrapDurableState(runtime);
+		// Reading the manifest is asynchronous, so the thread cannot be there yet;
+		// the published pass is what a reader has to await to see it.
+		expect(runtime.threads.has(5)).toBe(false);
+		await runtime.durableRestore;
+		expect(runtime.threads.get(5)?.state).toBe("parked");
+		expect(runtime.restoredRunIds).toEqual([5]);
+
+		await bootstrap;
+	});
+
+	it("holds status and resume until the restore pass has finished", async () => {
+		const stub = makeStub();
+		registerLookupTools(stub.api, runtime);
+		const status = stub.tools.find((tool) => tool.name === "subagent_status");
+		const control = stub.tools.find((tool) => tool.name === "subagent_control");
+		let finishRestore!: () => void;
+		runtime.durableRestore = new Promise<void>((resolve) => {
+			finishRestore = resolve;
+		});
+
+		let statusSettled = false;
+		const pendingStatus = runTool(status, "status", {}, executionContext()).then((result: any) => {
+			statusSettled = true;
+			return result;
+		});
+		let controlSettled = false;
+		const pendingControl = runTool(control, "control", { action: "resume", id: 5 }, executionContext())
+			.then((result: any) => {
+				controlSettled = true;
+				return result;
+			});
+		await new Promise((resolve) => setTimeout(resolve, 20));
+		// Answering now would report parked work as missing and deny its run id.
+		expect(statusSettled).toBe(false);
+		expect(controlSettled).toBe(false);
+
+		runtime.threads.set(5, restorableThread(5));
+		finishRestore();
+
+		expect((await pendingStatus).content[0].text).toContain("- #5 worker");
+		expect((await pendingControl).content[0].text).toContain("Resumed run #5");
 	});
 });

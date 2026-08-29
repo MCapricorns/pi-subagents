@@ -45,11 +45,14 @@ export function registerAnnouncements(pi: ExtensionAPI, runtime: SubagentRuntime
 		}
 		await announceRecoveryRecords(runtime.configPath, ctx);
 		await migrateUnavailableAgentModels(ctx, runtime);
+		// Restore starts at extension load and session_start fires right behind
+		// it, so without this the notice reports whatever the race left behind.
+		await runtime.durableRestore;
 		if (!runtime.restoredNotified && runtime.restoredRunIds.length > 0) {
 			runtime.restoredNotified = true;
 			const ids = runtime.restoredRunIds.map((id) => `#${id}`).join(", ");
 			ctx.ui.notify(
-				`pi-subagents: restored ${runtime.restoredRunIds.length} interrupted thread${runtime.restoredRunIds.length === 1 ? "" : "s"} from the previous session (${ids}). subagent_status lists them; subagent_control resume continues one.`,
+				`pi-subagents: restored ${runtime.restoredRunIds.length} interrupted thread${runtime.restoredRunIds.length === 1 ? "" : "s"} (${ids}) with retained context. subagent_status lists them; subagent_control resume continues one.`,
 				"info",
 			);
 		}

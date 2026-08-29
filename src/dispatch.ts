@@ -499,6 +499,10 @@ export function registerSubagentTool(pi: ExtensionAPI, runtime: SubagentRuntime)
 		parameters: SubagentParams,
 
 		async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
+			// Run ids are allocated below; restore raises the allocator above every
+			// id a durable record still owns, so a dispatch racing it could hand a
+			// fresh run the id of a parked thread and overwrite its record.
+			await runtime.durableRestore;
 			monitor.beginTurn();
 			const config = await loadConfig(runtime.configPath);
 
