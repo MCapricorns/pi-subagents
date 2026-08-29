@@ -38,7 +38,7 @@ export function buildDelegationDirective(
 			]
 			: []),
 		...(hasCleaner
-			? ["`cleaner`: dispatch for requested cleanup AND proactively when finished work leaves dead code or duplication in scope. Your brief is its edit authorization — every safe proven cut applies without per-item approval; never a gate."]
+			? ["`cleaner`: dispatch for requested cleanup AND proactively when finished work leaves dead code or duplication. Your brief is its edit authorization — every safe proven cut applies without per-item approval; never a gate. Scope: the uncommitted diff, or whatever your brief names (Git range, directory)."]
 			: []),
 		...(hasDocumenter
 			? ["`documenter`: standalone docs/comment work; dispatch it proactively when a change — yours or a child's — leaves README/docs/comment drift no writer already synced; cheap and may make zero edits."]
@@ -58,7 +58,7 @@ export function buildDelegationDirective(
 	const handoffRules = [
 		"Dispatch never blocks or ends your turn — keep working; each completion resumes you automatically. Never sleep or poll for it.",
 		"Results are already shown; add only your conclusion or next action, never a restatement.",
-		"Never declare the overall task done while a dispatched run is still active — completions name the runs still working.",
+		"Never declare the overall task done while a dispatched run is still active.",
 	];
 
 	const verificationRules = [

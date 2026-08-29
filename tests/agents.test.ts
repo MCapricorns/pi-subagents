@@ -58,6 +58,20 @@ describe("shipped specialist agents", () => {
 		expect(cleaner?.systemPrompt).toContain("deleting whole categories of complexity");
 	});
 
+	it("gives cleaner a scope contract with the uncommitted diff as its default", () => {
+		const cleaner = loadBuiltinAgents().find((agent) => agent.name === "cleaner");
+		// Two dispatch shapes: cleanup of what was just written, and cleanup of a
+		// caller-named target — committed history or a subtree.
+		expect(cleaner?.systemPrompt).toContain("your scope is the uncommitted work");
+		expect(cleaner?.systemPrompt).toContain("a Git range");
+		expect(cleaner?.systemPrompt).toContain("a directory or path list is that subtree");
+		// A clean tree plus a vague brief must not become a repository-wide sweep.
+		expect(cleaner?.systemPrompt).toContain("Roaming the whole repository uninvited is not a safe default");
+		// The load-bearing rule: narrowing where edits land must never narrow the
+		// search that proves a cut safe, or a scoped cleanup deletes a live caller.
+		expect(cleaner?.systemPrompt).toContain("Scope bounds your edits, never your evidence");
+	});
+
 	it("keeps release ownership out of implementation children", () => {
 		const worker = loadBuiltinAgents().find((agent) => agent.name === "worker");
 		expect(worker?.systemPrompt).toContain("Never commit, push, publish, tag, release, or bump");

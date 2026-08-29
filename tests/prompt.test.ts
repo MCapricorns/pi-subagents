@@ -62,6 +62,9 @@ describe("buildDelegationDirective", () => {
 		expect(directive).toContain("Your brief is its edit authorization");
 		expect(directive).toContain("every safe proven cut applies without per-item approval");
 		expect(directive).toContain("never a gate");
+		// The default needs no brief text; anything else has to be stated, since the
+		// child has no conversation memory to infer the target from.
+		expect(directive).toContain("Scope: the uncommitted diff, or whatever your brief names");
 	});
 
 	it("keeps documenter as a directly dispatched drift-sync decision owned by the main agent", () => {
