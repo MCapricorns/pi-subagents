@@ -249,6 +249,30 @@ describe("stale project-root pruning", () => {
 		}
 	});
 
+	it("keeps a project root whose only fresh file sits deep inside a stale tree", async () => {
+		const home = mkdtempSync(join(tmpdir(), "pi-subagents-project-prune-deep-"));
+		try {
+			const configPath = join(home, "settings.json");
+			const project = join(home, "ferris-pi-subagents", "deep-project");
+			const checkout = join(project, "worktrees", "pi-subagent-1", "checkout");
+			mkdirSync(checkout, { recursive: true });
+			const now = Date.now();
+			const old = new Date(now - PROJECT_ROOT_MAX_AGE_MS - 60_000);
+			writeFileSync(join(checkout, "live.ts"), "x", "utf8");
+			// Every directory above the live file looks long abandoned, so the age
+			// probe only finds the one thing keeping this project alive by
+			// descending all the way to it.
+			for (const dir of [join(project, "worktrees"), join(project, "worktrees", "pi-subagent-1"), checkout]) {
+				utimesSync(dir, old, old);
+			}
+
+			expect(await pruneStaleProjectRoots(configPath, { now })).toEqual([]);
+			expect(existsSync(join(checkout, "live.ts"))).toBe(true);
+		} finally {
+			rmSync(home, { recursive: true, force: true });
+		}
+	});
+
 	it("is a no-op when the extension home has no project roots yet", async () => {
 		const home = mkdtempSync(join(tmpdir(), "pi-subagents-project-prune-empty-"));
 		try {

@@ -371,10 +371,14 @@ export function referencedDurablePaths(records: readonly ThreadRecord[]): Set<st
 	return paths;
 }
 
-/** Newest modification time anywhere under root (directories count via their
- * own entries); undefined when root cannot be read. */
-function newestMtimeMs(root: string, now: number = Date.now()): number | undefined {
-	let newest: number | undefined;
+/** Whether everything under root was last modified before `cutoffMs` — the only
+ * question the age rule asks. Returns false the moment one fresh entry turns up,
+ * so a project still in use costs a few stats instead of a full walk of its
+ * retained sessions and worktree checkouts on every load. A root with no usable
+ * timestamp at all also reports false: a directory nothing could be read from is
+ * never the one to delete. */
+function isIdleSince(root: string, cutoffMs: number, now: number): boolean {
+	let sawTimestamp = false;
 	const stack: string[] = [root];
 	while (stack.length > 0) {
 		const dir = stack.pop()!;
@@ -392,11 +396,16 @@ function newestMtimeMs(root: string, now: number = Date.now()): number | undefin
 			} catch {
 				continue;
 			}
-			if (mtime > 0 && mtime <= now && (newest === undefined || mtime > newest)) newest = mtime;
+			// A timestamp in the future carries no usable age: it neither keeps a
+			// root alive nor lets one age out.
+			if (mtime > 0 && mtime <= now) {
+				if (mtime >= cutoffMs) return false;
+				sawTimestamp = true;
+			}
 			if (entry.isDirectory() && !entry.isSymbolicLink()) stack.push(path);
 		}
 	}
-	return newest;
+	return sawTimestamp;
 }
 
 /** Delete project directories under the ferris-pi-subagents root that have
@@ -419,8 +428,7 @@ export async function pruneStaleProjectRoots(configPath: string, options: { now?
 		if (!project.isDirectory() || project.isSymbolicLink()) continue;
 		const projectDir = join(root, project.name);
 		if (containsReferencedPath(projectDir, referenced)) continue;
-		const newest = newestMtimeMs(projectDir, now);
-		if (newest === undefined || now - newest <= PROJECT_ROOT_MAX_AGE_MS) continue;
+		if (!isIdleSince(projectDir, now - PROJECT_ROOT_MAX_AGE_MS, now)) continue;
 		await rm(projectDir, { recursive: true, force: true }).catch(() => undefined);
 		if (!existsSync(projectDir)) removed.push(project.name);
 	}
