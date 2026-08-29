@@ -302,6 +302,7 @@ function fakeWorktree(
 			throw new Error("not needed");
 		},
 		discard: async () => undefined,
+		hasPendingChanges: async () => true,
 		finalize: async () => ({ status: "integrated", integrated: true, hadChanges: true }),
 	};
 }

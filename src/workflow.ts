@@ -69,13 +69,21 @@ export function canStartManagedWorkflow(
  * directly, including every reviewer result — a direct reviewer dispatch never
  * starts another child. A failing managed gate is expanded by the workflow
  * itself into the reviewer fix stage. A dispatch that opted out of the gate
- * (review: "none") delivers directly too. */
+ * (review: "none") delivers directly too.
+ *
+ * `changedWorkspace: false` also delivers directly. A gate reviews a pending
+ * diff, so a run that produced none — a cleaner that found no safe cut, a worker
+ * that concluded there was nothing to do, both explicitly valid outcomes — has
+ * nothing to review, and spending a reviewer on an empty diff buys nothing.
+ * Only a proven absence of changes skips: `undefined` keeps the gate. */
 export function getManagedWorkflowPlan(
 	result: SingleResult,
 	availability: WorkflowAgentAvailability,
 	review: ReviewMode = "gate",
+	changedWorkspace?: boolean,
 ): ManagedWorkflowPlan | undefined {
 	if (review === "none") return undefined;
+	if (changedWorkspace === false) return undefined;
 	if (result.dispatchFailed || isFailedResult(result)) return undefined;
 	if (result.agent === "worker" || result.agent === "cleaner") {
 		if (!availability.reviewer) return undefined;

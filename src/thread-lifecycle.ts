@@ -667,7 +667,12 @@ export function createBackgroundDispatcher(options: BackgroundDispatcherOptions)
 
 				if (thread.retireOnSettle) runtime.retireThreadSession(thread);
 				let workflowOutcome: ManagedWorkflowOutcome | undefined;
-				const workflowPlan = getManagedWorkflowPlan(result, workflowAvailability, review);
+				const workflowPlan = getManagedWorkflowPlan(
+					result,
+					workflowAvailability,
+					review,
+					await producedWorkspaceChanges(thread),
+				);
 					if (workflowPlan && runtime.sessionActive) {
 						// The continuation is runtime-initiated (gate review,
 						// documentation sync): release this generation's
@@ -1292,6 +1297,21 @@ async function discardRestoredRecord(runtime: SubagentRuntime, record: ThreadRec
 		await worktree?.discard().catch(() => undefined);
 	}
 	await removeThreadRecord(runtime.configPath, record.runId).catch(() => undefined);
+}
+
+/** Whether a settled generation left anything for a gate to review.
+ *
+ * Only an isolated worktree can answer: it starts from the integration base, so a
+ * diff against that base is precisely this generation's own output. A shared
+ * checkout is shared with the user and their editor, so nothing in it can be
+ * attributed to one run, and undefined keeps the gate. Wrongly skipping a review
+ * is the only failure here that costs correctness rather than a run, so an
+ * undecidable case always pays for the run. */
+async function producedWorkspaceChanges(
+	thread: SubagentThread,
+): Promise<boolean | undefined> {
+	if (!thread.worktree) return undefined;
+	return thread.worktree.hasPendingChanges().catch(() => undefined);
 }
 
 /** Project-scoped <projectRoot>/results for a completion's artifacts. */

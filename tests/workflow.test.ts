@@ -43,6 +43,17 @@ describe("managed workflow planning", () => {
 		expect(getManagedWorkflowPlan(result, available("reviewer"), "gate")).toBeDefined();
 	});
 
+	it.each(["worker", "cleaner"])("skips the gate for a %s run that produced no diff to review", (agent) => {
+		const result = reviewResult("found no safe cut", { agent });
+		// A gate reviews a pending diff; there is nothing to review and nothing to
+		// regress. Making zero edits is an explicitly valid outcome for both roles.
+		expect(getManagedWorkflowPlan(result, available("reviewer"), "gate", false)).toBeUndefined();
+		expect(getManagedWorkflowPlan(result, available("reviewer"), "gate", true)).toBeDefined();
+		// Undecidable (a shared checkout nobody can attribute) still pays for the
+		// gate: skipping a review of real changes is the failure that matters.
+		expect(getManagedWorkflowPlan(result, available("reviewer"), "gate", undefined)).toBeDefined();
+	});
+
 	it("delivers a successful top-level documenter directly", () => {
 		const result = reviewResult("docs done", { agent: "documenter" });
 		expect(getManagedWorkflowPlan(result, available("reviewer"))).toBeUndefined();

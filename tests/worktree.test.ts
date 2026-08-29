@@ -116,6 +116,42 @@ describe.concurrent("Git worktree isolation lifecycle", { timeout: 30_000 }, () 
 		await expect(createIsolation(ctx, dir)).rejects.toThrow(/inside a Git worktree\/repository/i);
 	});
 
+	it("reports pending changes only once the worktree actually has some", async (ctx) => {
+		const repo = createRepo();
+		trackDir(ctx, repo);
+		const worktree = await createIsolation(ctx, repo);
+		trackWorktree(ctx, repo, worktree);
+
+		// A fresh worktree starts at the integration base, which is what makes the
+		// answer exact: no diff means this generation wrote nothing.
+		expect(await worktree.hasPendingChanges()).toBe(false);
+
+		writeFileSync(join(worktree.cwd, "tracked.txt"), "edited\n", "utf8");
+		expect(await worktree.hasPendingChanges()).toBe(true);
+
+		// Untracked output counts too — a cleanup that only adds a file still has
+		// something to review.
+		writeFileSync(join(worktree.cwd, "tracked.txt"), "base\n", "utf8");
+		writeFileSync(join(worktree.cwd, "brand-new.txt"), "new\n", "utf8");
+		expect(await worktree.hasPendingChanges()).toBe(true);
+
+		await worktree.finalize();
+		// A settled handle answers from its recorded outcome instead of asking Git
+		// about a directory that no longer exists.
+		expect(await worktree.hasPendingChanges()).toBe(true);
+	});
+
+	it("reports no pending changes for a worktree that settled without any", async (ctx) => {
+		const repo = createRepo();
+		trackDir(ctx, repo);
+		const worktree = await createIsolation(ctx, repo);
+		trackWorktree(ctx, repo, worktree);
+
+		const finalization = await worktree.finalize();
+		expect(finalization.hadChanges).toBe(false);
+		expect(await worktree.hasPendingChanges()).toBe(false);
+	});
+
 	it("canonicalizes root and nested paths in an empty repository without requiring HEAD", async (ctx) => {
 		const repo = mkdtempSync(join(tmpdir(), "pi-subagents-empty-repo-"));
 		trackDir(ctx, repo);

@@ -109,6 +109,9 @@ function fakeWorktree(root: string, final: WorktreeFinalization = {
 		async snapshotCheckpoint() {
 			return { baseHead: "deadbeef", commit: "deadbeef", patch: Buffer.alloc(0) };
 		},
+		async hasPendingChanges() {
+			return true;
+		},
 		finalize: finalizeMock,
 		finalizeMock,
 		discard: discardMock,
