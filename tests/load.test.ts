@@ -230,6 +230,34 @@ describe("extension registration", () => {
 		expect(stub.tools.map((t) => t.name)).not.toContain("subagent");
 		expect(stub.tools.map((t) => t.name)).not.toContain("subagent_control");
 	});
+
+	it("surfaces compaction failures through session_compact_failed", async () => {
+		const stub = makeStub();
+		register(stub.api);
+		const notify = vi.fn();
+		expect(typeof stub.hooks["session_compact_failed"]).toBe("function");
+
+		await stub.hooks["session_compact_failed"](
+			{ reason: "threshold", errorMessage: "provider 502", aborted: false, willRetry: false },
+			{ ui: { notify } },
+		);
+		expect(notify).toHaveBeenCalledWith(expect.stringContaining("provider 502"), "error");
+
+		notify.mockClear();
+		await stub.hooks["session_compact_failed"](
+			{ reason: "overflow", errorMessage: "transient", aborted: true, willRetry: true },
+			{ ui: { notify } },
+		);
+		expect(notify).toHaveBeenCalledWith(expect.stringContaining("retrying automatically"), "warning");
+
+		// A user-cancelled compaction stays silent.
+		notify.mockClear();
+		await stub.hooks["session_compact_failed"](
+			{ reason: "manual", aborted: true, willRetry: false },
+			{ ui: { notify } },
+		);
+		expect(notify).not.toHaveBeenCalled();
+	});
 });
 
 describe("run id matching", () => {

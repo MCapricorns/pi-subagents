@@ -10,7 +10,7 @@ import {
 import { mkdir } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, relative, resolve } from "node:path";
-import { afterEach, describe, expect, it } from "vitest";
+import { describe, expect, it, type TestContext } from "vitest";
 import {
 	createWorktreeIsolation,
 	resolveRepositoryRoot,
@@ -47,27 +47,35 @@ function createRepo(): string {
 	return repo;
 }
 
-const repos: string[] = [];
-const retained: Array<{ repo: string; handle: WorktreeIsolation }> = [];
+/** Per-test cleanup registration keeps concurrent tests from draining each
+ * other's repositories: artifacts are recorded against the owning test's
+ * context (the global onTestFinished cannot attribute callers reliably under
+ * describe.concurrent) instead of a module-level afterEach sweep. */
+function trackDir(ctx: TestContext, dir: string): void {
+	ctx.onTestFinished(() => {
+		rmSync(dir, { recursive: true, force: true });
+	});
+}
 
-afterEach(() => {
-	for (const { repo, handle } of retained.splice(0)) {
-		try {
-			if (existsSync(handle.worktreePath)) git(repo, ["worktree", "remove", "--force", handle.worktreePath]);
-			git(repo, ["worktree", "prune"]);
-		} catch {
-			/* best-effort test cleanup */
+function trackWorktree(ctx: TestContext, repo: string, ...handles: WorktreeIsolation[]): void {
+	ctx.onTestFinished(() => {
+		for (const handle of handles) {
+			try {
+				if (existsSync(handle.worktreePath)) git(repo, ["worktree", "remove", "--force", handle.worktreePath]);
+				git(repo, ["worktree", "prune"]);
+			} catch {
+				/* best-effort test cleanup */
+			}
+			try {
+				rmSync(handle.tempDir, { recursive: true, force: true });
+			} catch {
+				/* best-effort test cleanup */
+			}
 		}
-		try {
-			rmSync(handle.tempDir, { recursive: true, force: true });
-		} catch {
-			/* best-effort test cleanup */
-		}
-	}
-	for (const repo of repos.splice(0)) rmSync(repo, { recursive: true, force: true });
-});
+	});
+}
 
-describe("bounded Git command runner", () => {
+describe.concurrent("bounded Git command runner", () => {
 	it("terminates commands that exceed their deadline", async () => {
 		await expect(runCommand(process.execPath, ["-e", "setInterval(() => {}, 1000)"], {
 			cwd: process.cwd(),
@@ -87,17 +95,17 @@ describe("bounded Git command runner", () => {
 
 // Every lifecycle test spawns dozens of git subprocesses; on Windows that alone
 // can exceed the default 5s per test, so the whole block gets a wider ceiling.
-describe("Git worktree isolation lifecycle", { timeout: 30_000 }, () => {
-	it("rejects cwd outside a Git worktree without degrading to shared", async () => {
+describe.concurrent("Git worktree isolation lifecycle", { timeout: 30_000 }, () => {
+	it("rejects cwd outside a Git worktree without degrading to shared", async (ctx) => {
 		const dir = mkdtempSync(join(tmpdir(), "pi-subagents-not-git-"));
-		repos.push(dir);
+		trackDir(ctx, dir);
 		await expect(resolveWorktreeTarget(dir)).rejects.toThrow(/inside a Git worktree\/repository/i);
 		await expect(createWorktreeIsolation(dir)).rejects.toThrow(/inside a Git worktree\/repository/i);
 	});
 
-	it("canonicalizes root and nested paths in an empty repository without requiring HEAD", async () => {
+	it("canonicalizes root and nested paths in an empty repository without requiring HEAD", async (ctx) => {
 		const repo = mkdtempSync(join(tmpdir(), "pi-subagents-empty-repo-"));
-		repos.push(repo);
+		trackDir(ctx, repo);
 		git(repo, ["init"]);
 		const nested = join(repo, "nested");
 		mkdirSync(nested, { recursive: true });
@@ -108,9 +116,9 @@ describe("Git worktree isolation lifecycle", { timeout: 30_000 }, () => {
 		await expect(resolveWorktreeTarget(nested)).rejects.toThrow(/committed HEAD/i);
 	});
 
-	it("creates a detached worktree and mirrors a requested subdirectory", async () => {
+	it("creates a detached worktree and mirrors a requested subdirectory", async (ctx) => {
 		const repo = createRepo();
-		repos.push(repo);
+		trackDir(ctx, repo);
 		const requested = join(repo, "nested");
 		const handle = await createWorktreeIsolation(requested);
 		expect(existsSync(handle.worktreePath)).toBe(true);
@@ -126,9 +134,9 @@ describe("Git worktree isolation lifecycle", { timeout: 30_000 }, () => {
 		expect(git(repo, ["worktree", "list", "--porcelain"])).not.toContain(handle.worktreePath);
 	});
 
-	it("integrates tracked edits, deletion, untracked text/binary without staging or clobbering parent edits", async () => {
+	it("integrates tracked edits, deletion, untracked text/binary without staging or clobbering parent edits", async (ctx) => {
 		const repo = createRepo();
-		repos.push(repo);
+		trackDir(ctx, repo);
 		// This dirty parent edit is unrelated and must survive patch application.
 		writeFileSync(join(repo, "parent-only.txt"), "parent dirty edit\n", "utf8");
 		const handle = await createWorktreeIsolation(repo);
@@ -154,9 +162,9 @@ describe("Git worktree isolation lifecycle", { timeout: 30_000 }, () => {
 		expect(existsSync(handle.tempDir)).toBe(false);
 	});
 
-	it("seeds a settled continuation and integrates only follow-on edits", async () => {
+	it("seeds a settled continuation and integrates only follow-on edits", async (ctx) => {
 		const repo = createRepo();
-		repos.push(repo);
+		trackDir(ctx, repo);
 		const first = await createWorktreeIsolation(repo);
 		writeFileSync(join(first.worktreePath, "tracked.txt"), "generation one\n", "utf8");
 		expect(await first.finalize()).toMatchObject({ status: "integrated", integrated: true });
@@ -174,9 +182,9 @@ describe("Git worktree isolation lifecycle", { timeout: 30_000 }, () => {
 		expect(git(repo, ["diff", "--cached", "--name-only"])).toBe("");
 	});
 
-	it("integrates only each fork's unique edits after one shared seed", async () => {
+	it("integrates only each fork's unique edits after one shared seed", async (ctx) => {
 		const repo = createRepo();
-		repos.push(repo);
+		trackDir(ctx, repo);
 		const source = await createWorktreeIsolation(repo);
 		writeFileSync(join(source.worktreePath, "tracked.txt"), "shared seed\n", "utf8");
 		expect(await source.finalize()).toMatchObject({ status: "integrated", integrated: true });
@@ -193,9 +201,9 @@ describe("Git worktree isolation lifecycle", { timeout: 30_000 }, () => {
 		expect(readFileSync(join(repo, "fork-two.txt"), "utf8")).toBe("two\n");
 	});
 
-	it("three-way merges a later fork whose patch context drifted in the checkout", async () => {
+	it("three-way merges a later fork whose patch context drifted in the checkout", async (ctx) => {
 		const repo = createRepo();
-		repos.push(repo);
+		trackDir(ctx, repo);
 		const lines = ["one", "two", "three", "four", "five", "six", "seven"];
 		writeFileSync(join(repo, "tracked.txt"), `${lines.join("\n")}\n`, "utf8");
 		git(repo, ["add", "."]);
@@ -203,7 +211,7 @@ describe("Git worktree isolation lifecycle", { timeout: 30_000 }, () => {
 
 		const firstFork = await createWorktreeIsolation(repo);
 		const secondFork = await createWorktreeIsolation(repo);
-		retained.push({ repo, handle: firstFork }, { repo, handle: secondFork });
+		trackWorktree(ctx, repo, firstFork, secondFork);
 		// The second fork's patch context includes line one, which the first
 		// fork will have already changed by the time it integrates.
 		writeFileSync(join(firstFork.worktreePath, "tracked.txt"), `${["A1", ...lines.slice(1)].join("\n")}\n`, "utf8");
@@ -220,12 +228,12 @@ describe("Git worktree isolation lifecycle", { timeout: 30_000 }, () => {
 		expect(git(repo, ["diff", "--cached", "--name-only"])).toBe("");
 	});
 
-	it("retains a later fork that edits the same lines as an integrated one", async () => {
+	it("retains a later fork that edits the same lines as an integrated one", async (ctx) => {
 		const repo = createRepo();
-		repos.push(repo);
+		trackDir(ctx, repo);
 		const firstFork = await createWorktreeIsolation(repo);
 		const secondFork = await createWorktreeIsolation(repo);
-		retained.push({ repo, handle: firstFork }, { repo, handle: secondFork });
+		trackWorktree(ctx, repo, firstFork, secondFork);
 		writeFileSync(join(firstFork.worktreePath, "tracked.txt"), "fork one\n", "utf8");
 		writeFileSync(join(secondFork.worktreePath, "tracked.txt"), "fork two\n", "utf8");
 
@@ -244,9 +252,9 @@ describe("Git worktree isolation lifecycle", { timeout: 30_000 }, () => {
 		expect(git(repo, ["diff", "--cached", "--name-only"])).toBe("");
 	});
 
-	it("recognizes an integrated seed after the parent commits it", async () => {
+	it("recognizes an integrated seed after the parent commits it", async (ctx) => {
 		const repo = createRepo();
-		repos.push(repo);
+		trackDir(ctx, repo);
 		const first = await createWorktreeIsolation(repo);
 		writeFileSync(join(first.worktreePath, "tracked.txt"), "generation one\n", "utf8");
 		expect(await first.finalize()).toMatchObject({ status: "integrated", integrated: true });
@@ -264,9 +272,9 @@ describe("Git worktree isolation lifecycle", { timeout: 30_000 }, () => {
 		expect(readFileSync(join(repo, "tracked.txt"), "utf8")).toBe("generation two\n");
 	});
 
-	it("preserves an integrated seed through a no-op continuation before later edits", async () => {
+	it("preserves an integrated seed through a no-op continuation before later edits", async (ctx) => {
 		const repo = createRepo();
-		repos.push(repo);
+		trackDir(ctx, repo);
 		const first = await createWorktreeIsolation(repo);
 		writeFileSync(join(first.worktreePath, "tracked.txt"), "generation one\n", "utf8");
 		expect(await first.finalize()).toMatchObject({ status: "integrated", integrated: true });
@@ -288,11 +296,11 @@ describe("Git worktree isolation lifecycle", { timeout: 30_000 }, () => {
 		expect(readFileSync(join(repo, "generation-three.txt"), "utf8")).toBe("three\n");
 	});
 
-	it("retains the worktree and binary patch when parent changes conflict", async () => {
+	it("retains the worktree and binary patch when parent changes conflict", async (ctx) => {
 		const repo = createRepo();
-		repos.push(repo);
+		trackDir(ctx, repo);
 		const handle = await createWorktreeIsolation(repo);
-		retained.push({ repo, handle });
+		trackWorktree(ctx, repo, handle);
 		writeFileSync(join(handle.worktreePath, "conflict.txt"), "worker version\n", "utf8");
 		writeFileSync(join(repo, "conflict.txt"), "parent version\n", "utf8");
 
@@ -317,9 +325,9 @@ describe("Git worktree isolation lifecycle", { timeout: 30_000 }, () => {
 		expect(git(repo, ["diff", "--cached", "--name-only"])).toBe("");
 	});
 
-	it("recreates an equivalent untracked/empty cwd in the isolated tree", async () => {
+	it("recreates an equivalent untracked/empty cwd in the isolated tree", async (ctx) => {
 		const repo = createRepo();
-		repos.push(repo);
+		trackDir(ctx, repo);
 		const empty = join(repo, "untracked", "deep");
 		await mkdir(empty, { recursive: true });
 		const handle = await createWorktreeIsolation(empty);

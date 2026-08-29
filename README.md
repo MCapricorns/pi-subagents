@@ -71,7 +71,7 @@ the main agent automatically; there is no polling loop.
 
 ## Quick start
 
-Requires **pi >= 0.83.0** and **Node.js >= 22.19.0**.
+Requires **pi >= 0.84.4** and **Node.js >= 22.19.0**.
 
 ```bash
 pi install npm:@ferris1225/pi-subagents
@@ -197,7 +197,7 @@ Every dispatch returns a stable `#id` — the handle for all control tools:
 | `subagent_control` | `resume` a parked/settled thread with its full retained context, optionally with a new `objective` appended. Only interrupted (parked) threads survive a reload. |
 | `subagent_status`  | List active and recent runs, or return one run's full result and failed-tool diagnostics.                                                                        |
 | `subagent_wait`    | Non-blocking in-turn lookup; `timeoutMs` only when you must wait.                                                                                                |
-| `subagent_stop`    | Destructively cancel, deliver the partial output, retire the thread.                                                                                             |
+| `subagent_stop`    | Destructively cancel, deliver the partial output, retire the thread. Stopping also drops any steering/follow-up messages still queued in the child so a stopped or later resumed thread cannot be revived by stale queue entries.      |
 
 ```ts
 subagent_control({ action: "resume", id: 7, objective: "Finish the tests." });
@@ -292,6 +292,8 @@ config-file only, stored at
 Invalid values fall back safely; stale keys (including the former
 `maxConcurrency`/`maxFixRounds` knobs) are dropped automatically. At session
 start, model overrides Pi no longer reports are removed with a one-time notice.
+When pi's own session compaction fails mid-thread, a notice surfaces the error
+(and the automatic retry) instead of failing silently.
 
 ## Custom agents
 

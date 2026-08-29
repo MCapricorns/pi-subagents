@@ -56,4 +56,20 @@ export function registerAnnouncements(pi: ExtensionAPI, runtime: SubagentRuntime
 		if (ctx.mode !== "tui") return;
 		installActiveRunsWidget(ctx);
 	});
+
+	// Compaction failures are otherwise silent in long orchestration sessions
+	// where subagent results accumulate; aborted (user-cancelled) compactions
+	// are deliberate and not worth a notice.
+	pi.on("session_compact_failed", async (event, ctx) => {
+		if (event.aborted && !event.errorMessage) return;
+		const detail = event.errorMessage ? `: ${event.errorMessage}` : "";
+		if (event.willRetry) {
+			ctx.ui.notify(`pi-subagents: session compaction failed${detail} — retrying automatically.`, "warning");
+			return;
+		}
+		ctx.ui.notify(
+			`pi-subagents: session compaction failed${detail}. Long threads may hit context limits soon; run /compact to retry or trim old results.`,
+			"error",
+		);
+	});
 }

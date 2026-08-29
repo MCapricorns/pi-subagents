@@ -3,10 +3,16 @@ export interface FakeRpcScriptOptions {
 	/** Runs after receipt/counting but before agent_start and onPrompt. Override
 	 * to delay or reject prompt preflight; the snippet must call respond(). */
 	onPromptPreflight?: string;
-	onPrompt: string;
+	onPrompt: string;
 	onAbort?: string;
 	onAbortRetry?: string;
 	onGetState?: string;
+	/** Data returned for a clear_queue command; defaults to empty queues. */
+	clearQueueData?: Record<string, unknown[]>;
+	/** Respond to clear_queue with a rejection, as an older pi child would. */
+	clearQueueFail?: boolean;
+	/** Runs when a clear_queue command arrives, before the canned response. */
+	onClearQueue?: string;
 	emitAgentStart?: boolean;
 	autoSettle?: boolean;
 }
@@ -29,7 +35,7 @@ ${options.setup ?? ""}
 let inputBuffer = "";
 let promptCount = 0;
 const send = (value) => process.stdout.write(JSON.stringify(value) + "\\n");
-const respond = (command, success = true, error) => send({ id: command.id, type: "response", command: command.type, success, ...(error ? { error } : {}) });
+const respond = (command, success = true, error, data) => send({ id: command.id, type: "response", command: command.type, success, ...(data !== undefined ? { data } : {}), ...(error ? { error } : {}) });
 const handle = async (command) => {
 	if (command.type === "prompt") {
 		promptCount++;
@@ -38,6 +44,12 @@ const handle = async (command) => {
 		const input = command.message;
 		${options.onPrompt}
 		${options.autoSettle === false ? "" : "send({ type: \"agent_settled\" });"}
+		return;
+	}
+	if (command.type === "clear_queue") {
+		${options.onClearQueue ?? ""}
+		if (${options.clearQueueFail ? "true" : "false"}) respond(command, false, "unknown command");
+		else respond(command, true, undefined, ${JSON.stringify(options.clearQueueData ?? { steering: [], followUp: [] })});
 		return;
 	}
 	if (command.type === "abort") {

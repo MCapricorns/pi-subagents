@@ -23,6 +23,10 @@ export const DEPTH_ENV_VAR = "PI_SUBAGENT_DEPTH";
 export const SUBAGENT_KILL_GRACE_MS = 5_000;
 /** ACK budget after the child is known to be reading RPC. */
 export const RPC_COMMAND_TIMEOUT_MS = 30_000;
+
+/** clear_queue is stop-path hygiene ahead of the abort: give it its own short
+ * budget so a hung response cannot eat into the abort-settle window. */
+const RPC_CLEAR_QUEUE_TIMEOUT_MS = 2_000;
 /** Time allowed for the child to boot and answer get_state. */
 export const RPC_READY_TIMEOUT_MS = 60_000;
 export const RPC_ABORT_SETTLE_TIMEOUT_MS = 5_000;
@@ -503,6 +507,7 @@ export async function runRpcAgentAttempt(options: RunRpcAttemptOptions): Promise
 	let forceKillTimer: ReturnType<typeof setTimeout> | undefined;
 	let abortHandler: (() => void) | undefined;
 	let abortSettlement: Deferred<void> | undefined;
+	let droppedQueuedCount = 0;
 	let initialPromptResolved = false;
 	const initialPrompt = deferred<{ accepted: boolean; error?: Error }>();
 	const pendingRequests = new Map<string, PendingRequest>();
@@ -625,6 +630,20 @@ export async function runRpcAgentAttempt(options: RunRpcAttemptOptions): Promise
 	const abortAcceptedPrompt = async (): Promise<boolean> => {
 		const acceptance = await initialPrompt.promise;
 		if (!acceptance.accepted) return false;
+		// Pi continues queued steering/follow-up messages after an abort. Drop
+		// them first so a stopped run — or a later resume of its retained
+		// thread — cannot be revived by stale queue entries. Best-effort: an
+		// older child rejects the command and a hung child falls through to
+		// the bounded abort below.
+		try {
+			const cleared = await send({ type: "clear_queue" }, RPC_CLEAR_QUEUE_TIMEOUT_MS);
+			const data = cleared.data as { steering?: unknown; followUp?: unknown } | undefined;
+			droppedQueuedCount =
+				(Array.isArray(data?.steering) ? data.steering.length : 0) +
+				(Array.isArray(data?.followUp) ? data.followUp.length : 0);
+		} catch {
+			/* abort below is the authoritative stop */
+		}
 		const stable = waitForAbortSettlement();
 		try {
 			await Promise.all([send({ type: "abort" }), stable.promise]);
@@ -669,7 +688,10 @@ export async function runRpcAgentAttempt(options: RunRpcAttemptOptions): Promise
 			}
 			result.exitCode = 1;
 			result.stopReason = "aborted";
-			result.errorMessage = reason;
+			result.errorMessage =
+				droppedQueuedCount > 0
+					? `${reason} — dropped ${droppedQueuedCount} queued steering/follow-up message${droppedQueuedCount === 1 ? "" : "s"}`
+					: reason;
 			finish();
 			// Even when RPC abort/settle times out, give Pi SIGTERM first so its
 			// shutdown handler can reap detached tool process groups. terminate()

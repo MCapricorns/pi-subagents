@@ -254,6 +254,85 @@ send({ type: "agent_settled" });`,
 			rmSync(dir, { recursive: true, force: true });
 		}
 	});
+
+	it("clears queued steering/follow-up messages before aborting", async () => {
+		const dir = mkdtempSync(join(tmpdir(), "pi-subagents-rpc-clear-"));
+		const script = join(dir, "clear-child.mjs");
+		const log = join(dir, "commands.log");
+		writeFileSync(
+			script,
+			fakeRpcScript({
+				setup: `const commandLog = ${JSON.stringify(log)};`,
+				onPrompt: `send({ type: "message_update", assistantMessageEvent: { type: "text_delta", delta: "working" } });`,
+				onClearQueue: `fs.appendFileSync(commandLog, JSON.stringify({ type: "clear_queue" }) + "\\n");`,
+				clearQueueData: { steering: ["change direction"], followUp: ["summarize after"] },
+				onAbort: `fs.appendFileSync(commandLog, JSON.stringify({ type: "abort" }) + "\\n");
+send({ type: "agent_settled" });`,
+				autoSettle: false,
+			}),
+			"utf8",
+		);
+		const previous = process.argv[1];
+		process.argv[1] = script;
+		try {
+			const control = new RpcRunControl("objective", 1);
+			const running = runSingleAgent({
+				defaultCwd: process.cwd(),
+				sessionRoot: sessionRootForTests(),
+				agent,
+				agentName: agent.name,
+				task: "objective",
+				control,
+				makeDetails: (results) => ({ mode: "single", results }),
+			});
+			await waitFor(() => control.getPhase() === "running");
+			await control.stop("manual stop");
+			const result = await running;
+			expect(readLog(log).map((entry) => entry.type)).toEqual(["clear_queue", "abort"]);
+			expect(result.stopReason).toBe("aborted");
+			expect(result.errorMessage).toBe("manual stop — dropped 2 queued steering/follow-up messages");
+		} finally {
+			process.argv[1] = previous;
+			rmSync(dir, { recursive: true, force: true });
+		}
+	});
+
+	it("still aborts cleanly when the child rejects clear_queue", async () => {
+		const dir = mkdtempSync(join(tmpdir(), "pi-subagents-rpc-clear-reject-"));
+		const script = join(dir, "clear-reject-child.mjs");
+		writeFileSync(
+			script,
+			fakeRpcScript({
+				onPrompt: `send({ type: "message_update", assistantMessageEvent: { type: "text_delta", delta: "working" } });`,
+				clearQueueFail: true,
+				onAbort: `send({ type: "agent_settled" });`,
+				autoSettle: false,
+			}),
+			"utf8",
+		);
+		const previous = process.argv[1];
+		process.argv[1] = script;
+		try {
+			const control = new RpcRunControl("objective", 1);
+			const running = runSingleAgent({
+				defaultCwd: process.cwd(),
+				sessionRoot: sessionRootForTests(),
+				agent,
+				agentName: agent.name,
+				task: "objective",
+				control,
+				makeDetails: (results) => ({ mode: "single", results }),
+			});
+			await waitFor(() => control.getPhase() === "running");
+			await control.stop("manual stop");
+			const result = await running;
+			expect(result.stopReason).toBe("aborted");
+			expect(result.errorMessage).toBe("manual stop");
+		} finally {
+			process.argv[1] = previous;
+			rmSync(dir, { recursive: true, force: true });
+		}
+	});
 });
 
 describe("RpcRunControl attempt tokens", () => {
