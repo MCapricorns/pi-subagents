@@ -118,7 +118,7 @@ describe("buildDelegationDirective", () => {
 		const directive = buildDelegationDirective([agent("explorer"), agent("worker"), agent("reviewer")]);
 		expect(directive).toContain("Dispatch never blocks or ends your turn");
 		expect(directive).toContain("each completion resumes you automatically");
-		expect(directive).toContain("Never sleep, poll, or `subagent_wait`");
+		expect(directive).toContain("Never sleep or poll for it");
 		expect(directive).toContain("never a restatement");
 		expect(directive).toContain("`subagent_status` must show no active runs");
 	});

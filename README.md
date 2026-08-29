@@ -213,8 +213,7 @@ Every dispatch returns a stable `#id` — the handle for all control tools:
 | Tool               | What it does                                                                                                                                                     |
 | ------------------ | ---------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `subagent_control` | `resume` a parked/settled thread with its full retained context, optionally with a new `objective` appended. Only interrupted (parked) threads survive a reload. |
-| `subagent_status`  | List active and recent runs, or return one run's full result and failed-tool diagnostics.                                                                        |
-| `subagent_wait`    | Non-blocking in-turn lookup; `timeoutMs` only when you must wait.                                                                                                |
+| `subagent_status`  | List active and recent runs, or return one run's full result and failed-tool diagnostics. `waitMs` blocks in-turn for active runs (one-shot `pi -p` parents, or a dependent next step). |
 | `subagent_stop`    | Destructively cancel, deliver the partial output, retire the thread. Stopping also drops any steering/follow-up messages still queued in the child so a stopped or later resumed thread cannot be revived by stale queue entries.      |
 
 ```ts

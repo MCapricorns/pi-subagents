@@ -72,6 +72,8 @@ describe("extension registration", () => {
 		register(stub.api);
 		expect(stub.tools.map((t) => t.name)).toContain("subagent");
 		expect(stub.tools.map((t) => t.name)).toContain("subagent_control");
+		// The former standalone wait tool is folded into subagent_status waitMs.
+		expect(stub.tools.map((t) => t.name)).not.toContain("subagent_wait");
 		expect(stub.commands).toContain("subagents-setup");
 		expect(stub.commands).not.toContain("subagents-inspect");
 		expect(typeof stub.hooks["before_agent_start"]).toBe("function");
@@ -106,7 +108,7 @@ describe("extension registration", () => {
 		// call-time mechanics only.
 		const parentPaid = stub.tools.reduce((total: number, tool: any) =>
 			total + [tool.description, tool.promptSnippet, ...(tool.promptGuidelines ?? [])].join(" ").length, 0);
-		expect(parentPaid).toBeLessThan(3_900);
+		expect(parentPaid).toBeLessThan(3_400);
 	});
 
 	it("points a first run without a config file at /subagents-setup", async () => {
@@ -439,7 +441,7 @@ send({
 		}
 	});
 
-	it("subagent_wait returns the finished result in-turn instead of sleeping", async () => {
+	it("subagent_status waitMs blocks for the result in-turn instead of sleeping", async () => {
 		configureEnabledAgents(["worker"]);
 		const stub = makeStub();
 		const { tasks: capturedTasks, controllers } = captureEnqueue();
@@ -457,20 +459,20 @@ send({
 
 			register(stub.api);
 			const tool = stub.tools.find((candidate) => candidate.name === "subagent");
-			const waitTool = stub.tools.find((candidate) => candidate.name === "subagent_wait");
-			expect(waitTool).toBeDefined();
+			const statusTool = stub.tools.find((candidate) => candidate.name === "subagent_status");
+			expect(statusTool).toBeDefined();
 
 			await runTool(tool, "call-w", { agent: "worker", task: "Fix the build" }, executionContext());
 			expect(capturedTasks).toHaveLength(1);
 
-			// An explicit timeoutMs opts into blocking (the default is a
+			// An explicit waitMs opts into blocking (the default is a
 			// non-blocking lookup); let the run settle afterwards and the same
 			// promise resolves with it.
 			const runId = monitor.getRuns().find((run) => run.task === "Fix the build")?.id;
 			expect(runId).toBeDefined();
-			const waitPromise = waitTool.execute(
+			const waitPromise = statusTool.execute(
 				"wait-1",
-				{ id: String(runId), timeoutMs: 30_000 },
+				{ id: String(runId), waitMs: 30_000 },
 				new AbortController().signal,
 				() => {},
 				executionContext(),
@@ -483,8 +485,8 @@ send({
 			expect(text).toContain("worker result payload");
 			expect(text).toContain("Task: Fix the build");
 
-			// A settled run resolves immediately on a second call.
-			const second = await runTool(waitTool, "wait-2", { id: String(runId) }, executionContext());
+			// A settled run resolves immediately on a second call, waiting or not.
+			const second = await runTool(statusTool, "wait-2", { id: String(runId), waitMs: 30_000 }, executionContext());
 			expect(second.content[0].text).toContain("worker result payload");
 		} finally {
 			restoreChild();
@@ -492,48 +494,49 @@ send({
 		}
 	});
 
-	it("subagent_wait reports no active runs and times out on still-running ones", async () => {
+	it("subagent_status waitMs reports no active runs and times out on still-running ones", async () => {
 		const stub = makeStub();
 		const { tasks: capturedTasks, controllers } = captureEnqueue();
 
 		try {
 			register(stub.api);
 			const tool = stub.tools.find((candidate) => candidate.name === "subagent");
-			const waitTool = stub.tools.find((candidate) => candidate.name === "subagent_wait");
+			const statusTool = stub.tools.find((candidate) => candidate.name === "subagent_status");
 
-			const none = await runTool(waitTool, "wait-none", {}, executionContext());
+			const none = await runTool(statusTool, "wait-none", { waitMs: 100 }, executionContext());
 			expect(none.content[0].text).toContain("No active subagent runs");
 
 			await runTool(tool, "call-w2", { agent: "worker", task: "Long task" }, executionContext());
-			// The captured task never runs, so the run stays active: wait times out.
+			// The captured task never runs, so the run stays active: the wait times out.
 			const runId = monitor.getRuns().find((run) => run.task === "Long task")?.id;
 			expect(runId).toBeDefined();
-			const timedOut = await runTool(waitTool, "wait-to", { id: String(runId), timeoutMs: 100 }, executionContext());
+			const timedOut = await runTool(statusTool, "wait-to", { id: String(runId), waitMs: 100 }, executionContext());
 			expect(timedOut.content[0].text).toContain("wait timed out");
 			expect(timedOut.content[0].text).toContain(`#${runId}`);
 
-			// The default is a NON-blocking lookup: a still-active run returns a
+			// Without waitMs the lookup NEVER blocks: a still-active run returns a
 			// note immediately (the model ends its turn and the wake-up message
 			// delivers the result) instead of holding the turn.
-			const nonBlocking = await runTool(waitTool, "wait-nb", { id: String(runId) }, executionContext());
-			expect(nonBlocking.content[0].text).toContain(`run #${runId} is still active`);
-			expect(nonBlocking.content[0].text).toContain("end your turn");
+			const nonBlocking = await runTool(statusTool, "wait-nb", { id: String(runId) }, executionContext());
+			expect(nonBlocking.content[0].text).toContain(`Run #${runId} worker is still active`);
+			expect(nonBlocking.content[0].text).toContain("End your turn");
+			expect(nonBlocking.content[0].text).toContain("waitMs");
 
-			const unknown = await runTool(waitTool, "wait-x", { id: "99" }, executionContext());
+			const unknown = await runTool(statusTool, "wait-x", { id: "99", waitMs: 100 }, executionContext());
 			expect(unknown.content[0].text).toContain('No active subagent run matches "99"');
 		} finally {
 			await shutdownExtension(stub, { controllers });
 		}
 	});
 
-	it("subagent_wait resolves with a note when the calling turn's signal is aborted", async () => {
+	it("subagent_status waitMs resolves with a note when the calling turn's signal is aborted", async () => {
 		const stub = makeStub();
 		const { tasks: capturedTasks, controllers } = captureEnqueue();
 
 		try {
 			register(stub.api);
 			const tool = stub.tools.find((candidate) => candidate.name === "subagent");
-			const waitTool = stub.tools.find((candidate) => candidate.name === "subagent_wait");
+			const statusTool = stub.tools.find((candidate) => candidate.name === "subagent_status");
 			await runTool(tool, "call-wa", { agent: "worker", task: "Long task" }, executionContext());
 			const runId = monitor.getRuns().find((run) => run.task === "Long task")?.id;
 			expect(runId).toBeDefined();
@@ -541,9 +544,9 @@ send({
 			// Already-aborted signal: the wait resolves immediately without blocking.
 			const alreadyAborted = new AbortController();
 			alreadyAborted.abort();
-			const immediate = await waitTool.execute(
+			const immediate = await statusTool.execute(
 				"wait-ab1",
-				{ id: String(runId) },
+				{ id: String(runId), waitMs: 30_000 },
 				alreadyAborted.signal,
 				() => {},
 				executionContext(),
@@ -552,9 +555,9 @@ send({
 
 			// Mid-wait abort: the onAbort listener resolves the pending wait.
 			const midWait = new AbortController();
-			const pending = waitTool.execute(
+			const pending = statusTool.execute(
 				"wait-ab2",
-				{ id: String(runId) },
+				{ id: String(runId), waitMs: 30_000 },
 				midWait.signal,
 				() => {},
 				executionContext(),
@@ -631,7 +634,7 @@ send({
 		try {
 			register(stub.api);
 			const tool = stub.tools.find((candidate) => candidate.name === "subagent");
-			const waitTool = stub.tools.find((candidate) => candidate.name === "subagent_wait");
+			const statusTool = stub.tools.find((candidate) => candidate.name === "subagent_status");
 			const stopTool = stub.tools.find((candidate) => candidate.name === "subagent_stop");
 			expect(stopTool).toBeDefined();
 
@@ -644,9 +647,9 @@ send({
 			// A waiter blocks on the queued run; stopping resolves it.
 			const runId = monitor.getRuns().find((run) => run.task === "Long task")?.id;
 			expect(runId).toBeDefined();
-			const waitPromise = waitTool.execute(
+			const waitPromise = statusTool.execute(
 				"wait-st",
-				{ id: String(runId), timeoutMs: 30_000 },
+				{ id: String(runId), waitMs: 30_000 },
 				new AbortController().signal,
 				() => {},
 				executionContext(),

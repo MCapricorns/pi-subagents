@@ -53,7 +53,7 @@ export function buildDelegationDirective(
 	];
 
 	const handoffRules = [
-		"Dispatch never blocks or ends your turn — keep working; each completion resumes you automatically. Never sleep, poll, or `subagent_wait` for it.",
+		"Dispatch never blocks or ends your turn — keep working; each completion resumes you automatically. Never sleep or poll for it.",
 		"Results are already shown; add only your conclusion or next action, never a restatement.",
 		"Before declaring the overall task done, `subagent_status` must show no active runs.",
 	];

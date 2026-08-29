@@ -1,7 +1,7 @@
 /**
  * Thread controls and lookup tools around the subagent runtime:
- * subagent_control (resume), subagent_wait (in-turn
- * result lookup), subagent_status, and destructive subagent_stop.
+ * subagent_control (resume), subagent_status (overview, full results, and the
+ * opt-in waitMs block for active runs), and destructive subagent_stop.
  */
 
 import { StringEnum } from "@earendil-works/pi-ai";
@@ -20,7 +20,6 @@ import {
 	runLabel,
 	runWaitLabel,
 	statusLabel,
-	type RunStatus,
 	type RunWaitReason,
 } from "./monitor.ts";
 import { persistRecoveryRecords, recoveryRecordFromFinalization } from "./recovery.ts";
@@ -28,14 +27,6 @@ import type { SubagentRuntime, SubagentThread } from "./runtime.ts";
 import { CONTROL_QUIESCE_TIMEOUT_MS, projectResultsRoot, quiesced } from "./thread-lifecycle.ts";
 import { getResultOutput, isFailedResult, type SingleResult } from "./spawn.ts";
 import type { WorktreeFinalization } from "./worktree.ts";
-
-/** In-turn result lookup. Dispatch already ended the turn and results arrive as
- * wake-up messages, so the default must NOT block: a settled run returns its
- * result immediately, a still-active run returns a "still running — end your
- * turn" note and the model finishes (the completion then wakes it). Blocking
- * is opt-in via an explicit timeoutMs — a long default would hold the turn
- * hostage for nothing, since the result arrives on its own either way. */
-const SUBAGENT_WAIT_DEFAULT_TIMEOUT_MS = 0;
 
 function renderFirstLine(result: { content?: unknown }, label: string, theme: any): Text {
 	const parts = (result.content ?? []) as Array<{ type: string; text?: string }>;
@@ -122,174 +113,137 @@ export function registerLookupTools(pi: ExtensionAPI, runtime: SubagentRuntime):
 		},
 	});
 
-	const SubagentWaitParams = Type.Object({
-		id: Type.Optional(
-			Type.String({
-				description: "Run id or prefix shown by subagent dispatch/status output. Omit to wait for all active runs in this session.",
-			}),
-		),
-		timeoutMs: Type.Optional(
-			Type.Number({
-				description: `Block for up to this many milliseconds and report the still-running runs. Default ${SUBAGENT_WAIT_DEFAULT_TIMEOUT_MS}: no blocking — settled runs return their result immediately, active runs return a note telling the model to end its turn.`,
-			}),
-		),
-	});
-
-	pi.registerTool({
-		name: "subagent_wait",
-		label: "Subagent Wait",
-		description: [
-			"Look up background sub-agent run(s) and return their results.",
-			"PREFER NOT CALLING THIS: every result also arrives on its own as the message that wakes you, so seeing a result twice is expected.",
-			"It does NOT block by default: a settled run returns its result immediately, a still-active run returns a 'still running — end your turn' note. Pass timeoutMs only when you must stay in the turn for a directly dependent next step.",
-		].join(" "),
-		promptSnippet: "Look up a background subagent result in-turn (id: run id from dispatch/status output; omit for all). Non-blocking by default; pass timeoutMs to block.",
-		promptGuidelines: [
-			"Do NOT call subagent_wait to hold the turn: results arrive as wake-up messages automatically. Pass timeoutMs only when the next step depends on the result right now.",
-			"Never use bash sleep/timeout/polling to wait for a sub-agent; when a wait times out, end the turn or call it again with a longer timeoutMs.",
-		],
-		parameters: SubagentWaitParams,
-
-		async execute(_toolCallId, params, signal, _onUpdate, ctx) {
-			const config = await loadConfig(runtime.configPath);
-			// A non-finite or negative timeout would produce a nonsensical note
-			// ("timed out after Infinitys") or an instant "timeout" that was never
-			// asked for; fall back to the default. Zero is honored as an immediate
-			// give-up (clamped to 1ms below).
-			const timeoutMs =
-				typeof params.timeoutMs === "number" && Number.isFinite(params.timeoutMs) && params.timeoutMs >= 0
-					? params.timeoutMs
-					: SUBAGENT_WAIT_DEFAULT_TIMEOUT_MS;
-			const isActive = (run: { status: RunStatus }): boolean => isRunActiveStatus(run.status);
-
-			const requested = params.id?.trim();
-			// A run that already settled resolves immediately with its result.
-			if (requested) {
-				const settledIds = matchRunIds([...runtime.settledRuns.keys()], requested);
-				if (settledIds.length > 0) {
-					return {
-						content: [
-							{ type: "text", text: settledIds.map((id) => {
-								const result = runtime.settledRuns.get(id)!;
-								return formatCompletionBlock(result, config.maxResultLines, { resultRoot: projectResultsRoot(runtime.configPath, result.projectCwd ?? ctx.cwd) });
-							}).join("\n\n") },
-						],
-						details: {},
-					};
-				}
-			}
-
-			const activeRuns = monitor.getRuns().filter(isActive);
-			const targetIds = requested ? matchRunIds(activeRuns.map((run) => run.id), requested) : activeRuns.map((run) => run.id);
-			const targets = activeRuns.filter((run) => targetIds.includes(run.id));
-			if (targets.length === 0) {
-				const activeList = activeRuns.map((run) => `#${run.id} ${run.agent}`).join(", ");
+	/** Blocking lookup behind subagent_status waitMs: hold the turn until the
+	 * targeted active runs settle (or the timeout/abort fires). This is the one
+	 * path that must block — a print/one-shot parent cannot end its turn and be
+	 * woken, and an in-turn dependent step needs the result now. */
+	const waitForResults = async (
+		requested: string | undefined,
+		waitMs: number,
+		signal: AbortSignal | undefined,
+		maxResultLines: number,
+		fallbackCwd: string,
+	): Promise<{ content: Array<{ type: "text"; text: string }>; details: Record<string, never> }> => {
+		// A run that already settled resolves immediately with its result.
+		if (requested) {
+			const settledIds = matchRunIds([...runtime.settledRuns.keys()], requested);
+			if (settledIds.length > 0) {
 				return {
 					content: [
-						{
-							type: "text",
-							text: requested
-								? `No active subagent run matches "${requested}".${activeList ? ` Active runs: ${activeList}.` : ""}`
-								: `No active subagent runs${activeList ? ` (active: ${activeList})` : " right now"}.`,
-						},
+						{ type: "text", text: settledIds.map((id) => {
+							const result = runtime.settledRuns.get(id)!;
+							return formatCompletionBlock(result, maxResultLines, { resultRoot: projectResultsRoot(runtime.configPath, result.projectCwd ?? fallbackCwd) });
+						}).join("\n\n") },
 					],
 					details: {},
 				};
 			}
+		}
 
-			const waitForRun = (runId: number): Promise<{ result?: SingleResult; note?: string }> => {
-				const already = runtime.settledRuns.get(runId);
-				if (already) return Promise.resolve({ result: already });
-				return new Promise((resolve) => {
-					let done = false;
-					let timer: ReturnType<typeof setTimeout> | undefined;
-					let unsub: (() => void) | undefined;
-					const cleanup = (): void => {
-						if (timer) clearTimeout(timer);
-						if (unsub) unsub();
-						signal?.removeEventListener("abort", onAbort);
-						const listeners = runtime.settledListeners.get(runId);
-						if (listeners) {
-							listeners.delete(onSettled);
-							if (listeners.size === 0) runtime.settledListeners.delete(runId);
-						}
-					};
-					const finish = (outcome: { result?: SingleResult; note?: string }): void => {
-						if (done) return;
-						done = true;
-						cleanup();
-						resolve(outcome);
-					};
-					const onSettled = (result: SingleResult): void => finish({ result });
-					const onMonitor = (): void => {
-						const current = runtime.settledRuns.get(runId);
-						if (current) {
-							finish({ result: current });
-							return;
-						}
-						const live = monitor.findRun(runId);
-						if (live?.status === "parked") {
-							finish({ note: `run #${runId} was parked at a stable checkpoint; use subagent_control resume to continue it` });
-							return;
-						}
-						if (!live) {
-							// Removal is followed synchronously by registerRunResult in the
-							// finishing task; re-check on the next tick so the result wins.
-							setTimeout(() => {
-								const late = runtime.settledRuns.get(runId);
-								if (late) finish({ result: late });
-								else finish({ note: `run #${runId} was removed before its result was recorded (cancelled or session ended)` });
-							}, 0);
-						}
-					};
-					const onAbort = (): void => finish({ note: "wait aborted" });
-					let listeners = runtime.settledListeners.get(runId);
-					if (!listeners) {
-						listeners = new Set();
-						runtime.settledListeners.set(runId, listeners);
-					}
-					listeners.add(onSettled);
-					unsub = monitor.subscribe(onMonitor);
-					timer = setTimeout(
-						() =>
-							finish({
-								note:
-									timeoutMs === 0
-										? `run #${runId} is still active — end your turn: the result will wake you (or call subagent_wait again with an explicit timeoutMs to block)`
-										: `wait timed out after ${Math.round(timeoutMs / 1000)}s — run #${runId} is still active; call subagent_wait again or end the turn (the result will wake you when ready)`,
-							}),
-						Math.max(1, timeoutMs),
-					);
-					if (signal?.aborted) onAbort();
-					else signal?.addEventListener("abort", onAbort, { once: true });
-				});
+		const activeRuns = monitor.getRuns().filter((run) => isRunActiveStatus(run.status));
+		const targetIds = requested ? matchRunIds(activeRuns.map((run) => run.id), requested) : activeRuns.map((run) => run.id);
+		const targets = activeRuns.filter((run) => targetIds.includes(run.id));
+		if (targets.length === 0) {
+			const activeList = activeRuns.map((run) => `#${run.id} ${run.agent}`).join(", ");
+			return {
+				content: [
+					{
+						type: "text",
+						text: requested
+							? `No active subagent run matches "${requested}".${activeList ? ` Active runs: ${activeList}.` : ""}`
+							: `No active subagent runs${activeList ? ` (active: ${activeList})` : " right now"}.`,
+					},
+				],
+				details: {},
 			};
+		}
 
-			const outcomes = await Promise.all(targets.map((run) => waitForRun(run.id)));
-			const blocks = outcomes.map((outcome) =>
-				outcome.result
-					? formatCompletionBlock(outcome.result, config.maxResultLines, { resultRoot: projectResultsRoot(runtime.configPath, outcome.result.projectCwd ?? ctx.cwd) })
-					: (outcome.note ?? "(no outcome)"),
-			);
-			return { content: [{ type: "text", text: blocks.join("\n\n") }], details: {} };
-		},
+		const waitForRun = (runId: number): Promise<{ result?: SingleResult; note?: string }> => {
+			const already = runtime.settledRuns.get(runId);
+			if (already) return Promise.resolve({ result: already });
+			return new Promise((resolve) => {
+				let done = false;
+				let timer: ReturnType<typeof setTimeout> | undefined;
+				let unsub: (() => void) | undefined;
+				const cleanup = (): void => {
+					if (timer) clearTimeout(timer);
+					if (unsub) unsub();
+					signal?.removeEventListener("abort", onAbort);
+					const listeners = runtime.settledListeners.get(runId);
+					if (listeners) {
+						listeners.delete(onSettled);
+						if (listeners.size === 0) runtime.settledListeners.delete(runId);
+					}
+				};
+				const finish = (outcome: { result?: SingleResult; note?: string }): void => {
+					if (done) return;
+					done = true;
+					cleanup();
+					resolve(outcome);
+				};
+				const onSettled = (result: SingleResult): void => finish({ result });
+				const onMonitor = (): void => {
+					const current = runtime.settledRuns.get(runId);
+					if (current) {
+						finish({ result: current });
+						return;
+					}
+					const live = monitor.findRun(runId);
+					if (live?.status === "parked") {
+						finish({ note: `run #${runId} was parked at a stable checkpoint; use subagent_control resume to continue it` });
+						return;
+					}
+					if (!live) {
+						// Removal is followed synchronously by registerRunResult in the
+						// finishing task; re-check on the next tick so the result wins.
+						setTimeout(() => {
+							const late = runtime.settledRuns.get(runId);
+							if (late) finish({ result: late });
+							else finish({ note: `run #${runId} was removed before its result was recorded (cancelled or session ended)` });
+						}, 0);
+					}
+				};
+				const onAbort = (): void => finish({ note: "wait aborted" });
+				let listeners = runtime.settledListeners.get(runId);
+				if (!listeners) {
+					listeners = new Set();
+					runtime.settledListeners.set(runId, listeners);
+				}
+				listeners.add(onSettled);
+				unsub = monitor.subscribe(onMonitor);
+				timer = setTimeout(
+					() =>
+						finish({
+							note: `wait timed out after ${Math.round(waitMs / 1000)}s — run #${runId} is still active; call subagent_status again with waitMs or end the turn (the result will wake you when ready)`,
+						}),
+					Math.max(1, waitMs),
+				);
+				if (signal?.aborted) onAbort();
+				else signal?.addEventListener("abort", onAbort, { once: true });
+			});
+		};
 
-		renderCall(args, theme) {
-			const target = args.id ? `#${args.id}` : "all";
-			return new Text(`${theme.fg("toolTitle", theme.bold("subagent_wait "))}${theme.fg("accent", target)}`, 0, 0);
-		},
-
-		renderResult(result, _options, theme) {
-			return renderFirstLine(result, "subagent_wait ", theme);
-		},
-	});
+		const outcomes = await Promise.all(targets.map((run) => waitForRun(run.id)));
+		const blocks = outcomes.map((outcome) =>
+			outcome.result
+				? formatCompletionBlock(outcome.result, maxResultLines, { resultRoot: projectResultsRoot(runtime.configPath, outcome.result.projectCwd ?? fallbackCwd) })
+				: (outcome.note ?? "(no outcome)"),
+		);
+		return { content: [{ type: "text", text: blocks.join("\n\n") }], details: {} };
+	};
 
 	// Status overview: what is running right now and what finished this session,
-	// with per-run details (id, role, model, usage, elapsed, activity).
+	// with per-run details (id, role, model, usage, elapsed, activity). waitMs
+	// turns the lookup into a bounded block for active runs.
 	const SubagentStatusParams = Type.Object({
 		id: Type.Optional(
 			Type.String({
-				description: "Run id or prefix to show the full result for (must already be finished; use subagent_wait to block on an active run).",
+				description: "Run id or prefix from dispatch/status output: full result of a finished run, or the live state of an active one. Omit for the overview (or, with waitMs, to wait for all active runs).",
+			}),
+		),
+		waitMs: Type.Optional(
+			Type.Number({
+				description: "Block up to this many milliseconds for the targeted active run(s) to settle and return their results. Omit for the default non-blocking lookup — results arrive on their own as wake-up messages.",
 			}),
 		),
 	});
@@ -299,18 +253,29 @@ export function registerLookupTools(pi: ExtensionAPI, runtime: SubagentRuntime):
 		label: "Subagent Status",
 		description: [
 			"List active background sub-agent runs (id, role, model, thinking, usage, elapsed, current activity) and recently finished results.",
-			"Pass id to read the full result of a finished run; pass no id for the overview. Use it to decide whether to wait, stop, or re-dispatch — never to poll: results arrive by themselves.",
+			"Pass id to read the full result of a finished run; pass no id for the overview. Never poll: results arrive by themselves as wake-up messages.",
+			"waitMs blocks up to that long for active run(s) to settle and returns their results — only when you must stay in the turn for a directly dependent next step.",
 		].join(" "),
-		promptSnippet: "Inspect background subagents: active runs, finished results, full result by id.",
+		promptSnippet: "Inspect background subagents: active runs, finished results, full result by id; waitMs blocks for active runs.",
 		promptGuidelines: [
-			"Call subagent_status to see what is running and what already finished, never in a loop to wait for a run.",
+			"Call subagent_status to see what is running and what already finished, never in a loop to wait for a run (results wake you automatically; a duplicate is expected).",
+			"Pass waitMs only when the next step depends on a result right now; never use bash sleep/timeout/polling to wait for a sub-agent.",
 			"A finished run's id stays available for the session; its full result is one subagent_status call away.",
 		],
 		parameters: SubagentStatusParams,
 
-		async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
+		async execute(_toolCallId, params, signal, _onUpdate, ctx) {
 			const config = await loadConfig(runtime.configPath);
 			const requested = params.id?.trim();
+
+			// A non-finite or non-positive waitMs is a plain lookup, never a block.
+			const waitMs =
+				typeof params.waitMs === "number" && Number.isFinite(params.waitMs) && params.waitMs > 0
+					? params.waitMs
+					: 0;
+			if (waitMs > 0) {
+				return waitForResults(requested, waitMs, signal, config.maxResultLines, ctx.cwd);
+			}
 
 			if (requested) {
 				const settledIds = matchRunIds([...runtime.settledRuns.keys()], requested);
@@ -359,8 +324,8 @@ export function registerLookupTools(pi: ExtensionAPI, runtime: SubagentRuntime):
 								text: parked
 									? `Run #${active.id} ${owner} is parked with retained${retainedStage ? ` ${retainedStage} stage` : ""} context${metadata ? ` (${metadata})` : ""}. Use subagent_control resume to restart it, or subagent_stop to retire it.`
 									: managedDownstream
-										? `Run #${active.id} ${owner} is in a managed downstream stage (${stageStatus}${metadata ? ` · ${metadata}` : ""}). Use subagent_wait for its result or subagent_stop to cancel it.`
-										: `Run #${active.id} ${owner} is still active (${active.activity ?? runWaitLabel(active) ?? statusLabel(active.status)}${metadata ? ` · ${metadata}` : ""}). Use subagent_wait to block for its result or subagent_stop to cancel it.`,
+										? `Run #${active.id} ${owner} is in a managed downstream stage (${stageStatus}${metadata ? ` · ${metadata}` : ""}). Its result will wake you; pass waitMs to block for it, or subagent_stop to cancel it.`
+										: `Run #${active.id} ${owner} is still active (${active.activity ?? runWaitLabel(active) ?? statusLabel(active.status)}${metadata ? ` · ${metadata}` : ""}). End your turn and its result will wake you; pass waitMs to block for it, or subagent_stop to cancel it.`,
 							},
 						],
 						details: {},
@@ -421,13 +386,15 @@ export function registerLookupTools(pi: ExtensionAPI, runtime: SubagentRuntime):
 			sections.push(parkedLines.length > 0 ? parkedLines.join("\n") : "(none)");
 			sections.push(`### Finished this session (${runtime.settledRuns.size})`);
 			sections.push(completedLines.length > 0 ? completedLines.join("\n") : "(none)");
-			sections.push("Pass a run id to subagent_status for the full result, use subagent_control to resume a settled thread, or subagent_wait for active work.");
+			sections.push("Pass a run id to subagent_status for the full result, use subagent_control to resume a settled thread, or waitMs to block on active work.");
 			return { content: [{ type: "text", text: sections.join("\n\n") }], details: {} };
 		},
 
 		renderCall(args, theme) {
+			const target = args.id ? `#${args.id}` : args.waitMs ? "all" : "overview";
+			const waiting = args.waitMs ? ` · wait ${Math.round(args.waitMs / 1000)}s` : "";
 			return new Text(
-				`${theme.fg("toolTitle", theme.bold("subagent_status "))}${theme.fg("accent", args.id ? `#${args.id}` : "overview")}`,
+				`${theme.fg("toolTitle", theme.bold("subagent_status "))}${theme.fg("accent", target)}${theme.fg("dim", waiting)}`,
 				0,
 				0,
 			);

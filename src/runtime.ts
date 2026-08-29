@@ -1,7 +1,7 @@
 /**
  * Shared per-session runtime state for pi-subagents.
  *
- * The extension registers several tools (subagent, subagent_wait/status/stop)
+ * The extension registers several tools (subagent, subagent_status/stop)
  * that share the background queue, completion batcher, abort controllers per
  * run, and settled-results store.
  * `createRuntime` builds those once per extension load and hands the same object
@@ -104,7 +104,7 @@ export interface SubagentRuntime {
 	completionBatcher: CompletionBatcher<CompletionMessageItem>;
 	/** Abort controllers per active run, so subagent_stop can cancel a run in-turn. */
 	runControllers: Map<number, AbortController>;
-	/** Final results keyed by run id, so subagent_wait can hand the model the
+	/** Final results keyed by run id, so subagent_status can hand the model the
 	 * actual result in-turn instead of it sleeping/polling for a wake-up message. */
 	settledRuns: Map<number, SingleResult>;
 	settledListeners: Map<number, Set<(result: SingleResult) => void>>;

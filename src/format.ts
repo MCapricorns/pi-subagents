@@ -1,6 +1,6 @@
 /**
  * Pure formatting/result helpers shared by the subagent tool and the lookup
- * tools (subagent_wait/status): usage rendering, completion blocks, synthetic
+ * tools (subagent_status): usage rendering, completion blocks, synthetic
  * result constructors, and run-id matching.
  */
 

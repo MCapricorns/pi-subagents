@@ -194,7 +194,7 @@ describe("parent tool inheritance", () => {
 
 	it("represents an empty inherited active set explicitly", () => {
 		const worker = loadBuiltinAgents().find((agent) => agent.name === "worker")!;
-		expect(resolveAgentTools(worker, ["subagent", "subagent_wait"]).tools).toEqual([]);
+		expect(resolveAgentTools(worker, ["subagent", "subagent_status"]).tools).toEqual([]);
 	});
 });
 

@@ -5,7 +5,7 @@
  * The heavy lifting lives in focused modules:
  *   - dispatch.ts         — tool contract, managed role policy, internal steps
  *   - thread-lifecycle.ts — stable generations, controls, final integration/delivery
- *   - tools.ts            — subagent_control / subagent_wait / status / stop
+ *   - tools.ts            — subagent_control / subagent_status / subagent_stop
  *   - announcements.ts — session-start recovery, notices, and widget install
  *   - widget.ts        — active-only TUI run status
  *   - runtime.ts       — shared per-session state
