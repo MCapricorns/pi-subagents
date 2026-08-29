@@ -12,8 +12,6 @@ import {
 	addStartupRetryJitter,
 	getFinalOutput,
 	isModelLevelFailure,
-	isRetryableStartupFailure,
-	RpcRunControl,
 	runSingleAgentWithMainFallback,
 	SUBAGENT_STARTUP_RETRY_DELAYS_MS,
 } from "../src/spawn.ts";

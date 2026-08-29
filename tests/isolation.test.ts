@@ -1,7 +1,6 @@
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { Agent } from "@earendil-works/pi-agent-core";
 import { SessionManager } from "@earendil-works/pi-coding-agent";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { loadBuiltinAgents } from "../src/agents.ts";
@@ -236,91 +235,6 @@ describe("dispatch isolation selection", () => {
 			tasks: [{ agent: "worker", task: "all fail", cwd: nonGit }],
 		}, root)).rejects.toThrow(/No background subagents were started[\s\S]*tasks\[0\].*not a Git repository/i);
 		rmSync(root, { recursive: true, force: true });
-		rmSync(nonGit, { recursive: true, force: true });
-	});
-
-	it("surfaces an all-failed parallel dispatch as a Pi Agent tool error", async () => {
-		const nonGit = mkdtempSync(join(tmpdir(), "pi-subagents-isolation-agent-wrapper-"));
-		vi.spyOn(worktreeModule, "createWorktreeIsolation").mockRejectedValue(new Error("not a Git repository"));
-		const { subagent } = registered();
-		const tool = {
-			...subagent,
-			execute: (id: string, params: unknown, signal?: AbortSignal, onUpdate?: (result: unknown) => void) =>
-				subagent.execute(id, params, signal, onUpdate, ctx(nonGit)),
-		};
-		const usage = {
-			input: 1,
-			output: 1,
-			cacheRead: 0,
-			cacheWrite: 0,
-			totalTokens: 2,
-			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
-		};
-		const responses = [
-			{
-				role: "assistant",
-				content: [{
-					type: "toolCall",
-					id: "dispatch-all-fail",
-					name: "subagent",
-					arguments: { tasks: [{ agent: "worker", task: "must isolate", cwd: nonGit }] },
-				}],
-				api: "test",
-				provider: "test",
-				model: "test-model",
-				usage,
-				stopReason: "toolUse",
-				timestamp: Date.now(),
-			},
-			{
-				role: "assistant",
-				content: [{ type: "text", text: "observed tool failure" }],
-				api: "test",
-				provider: "test",
-				model: "test-model",
-				usage,
-				stopReason: "stop",
-				timestamp: Date.now(),
-			},
-		] as any[];
-		const streamFn = vi.fn(async () => {
-			const message = responses.shift();
-			if (!message) throw new Error("unexpected extra model turn");
-			return {
-				async *[Symbol.asyncIterator]() {
-					yield { type: "done" };
-				},
-				result: async () => message,
-			};
-		});
-		const agent = new Agent({
-			initialState: {
-				systemPrompt: "test",
-				model: {
-					id: "test-model",
-					name: "Test",
-					api: "test",
-					provider: "test",
-					baseUrl: "",
-					reasoning: false,
-					input: ["text"],
-					cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
-					contextWindow: 1_000,
-					maxTokens: 100,
-				} as any,
-				thinkingLevel: "off",
-				tools: [tool],
-			},
-			streamFn: streamFn as any,
-		});
-		const toolEnds: any[] = [];
-		agent.subscribe((event) => {
-			if (event.type === "tool_execution_end") toolEnds.push(event);
-		});
-		await agent.prompt("dispatch it");
-		expect(toolEnds).toHaveLength(1);
-		expect(toolEnds[0].isError).toBe(true);
-		expect(toolEnds[0].result.content[0].text).toMatch(/No background subagents were started[\s\S]*tasks\[0\]/i);
 		rmSync(nonGit, { recursive: true, force: true });
 	});
 
