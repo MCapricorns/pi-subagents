@@ -25,6 +25,7 @@ import { isRunActiveStatus, monitor } from "./monitor.ts";
 import type { RpcRunControl } from "./rpc-run.ts";
 import type { StartBackgroundInternal } from "./thread-lifecycle.ts";
 import { isFailedResult, type SingleResult } from "./spawn.ts";
+import type { ReviewMode } from "./workflow.ts";
 import type { IsolationMode, WorktreeFinalization, WorktreeIsolation } from "./worktree.ts";
 
 export type ThreadState =
@@ -50,6 +51,9 @@ export interface SubagentThread {
 	executionCwd: string;
 	thinkingLevel?: ThinkingLevel;
 	isolation: IsolationMode;
+	/** Dispatch-time gate intensity; "none" skips the automatic post-writer
+	 * reviewer for this thread (kept across resumes and reloads). */
+	review?: ReviewMode;
 	worktree?: WorktreeIsolation;
 	state: ThreadState;
 	control: RpcRunControl;

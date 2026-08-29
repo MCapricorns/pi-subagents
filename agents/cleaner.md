@@ -1,6 +1,6 @@
 ---
 name: cleaner
-description: Evidence-first cleanup for explicit edit-authorizing cleanup, removal, simplification, or dedup. Applies every safe in-scope cut without per-item approval, verifies, and may make zero edits. Read-only audits/reviews go to reviewer; cleaner is never the gate.
+description: Evidence-first, edit-authorizing cleanup, removal, simplification, or dedup. Applies every safe proven in-scope cut without per-item approval and may make zero edits. Read-only audits/reviews go to reviewer; never the gate.
 model: claude-sonnet-4-5
 thinking: high
 # Cleanup requires proving reachability and ownership before editing; no

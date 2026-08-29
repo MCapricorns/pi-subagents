@@ -51,6 +51,7 @@ import {
 	workflowAgentAvailability,
 	type ManagedWorkflowOutcome,
 	type ManagedWorkflowPlan,
+	type ReviewMode,
 } from "./workflow.ts";
 import {
 	availableModelsInScope,
@@ -279,6 +280,8 @@ export interface StartBackgroundOptions {
 	environment?: DispatchEnvironment;
 	seed?: SessionSeed;
 	resumeReservation?: ResumeReservation;
+	/** Gate intensity for this dispatch; a resume keeps the thread's mode. */
+	review?: ReviewMode;
 }
 
 export type StartBackgroundInternal = (
@@ -393,6 +396,10 @@ export function createBackgroundDispatcher(options: BackgroundDispatcherOptions)
 			seed,
 			resumeReservation,
 		} = startOptions;
+		// The dispatch-time gate choice is a thread property: resumes of a
+		// review-exempt task stay exempt instead of surprising the caller with a
+		// full gate after a reload.
+		const review: ReviewMode = startOptions.review ?? existingThread?.review ?? "gate";
 		if (!runtime.sessionActive) {
 			return failedStartResult(agentName, task, "Parent session shut down before this subagent generation could start.");
 		}
@@ -505,6 +512,7 @@ export function createBackgroundDispatcher(options: BackgroundDispatcherOptions)
 			thread.executionCwd = executionCwd;
 			thread.thinkingLevel = thinkingLevel;
 			thread.isolation = isolation;
+			thread.review = review;
 			thread.worktree = worktree;
 			thread.state = "queued";
 			thread.control = control;
@@ -528,6 +536,7 @@ export function createBackgroundDispatcher(options: BackgroundDispatcherOptions)
 				executionCwd,
 				thinkingLevel,
 				isolation,
+				review,
 				worktree,
 				state: "queued",
 				control,
@@ -654,7 +663,7 @@ export function createBackgroundDispatcher(options: BackgroundDispatcherOptions)
 
 				if (thread.retireOnSettle) runtime.retireThreadSession(thread);
 				let workflowOutcome: ManagedWorkflowOutcome | undefined;
-				const workflowPlan = getManagedWorkflowPlan(result, workflowAvailability);
+				const workflowPlan = getManagedWorkflowPlan(result, workflowAvailability, review);
 					if (workflowPlan && runtime.sessionActive) {
 						// The continuation is runtime-initiated (gate review,
 						// documentation sync): release this generation's
@@ -1290,6 +1299,7 @@ function createRestoredThread(
 		executionCwd: record.executionCwd,
 		...(record.thinkingLevel ? { thinkingLevel: record.thinkingLevel as ThinkingLevel } : {}),
 		isolation: record.isolation,
+		...(record.review ? { review: record.review } : {}),
 		worktree,
 		state,
 		control: new RpcRunControl(record.task, record.generation),

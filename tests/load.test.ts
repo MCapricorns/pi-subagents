@@ -1042,6 +1042,40 @@ describe("managed post-writer workflows", () => {
 		}
 	});
 
+	it("delivers a review-none worker directly without starting a gate", async () => {
+		vi.useFakeTimers();
+		vi.setSystemTime(0);
+		configureEnabledAgents(["worker", "reviewer"]);
+		const stub = makeStub();
+		const { tasks, controllers } = captureEnqueue();
+		const run = vi.spyOn(spawn, "runSingleAgentWithMainFallback").mockImplementation(async (options: any) => {
+			if (options.agentName === "reviewer") {
+				throw new Error("review: none must not start a reviewer gate");
+			}
+			return makeResult("worker", options.task, "fixed the typo in src/tiny.ts");
+		});
+
+		try {
+			register(stub.api);
+			const tool = stub.tools.find((candidate) => candidate.name === "subagent");
+			await runTool(
+				tool,
+				"no-gate",
+				{ agent: "worker", task: "Fix the typo in src/tiny.ts", review: "none" },
+				executionContext(),
+			);
+			await tasks[0](controllers[0].signal, controllers[0]);
+			vi.advanceTimersByTime(150);
+
+			expect(run.mock.calls.map(([options]) => options.agentName)).toEqual(["worker"]);
+			expect(stub.messages).toHaveLength(1);
+			expect(stub.messages[0].message.content).toContain("### [worker] completed");
+			expect(stub.messages[0].message.content).not.toContain("Managed workflow");
+		} finally {
+			await shutdownExtension(stub, { controllers });
+		}
+	});
+
 	it("converges a failing gate through reviewer fix stages and fresh re-reviews", async () => {
 		configureEnabledAgents(["worker", "documenter", "reviewer"]);
 		const stub = makeStub();

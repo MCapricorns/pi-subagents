@@ -28,16 +28,6 @@ export function buildDelegationDirective(
 		...(hasWorker ? ["worker"] : []),
 		...(hasCleaner ? ["cleaner"] : []),
 	];
-	const namedWorktreeTargets = [
-		...(hasWorker ? ["worker"] : []),
-		...(hasCleaner ? ["cleaner"] : []),
-		...(hasDocumenter ? ["documenter"] : []),
-	];
-	const worktreeTargets = namedWorktreeTargets.length === 0
-		? "a"
-		: namedWorktreeTargets.length === 1
-			? `${namedWorktreeTargets[0]} or another`
-			: `${namedWorktreeTargets.slice(0, -1).join(", ")}, ${namedWorktreeTargets.at(-1)}, or another`;
 
 	const dispatchRules = [
 		`Delegate aggressively: child contexts are cheap, yours is scarce. Inline only trivial work — a one-shot lookup, a single focused edit, an answer already in context${hasWorker ? "; default every non-trivial implementation, fix, refactor, or test task to `worker`" : ""}.`,
@@ -47,23 +37,23 @@ export function buildDelegationDirective(
 			]
 			: []),
 		...(hasCleaner
-			? ["`cleaner`: only user-authorized cleanup or dedup; it applies every safe proven cut without per-item approval and is never a gate."]
+			? ["`cleaner`: dispatch for requested cleanup AND proactively when finished work leaves dead code or duplication in scope. Your brief is its edit authorization — every safe proven cut applies without per-item approval; never a gate."]
 			: []),
 		...(hasDocumenter
-			? ["`documenter`: standalone docs/comment work, or syncing real drift a change left — writers already sync what they directly affect."]
+			? ["`documenter`: standalone docs/comment work; dispatch it proactively when a change — yours or a child's — leaves README/docs/comment drift no writer already synced; cheap and may make zero edits."]
 			: []),
 		...(hasReviewer
 			? [
-				`\`reviewer\`: read-only assessments and gates${codeWriterNames.length > 0 ? `; successful ${codeWriterNames.join("/")} runs get one fresh gate, and failing gates are fixed by the reviewer itself in bounded fix/re-review rounds that converge on the fixes (a still-failing gate returns to you)` : ""}. Advisory output has no VERDICT and cannot authorize edits.`,
+				`\`reviewer\`: read-only assessments and gates${codeWriterNames.length > 0 ? `; successful ${codeWriterNames.join("/")} runs get one fresh gate, and failing gates are fixed by the reviewer itself in bounded fix/re-review rounds (a still-failing gate returns to you). Pass \`review: "none"\` for mechanical, low-risk edits you verify yourself; keep the default gate whenever behavior can change` : ""}. Advisory output has no VERDICT and cannot authorize edits.`,
 			]
 			: []),
 		`Parallelize by default: map the todo list onto ONE \`tasks\` dispatch. One child owns one deliverable and its files; only genuinely dependent work waits for its prerequisite.`,
 		"Brief each child completely — goal, exact paths, constraints, expected output; it has no conversation memory and cannot delegate. Resume parked threads with `subagent_control resume`.",
-		`Request \`isolation: "worktree"\` only for ${worktreeTargets} write-capable agent in a repo with committed HEAD.`,
+		`Request \`isolation: "worktree"\` only for write-capable agents in a repo with committed HEAD.`,
 	];
 
 	const handoffRules = [
-		"Dispatch never blocks or ends your turn — keep working; each completion resumes you automatically. Never sleep, poll, or `subagent_wait` to hold the turn.",
+		"Dispatch never blocks or ends your turn — keep working; each completion resumes you automatically. Never sleep, poll, or `subagent_wait` for it.",
 		"Results are already shown; add only your conclusion or next action, never a restatement.",
 		"Before declaring the overall task done, `subagent_status` must show no active runs.",
 	];
@@ -72,8 +62,8 @@ export function buildDelegationDirective(
 		"Never report an unrun check as passed; surface unavailable checks and pre-existing failures, and inspect actual changes before reporting completion.",
 		...(hasReviewer
 			? [
-				"A REVIEW_FAIL from a gate you dispatched directly returns its findings to you: fix them inline or via a briefed worker without waiting for the user (ask only for genuinely destructive or scope-changing fixes), then re-verify ONCE. If the gate still fails, report the remaining findings and move on — never loop gate dispatches.",
-				"Multi-model cross-review only when explicitly requested or for high-risk security, unsafe/FFI, persistence-migration, or concurrency changes.",
+				"A REVIEW_FAIL from a gate you dispatched directly returns its findings to you: fix them inline or via a briefed worker without waiting for the user, then re-verify ONCE. If the gate still fails, report the remaining findings and move on — never loop gate dispatches.",
+				"Multi-model cross-review only when explicitly requested or for high-risk security, FFI, migration, or concurrency changes.",
 			]
 			: []),
 		"Commit or push only when explicitly requested, applicable checks pass, and no review finding remains unresolved.",
@@ -82,7 +72,7 @@ export function buildDelegationDirective(
 	return `
 ## Sub-agent delegation (pi-subagents)
 
-\`subagent\` runs isolated leaf Pi child processes in the background; each completion resumes you.
+\`subagent\` runs isolated leaf Pi child processes in the background.
 
 Agents:
 ${catalog}

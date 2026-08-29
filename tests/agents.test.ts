@@ -90,6 +90,7 @@ describe("shipped specialist agents", () => {
 		const reviewer = loadBuiltinAgents().find((agent) => agent.name === "reviewer");
 		expect(reviewer?.systemPrompt).toContain("concrete fix instruction");
 		expect(reviewer?.systemPrompt).toContain("how to verify the fix");
+		expect(reviewer?.systemPrompt).toContain("Scale scrutiny to the change");
 		expect(reviewer?.systemPrompt).toContain("Complete finding set in ONE pass");
 		expect(reviewer?.systemPrompt).toContain("never ration findings across rounds");
 		expect(reviewer?.systemPrompt).toContain("Fix stage (runtime-granted)");

@@ -21,6 +21,7 @@ import {
 	MAX_REVIEW_FIX_ROUNDS,
 	type ChainStep,
 	type ManagedWorkflowOutcome,
+	type ReviewMode,
 } from "./workflow.ts";
 import {
 	formatTaskSummary,
@@ -65,6 +66,13 @@ const IsolationSchema = Type.Optional(
 	StringEnum(["shared", "worktree"] as const, { description: ISOLATION_DESCRIPTION }),
 );
 
+const REVIEW_DESCRIPTION =
+	"Gate intensity for a worker/cleaner task: \"gate\" (default) runs one automatic reviewer after success; \"none\" skips it for mechanical, low-risk edits (typos, comments, doc strings, config value tweaks) that you verify yourself. Keep the default whenever behavior can change.";
+
+const ReviewSchema = Type.Optional(
+	StringEnum(["gate", "none"] as const, { description: REVIEW_DESCRIPTION }),
+);
+
 const TaskItem = Type.Object({
 	agent: Type.String({ description: "Name of the agent to invoke" }),
 	task: Type.String({
@@ -73,6 +81,7 @@ const TaskItem = Type.Object({
 	}),
 	cwd: Type.Optional(Type.String({ description: "Working directory for the agent process" })),
 	isolation: IsolationSchema,
+	review: ReviewSchema,
 });
 
 const SubagentParams = Type.Object({
@@ -83,6 +92,7 @@ const SubagentParams = Type.Object({
 	tasks: Type.Optional(Type.Array(TaskItem, { description: "Array of {agent, task} for parallel execution" })),
 	cwd: Type.Optional(Type.String({ description: "Working directory for the agent process (single mode)" })),
 	isolation: IsolationSchema,
+	review: ReviewSchema,
 });
 
 /** Roles that default to worktree isolation in parallel dispatches even when
@@ -482,7 +492,7 @@ export function registerSubagentTool(pi: ExtensionAPI, runtime: SubagentRuntime)
 			"Dispatch enabled agents as isolated leaf Pi child processes, singly or in parallel. Dispatching never blocks your turn — runs proceed in the background and each completion resumes you automatically; never poll or restate delivered results.",
 			"Put every genuinely independent unit in one `tasks` array (no per-call cap). Process slots scale with the machine; when all slots are busy the extra runs simply wait and start automatically as slots free — waiting is pacing, never a rejection or a limit on how much you may dispatch.",
 			"Every parallel write-capable agent (worker, cleaner, documenter, custom writers) defaults to a detached Git worktree, so writers run concurrently; shared mode serializes same-repository writers. Explicit `shared` keeps the caller's checkout; setup failure never silently falls back to shared.",
-			"Successful worker/cleaner runs get one automatic reviewer gate; a failing gate is fixed by the reviewer itself in a write-enabled continuation of the same session and re-reviewed in bounded, converging rounds. A REVIEW_FAIL from a gate you dispatched directly returns its findings to you — fix them inline or via a briefed worker without waiting for the user.",
+			"Successful worker/cleaner runs get one automatic reviewer gate; a failing gate is fixed by the reviewer itself in a write-enabled continuation of the same session and re-reviewed in bounded, converging rounds. Pass review: \"none\" on a worker/cleaner task to skip its automatic gate for mechanical, low-risk edits you verify yourself. A REVIEW_FAIL from a gate you dispatched directly returns its findings to you — fix them inline or via a briefed worker without waiting for the user.",
 			"A configured child-model failure continues the retained session on the current main model. Resume a parked or settled thread with subagent_control by run id; use subagent_stop for destructive cancellation.",
 		].join(" "),
 		promptSnippet:
@@ -566,6 +576,7 @@ export function registerSubagentTool(pi: ExtensionAPI, runtime: SubagentRuntime)
 							item.isolation as IsolationMode | undefined,
 							catalogAgent ? isWriteCapableAgent(catalogAgent) : undefined,
 						),
+						{ review: item.review as ReviewMode | undefined },
 					));
 				}
 				const startedRuns = results.filter((result) => result.exitCode === -1);
@@ -602,6 +613,7 @@ export function registerSubagentTool(pi: ExtensionAPI, runtime: SubagentRuntime)
 				params.task as string,
 				params.cwd,
 				defaultIsolationMode("single", params.agent as string, params.isolation as IsolationMode | undefined),
+				{ review: params.review as ReviewMode | undefined },
 			);
 			if (result.exitCode !== -1) {
 				throw new Error(getResultOutput(result));
@@ -617,19 +629,21 @@ export function registerSubagentTool(pi: ExtensionAPI, runtime: SubagentRuntime)
 		renderCall(args, theme) {
 			if (args.tasks && args.tasks.length > 0) {
 				let text = `${theme.fg("toolTitle", theme.bold("subagent "))}${theme.fg("accent", `parallel (${args.tasks.length})`)}`;
-				for (const t of args.tasks.slice(0, 4)) {
-					const preview = formatTaskSummary(t.task, 48);
-					const isolation = defaultIsolationMode("parallel", t.agent, t.isolation) === "worktree" ? " [worktree]" : "";
-					text += `\n  ${theme.fg("accent", t.agent)}${theme.fg("dim", isolation)} ${theme.fg("dim", preview)}`;
-				}
+			for (const t of args.tasks.slice(0, 4)) {
+				const preview = formatTaskSummary(t.task, 48);
+				const isolation = defaultIsolationMode("parallel", t.agent, t.isolation) === "worktree" ? " [worktree]" : "";
+				const gate = t.review === "none" ? " [no gate]" : "";
+				text += `\n  ${theme.fg("accent", t.agent)}${theme.fg("dim", `${isolation}${gate}`)} ${theme.fg("dim", preview)}`;
+			}
 				if (args.tasks.length > 4) text += `\n  ${theme.fg("dim", `… +${args.tasks.length - 4} more`)}`;
 				return new Text(text, 0, 0);
 			}
 			const task: string = args.task ?? "";
 			const preview = formatTaskSummary(task, 60);
 			const isolation = args.isolation === "worktree" ? " [worktree]" : "";
+			const gate = args.review === "none" ? " [no gate]" : "";
 			return new Text(
-				`${theme.fg("toolTitle", theme.bold("subagent "))}${theme.fg("accent", args.agent ?? "?")}${theme.fg("dim", isolation)} ${theme.fg("dim", preview)}`,
+				`${theme.fg("toolTitle", theme.bold("subagent "))}${theme.fg("accent", args.agent ?? "?")}${theme.fg("dim", `${isolation}${gate}`)} ${theme.fg("dim", preview)}`,
 				0,
 				0,
 			);

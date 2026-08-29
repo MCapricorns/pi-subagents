@@ -35,6 +35,12 @@ export interface ManagedWorkflowPlan {
 	initialRelation: string;
 }
 
+/** Dispatch-time gate intensity for one worker/cleaner task. "gate" (default)
+ * keeps the automatic post-writer reviewer; "none" skips it so a mechanical,
+ * low-risk edit does not pay for a full adversarial review — the dispatching
+ * model owns that proportionality call because it knows the task's risk. */
+export type ReviewMode = "gate" | "none";
+
 /** Fixed cap on reviewer fix → re-review rounds inside one managed workflow.
  * Re-reviews converge by construction (they verify fixes and fix regressions
  * instead of re-scanning the whole surface); the cap only stops pathological
@@ -62,11 +68,14 @@ export function canStartManagedWorkflow(
 /** Classify only healthy top-level writer results; everything else delivers
  * directly, including every reviewer result — a direct reviewer dispatch never
  * starts another child. A failing managed gate is expanded by the workflow
- * itself into the reviewer fix stage. */
+ * itself into the reviewer fix stage. A dispatch that opted out of the gate
+ * (review: "none") delivers directly too. */
 export function getManagedWorkflowPlan(
 	result: SingleResult,
 	availability: WorkflowAgentAvailability,
+	review: ReviewMode = "gate",
 ): ManagedWorkflowPlan | undefined {
+	if (review === "none") return undefined;
 	if (result.dispatchFailed || isFailedResult(result)) return undefined;
 	if (result.agent === "worker" || result.agent === "cleaner") {
 		if (!availability.reviewer) return undefined;
@@ -89,6 +98,8 @@ export function buildFinalReviewBrief(initialResult: SingleResult): string {
 		`---`,
 		``,
 		`Run \`git status\` and \`git diff\` and judge the actual pending code; the report is context, not proof.`,
+		`Scale the gate to the change: a small, contained diff gets a fast, focused review of its correctness,`,
+		`regressions, and blast radius — not a whole-surface audit or a redesign of surrounding code it merely touches.`,
 		`Remain read-only. Attach a concrete fix instruction to EVERY gate finding — including documentation drift —:`,
 		`what to change, where, and how to verify it. A failing gate continues into your own write-enabled fix stage,`,
 		`so make every instruction executable exactly as written.`,

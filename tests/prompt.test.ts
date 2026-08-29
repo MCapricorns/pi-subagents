@@ -56,10 +56,11 @@ describe("buildDelegationDirective", () => {
 		expect(withoutExplorer).not.toContain("explorer");
 	});
 
-	it("routes only edit-authorized cleanup to cleaner", () => {
+	it("routes cleanup to cleaner proactively with the brief as edit authorization", () => {
 		const directive = buildDelegationDirective([agent("cleaner"), agent("reviewer")]);
-		expect(directive).toContain("only user-authorized cleanup or dedup");
-		expect(directive).toContain("every safe proven cut without per-item approval");
+		expect(directive).toContain("proactively when finished work leaves dead code");
+		expect(directive).toContain("Your brief is its edit authorization");
+		expect(directive).toContain("every safe proven cut applies without per-item approval");
 		expect(directive).toContain("never a gate");
 	});
 
@@ -71,10 +72,20 @@ describe("buildDelegationDirective", () => {
 			agent("reviewer"),
 		]);
 		expect(directive).toContain("standalone docs/comment work");
-		expect(directive).toContain("syncing real drift a change left");
-		expect(directive).toContain("writers already sync what they directly affect");
+		expect(directive).toContain("dispatch it proactively when a change — yours or a child's — leaves README/docs/comment drift");
+		expect(directive).toContain("may make zero edits");
 		expect(directive).not.toContain("DOCUMENTATION: NEEDED");
 		expect(directive).toContain("failing gates are fixed by the reviewer itself in bounded fix/re-review rounds");
+	});
+
+	it("teaches proportional gating: review none for mechanical edits, default gate otherwise", () => {
+		const directive = buildDelegationDirective([agent("worker"), agent("reviewer")]);
+		expect(directive).toContain('review: "none"');
+		expect(directive).toContain("mechanical, low-risk edits");
+		expect(directive).toContain("keep the default gate whenever behavior can change");
+		// Without a code writer there is no automatic gate to scale.
+		const noWriter = buildDelegationDirective([agent("explorer"), agent("reviewer")]);
+		expect(noWriter).not.toContain('review: "none"');
 	});
 
 	it("does not advertise documenter routing when the role is disabled", () => {

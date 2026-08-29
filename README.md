@@ -30,16 +30,21 @@ burden:
   batches never fail, never flood your context (results deliver compact, with
   the full text on disk), and queueing is always visible pacing — never a
   hidden dispatch limit.
-- **Quality gates are built in and converge by themselves.** Successful
-  worker/cleaner runs continue through one independent reviewer gate. A failing
+- **Quality gates are built in, proportional, and converge by themselves.**
+  Successful worker/cleaner runs continue through one independent reviewer
+  gate, and the gate scales: a small, contained diff gets a fast, focused
+  review, and `review: "none"` skips the gate entirely for mechanical,
+  low-risk edits — a one-sentence fix never pays for a full adversarial
+  audit. A failing
   gate is fixed by the reviewer itself — the same retained session gets write
   access and applies its own fix instructions, then a converging re-review
   verifies the fixes — bounded rounds; a still-failing gate returns to the main
   agent with every finding and fix instruction. No guessing what satisfies the
   reviewer.
-- **Documentation stops drifting.** Writers sync the docs they directly affect;
-  documentation drift is an ordinary gate finding, and dispatching the
-  documenter for real remaining drift stays the main agent's decision.
+- **Documentation stops drifting.** Writers sync the docs they directly
+  affect; documentation drift is an ordinary gate finding, and the main agent
+  is told to dispatch the documenter proactively when a change leaves drift no
+  writer already synced.
 - **Parallel edits are safe.** Parallel workers default to isolated Git
   worktrees and integrate back without touching your index; shared-checkout
   writers serialize through one repository lane.
@@ -95,7 +100,7 @@ directly for exact control.
 | ------------ | ------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `explorer`   | Read-only                             | Broad search, unfamiliar-area mapping, symbol/dependency tracing. Fast model, returns a retrieval index — never proof.                                           |
 | `worker`     | Full                                  | The default route for any non-trivial, self-contained implementation, fix, refactor, or test task carried through verification.                                  |
-| `cleaner`    | Full                                  | Explicitly authorized cleanup, removal, simplification, deduplication. Every safe proven cut applies without item-by-item approval.                              |
+| `cleaner`    | Full                                  | Cleanup, removal, simplification, deduplication — requested by the user or dispatched proactively when finished work leaves dead code; the brief is its edit authorization and every safe proven cut applies. |
 | `documenter` | Docs/comments                         | Standalone docs/comments work, including syncing real drift a change left behind. May make zero edits; never changes runtime behavior.                           |
 | `reviewer`   | Read-only (review) / full (fix stage) | Audits, code-health checks, plans, PR/issue validation, and independent gates; a failing managed gate continues into the reviewer's own write-enabled fix stage. |
 
@@ -152,6 +157,14 @@ A gate ends with exactly one verdict line: `VERDICT: REVIEW_PASS` or
 `REVIEW_FAIL`. Every gate finding carries a concrete fix instruction, and the
 reviewer must surface the complete finding set in one pass — never rationing
 findings across later rounds.
+
+Gates are proportional. The reviewer scales a small, contained diff to a
+fast, focused review of its correctness, regressions, and blast radius —
+never a whole-surface audit — and a worker/cleaner dispatch can skip its
+automatic gate outright with `review: "none"`, meant for mechanical, low-risk
+edits (typos, comments, doc strings, config value tweaks) the main agent
+verifies itself. The default stays one fresh gate whenever behavior can
+change, and a resumed thread keeps its dispatch-time choice.
 
 A failing **managed** gate (after a top-level worker/cleaner) converges inside
 the workflow: the same retained reviewer session continues with write access

@@ -37,6 +37,12 @@ describe("managed workflow planning", () => {
 		expect(getManagedWorkflowPlan(result, available())).toBeUndefined();
 	});
 
+	it.each(["worker", "cleaner"])("skips the gate for a %s dispatch that opted out with review none", (agent) => {
+		const result = reviewResult("done", { agent });
+		expect(getManagedWorkflowPlan(result, available("reviewer"), "none")).toBeUndefined();
+		expect(getManagedWorkflowPlan(result, available("reviewer"), "gate")).toBeDefined();
+	});
+
 	it("delivers a successful top-level documenter directly", () => {
 		const result = reviewResult("docs done", { agent: "documenter" });
 		expect(getManagedWorkflowPlan(result, available("reviewer"))).toBeUndefined();
@@ -77,6 +83,7 @@ describe("managed handoff briefs", () => {
 		const brief = buildFinalReviewBrief(reviewResult("worker report", { agent: "worker" }));
 		expect(brief).toContain("worker report");
 		expect(brief).toContain("actual pending code");
+		expect(brief).toContain("Scale the gate to the change");
 		expect(brief).toContain("Remain read-only");
 		expect(brief).toContain("fix instruction to EVERY gate finding");
 		expect(brief).toContain("continues into your own write-enabled fix stage");
