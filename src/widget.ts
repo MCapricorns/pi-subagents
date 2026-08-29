@@ -2,15 +2,19 @@
  * Compact, glanceable active-run widget for interactive Pi sessions.
  *
  * Layout contract (redesign):
- * - One line per simple run: `icon #id agent · label — live activity` with a
- *   right-aligned `worktree · model/thinking · elapsed` telemetry column, so
- *   every line scans the same way and times line up at the right edge.
- * - Two lines per managed workflow: the stable parent line plus its stage
- *   timeline; the live stage's activity/model/elapsed rides right-aligned on
- *   the timeline line. Internal child rows are not repeated as extra lines.
+ * - Aligned columns: `icon  #id  agent` pad to the widest displayed id and
+ *   agent so every label starts at the same column; a resumed thread carries
+ *   a dim `↻` inside the agent column.
+ * - Visual hierarchy: the label (what the run owns) is plain, the live
+ *   activity after ` — ` is dim, and all telemetry — worktree badge,
+ *   model/thinking, wait state, elapsed — is one dim right-aligned column,
+ *   so times and states line up at the right edge.
+ * - Two lines per managed workflow: the stable parent line plus a `└`-connected
+ *   stage timeline; the live stage's activity/model/elapsed rides right-aligned
+ *   on the timeline line. Internal child rows are not repeated as extra lines.
  * - Queued rows say what they actually wait for ("queued" for a process slot,
- *   "waiting on repo lane" for shared-writer serialization, "starting" while
- *   the child process launches) instead of one catch-all "queued".
+ *   "repo lane" for shared-writer serialization, "starting" while the child
+ *   process launches) instead of one catch-all "queued".
  */
 
 import type { ExtensionContext, Theme } from "@earendil-works/pi-coding-agent";
@@ -32,12 +36,22 @@ export const SUBAGENTS_WIDGET_ID = "pi-subagents";
 const MAX_WIDGET_LINES = 10;
 
 const SEPARATOR = " · ";
+/** Column gap between the identity block and the run's label. */
+const IDENTITY_GAP = "  ";
 /** Splits "what this run is" from "what it is doing right now". */
 const ACTIVITY_SEPARATOR = " — ";
 /** Columns kept for left content before right-tail parts are dropped. */
 const LEFT_MIN_CONTENT = 8;
 /** Minimum useful width for a live-activity fragment. */
 const ACTIVITY_MIN_WIDTH = 6;
+
+/** Shared column widths so every visible row lines up. */
+interface ColumnLayout {
+	/** Display width of the widest `#id` among rendered roots. */
+	idWidth: number;
+	/** Display width of the widest agent name (plus resume marker) among them. */
+	agentWidth: number;
+}
 
 /** Compose one widget line with a right-aligned telemetry column: the left
  * side truncates first, the right side stays put so elapsed times and badges
@@ -52,11 +66,11 @@ function layoutLine(left: string, right: string, width: number): string {
 	return `${leftText}${" ".repeat(Math.max(1, width - visibleWidth(leftText) - rightWidth))}${right}`;
 }
 
-/** Short truthful wait word for a queued row. */
+/** Short truthful wait word for a queued row, shown in the telemetry column. */
 function waitWord(run: Pick<RunView, "waitReason">): string {
 	switch (run.waitReason) {
 		case "repository-lane":
-			return "waiting on repo lane";
+			return "repo lane";
 		case "starting":
 			return "starting";
 		default:
@@ -91,23 +105,33 @@ function composeTail(parts: Array<string | undefined>, budget: number): string {
 	return present.join(SEPARATOR);
 }
 
-/** `icon #id agent` plus dim resume/wait markers — never truncated. */
-function identitySegment(run: RunView, theme: Theme): string {
+/** Marker text that shares the agent column so alignment survives resumes. */
+function agentColumnText(run: RunView): string {
+	return run.continuationKind ? `${run.agent} ↻` : run.agent;
+}
+
+/** `icon  #id  agent` in fixed columns — never truncated. The id is
+ * right-aligned and the agent column is padded so every label starts at the
+ * same x; a resumed thread carries a dim `↻` inside the agent column. */
+function identitySegment(run: RunView, theme: Theme, layout: ColumnLayout): string {
 	const icon = run.managedWorkflow && run.status === "running"
 		? theme.fg("accent", theme.bold("◆"))
 		: statusIcon(run.status, theme);
+	const id = `#${run.id}`.padStart(layout.idWidth);
 	const name = theme.fg("accent", theme.bold(run.agent));
-	const resumed = run.continuationKind ? ` ${theme.fg("dim", "↻ resumed")}` : "";
-	const wait = run.status === "queued" ? ` ${theme.fg("dim", `· ${waitWord(run)}`)}` : "";
-	return `${icon} #${run.id} ${name}${resumed}${wait}`;
+	const resumed = run.continuationKind ? ` ${theme.fg("dim", "↻")}` : "";
+	const pad = " ".repeat(Math.max(0, layout.agentWidth - visibleWidth(agentColumnText(run))));
+	return `${icon} ${theme.fg("dim", id)} ${name}${resumed}${pad}`;
 }
 
-/** One primary line per run. Left: identity · label — activity. Right: badge,
- * model/thinking, elapsed. The activity (live signal) outranks the label when
- * space runs out; the identity and elapsed survive every width. */
-function primaryLine(run: RunView, theme: Theme, width: number, now: number): string {
+/** One primary line per run. Left: identity  label — activity, where the
+ * label stays plain and the live activity is dim. Right: one dim telemetry
+ * column (worktree badge, model/thinking, wait state, elapsed). The activity
+ * outranks the label when space runs out; the identity and elapsed survive
+ * every width. */
+function primaryLine(run: RunView, theme: Theme, width: number, now: number, layout: ColumnLayout): string {
 	const dim = (text: string): string => theme.fg("dim", text);
-	const identity = identitySegment(run, theme);
+	const identity = identitySegment(run, theme, layout);
 	const elapsed = formatElapsed(run, now);
 	const modelId = run.model?.split("/").at(-1);
 	// Queued rows omit the model (the route is re-resolved at actual start);
@@ -116,8 +140,11 @@ function primaryLine(run: RunView, theme: Theme, width: number, now: number): st
 		? undefined
 		: `${modelId}${run.thinking ? `/${run.thinking}` : ""}`;
 	const badge = run.isolation === "worktree" ? worktreeBadge(run) : undefined;
+	const wait = run.status === "queued" ? waitWord(run) : undefined;
 	const tailBudget = Math.max(0, width - visibleWidth(identity) - LEFT_MIN_CONTENT);
-	const tail = composeTail([badge, modelPart, elapsed || undefined], tailBudget);
+	// Drop order under pressure: badge, then model, then wait word; elapsed
+	// survives every width the identity leaves room for.
+	const tail = composeTail([badge, modelPart, wait, elapsed || undefined], tailBudget);
 
 	// A chain child rendered at root level (its parent row is gone) keeps its
 	// workflow relation; the templated brief itself would only repeat content.
@@ -133,7 +160,7 @@ function primaryLine(run: RunView, theme: Theme, width: number, now: number): st
 	const contentBudget = width
 		- visibleWidth(identity)
 		- (tail ? visibleWidth(tail) + 1 : 0)
-		- visibleWidth(SEPARATOR);
+		- visibleWidth(IDENTITY_GAP);
 	let content = "";
 	if (contentBudget > 0) {
 		const labelBudget = activity
@@ -149,15 +176,15 @@ function primaryLine(run: RunView, theme: Theme, width: number, now: number): st
 				- visibleWidth(labelText)
 				- (labelText ? visibleWidth(ACTIVITY_SEPARATOR) : 0);
 			content = activityBudget >= ACTIVITY_MIN_WIDTH
-				? `${labelText ? `${labelText}${ACTIVITY_SEPARATOR}` : ""}${formatTaskSummary(activity, activityBudget)}`
+				? `${labelText}${labelText ? dim(ACTIVITY_SEPARATOR) : ""}${dim(formatTaskSummary(activity, activityBudget))}`
 				// Too narrow for both: the live activity is the stronger signal.
-				: formatTaskSummary(activity, contentBudget);
+				: dim(formatTaskSummary(activity, contentBudget));
 		} else {
 			content = labelText;
 		}
 	}
 
-	const left = content ? `${identity}${SEPARATOR}${dim(content)}` : identity;
+	const left = content ? `${identity}${IDENTITY_GAP}${content}` : identity;
 	return layoutLine(left, tail ? dim(tail) : "", width);
 }
 
@@ -195,10 +222,10 @@ function timelineSegment(stages: readonly WorkflowStage[], theme: Theme, width: 
 	return truncateToWidth(`${omittedPrefix}${render(stages.slice(focusIndex))}`, width, "…");
 }
 
-/** Timeline line under a managed workflow parent. The live stage's telemetry
- * (its activity or model, plus stage elapsed) rides right-aligned, so the two
- * workflow lines replace what used to be four (parent, timeline, child row,
- * child activity). */
+/** Timeline line under a managed workflow parent, tied to it with a dim `└`.
+ * The live stage's telemetry (its activity or model, plus stage elapsed) rides
+ * right-aligned, so the two workflow lines replace what used to be four
+ * (parent, timeline, child row, child activity). */
 function workflowTimelineLine(
 	run: RunView,
 	children: readonly RunView[],
@@ -207,7 +234,7 @@ function workflowTimelineLine(
 	now: number,
 ): string | undefined {
 	const stages = run.workflowStages;
-	const indent = "  ";
+	const indent = `  ${theme.fg("dim", "└")} `;
 	const budget = width - visibleWidth(indent);
 	if (!stages || stages.length === 0 || budget <= 0) return undefined;
 	const child = children.find((candidate) => candidate.status === "running" || candidate.status === "interrupting")
@@ -230,7 +257,7 @@ function workflowTimelineLine(
 
 /** Render active runs as compact per-run line groups: one line per simple run,
  * two per managed workflow. Internal stage children fold into their parent's
- * timeline instead of adding rows. */
+ * timeline instead of adding rows, and all rows share one column layout. */
 export function formatActiveRunLines(
 	runs: readonly RunView[],
 	theme: Theme,
@@ -250,8 +277,12 @@ export function formatActiveRunLines(
 			roots.push(run);
 		}
 	}
+	const layout: ColumnLayout = {
+		idWidth: Math.max(...roots.map((root) => visibleWidth(`#${root.id}`)), 0),
+		agentWidth: Math.max(...roots.map((root) => visibleWidth(agentColumnText(root))), 0),
+	};
 	const groups: string[][] = roots.map((root) => {
-		const lines = [primaryLine(root, theme, width, now)];
+		const lines = [primaryLine(root, theme, width, now, layout)];
 		const timeline = root.managedWorkflow
 			? workflowTimelineLine(root, childrenOf.get(root.id) ?? [], theme, width, now)
 			: undefined;

@@ -224,24 +224,28 @@ threads that had already finished keep only their delivered result.
 
 ## Live status and results
 
-The TUI widget renders one compact line per run — identity, task label, live
-activity, and a right-aligned worktree/model/elapsed column — plus exactly two
-lines per managed workflow, whose timeline carries the live stage's telemetry
-instead of extra child rows:
+The TUI widget renders one compact line per run in fixed columns — status icon,
+right-aligned `#id`, padded agent name, then the task label — so every label
+starts at the same column, with the live activity dimmed after ` — ` and one
+right-aligned telemetry column (worktree badge, model/thinking, wait state,
+elapsed) so times line up at the right edge. A managed workflow adds exactly
+one more line: a `└`-connected stage timeline that carries the live stage's
+telemetry instead of extra child rows:
 
 ```text
-◆ #12 worker · src/cache.ts                      wt:a91f3c · 1m42s
-  ✓ implement ─ ● review                    read src/auth.ts · 10s
-● #15 explorer · src/models.ts — grep fallback    haiku-4-5 · 22s
-○ #23 worker · waiting on repo lane · src/config.ts
-○ #24 worker ↻ resumed · queued · tests/config.test.ts     5m02s
+◆ #12 worker    src/cache.ts                       wt:a91f3c · 1m42s
+  └ ✓ implement ─ ● review             read src/auth.ts · 10s
+● #15 explorer  src/models.ts — grep fallback    haiku-4-5/low · 22s
+○ #23 worker    src/config.ts                              repo lane
+○ #24 worker ↻  tests/config.test.ts                  queued · 5m02s
 ```
 
-Queued rows say what they are actually waiting for — `queued` for a free process
-slot, `waiting on repo lane` for shared-checkout write serialization, or
-`starting` — and resumed threads carry a `↻ resumed` marker with their cumulative
-time. The widget is capped at ten lines: when many runs are live, the extra ones
-collapse into a `… +N more` marker so the editor keeps its space.
+Queued rows state what they actually wait for in the telemetry column —
+`queued` for a free process slot, `repo lane` for shared-checkout write
+serialization, or `starting` — and a resumed thread carries a dim `↻` in its
+agent column with its cumulative time. The widget is capped at ten lines: when
+many runs are live, the extra ones collapse into a `… +N more` marker so the
+editor keeps its space.
 
 Completions resume the main agent on their own, with a compact block of at most 40
 lines by default; longer output lands unchanged in a Markdown artifact whose path

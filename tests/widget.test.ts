@@ -35,7 +35,7 @@ describe("formatActiveRunLines", () => {
 
 		const lines = formatActiveRunLines(store.getRuns(), theme, 120, 62_000);
 		expect(lines).toHaveLength(1);
-		expect(lines[0]).toContain(`● #${running} worker · src/index.ts — edit src/index.ts`);
+		expect(lines[0]).toContain(`● #${running} worker  src/index.ts — edit src/index.ts`);
 		expect(lines[0]).toContain("gpt-5-mini/high");
 		expect(lines[0]).not.toContain("openai/");
 		// Telemetry column is right-aligned: the line ends at the width with elapsed.
@@ -45,7 +45,7 @@ describe("formatActiveRunLines", () => {
 		expect(lines[0]).not.toContain(`#${parked}`);
 	});
 
-	it("labels queued rows with what they actually wait for", () => {
+	it("labels queued rows with what they actually wait for in the telemetry column", () => {
 		const store = new MonitorStore();
 		const slot = store.addRun("explorer", "Map the cleaner workflow");
 		const lane = store.addRun("worker", "Fix src/cache.ts shared");
@@ -54,9 +54,13 @@ describe("formatActiveRunLines", () => {
 
 		const lines = formatActiveRunLines(store.getRuns(), theme, 120);
 		expect(lines).toHaveLength(3);
-		expect(lines[0]).toContain(`○ #${slot} explorer · queued · Map the cleaner workflow`);
-		expect(lines[1]).toContain(`○ #${lane} worker · waiting on repo lane`);
-		expect(lines[2]).toContain(`○ #${starting} worker · starting`);
+		// The agent column is padded to the widest name so labels align.
+		expect(lines[0]).toContain(`○ #${slot} explorer  Map the cleaner workflow`);
+		expect(lines[0].endsWith("queued")).toBe(true);
+		expect(lines[1]).toContain(`○ #${lane} worker    src/cache.ts`);
+		expect(lines[1].endsWith("repo lane")).toBe(true);
+		expect(lines[2]).toContain(`○ #${starting} worker    Spawn immediately`);
+		expect(lines[2].endsWith("starting")).toBe(true);
 		for (const line of lines) expect(line).not.toContain("undefined");
 	});
 
@@ -114,10 +118,10 @@ describe("formatActiveRunLines", () => {
 
 		const lines = formatActiveRunLines(store.getRuns(), theme, 120);
 		expect(lines).toHaveLength(2);
-		expect(lines[0]).toContain(`◆ #${parent} worker · src/index.ts`);
+		expect(lines[0]).toContain(`◆ #${parent} worker  src/index.ts`);
 		expect(lines[0]).not.toContain("grok-parent");
 		expect(lines[0]).not.toContain("/xhigh");
-		expect(lines[1]).toContain("✓ implement ─ ● review ─ ○ docs");
+		expect(lines[1]).toContain("└ ✓ implement ─ ● review ─ ○ docs");
 		// The live stage's doing-now rides on the timeline instead of extra rows.
 		expect(lines[1]).toContain("read src/index.ts");
 		expect(lines.join("\n")).not.toContain("managed workflow running");
@@ -216,7 +220,7 @@ describe("formatActiveRunLines", () => {
 
 		const lines = formatActiveRunLines(store.getRuns(), theme, 120);
 		expect(lines).toHaveLength(1);
-		expect(lines[0]).toContain(`● #${orphan} documenter · docs sync · src/widget.ts`);
+		expect(lines[0]).toContain(`● #${orphan} documenter  docs sync · src/widget.ts`);
 	});
 
 	it("caps output at the host widget budget with an overflow marker counting hidden runs", () => {
@@ -270,10 +274,9 @@ describe("formatActiveRunLines", () => {
 		);
 		const [line] = formatActiveRunLines(store.getRuns(), theme, 80, 100_000);
 		expect(visibleWidth(line)).toBeLessThanOrEqual(80);
-		expect(line).toContain("↻ resumed");
-		expect(line).toContain("queued");
+		expect(line).toContain("worker ↻");
+		expect(line).toContain("queued · 1m01s");
 		expect(line).toContain(".ts");
-		expect(line).toContain("1m01s");
 	});
 
 	it("shows an auto-fix parent as running with cumulative live elapsed after its review settles", () => {
