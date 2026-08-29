@@ -367,6 +367,9 @@ export interface RunSingleOptions {
 	/** Parent directory for a fresh session directory: the project-scoped
 	 * sessions root, so retained sessions survive reloads and restarts. */
 	sessionRoot: string;
+	/** Parent directory for per-attempt transient files (child prompt, retry
+	 * policy): the project-scoped tmp root, so nothing lands in the OS temp. */
+	scratchRoot: string;
 	/** Initial RPC prompt. Kept under the old name to limit caller churn. */
 	stdinText?: string;
 	/** Refresh parent-derived tools immediately before every startup retry and
@@ -440,6 +443,7 @@ export async function runSingleAgent(options: RunSingleOptions): Promise<SingleR
 		idleTimeoutMs,
 		sessionDir: options.sessionDir,
 		sessionId: options.sessionId,
+		scratchRoot: options.scratchRoot,
 		prompt,
 		signal: options.signal,
 		onLive: options.onLive,

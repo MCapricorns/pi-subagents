@@ -42,6 +42,10 @@ function sessionRootForTests(): string {
 	return mkdtempSync(join(tmpdir(), "pi-subagents-test-sessions-"));
 }
 
+function scratchRootForTests(): string {
+	return mkdtempSync(join(tmpdir(), "pi-subagents-test-scratch-"));
+}
+
 
 describe("runSingleAgentWithMainFallback startup retry", () => {
 	const agent = {
@@ -92,6 +96,7 @@ describe("runSingleAgentWithMainFallback startup retry", () => {
 				const result = await runSingleAgentWithMainFallback({
 					defaultCwd: process.cwd(),
 					sessionRoot: sessionRootForTests(),
+					scratchRoot: scratchRootForTests(),
 					agent,
 					agentName: agent.name,
 					task: "survive a startup race",
@@ -124,6 +129,7 @@ describe("runSingleAgentWithMainFallback startup retry", () => {
 				const result = await runSingleAgentWithMainFallback({
 					defaultCwd: process.cwd(),
 					sessionRoot: sessionRootForTests(),
+					scratchRoot: scratchRootForTests(),
 					agent,
 					agentName: agent.name,
 					task: "do not hang on an invalid delay",
@@ -156,6 +162,7 @@ describe("runSingleAgentWithMainFallback startup retry", () => {
 				const running = runSingleAgentWithMainFallback({
 					defaultCwd: process.cwd(),
 					sessionRoot: sessionRootForTests(),
+					scratchRoot: scratchRootForTests(),
 					agent,
 					agentName: agent.name,
 					task: "abort during retry",
@@ -201,6 +208,7 @@ process.exit(1);`,
 				const result = await runSingleAgentWithMainFallback({
 					defaultCwd: process.cwd(),
 					sessionRoot: sessionRootForTests(),
+					scratchRoot: scratchRootForTests(),
 					agent,
 					agentName: agent.name,
 					task: "real error",
@@ -238,6 +246,7 @@ process.exit(1);`,
 				const result = await runSingleAgentWithMainFallback({
 					defaultCwd: process.cwd(),
 					sessionRoot: sessionRootForTests(),
+					scratchRoot: scratchRootForTests(),
 					agent,
 					agentName: agent.name,
 					task: "accepted then crashed",
@@ -280,6 +289,7 @@ const count = fs.readFileSync(process.env.LOG_PATH, "utf8").split("\\n").filter(
 				const result = await runSingleAgentWithMainFallback({
 					defaultCwd: process.cwd(),
 					sessionRoot: sessionRootForTests(),
+					scratchRoot: scratchRootForTests(),
 					agent: { ...agent, tools: ["read"] },
 					resolveAgentForAttempt: (candidate) => ({
 						...candidate,
@@ -335,6 +345,7 @@ const count = fs.readFileSync(process.env.LOG_PATH, "utf8").split("\\n").filter(
 				const result = await runSingleAgentWithMainFallback({
 					defaultCwd: process.cwd(),
 					sessionRoot: sessionRootForTests(),
+					scratchRoot: scratchRootForTests(),
 					agent,
 					agentName: agent.name,
 					task: "perform one side effect",
@@ -382,6 +393,7 @@ const count = fs.readFileSync(process.env.LOG_PATH, "utf8").split("\\n").filter(
 					{
 						defaultCwd: process.cwd(),
 						sessionRoot: sessionRootForTests(),
+						scratchRoot: scratchRootForTests(),
 						agent: { ...agent, model: "selected/model" },
 						agentName: agent.name,
 						task: "perform one side effect before going idle",
@@ -425,6 +437,7 @@ const count = fs.readFileSync(process.env.LOG_PATH, "utf8").split("\\n").filter(
 				const result = await runSingleAgentWithMainFallback({
 					defaultCwd: process.cwd(),
 					sessionRoot: sessionRootForTests(),
+					scratchRoot: scratchRootForTests(),
 					agent,
 					agentName: agent.name,
 					task: "real model error",

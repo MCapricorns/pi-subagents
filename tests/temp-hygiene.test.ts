@@ -6,6 +6,7 @@ import {
 	isProcessAlive,
 	killProcessTree,
 	sweepOrphanTempDirs,
+	sweepProjectTempDirs,
 	TEMP_OWNER_FILE_NAME,
 	UNMARKED_TEMP_MAX_AGE_MS,
 	writeTempOwnerMarker,
@@ -37,7 +38,7 @@ describe("process liveness and tree kill", () => {
 });
 
 describe("temp owner markers and orphan sweep", () => {
-	it("removes only dead-owner and old-unmarked directories", () => {
+	it("removes only dead-owner and old-unmarked transient directories", () => {
 		const root = mkdtempSync(join(tmpdir(), "pi-subagents-hygiene-"));
 		roots.push(root);
 		const now = Date.now();
@@ -56,10 +57,14 @@ describe("temp owner markers and orphan sweep", () => {
 			"utf8",
 		);
 		writeFileSync(join(deadOwner, "payload.txt"), "x", "utf8");
-		const oldUnmarked = makeDir(root, "pi-subagent-session-legacy");
+		const oldUnmarked = makeDir(root, "pi-subagents-unmarked-old");
 		aged(oldUnmarked);
-		const freshUnmarked = makeDir(root, "pi-subagent-session-fresh");
-		const results = makeDir(root, "pi-subagents-results");
+		const freshUnmarked = makeDir(root, "pi-subagents-unmarked-fresh");
+		// Durable session/worktree directories use the singular pi-subagent-
+		// prefix and live in their own roots; the transient sweep never touches
+		// them even when they age past the cap.
+		const durableSession = makeDir(root, "pi-subagent-session-durable");
+		aged(durableSession);
 		const unrelated = makeDir(root, "someone-elses-dir");
 
 		const removed = sweepOrphanTempDirs(root, {
@@ -72,7 +77,7 @@ describe("temp owner markers and orphan sweep", () => {
 		expect(existsSync(deadOwner)).toBe(false);
 		expect(existsSync(oldUnmarked)).toBe(false);
 		expect(existsSync(freshUnmarked)).toBe(true);
-		expect(existsSync(results)).toBe(true);
+		expect(existsSync(durableSession)).toBe(true);
 		expect(existsSync(unrelated)).toBe(true);
 	});
 
@@ -89,6 +94,36 @@ describe("temp owner markers and orphan sweep", () => {
 		});
 		expect(justInside).toBe(0);
 		expect(existsSync(dir)).toBe(true);
+	});
+
+	it("sweeps every project's tmp directory under the durable root", () => {
+		const durableRoot = mkdtempSync(join(tmpdir(), "pi-subagents-hygiene-root-"));
+		roots.push(durableRoot);
+		const deadOwner = (project: string, name: string): string => {
+			const dir = makeDir(join(durableRoot, project), join("tmp", name));
+			writeFileSync(
+				join(dir, TEMP_OWNER_FILE_NAME),
+				`${JSON.stringify({ pid: 999_999, createdAt: 0 })}\n`,
+				"utf8",
+			);
+			return dir;
+		};
+		const goneA = deadOwner("proj-a", "pi-subagents-dead-a");
+		const goneB = deadOwner("proj-b", "pi-subagents-dead-b");
+		const liveDir = makeDir(join(durableRoot, "proj-a"), join("tmp", "pi-subagents-live"));
+		writeTempOwnerMarker(liveDir, 0);
+		// A project whose tmp directory was never created must be skipped silently.
+		mkdirSync(join(durableRoot, "proj-c", "sessions"), { recursive: true });
+		// Loose files under the durable root are not project directories.
+		writeFileSync(join(durableRoot, "stray.txt"), "x", "utf8");
+
+		const removed = sweepProjectTempDirs(durableRoot, { isAlive: (pid) => pid === process.pid });
+
+		expect(removed).toBe(2);
+		expect(existsSync(goneA)).toBe(false);
+		expect(existsSync(goneB)).toBe(false);
+		expect(existsSync(liveDir)).toBe(true);
+		expect(existsSync(join(durableRoot, "proj-c", "sessions"))).toBe(true);
 	});
 });
 

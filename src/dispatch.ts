@@ -251,6 +251,7 @@ export function registerSubagentTool(pi: ExtensionAPI, runtime: SubagentRuntime)
 			...(request.worktreeId ? { worktreeId: request.worktreeId } : {}),
 		});
 		const onLive = makeLiveHandler(runId);
+		const projectRoot = getProjectRoot(runtime.configPath, request.executionCwd);
 		try {
 			const result = await runSingleAgentWithMainFallback(
 				{
@@ -266,7 +267,8 @@ export function registerSubagentTool(pi: ExtensionAPI, runtime: SubagentRuntime)
 					onLive,
 					makeDetails: makeDetails("single", true),
 					idleTimeoutMs: stageConfig.idleTimeoutSec * 1000,
-					sessionRoot: join(getProjectRoot(runtime.configPath, request.executionCwd), "sessions"),
+					sessionRoot: join(projectRoot, "sessions"),
+					scratchRoot: join(projectRoot, "tmp"),
 					...(stage.session
 						? { sessionId: stage.session.sessionId, sessionDir: stage.session.sessionDir, stdinText: task }
 						: {}),

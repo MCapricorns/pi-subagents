@@ -59,6 +59,10 @@ function sessionRootForTests(): string {
 	return mkdtempSync(join(tmpdir(), "pi-subagents-test-sessions-"));
 }
 
+function scratchRootForTests(): string {
+	return mkdtempSync(join(tmpdir(), "pi-subagents-test-scratch-"));
+}
+
 describe("runSingleAgent transport and lifecycle", () => {
 	const agent = {
 		name: "fake",
@@ -84,6 +88,7 @@ describe("runSingleAgent transport and lifecycle", () => {
 			const result = await runSingleAgent({
 				defaultCwd: process.cwd(),
 				sessionRoot: sessionRootForTests(),
+				scratchRoot: scratchRootForTests(),
 				agent,
 				agentName: agent.name,
 				task: "hello from stdin",
@@ -117,6 +122,7 @@ describe("runSingleAgent transport and lifecycle", () => {
 				const result = await runSingleAgent({
 					defaultCwd: process.cwd(),
 					sessionRoot: sessionRootForTests(),
+					scratchRoot: scratchRootForTests(),
 					agent: { ...agent, tools: [...tools] },
 					agentName: agent.name,
 					task: "inspect tool args",
@@ -155,6 +161,7 @@ describe("runSingleAgent transport and lifecycle", () => {
 		const result = await runSingleAgent({
 			defaultCwd: process.cwd(),
 			sessionRoot: sessionRootForTests(),
+			scratchRoot: scratchRootForTests(),
 			agent,
 			agentName: agent.name,
 			task: "hang after one line",
@@ -198,6 +205,7 @@ describe("runSingleAgent transport and lifecycle", () => {
 			const result = await runSingleAgent({
 				defaultCwd: process.cwd(),
 				sessionRoot: sessionRootForTests(),
+				scratchRoot: scratchRootForTests(),
 				agent,
 				agentName: agent.name,
 				task: "retry terminated streams",
@@ -240,6 +248,7 @@ const timer = setInterval(() => {
 			const result = await runSingleAgent({
 				defaultCwd: process.cwd(),
 				sessionRoot: sessionRootForTests(),
+				scratchRoot: scratchRootForTests(),
 				agent,
 				agentName: agent.name,
 				task: "keep busy",
@@ -289,6 +298,7 @@ describe("runSingleAgentWithMainFallback", () => {
 				{
 					defaultCwd: process.cwd(),
 					sessionRoot: sessionRootForTests(),
+					scratchRoot: scratchRootForTests(),
 					agent: { ...agent, model: "openai-codex/gpt-5.6-sol" },
 					agentName: agent.name,
 					task: "review",
@@ -345,6 +355,7 @@ respond(command);`,
 				{
 					defaultCwd: process.cwd(),
 					sessionRoot: sessionRootForTests(),
+					scratchRoot: scratchRootForTests(),
 					agent: { ...agent, model: "selected/model" },
 					agentName: agent.name,
 					task: "review",
@@ -379,6 +390,7 @@ respond(command);`,
 				{
 					defaultCwd: process.cwd(),
 					sessionRoot: sessionRootForTests(),
+					scratchRoot: scratchRootForTests(),
 					agent: { ...agent, model: "openai-codex/gpt-5.6-sol" },
 					agentName: agent.name,
 					task: "review",
@@ -408,6 +420,7 @@ respond(command);`,
 			const result = await runSingleAgentWithMainFallback({
 				defaultCwd: process.cwd(),
 				sessionRoot: sessionRootForTests(),
+				scratchRoot: scratchRootForTests(),
 				agent: { ...agent, model: "openai-codex/gpt-5.6-sol" },
 				agentName: agent.name,
 				task: "review",
@@ -442,6 +455,7 @@ respond(command);`,
 				{
 					defaultCwd: process.cwd(),
 					sessionRoot: sessionRootForTests(),
+					scratchRoot: scratchRootForTests(),
 					agent: { ...agent, model: "anthropic/primary" },
 					agentName: agent.name,
 					task: "run tests",
@@ -531,6 +545,7 @@ describe("runSingleAgentWithMainFallback session resume", () => {
 				{
 					defaultCwd: process.cwd(),
 					sessionRoot: sessionRootForTests(),
+					scratchRoot: scratchRootForTests(),
 					agent: { ...agent, model: "openai-codex/gpt-5.6-sol", tools: ["read"] },
 					resolveAgentForAttempt: (candidate) => ({
 						...candidate,
@@ -586,6 +601,7 @@ describe("runSingleAgentWithMainFallback session resume", () => {
 			const result = await runSingleAgentWithMainFallback({
 				defaultCwd: process.cwd(),
 				sessionRoot: sessionRootForTests(),
+				scratchRoot: scratchRootForTests(),
 				agent: { ...agent, model: "openai-codex/gpt-5.6-sol" },
 				agentName: agent.name,
 				task: "review",

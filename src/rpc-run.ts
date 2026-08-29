@@ -9,8 +9,7 @@
 
 import { spawn, type ChildProcess } from "node:child_process";
 import { existsSync, readdirSync, unlinkSync, rmdirSync } from "node:fs";
-import { mkdtemp, rm, writeFile } from "node:fs/promises";
-import { tmpdir } from "node:os";
+import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { basename, join } from "node:path";
 import { StringDecoder } from "node:string_decoder";
 import type { Message } from "@earendil-works/pi-ai";
@@ -332,9 +331,11 @@ interface ChildRetryPolicyExtension {
  * maxRetries=0. It uses Pi's public extension and pi-ai compatibility APIs, so
  * it works in Node and standalone/Bun builds without touching user settings. */
 export async function writeChildRetryPolicyExtension(
+	scratchRoot: string,
 	modelRef?: string,
 ): Promise<ChildRetryPolicyExtension> {
-	const dir = await mkdtemp(join(tmpdir(), "pi-subagents-policy-"));
+	await mkdir(scratchRoot, { recursive: true });
+	const dir = await mkdtemp(join(scratchRoot, "pi-subagents-policy-"));
 	writeTempOwnerMarker(dir);
 	const filePath = join(dir, "no-provider-retries.mjs");
 	const slash = modelRef?.indexOf("/") ?? -1;
@@ -363,8 +364,13 @@ export async function writeChildRetryPolicyExtension(
 	}
 }
 
-async function writePromptToTempFile(agentName: string, prompt: string): Promise<{ dir: string; filePath: string }> {
-	const dir = await mkdtemp(join(tmpdir(), "pi-subagents-"));
+async function writePromptToTempFile(
+	scratchRoot: string,
+	agentName: string,
+	prompt: string,
+): Promise<{ dir: string; filePath: string }> {
+	await mkdir(scratchRoot, { recursive: true });
+	const dir = await mkdtemp(join(scratchRoot, "pi-subagents-"));
 	writeTempOwnerMarker(dir);
 	const safeName = agentName.replace(/[^\w.-]+/g, "_");
 	const filePath = join(dir, `prompt-${safeName}.md`);
@@ -425,6 +431,9 @@ export interface RunRpcAttemptOptions {
 	idleTimeoutMs: number;
 	sessionDir?: string;
 	sessionId?: string;
+	/** Transient scratch root (child prompt files, retry-policy extension):
+	 * the project-scoped tmp directory, never the OS temp directory. */
+	scratchRoot: string;
 	prompt: string;
 	signal?: AbortSignal;
 	onLive?: (event: SubagentLiveEvent) => void;
@@ -454,7 +463,7 @@ export async function runRpcAgentAttempt(options: RunRpcAttemptOptions): Promise
 	let tmpPromptDir: string | null = null;
 	let tmpPromptPath: string | null = null;
 	if (agent.systemPrompt.trim()) {
-		const tmp = await writePromptToTempFile(agent.name, agent.systemPrompt);
+		const tmp = await writePromptToTempFile(options.scratchRoot, agent.name, agent.systemPrompt);
 		tmpPromptDir = tmp.dir;
 		tmpPromptPath = tmp.filePath;
 		args.push("--append-system-prompt", tmpPromptPath);
@@ -462,7 +471,7 @@ export async function runRpcAgentAttempt(options: RunRpcAttemptOptions): Promise
 
 	let retryPolicy: ChildRetryPolicyExtension;
 	try {
-		retryPolicy = await writeChildRetryPolicyExtension(agent.model);
+		retryPolicy = await writeChildRetryPolicyExtension(options.scratchRoot, agent.model);
 		args.push("--extension", retryPolicy.filePath);
 	} catch (error) {
 		if (tmpPromptDir) await rm(tmpPromptDir, { recursive: true, force: true }).catch(() => undefined);

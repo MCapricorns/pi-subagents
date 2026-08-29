@@ -3,7 +3,6 @@
 import { SessionManager } from "@earendil-works/pi-coding-agent";
 import { existsSync } from "node:fs";
 import { mkdir, mkdtemp, rm } from "node:fs/promises";
-import { tmpdir } from "node:os";
 import { join } from "node:path";
 
 export interface ForkedSession {
@@ -43,15 +42,15 @@ export async function forkRetainedSession(options: {
 	targetCwd?: string;
 	sessionDir: string;
 	sessionId: string;
-	/** Parent directory for the cloned branch. Defaults to the OS temp dir;
-	 * dispatch passes the durable state root. */
-	targetRoot?: string;
+	/** Parent directory for the cloned branch: the project-scoped durable
+	 * sessions root, so forks never land in the OS temp directory. */
+	targetRoot: string;
 }): Promise<ForkedSession> {
 	const sourceSessionFile = await findRetainedSessionFile(
 		options.sessionDir,
 		options.sessionId,
 	);
-	const root = options.targetRoot ?? tmpdir();
+	const root = options.targetRoot;
 	await mkdir(root, { recursive: true });
 	const sessionDir = await mkdtemp(join(root, "pi-subagent-session-fork-"));
 	try {

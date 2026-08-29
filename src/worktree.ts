@@ -11,7 +11,6 @@
 import { spawn, type ChildProcess } from "node:child_process";
 import { existsSync } from "node:fs";
 import { copyFile, mkdir, mkdtemp, realpath, rm, stat, writeFile } from "node:fs/promises";
-import { tmpdir } from "node:os";
 import { isAbsolute, join, relative, resolve } from "node:path";
 
 export type IsolationMode = "shared" | "worktree";
@@ -216,8 +215,9 @@ export interface WorktreeSnapshot {
 
 export interface WorktreeCreateOptions {
 	runner?: CommandRunner;
-	/** Test hook; production uses the OS temp directory. */
-	tempBaseDir?: string;
+	/** Parent directory for the worktree group: the project-scoped durable
+	 * worktrees root, so isolation never lands in the OS temp directory. */
+	tempBaseDir: string;
 	/** Complete source generation checkpoint merged onto the current HEAD. */
 	seedCheckpoint?: WorktreeCheckpoint;
 	/** The seed is already present in the parent checkout, so only later edits
@@ -672,11 +672,11 @@ class GitWorktreeIsolation implements WorktreeIsolation {
  */
 export async function createWorktreeIsolation(
 	cwd: string,
-	options: WorktreeCreateOptions = {},
+	options: WorktreeCreateOptions,
 ): Promise<WorktreeIsolation> {
 	const runner = options.runner ?? runCommand;
 	const target = await resolveWorktreeTarget(cwd, runner);
-	const tempBase = options.tempBaseDir ? resolve(options.tempBaseDir) : tmpdir();
+	const tempBase = resolve(options.tempBaseDir);
 	await mkdir(tempBase, { recursive: true });
 	const tempDir = await mkdtemp(join(tempBase, "pi-subagent-worktree-"));
 	const worktreePath = join(tempDir, "worktree");

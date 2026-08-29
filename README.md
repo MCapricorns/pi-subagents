@@ -205,8 +205,10 @@ subagent_control({ action: "resume", id: 7, objective: "Finish the tests." });
 
 Threads are durable while work is unfinished: parked sessions, worktree
 checkpoints, and result excerpts live under
-`~/.pi/agent/ferris-pi-subagents/<project>/` (grouped per project; not the OS
-temp directory) and are restored when pi reloads or restarts — a reload
+`~/.pi/agent/ferris-pi-subagents/<project>/` (grouped per project; nothing is
+written to the OS temp directory — transient per-run scratch lives in the
+project's `tmp/` and is swept for dead owners on the next load) and are
+restored when pi reloads or restarts — a reload
 interrupts a live run into a restorable checkpoint instead of losing it. A
 thread that completes or fails cleanly drops its durable record, so the
 threads manifest exists only

@@ -12,7 +12,7 @@ import type { ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { existsSync } from "node:fs";
 import { rm } from "node:fs/promises";
 import { realpath } from "node:fs/promises";
-import { join, resolve } from "node:path";
+import { join, resolve, dirname } from "node:path";
 import {
 	discoverAgents,
 	isWriteCapableAgent,
@@ -68,6 +68,7 @@ import {
 	buildResumePrompt,
 	getProjectRoot,
 	getResultOutput,
+	PROJECT_ROOTS_DIR_NAME,
 	RpcRunControl,
 	isFailedResult,
 	isModelLevelFailure,
@@ -81,7 +82,7 @@ import {
 import {
 	isProcessAlive,
 	killProcessTree,
-	sweepOrphanTempDirs,
+	sweepProjectTempDirs,
 } from "./temp-hygiene.ts";
 import {
 	createWorktreeIsolation,
@@ -418,6 +419,7 @@ export function createBackgroundDispatcher(options: BackgroundDispatcherOptions)
 		const projectRoot = getProjectRoot(runtime.configPath, originalCwd);
 		const sessionsRoot = join(projectRoot, "sessions");
 		const worktreesRoot = join(projectRoot, "worktrees");
+		const scratchRoot = join(projectRoot, "tmp");
 		const previousWorktree = existingThread?.worktree;
 		let worktree = seed?.worktree ?? previousWorktree;
 		if (isolation === "worktree") {
@@ -586,6 +588,7 @@ export function createBackgroundDispatcher(options: BackgroundDispatcherOptions)
 							makeDetails: makeDetails("single", true),
 							idleTimeoutMs: activeIdleTimeoutMs,
 							sessionRoot: sessionsRoot,
+							scratchRoot,
 							...(priorSessionId && priorSessionDir
 								? {
 									sessionId: priorSessionId,
@@ -1384,7 +1387,7 @@ export async function bootstrapDurableState(runtime: SubagentRuntime): Promise<v
 		/* retention is best-effort */
 	}
 	try {
-		sweepOrphanTempDirs();
+		sweepProjectTempDirs(join(dirname(runtime.configPath), PROJECT_ROOTS_DIR_NAME));
 	} catch {
 		/* temp hygiene is best-effort */
 	}
