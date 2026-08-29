@@ -116,6 +116,17 @@ export interface RunChainMeta {
 	waitReason?: RunWaitReason;
 }
 
+/** Ephemeral activity of the parent pi model while its agent loop runs: the
+ * live model/thinking ref and a one-line "what is it doing now". Not a run —
+ * no id, usage, or chain machinery; the view disappears when the loop settles. */
+export interface MainActivity {
+	model?: string;
+	thinking?: string;
+	activity?: string;
+	/** Epoch ms when the current agent loop started. */
+	activeSince: number;
+}
+
 // ---------------------------------------------------------------------------
 // Formatting helpers
 // ---------------------------------------------------------------------------
@@ -472,6 +483,71 @@ export class MonitorStore {
 	private runs: RunView[] = [];
 	private nextId = 1;
 	private subscribers = new Set<() => void>();
+	private mainModel?: string;
+	private mainThinking?: string;
+	private mainActivity?: string;
+	private mainActiveSince?: number;
+
+	// --- parent pi model activity ------------------------------------------
+	// Fed by the parent session's extension events (agent loop, streaming,
+	// tool executions); rendered as the widget's first line. Change-guarded so
+	// per-token streaming deltas do not flood subscribers.
+
+	setMainModel(model?: string): void {
+		if (!model || this.mainModel === model) return;
+		this.mainModel = model;
+		this.notify();
+	}
+
+	setMainThinking(thinking?: string): void {
+		if (!thinking || this.mainThinking === thinking) return;
+		this.mainThinking = thinking;
+		this.notify();
+	}
+
+	setMainActivity(text: string): void {
+		const activity = sanitizeActivityText(text) || undefined;
+		if (!activity || this.mainActivity === activity) return;
+		this.mainActivity = activity;
+		this.notify();
+	}
+
+	/** Record the main model starting a tool; the activity shows the tool's
+	 * most telling argument, same vocabulary as subagent rows. */
+	recordMainToolStart(toolName: string, activity: string): void {
+		const safeToolName = sanitizeActivityText(toolName) || "tool";
+		this.setMainActivity(activity || safeToolName);
+	}
+
+	/** Record a failed main-model tool; successful completions keep their last
+	 * activity until the next model event supplies a better description. */
+	recordMainToolEnd(toolName: string, isError: boolean): void {
+		if (isError) this.setMainActivity(`✗ ${sanitizeActivityText(toolName) || "tool"} failed`);
+	}
+
+	/** Track the parent agent loop: started at agent_start, cleared when the
+	 * loop settles (agent_end / agent_settled). */
+	setMainAgentActive(active: boolean): void {
+		if ((this.mainActiveSince !== undefined) === active) return;
+		this.mainActiveSince = active ? Date.now() : undefined;
+		this.mainActivity = undefined;
+		this.notify();
+	}
+
+	/** Live view of the parent model while its agent loop runs; undefined when idle. */
+	getMainActivity(): MainActivity | undefined {
+		if (this.mainActiveSince === undefined) return undefined;
+		return {
+			...(this.mainModel ? { model: this.mainModel } : {}),
+			...(this.mainThinking ? { thinking: this.mainThinking } : {}),
+			...(this.mainActivity ? { activity: this.mainActivity } : {}),
+			activeSince: this.mainActiveSince,
+		};
+	}
+
+	isMainAgentActive(): boolean {
+		return this.mainActiveSince !== undefined;
+	}
 
 	beginTurn(): void {
 		// Clear finished runs from a previous turn, but keep active and parked
@@ -738,6 +814,10 @@ export class MonitorStore {
 	 * finishRun calls from the old session remain safe no-ops. */
 	clear(): void {
 		this.runs = [];
+		this.mainModel = undefined;
+		this.mainThinking = undefined;
+		this.mainActivity = undefined;
+		this.mainActiveSince = undefined;
 		this.notify();
 	}
 

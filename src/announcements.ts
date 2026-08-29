@@ -4,6 +4,7 @@ import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { existsSync } from "node:fs";
 import { loadConfig, saveConfig } from "./config.ts";
 import { availableModelsInScope, filterUnavailableModelOverrides } from "./models.ts";
+import { formatToolActivity, monitor } from "./monitor.ts";
 import { announceRecoveryRecords } from "./recovery.ts";
 import type { SubagentRuntime } from "./runtime.ts";
 import { installActiveRunsWidget } from "./widget.ts";
@@ -35,7 +36,32 @@ async function migrateUnavailableAgentModels(
 	}
 }
 
+/** Track the parent pi session itself as the widget's first row: what the
+ * current model is doing while its agent loop runs. Same activity vocabulary
+ * as subagent rows (thinking / responding / tool + target), fed by the
+ * session's own extension events; the row disappears when the loop settles. */
+function trackMainActivity(pi: ExtensionAPI): void {
+	pi.on("agent_start", () => monitor.setMainAgentActive(true));
+	pi.on("agent_end", () => monitor.setMainAgentActive(false));
+	pi.on("agent_settled", () => monitor.setMainAgentActive(false));
+	pi.on("model_select", (event) => monitor.setMainModel(event.model?.id));
+	pi.on("thinking_level_select", (event) => monitor.setMainThinking(event.level));
+	pi.on("message_update", (event) => {
+		if (event.message.role !== "assistant") return;
+		const kind = event.assistantMessageEvent.type;
+		if (kind === "text_start" || kind === "text_delta") monitor.setMainActivity("responding");
+		else if (kind === "thinking_start" || kind === "thinking_delta") monitor.setMainActivity("thinking");
+	});
+	pi.on("tool_execution_start", (event) =>
+		monitor.recordMainToolStart(event.toolName, formatToolActivity(event.toolName, event.args)));
+	pi.on("tool_execution_end", (event) => monitor.recordMainToolEnd(event.toolName, event.isError));
+}
+
 export function registerAnnouncements(pi: ExtensionAPI, runtime: SubagentRuntime): void {
+	// Registered at extension load (not session_start) so a model selection
+	// made during restore is already captured when the widget appears.
+	trackMainActivity(pi);
+
 	pi.on("session_start", async (_event, ctx) => {
 		if (!existsSync(runtime.configPath)) {
 			ctx.ui.notify(

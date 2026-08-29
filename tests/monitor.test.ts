@@ -413,6 +413,52 @@ describe("formatUsageCompact", () => {
 	});
 });
 
+describe("main model activity", () => {
+	it("tracks the parent agent loop and clears the view when it settles", () => {
+		const store = new MonitorStore();
+		expect(store.getMainActivity()).toBeUndefined();
+		store.setMainModel("openai/gpt-5");
+		store.setMainThinking("max");
+		store.setMainAgentActive(true);
+		store.setMainActivity("edit src/index.ts");
+		const view = store.getMainActivity();
+		expect(view).toMatchObject({ model: "openai/gpt-5", thinking: "max", activity: "edit src/index.ts" });
+		expect(view!.activeSince).toBeTypeOf("number");
+		store.setMainAgentActive(false);
+		expect(store.getMainActivity()).toBeUndefined();
+		expect(store.isMainAgentActive()).toBe(false);
+	});
+
+	it("dedupes streaming deltas so subscribers are not flooded", () => {
+		const store = new MonitorStore();
+		const notify = vi.fn();
+		store.subscribe(notify);
+		store.setMainActivity("responding");
+		store.setMainActivity("responding");
+		expect(notify).toHaveBeenCalledTimes(1);
+	});
+
+	it("reuses the tool activity vocabulary and flags failed tools", () => {
+		const store = new MonitorStore();
+		store.setMainAgentActive(true);
+		store.recordMainToolStart("read", "read src/index.ts");
+		expect(store.getMainActivity()?.activity).toBe("read src/index.ts");
+		store.recordMainToolEnd("read", false);
+		expect(store.getMainActivity()?.activity).toBe("read src/index.ts");
+		store.recordMainToolEnd("bash", true);
+		expect(store.getMainActivity()?.activity).toBe("✗ bash failed");
+	});
+
+	it("clear() resets main-model state with the runs", () => {
+		const store = new MonitorStore();
+		store.setMainAgentActive(true);
+		store.setMainModel("openai/gpt-5");
+		store.clear();
+		expect(store.getMainActivity()).toBeUndefined();
+		expect(store.isMainAgentActive()).toBe(false);
+	});
+});
+
 describe("formatToolActivity", () => {
 	it("shows the file being read, not a JSON args blob", () => {
 		expect(formatToolActivity("read", { path: "src/index.ts" })).toBe("read src/index.ts");

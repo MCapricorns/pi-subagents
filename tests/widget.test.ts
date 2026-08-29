@@ -20,7 +20,7 @@ afterEach(() => {
 });
 
 describe("formatActiveRunLines", () => {
-	it("renders a running run with model, token flow, cost, and seconds-precision elapsed", () => {
+	it("renders a running run with provider model, token flow, cost, and seconds-precision elapsed", () => {
 		const store = new MonitorStore();
 		const running = store.addRun("worker", "Fix src/index.ts", "anthropic/claude-sonnet-4-5", "high");
 		store.setModel(running, "openai/gpt-5-mini", "anthropic/claude-sonnet-4-5");
@@ -38,14 +38,14 @@ describe("formatActiveRunLines", () => {
 		const lines = formatActiveRunLines(store.getRuns(), theme, 120, 3_600_000 + 3_725_000);
 		expect(lines).toHaveLength(1);
 		expect(lines[0]).toContain(`● #${running} worker  src/index.ts — edit src/index.ts`);
-		expect(lines[0]).toContain("gpt-5-mini/high");
-		expect(lines[0]).not.toContain("openai/");
-		expect(lines[0]).toContain("↑1.2k ↓3.4k R91.0k W1.1k");
-		expect(lines[0]).toContain("$0.0500");
+		// Full provider/model/thinking ref — which provider served the run is
+		// exactly what a multi-provider session needs to see.
+		expect(lines[0]).toContain("openai/gpt-5-mini/high");
+		expect(lines[0]).toContain("↑1.2k ↓3.4k R91.0k W1.1k $0.0500");
 		// Elapsed carries seconds even at hour magnitude.
 		expect(lines[0].endsWith("1h02m05s")).toBe(true);
-		// Telemetry column is right-aligned: the line ends at the width with elapsed.
-		expect(visibleWidth(lines[0])).toBe(120);
+		// Telemetry flows inline right after the content — no blank padding.
+		expect(visibleWidth(lines[0])).toBeLessThanOrEqual(120);
 		expect(lines[0]).not.toContain(`#${done}`);
 		expect(lines[0]).not.toContain(`#${parked}`);
 	});
@@ -129,14 +129,15 @@ describe("formatActiveRunLines", () => {
 		expect(lines[0]).not.toContain("grok-parent");
 		expect(lines[0]).not.toContain("/xhigh");
 		// Parent totals aggregate the settled snapshot plus the live stage.
-		expect(lines[0]).toContain("↑1.5k ↓14.0k R48.0k W1.6k");
-		expect(lines[0]).toContain("$0.6000");
+		expect(lines[0]).toContain("↑1.5k ↓14.0k R48.0k W1.6k $0.6000");
 		expect(lines[1]).toContain("├ ✓ implement");
-		expect(lines[1]).toContain("grok-parent");
+		expect(lines[1]).toContain("xai/grok-parent");
 		expect(lines[1]).toContain("2m41s");
 		expect(lines[2]).toContain("├ ● review — read src/index.ts");
-		expect(lines[2]).toContain("gpt-worker/max");
+		expect(lines[2]).toContain("openai/gpt-worker/max");
 		expect(lines[3]).toBe("  └ ○ docs");
+		// Telemetry flows inline after each stage label — no blank padding.
+		for (const line of lines) expect(visibleWidth(line)).toBeLessThanOrEqual(120);
 		expect(lines.join("\n")).not.toContain("managed workflow running");
 		expect(lines.join("\n")).not.toContain(`#${review}`);
 	});
@@ -257,6 +258,38 @@ describe("formatActiveRunLines", () => {
 		const lines = formatActiveRunLines(store.getRuns(), theme, 120);
 		expect(lines).toHaveLength(1);
 		expect(lines[0]).toContain(`● #${orphan} documenter  docs sync · src/widget.ts`);
+	});
+
+	it("leads with the parent model's own live line while its agent loop runs", () => {
+		const store = new MonitorStore();
+		const run = store.addRun("explorer", "Map src/models.ts", "google/gemini-2.5-pro");
+		store.setStatus(run, "running");
+		const main = { model: "openai/gpt-5", thinking: "max", activity: "subagent Map src/models.ts", activeSince: 1_000 };
+
+		const lines = formatActiveRunLines(store.getRuns(), theme, 120, 42_000, main);
+		expect(lines).toHaveLength(2);
+		expect(lines[0]).toContain("subagent Map src/models.ts · openai/gpt-5/max · 41s");
+		// The parent line joins the identity layout: its label starts at the
+		// same column as the run rows' labels.
+		expect(lines[0].indexOf("subagent")).toBe(lines[1].indexOf("src/models.ts"));
+	});
+
+	it("renders the parent model line alone before any run exists", () => {
+		const main = { model: "openai/gpt-5", activity: "thinking", activeSince: 40_000 };
+		const lines = formatActiveRunLines([], theme, 80, 42_000, main);
+		expect(lines).toHaveLength(1);
+		expect(lines[0]).toContain("openai/gpt-5");
+		expect(lines[0].endsWith("2s")).toBe(true);
+	});
+
+	it("hides the parent model's line once its loop settles", () => {
+		const store = new MonitorStore();
+		const id = store.addRun("explorer", "Map src/models.ts");
+		store.setStatus(id, "running");
+
+		const lines = formatActiveRunLines(store.getRuns(), theme, 120, 42_000);
+		expect(lines).toHaveLength(1);
+		expect(lines.join("\n")).not.toContain("pi");
 	});
 
 	it("caps output at the host widget budget with an overflow marker counting hidden runs", () => {
@@ -402,6 +435,11 @@ describe("installActiveRunsWidget", () => {
 		expect(requestRender).toHaveBeenCalled();
 
 		monitor.setStatus(id, "done");
+		expect(vi.getTimerCount()).toBe(0);
+		// The parent model's own loop keeps the clock ticking too.
+		monitor.setMainAgentActive(true);
+		expect(vi.getTimerCount()).toBe(1);
+		monitor.setMainAgentActive(false);
 		expect(vi.getTimerCount()).toBe(0);
 		expect(component.render(80)).toEqual([]);
 		component.dispose();

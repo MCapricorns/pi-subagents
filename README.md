@@ -223,37 +223,41 @@ threads that had already finished keep only their delivered result.
 
 ## Live status and results
 
-The TUI widget renders one compact line per run in fixed columns — status icon,
-right-aligned `#id`, padded agent name, then the task label — so every label
-starts at the same column, with the live activity dimmed after ` — ` and one
-right-aligned telemetry column so telemetry lines up at the right edge: the
-worktree badge, the token flow in the footer vocabulary (`↑` input, `↓` output,
-`R`/`W` cache read/write), cost, model/thinking, the wait state, and an elapsed
-time that always carries seconds. A managed workflow (the automatic review /
-fix / re-review chain) renders as a tree: the parent line carries the
-workflow-wide token/cost totals and total elapsed, and every stage gets its
-own `├`/`└`-connected row with its own model, token flow, and elapsed — settled
-stages keep the telemetry frozen at settlement, the live stage shows its
-child's model and current activity:
+The TUI widget renders one line per participant in fixed identity columns —
+status icon, right-aligned `#id`, padded agent name, then the task label — so
+every label starts at the same column, with the live activity dimmed after
+` — ` and the rest of the telemetry flowing inline after ` · `: the worktree
+badge, the token flow in the footer vocabulary (`↑` input, `↓` output,
+`R`/`W` cache read/write), cost, the full `provider/model/thinking` ref, the
+wait state, and an elapsed time that always carries seconds. The first line is
+the parent session itself — what the current model is doing right now while
+its agent loop runs. A managed workflow (the automatic review / fix / re-review
+chain) renders as a tree: the parent line carries the workflow-wide token/cost
+totals and total elapsed, and every stage gets its own `├`/`└`-connected row
+with its own model, token flow, and elapsed — settled stages keep the
+telemetry frozen at settlement, the live stage shows its child's model and
+current activity:
 
 ```text
-◆ #12 worker    src/cache.ts        wt:a91f3c · ↑5.2k ↓41.0k R210.0k W6.1k $1.9400 · 12m06s
-  ├ ✓ implement      gpt-5 · ↑1.0k ↓12.0k R40.0k W1.2k $0.5100 · 2m41s
-  ├ ! review         gpt-5 · ↑0.9k ↓6.0k R38.0k W0.9k $0.3300 · 1m12s
-  ├ ● review fix — edit src/auth.ts       gpt-5 · ↑0.2k ↓3.0k R12.0k $0.1200 · 41s
+●    pi        subagent Implement the login redirect fix · openai/gpt-5/max · 12m06s
+◆ #12 worker    src/cache.ts · wt:a91f3c · ↑5.2k ↓41.0k R210.0k W6.1k $1.9400 · 12m06s
+  ├ ✓ implement · ↑1.0k ↓12.0k R40.0k W1.2k $0.5100 · xai/grok-4/xhigh · 2m41s
+  ├ ! review · ↑0.9k ↓6.0k R38.0k W0.9k $0.3300 · openai/gpt-5 · 1m12s
+  ├ ● review fix — edit src/auth.ts · ↑0.2k ↓3.0k R12.0k $0.1200 · openai/gpt-5/medium · 41s
   └ ○ re-review
-● #15 explorer  src/models.ts — grep fallback   haiku-4-5/low · ↑1.2k ↓8.4k R31.0k W1.1k $0.0900 · 3m07s
-○ #23 worker    src/config.ts                              repo lane
-○ #24 worker ↻  tests/config.test.ts                  queued · 5m02s
+● #15 explorer  src/models.ts — grep fallback · ↑1.2k ↓8.4k R31.0k W1.1k $0.0900 · openai/gpt-5-mini/low · 3m07s
+○ #23 worker    src/config.ts · repo lane
+○ #24 worker ↻  tests/config.test.ts · queued · 5m02s
 ```
 
-Queued rows state what they actually wait for in the telemetry column —
-`queued` for a free process slot, `repo lane` for shared-checkout write
-serialization, or `starting` — and a resumed thread carries a dim `↻` in its
-agent column with its cumulative time. The widget is capped at ten lines: when
-many runs are live, extra roots collapse into a `… +N more` marker, and an
-oversized stage chain keeps a window anchored on the live stage so the editor
-keeps its space.
+Telemetry drops leftmost-first when a row runs out of width (badge, wait
+state, usage, model) while the elapsed survives every width. Queued rows state
+what they actually wait for — `queued` for a free process slot, `repo lane`
+for shared-checkout write serialization, or `starting` — and a resumed thread
+carries a dim `↻` in its agent column with its cumulative time. The widget is
+capped at ten lines: when many runs are live, extra roots collapse into a
+`… +N more` marker, and an oversized stage chain keeps a window anchored on
+the live stage so the editor keeps its space.
 
 Completions resume the main agent on their own, with a compact block of at most 40
 lines by default; longer output lands unchanged in a Markdown artifact whose path

@@ -2,20 +2,23 @@
  * Compact, glanceable active-run widget for interactive Pi sessions.
  *
  * Layout contract (redesign):
- * - Aligned columns: `icon  #id  agent` pad to the widest displayed id and
- *   agent so every label starts at the same column; a resumed thread carries
- *   a dim `↻` inside the agent column.
- * - Visual hierarchy: the label (what the run owns) is plain, the live
- *   activity after ` — ` is dim, and all telemetry — worktree badge, token
- *   flow (↑in ↓out R/W cache), cost, model/thinking, wait state, elapsed — is
- *   one dim right-aligned column, so telemetry lines up at the right edge.
- * - Elapsed always carries seconds, at every magnitude.
- * - A managed workflow renders as a tree chain: the stable parent line (with
- *   the workflow-wide token/cost totals and total elapsed) plus one
+ * - Aligned identity columns: `icon  #id  agent` pad to the widest displayed
+ *   id and agent so every label starts at the same column; a resumed thread
+ *   carries a dim `↻` inside the agent column.
+ * - Multi-line rows flow inline: the telemetry (`provider/model/thinking`,
+ *   token flow in the pi-footer vocabulary `↑in ↓out R/W cache`, cost, wait
+ *   state, seconds-precision elapsed) follows the content after ` · ` instead
+ *   of a right-aligned column — no blank padding across a multi-line chain.
+ * - Telemetry drops leftmost-first under width pressure (badge, wait, usage,
+ *   model); the elapsed survives every width.
+ * - First line is the parent pi session itself: what the current model is
+ *   doing right now while its agent loop runs (model/thinking, live activity,
+ *   loop elapsed), fed by the session's own extension events.
+ * - A managed workflow renders as a tree chain under its parent line: one
  *   `├`/`└`-connected row per stage, each carrying its own model, token flow,
  *   and elapsed — settled stages from the snapshot frozen at settlement, the
- *   live stage from its child row. When the group outgrows the line budget,
- *   the visible window anchors on the live stage.
+ *   live stage from its child row. An oversized chain keeps a window anchored
+ *   on the live stage.
  * - Queued rows say what they actually wait for ("queued" for a process slot,
  *   "repo lane" for shared-writer serialization, "starting" while the child
  *   process launches) instead of one catch-all "queued".
@@ -33,6 +36,7 @@ import {
 	statusIcon,
 	sumUsage,
 	usageCostPart,
+	type MainActivity,
 	type RunView,
 	type WorkflowStage,
 	type WorkflowStageStatus,
@@ -63,17 +67,13 @@ interface ColumnLayout {
 	agentWidth: number;
 }
 
-/** Compose one widget line with a right-aligned telemetry column: the left
- * side truncates first, the right side stays put so elapsed times and badges
- * line up across rows. */
-function layoutLine(left: string, right: string, width: number): string {
-	if (width <= 0) return "";
-	if (!right) return truncateToWidth(left, width, "…");
-	const rightWidth = visibleWidth(right);
-	if (rightWidth >= width) return truncateToWidth(right, width, "");
-	const leftBudget = width - rightWidth - 1;
-	const leftText = visibleWidth(left) > leftBudget ? truncateToWidth(left, leftBudget, "…") : left;
-	return `${leftText}${" ".repeat(Math.max(1, width - visibleWidth(leftText) - rightWidth))}${right}`;
+/** Join left content and telemetry inline — `left · telemetry` — so a
+ * multi-line chain reads as one flowing sentence instead of leaving blank
+ * padding across the width; the whole line truncates as a last resort. */
+function composeLine(left: string, tail: string, theme: Theme, width: number): string {
+	if (!tail) return truncateToWidth(left, width, "…");
+	const line = `${left}${theme.fg("dim", SEPARATOR)}${theme.fg("dim", tail)}`;
+	return visibleWidth(line) <= width ? line : truncateToWidth(line, width, "…");
 }
 
 /** Short truthful wait word for a queued row, shown in the telemetry column. */
@@ -145,12 +145,13 @@ function usagePart(usage: UsageStats | undefined): string | undefined {
  * the always-surviving elapsed. `usage` defaults to the run's own; the managed
  * workflow parent overrides it with the workflow-wide aggregate. */
 function telemetryTailParts(run: RunView, now: number, usage: UsageStats = run.usage): Array<string | undefined> {
-	const modelId = run.model?.split("/").at(-1);
 	// Queued rows omit the model (the route is re-resolved at actual start);
-	// workflow parents omit it too (each stage row owns its own model).
-	const modelPart = run.status === "queued" || run.managedWorkflow || !modelId
+	// workflow parents omit it too (each stage row owns its own model). The
+	// full provider/model ref is kept — "which provider served this run" is
+	// exactly what a multi-provider session needs to see.
+	const modelPart = run.status === "queued" || run.managedWorkflow || !run.model
 		? undefined
-		: `${modelId}${run.thinking ? `/${run.thinking}` : ""}`;
+		: `${run.model}${run.thinking ? `/${run.thinking}` : ""}`;
 	const badge = run.isolation === "worktree" ? worktreeBadge(run) : undefined;
 	const wait = run.status === "queued" ? waitWord(run) : undefined;
 	// Drop order under pressure: badge, wait word, usage, model; elapsed
@@ -159,8 +160,8 @@ function telemetryTailParts(run: RunView, now: number, usage: UsageStats = run.u
 }
 
 /** One primary line per run. Left: identity  label — activity, where the
- * label stays plain and the live activity is dim. Right: one dim telemetry
- * column (worktree badge, token flow, cost, model/thinking, wait state,
+ * label stays plain and the live activity is dim. Telemetry flows inline
+ * after ` · ` (worktree badge, token flow, cost, model/thinking, wait state,
  * elapsed). The activity outranks the label when space runs out; the identity
  * and elapsed survive every width. */
 function primaryLine(
@@ -189,7 +190,7 @@ function primaryLine(
 
 	const contentBudget = width
 		- visibleWidth(identity)
-		- (tail ? visibleWidth(tail) + 1 : 0)
+		- (tail ? visibleWidth(tail) + visibleWidth(SEPARATOR) : 0)
 		- visibleWidth(IDENTITY_GAP);
 	let content = "";
 	if (contentBudget > 0) {
@@ -215,7 +216,7 @@ function primaryLine(
 	}
 
 	const left = content ? `${identity}${IDENTITY_GAP}${content}` : identity;
-	return layoutLine(left, tail ? dim(tail) : "", width);
+	return composeLine(left, tail, theme, width);
 }
 
 function stageIcon(status: WorkflowStageStatus, theme: Theme): string {
@@ -260,10 +261,34 @@ function stageTelemetry(
 	return { model: stage.model, usage: stage.usage, elapsed: stage.elapsedMs !== undefined ? formatDuration(stage.elapsedMs) : "" };
 }
 
-/** One `├`/`└`-connected row per managed-workflow stage: status icon, relation,
- * live activity for the running stage, and its own right-aligned model/token/
- * cost/elapsed telemetry. The chain hangs off the parent line, so who
- * dispatched what stays visible while the auto-fix workflow progresses. */
+/** The parent pi session's own line — what the current model is doing right
+ * now while its agent loop runs: full model/thinking ref, live activity, loop
+ * elapsed. Not a run, so it owns no `#id`; it joins the identity layout so its
+ * label column lines up with the run rows. */
+function mainLine(main: MainActivity, theme: Theme, width: number, now: number, layout: ColumnLayout): string {
+	const dim = (text: string): string => theme.fg("dim", text);
+	const icon = theme.fg("accent", "●");
+	const name = theme.fg("accent", theme.bold("pi"));
+	const pad = " ".repeat(Math.max(0, layout.agentWidth - visibleWidth("pi")));
+	const identity = `${icon} ${" ".repeat(layout.idWidth + 1)}${name}${pad}`;
+	const modelPart = main.model ? `${main.model}${main.thinking ? `/${main.thinking}` : ""}` : undefined;
+	const elapsed = formatDuration(Math.max(0, now - main.activeSince));
+	const tail = composeTail([modelPart, elapsed], Math.max(0, width - visibleWidth(identity) - LEFT_MIN_CONTENT));
+	const contentBudget = width
+		- visibleWidth(identity)
+		- (tail ? visibleWidth(tail) + visibleWidth(SEPARATOR) : 0)
+		- visibleWidth(IDENTITY_GAP);
+	let left = identity;
+	if (main.activity?.trim() && contentBudget >= ACTIVITY_MIN_WIDTH) {
+		left = `${identity}${IDENTITY_GAP}${dim(formatTaskSummary(main.activity.trim(), contentBudget))}`;
+	}
+	return composeLine(left, tail, theme, width);
+}
+
+/** One `├`/`└`-connected row per managed-workflow stage: status icon,
+ * relation, live activity for the running stage, and its own model/token/
+ * cost/elapsed telemetry flowing inline. The chain hangs off the parent line,
+ * so who dispatched what stays visible while the auto-fix workflow progresses. */
 function workflowStageLines(
 	stages: readonly WorkflowStage[],
 	children: readonly RunView[],
@@ -283,8 +308,9 @@ function workflowStageLines(
 		if (budget <= 0) break;
 		const icon = stageIcon(stage.status, theme);
 		const label = `${icon} ${stage.relation}`;
-		const modelId = telemetry.model?.split("/").at(-1);
-		const modelPart = modelId ? `${modelId}${telemetry.thinking ? `/${telemetry.thinking}` : ""}` : undefined;
+		const modelPart = telemetry.model
+			? `${telemetry.model}${telemetry.thinking ? `/${telemetry.thinking}` : ""}`
+			: undefined;
 		const parts = [
 			usagePart(telemetry.usage),
 			modelPart,
@@ -292,13 +318,13 @@ function workflowStageLines(
 		];
 		const tailBudget = Math.max(0, budget - visibleWidth(label) - ACTIVITY_MIN_WIDTH);
 		const tail = composeTail(parts, tailBudget);
-		const contentBudget = budget - (tail ? visibleWidth(tail) + 1 : 0);
+		const contentBudget = budget - (tail ? visibleWidth(tail) + visibleWidth(SEPARATOR) : 0);
 		let left = label;
 		if (telemetry.activity && contentBudget - visibleWidth(label) - visibleWidth(ACTIVITY_SEPARATOR) >= ACTIVITY_MIN_WIDTH) {
 			const activityBudget = contentBudget - visibleWidth(label) - visibleWidth(ACTIVITY_SEPARATOR);
 			left = `${label}${theme.fg("dim", ACTIVITY_SEPARATOR)}${theme.fg("dim", formatTaskSummary(telemetry.activity, activityBudget))}`;
 		}
-		lines.push(`${indent}${layoutLine(left, tail ? theme.fg("dim", tail) : "", budget)}`);
+		lines.push(`${indent}${composeLine(left, tail, theme, budget)}`);
 	}
 	return { lines, activeIndex };
 }
@@ -331,14 +357,15 @@ function fitGroupLines(
 	return [primary, ...parts];
 }
 
-/** Render active runs as compact per-run line groups: one line per simple run,
- * a tree chain per managed workflow (parent line + one row per stage). All
- * rows share one column layout. */
+/** Render active runs as compact per-run line groups: the parent model's own
+ * line first, then one line per simple run, a tree chain per managed workflow
+ * (parent line + one row per stage). All rows share one column layout. */
 export function formatActiveRunLines(
 	runs: readonly RunView[],
 	theme: Theme,
 	width: number,
 	now: number = Date.now(),
+	main?: MainActivity,
 ): string[] {
 	const active = runs.filter((run) => isRunActiveStatus(run.status));
 	const activeIds = new Set(active.map((run) => run.id));
@@ -355,7 +382,7 @@ export function formatActiveRunLines(
 	}
 	const layout: ColumnLayout = {
 		idWidth: Math.max(...roots.map((root) => visibleWidth(`#${root.id}`)), 0),
-		agentWidth: Math.max(...roots.map((root) => visibleWidth(agentColumnText(root))), 0),
+		agentWidth: Math.max(...roots.map((root) => visibleWidth(agentColumnText(root))), main ? visibleWidth("pi") : 0),
 	};
 	const groups: Array<{ lines: string[]; activeIndex: number }> = roots.map((root) => {
 		const children = childrenOf.get(root.id) ?? [];
@@ -379,6 +406,9 @@ export function formatActiveRunLines(
 	});
 
 	const lines: string[] = [];
+	if (main && MAX_WIDGET_LINES > 1) {
+		lines.push(mainLine(main, theme, width, now, layout));
+	}
 	let shownRoots = 0;
 	for (const group of groups) {
 		const remaining = MAX_WIDGET_LINES - 1 - lines.length;
@@ -394,13 +424,13 @@ export function formatActiveRunLines(
 }
 
 function hasTickingRun(): boolean {
-	return monitor.getRuns().some(
-		(run) => isRunActiveStatus(run.status) && run.activeSince !== undefined,
-	);
+	return monitor.isMainAgentActive()
+		|| monitor.getRuns().some((run) => isRunActiveStatus(run.status) && run.activeSince !== undefined);
 }
 
-/** Install the widget for one TUI session. Its timer exists only while at least
- * one active run has started and is disposed with the widget. */
+/** Install the widget for one TUI session. Its timer exists only while at
+ * least one active run has started or the parent agent loop is running, and
+ * is disposed with the widget. */
 export function installActiveRunsWidget(ctx: Pick<ExtensionContext, "mode" | "ui">): void {
 	if (ctx.mode !== "tui") return;
 	ctx.ui.setWidget(
@@ -428,7 +458,7 @@ export function installActiveRunsWidget(ctx: Pick<ExtensionContext, "mode" | "ui
 			syncTimer();
 
 			return {
-				render: (width: number) => formatActiveRunLines(monitor.getRuns(), theme, width),
+				render: (width: number) => formatActiveRunLines(monitor.getRuns(), theme, width, Date.now(), monitor.getMainActivity()),
 				invalidate() {},
 				dispose() {
 					disposed = true;
