@@ -1,9 +1,21 @@
-/** Lightweight active-run widget for interactive Pi sessions. */
+/**
+ * Compact, glanceable active-run widget for interactive Pi sessions.
+ *
+ * Layout contract (redesign):
+ * - One line per simple run: `icon #id agent · label — live activity` with a
+ *   right-aligned `worktree · model/thinking · elapsed` telemetry column, so
+ *   every line scans the same way and times line up at the right edge.
+ * - Two lines per managed workflow: the stable parent line plus its stage
+ *   timeline; the live stage's activity/model/elapsed rides right-aligned on
+ *   the timeline line. Internal child rows are not repeated as extra lines.
+ * - Queued rows say what they actually wait for ("queued" for a process slot,
+ *   "waiting on repo lane" for shared-writer serialization, "starting" while
+ *   the child process launches) instead of one catch-all "queued".
+ */
 
 import type { ExtensionContext, Theme } from "@earendil-works/pi-coding-agent";
 import { truncateToWidth, visibleWidth } from "@earendil-works/pi-tui";
 import {
-	continuationLabel,
 	formatElapsed,
 	formatTaskSummary,
 	isRunActiveStatus,
@@ -19,28 +31,37 @@ export const SUBAGENTS_WIDGET_ID = "pi-subagents";
  * the same bound itself, or a wide parallel dispatch floods the editor area. */
 const MAX_WIDGET_LINES = 10;
 
-/** Keep the elapsed tail visible while clipping the descriptive left side. */
-function compactLine(left: string, right: string, width: number): string {
+const SEPARATOR = " · ";
+/** Splits "what this run is" from "what it is doing right now". */
+const ACTIVITY_SEPARATOR = " — ";
+/** Columns kept for left content before right-tail parts are dropped. */
+const LEFT_MIN_CONTENT = 8;
+/** Minimum useful width for a live-activity fragment. */
+const ACTIVITY_MIN_WIDTH = 6;
+
+/** Compose one widget line with a right-aligned telemetry column: the left
+ * side truncates first, the right side stays put so elapsed times and badges
+ * line up across rows. */
+function layoutLine(left: string, right: string, width: number): string {
 	if (width <= 0) return "";
-	if (!right) return truncateToWidth(left, width, "");
-	const separator = " ";
+	if (!right) return truncateToWidth(left, width, "…");
 	const rightWidth = visibleWidth(right);
 	if (rightWidth >= width) return truncateToWidth(right, width, "");
-	const leftWidth = width - rightWidth - visibleWidth(separator);
-	if (leftWidth <= 0) return truncateToWidth(right, width, "");
-	return `${truncateToWidth(left, leftWidth, "…")}${separator}${right}`;
+	const leftBudget = width - rightWidth - 1;
+	const leftText = visibleWidth(left) > leftBudget ? truncateToWidth(left, leftBudget, "…") : left;
+	return `${leftText}${" ".repeat(Math.max(1, width - visibleWidth(leftText) - rightWidth))}${right}`;
 }
 
-/** Keep continuation semantics intact while independently compacting the task. */
-function formatContinuationTask(label: string, task: string, width: number): string {
-	if (width <= 0) return "";
-	const labelWidth = visibleWidth(label);
-	if (labelWidth >= width) return truncateToWidth(label, width, "");
-	const separator = " · ";
-	const taskWidth = width - labelWidth - visibleWidth(separator);
-	if (taskWidth <= 0) return label;
-	const summary = formatTaskSummary(task, taskWidth);
-	return summary ? `${label}${separator}${summary}` : label;
+/** Short truthful wait word for a queued row. */
+function waitWord(run: Pick<RunView, "waitReason">): string {
+	switch (run.waitReason) {
+		case "repository-lane":
+			return "waiting on repo lane";
+		case "starting":
+			return "starting";
+		default:
+			return "queued";
+	}
 }
 
 /** Worktree-group badge shown on the row that owns the isolated worktree: the
@@ -63,107 +84,81 @@ function worktreeBadge(run: RunView): string {
 	}
 }
 
-/** One compact primary line per genuinely active run, plus an optional indented
- * activity line. The primary line reserves stage model/thinking when present and
- * elapsed width before truncating the task. Settled and parked threads never
- * appear, so elapsed time cannot keep ticking beside a terminal status. */
-function runPrimaryLine(
-	run: RunView,
-	theme: Theme,
-	width: number,
-	now: number,
-	prefix: string,
-	isGroupOwner: boolean,
-): string {
-	const dim = (text: string): string => theme.fg("dim", text);
+/** Drop lower-priority tail parts (leftmost first) until the tail fits. */
+function composeTail(parts: Array<string | undefined>, budget: number): string {
+	const present = parts.filter((part): part is string => Boolean(part));
+	while (present.length > 0 && visibleWidth(present.join(SEPARATOR)) > budget) present.shift();
+	return present.join(SEPARATOR);
+}
+
+/** `icon #id agent` plus dim resume/wait markers — never truncated. */
+function identitySegment(run: RunView, theme: Theme): string {
 	const icon = run.managedWorkflow && run.status === "running"
 		? theme.fg("accent", theme.bold("◆"))
 		: statusIcon(run.status, theme);
-	const displayName = run.managedWorkflow ? `${run.agent} workflow` : run.agent;
-	const name = theme.fg("accent", theme.bold(displayName));
-	// The stable run id is the handle for subagent_control/subagent_status; a
-	// queued run has not started, which must be visible at a glance. Its model
-	// is omitted too: the route is re-resolved when the run actually starts.
-	const queued = run.status === "queued";
-	const queuedTag = queued ? ` ${dim("· queued")}` : "";
-	const identity = `${prefix}${icon} #${run.id} ${name}${queuedTag}`;
+	const name = theme.fg("accent", theme.bold(run.agent));
+	const resumed = run.continuationKind ? ` ${theme.fg("dim", "↻ resumed")}` : "";
+	const wait = run.status === "queued" ? ` ${theme.fg("dim", `· ${waitWord(run)}`)}` : "";
+	return `${icon} #${run.id} ${name}${resumed}${wait}`;
+}
+
+/** One primary line per run. Left: identity · label — activity. Right: badge,
+ * model/thinking, elapsed. The activity (live signal) outranks the label when
+ * space runs out; the identity and elapsed survive every width. */
+function primaryLine(run: RunView, theme: Theme, width: number, now: number): string {
+	const dim = (text: string): string => theme.fg("dim", text);
+	const identity = identitySegment(run, theme);
 	const elapsed = formatElapsed(run, now);
-	// Render only the resolved model id plus thinking level. Provider auth and
-	// other configuration never enter monitor state or this line.
 	const modelId = run.model?.split("/").at(-1);
-	const modelSource = run.managedWorkflow || queued
-		? ""
-		: formatTaskSummary(
-			modelId ? `${modelId}${run.thinking ? `/${run.thinking}` : ""}` : run.thinking ? `thinking:${run.thinking}` : "",
-			64,
-			false,
-		);
-	const badge = isGroupOwner && run.isolation === "worktree" ? worktreeBadge(run) : "";
-	// A chain child shows its role in the chain plus a task-derived label; the
-	// templated fix brief itself would only repeat the parent review's content.
-	const continuation = run.parentRunId === undefined
-		? continuationLabel(run.continuationKind)
+	// Queued rows omit the model (the route is re-resolved at actual start);
+	// workflow parents omit it too (each stage owns its own model).
+	const modelPart = run.status === "queued" || run.managedWorkflow || !modelId
+		? undefined
+		: `${modelId}${run.thinking ? `/${run.thinking}` : ""}`;
+	const badge = run.isolation === "worktree" ? worktreeBadge(run) : undefined;
+	const tailBudget = Math.max(0, width - visibleWidth(identity) - LEFT_MIN_CONTENT);
+	const tail = composeTail([badge, modelPart, elapsed || undefined], tailBudget);
+
+	// A chain child rendered at root level (its parent row is gone) keeps its
+	// workflow relation; the templated brief itself would only repeat content.
+	const label = run.parentRunId !== undefined
+		? [run.relationLabel, run.label].filter((part): part is string => Boolean(part)).join(SEPARATOR)
+		: run.label ?? formatTaskSummary(run.task, 48);
+	// The parent's own activity is a placeholder while a managed workflow runs;
+	// the timeline line below carries the live stage instead.
+	const activity = !run.managedWorkflow && (run.status === "running" || run.status === "interrupting")
+		? run.activity?.trim()
 		: undefined;
-	const taskSource = run.parentRunId !== undefined
-		? [run.relationLabel, run.label].filter((part): part is string => Boolean(part)).join(" · ")
-		: run.managedWorkflow
-			? run.label ?? formatTaskSummary(run.task, 64)
-			: formatTaskSummary(run.task, 64);
-	const taskDesiredSource = [continuation, taskSource]
-		.filter((part): part is string => Boolean(part))
-		.join(" · ");
-	const primaryPartCount = 2 + (modelSource ? 1 : 0) + (badge ? 1 : 0) + (elapsed ? 1 : 0);
-	const contentWidth = Math.max(
-		0,
-		width -
-			visibleWidth(identity) -
-			visibleWidth(elapsed) -
-			(primaryPartCount - 1) * visibleWidth(" · "),
-	);
-	const modelDesired = visibleWidth(modelSource);
-	const modelFloor = Math.min(modelDesired, Math.min(12, contentWidth));
-	let modelWidth = 0;
-	if (modelSource) {
-		if (continuation) {
-			const continuationWidth = visibleWidth(continuation);
-			// Preserve the full semantic label and the usual eight-column task tail
-			// before giving the remaining space to model/thinking.
-			const taskFloor = Math.min(
-				visibleWidth(taskDesiredSource),
-				continuationWidth +
-					(taskSource ? visibleWidth(" · ") + Math.min(8, visibleWidth(taskSource)) : 0),
-				contentWidth,
-			);
-			const effectiveModelFloor = Math.min(
-				modelFloor,
-				Math.max(0, contentWidth - continuationWidth),
-			);
-			modelWidth = Math.min(
-				modelDesired,
-				Math.max(effectiveModelFloor, contentWidth - taskFloor),
-			);
+
+	const contentBudget = width
+		- visibleWidth(identity)
+		- (tail ? visibleWidth(tail) + 1 : 0)
+		- visibleWidth(SEPARATOR);
+	let content = "";
+	if (contentBudget > 0) {
+		const labelBudget = activity
+			? Math.min(visibleWidth(label), Math.max(12, Math.floor(contentBudget * 0.4)))
+			: contentBudget;
+		// The label is already fragment-extracted (runLabel); plain right
+		// truncation avoids stacking a second head…tail ellipsis on top of it.
+		const labelText = label
+			? visibleWidth(label) > labelBudget ? truncateToWidth(label, labelBudget, "…") : label
+			: "";
+		if (activity) {
+			const activityBudget = contentBudget
+				- visibleWidth(labelText)
+				- (labelText ? visibleWidth(ACTIVITY_SEPARATOR) : 0);
+			content = activityBudget >= ACTIVITY_MIN_WIDTH
+				? `${labelText ? `${labelText}${ACTIVITY_SEPARATOR}` : ""}${formatTaskSummary(activity, activityBudget)}`
+				// Too narrow for both: the live activity is the stronger signal.
+				: formatTaskSummary(activity, contentBudget);
 		} else {
-			modelWidth = Math.min(modelDesired, Math.max(modelFloor, contentWidth - 8));
+			content = labelText;
 		}
 	}
-	let taskWidth = contentWidth - modelWidth;
-	if (visibleWidth(taskDesiredSource) < taskWidth) {
-		modelWidth = Math.min(modelDesired, modelWidth + taskWidth - visibleWidth(taskDesiredSource));
-		taskWidth = contentWidth - modelWidth;
-	}
-	const task = taskWidth <= 0
-		? ""
-		: continuation
-			? formatContinuationTask(continuation, taskSource, taskWidth)
-			: formatTaskSummary(taskSource, taskWidth, run.parentRunId === undefined);
-	const modelThinking = modelWidth > 0 ? formatTaskSummary(modelSource, modelWidth, false) : "";
-	const primaryLeft = [
-		identity,
-		task ? dim(task) : undefined,
-		modelThinking ? dim(modelThinking) : undefined,
-		badge ? dim(badge) : undefined,
-	].filter((part): part is string => Boolean(part)).join(" · ");
-	return compactLine(primaryLeft, elapsed ? dim(`· ${elapsed}`) : "", width);
+
+	const left = content ? `${identity}${SEPARATOR}${dim(content)}` : identity;
+	return layoutLine(left, tail ? dim(tail) : "", width);
 }
 
 function workflowStageToken(stage: WorkflowStage, theme: Theme): string {
@@ -182,20 +177,14 @@ function workflowStageToken(stage: WorkflowStage, theme: Theme): string {
 	}
 }
 
-/** Render the real/currently planned stage sequence. On narrow terminals the
- * active (or next actionable) stage becomes the left edge so it survives before
- * older history; the workflow-wide elapsed tail is independently preserved on
- * the primary line. */
-function workflowTimelineLine(run: RunView, theme: Theme, width: number): string | undefined {
-	const stages = run.workflowStages;
-	const indent = "  ";
-	if (!stages || stages.length === 0 || width <= visibleWidth(indent)) return undefined;
+/** Stage timeline, sliced from the active (or next actionable) stage when the
+ * full sequence does not fit, so the current position always survives. */
+function timelineSegment(stages: readonly WorkflowStage[], theme: Theme, width: number): string {
 	const separator = theme.fg("dim", " ─ ");
 	const render = (items: readonly WorkflowStage[]): string =>
 		items.map((stage) => workflowStageToken(stage, theme)).join(separator);
-	const full = `${indent}${render(stages)}`;
+	const full = render(stages);
 	if (visibleWidth(full) <= width) return full;
-
 	let focusIndex = stages.findIndex((stage) => stage.status === "active");
 	if (focusIndex === -1) {
 		focusIndex = stages.findLastIndex((stage) => stage.status === "changes" || stage.status === "failed");
@@ -203,24 +192,46 @@ function workflowTimelineLine(run: RunView, theme: Theme, width: number): string
 	if (focusIndex === -1) focusIndex = stages.findIndex((stage) => stage.status === "pending");
 	if (focusIndex === -1) focusIndex = stages.length - 1;
 	const omittedPrefix = focusIndex > 0 ? theme.fg("dim", "… ─ ") : "";
-	return truncateToWidth(`${indent}${omittedPrefix}${render(stages.slice(focusIndex))}`, width, "…");
+	return truncateToWidth(`${omittedPrefix}${render(stages.slice(focusIndex))}`, width, "…");
 }
 
-function runActivityLine(run: RunView, theme: Theme, width: number, indent: string): string[] {
-	const dim = (text: string): string => theme.fg("dim", text);
-	const activity = run.activity?.trim();
-	if (!activity) return [];
-	const activityWidth = width - visibleWidth(indent);
-	if (activityWidth <= 0) return [];
-	const activitySummary = formatTaskSummary(activity, activityWidth);
-	if (!activitySummary) return [];
-	return [truncateToWidth(`${indent}${dim(activitySummary)}`, width, "")];
+/** Timeline line under a managed workflow parent. The live stage's telemetry
+ * (its activity or model, plus stage elapsed) rides right-aligned, so the two
+ * workflow lines replace what used to be four (parent, timeline, child row,
+ * child activity). */
+function workflowTimelineLine(
+	run: RunView,
+	children: readonly RunView[],
+	theme: Theme,
+	width: number,
+	now: number,
+): string | undefined {
+	const stages = run.workflowStages;
+	const indent = "  ";
+	const budget = width - visibleWidth(indent);
+	if (!stages || stages.length === 0 || budget <= 0) return undefined;
+	const child = children.find((candidate) => candidate.status === "running" || candidate.status === "interrupting")
+		?? children.at(-1);
+	const childDoing = child?.activity?.trim() || child?.model?.split("/").at(-1) || "";
+	const childElapsed = child ? formatElapsed(child, now) : "";
+	const timeline = timelineSegment(stages, theme, budget);
+	const room = budget - visibleWidth(timeline) - 1;
+	let tail = "";
+	if (room >= ACTIVITY_MIN_WIDTH) {
+		const doingBudget = room - (childElapsed ? visibleWidth(childElapsed) + (childDoing ? visibleWidth(SEPARATOR) : 0) : 0);
+		const doingText = childDoing && doingBudget >= ACTIVITY_MIN_WIDTH
+			? formatTaskSummary(childDoing, doingBudget)
+			: "";
+		const parts = [doingText, childElapsed].filter(Boolean);
+		if (parts.length > 0) tail = theme.fg("dim", parts.join(SEPARATOR));
+	}
+	return `${indent}${layoutLine(timeline, tail, budget)}`;
 }
 
-/** Render active runs as compact workflow-aware trees. Stable managed parents
- * retain their stage timeline while the current internal child supplies exact
- * model/thinking/activity telemetry. Control ids remain available through
- * status. */
+/** Render active runs as compact per-run line groups: one line per simple run,
+ * two per managed workflow. Internal stage children fold into their parent's
+ * timeline instead of adding rows; ids for control remain available through
+ * subagent_status. */
 export function formatActiveRunLines(
 	runs: readonly RunView[],
 	theme: Theme,
@@ -240,30 +251,27 @@ export function formatActiveRunLines(
 			roots.push(run);
 		}
 	}
-	const lines: string[] = [];
-	for (const root of roots) {
-		const children = childrenOf.get(root.id) ?? [];
-		// Roots (including orphaned chain children whose parent row is gone) own
-		// their worktree group; nested children inherit the group via the tree.
-		lines.push(runPrimaryLine(root, theme, width, now, "", true));
-		const hasTimeline = Boolean(root.managedWorkflow && root.workflowStages?.length);
-		const timeline = hasTimeline ? workflowTimelineLine(root, theme, width) : undefined;
+	const groups: string[][] = roots.map((root) => {
+		const lines = [primaryLine(root, theme, width, now)];
+		const timeline = root.managedWorkflow
+			? workflowTimelineLine(root, childrenOf.get(root.id) ?? [], theme, width, now)
+			: undefined;
 		if (timeline) lines.push(timeline);
-		// A parent placeholder ("managed workflow running") would duplicate the
-		// timeline. Standalone roots keep their useful activity line as before.
-		if (children.length === 0 && !hasTimeline) {
-			lines.push(...runActivityLine(root, theme, width, "  "));
-		}
-		children.forEach((child, index) => {
-			const connector = index === children.length - 1 ? "└ " : "├ ";
-			lines.push(runPrimaryLine(child, theme, width, now, theme.fg("dim", `  ${connector}`), false));
-			lines.push(...runActivityLine(child, theme, width, "      "));
-		});
+		return lines;
+	});
+
+	const lines: string[] = [];
+	let shownRoots = 0;
+	for (const group of groups) {
+		const remaining = MAX_WIDGET_LINES - 1 - lines.length;
+		if (remaining <= 0) break;
+		// A group that no longer fits whole keeps its primary line only.
+		lines.push(...(group.length <= remaining ? group : group.slice(0, remaining)));
+		shownRoots++;
 	}
-	const hidden = lines.length - (MAX_WIDGET_LINES - 1);
-	if (hidden > 0) {
-		lines.length = MAX_WIDGET_LINES - 1;
-		lines.push(theme.fg("dim", `… +${hidden} more (subagent_status)`));
+	const hiddenRoots = roots.length - shownRoots;
+	if (hiddenRoots > 0) {
+		lines.push(theme.fg("dim", `… +${hiddenRoots} more (subagent_status)`));
 	}
 	return lines;
 }

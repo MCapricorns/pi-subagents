@@ -20,39 +20,57 @@ afterEach(() => {
 });
 
 describe("formatActiveRunLines", () => {
-	it("renders one primary line plus optional activity only for active runs", () => {
+	it("renders a running run as one line with inline activity and a right-aligned telemetry tail", () => {
 		const store = new MonitorStore();
 		const running = store.addRun("worker", "Fix src/index.ts", "anthropic/claude-sonnet-4-5", "high");
 		store.setModel(running, "openai/gpt-5-mini", "anthropic/claude-sonnet-4-5");
 		store.setStatus(running, "running");
 		store.setActivity(running, "edit src/index.ts");
+		store.findRun(running)!.startedAt = 1_000;
+		store.findRun(running)!.activeSince = 1_000;
 		const done = store.addRun("reviewer", "Review src/index.ts");
 		store.setStatus(done, "done");
 		const parked = store.addRun("worker", "Park work");
 		store.setStatus(parked, "parked");
 
-		const lines = formatActiveRunLines(store.getRuns(), theme, 120);
-		expect(lines).toHaveLength(2);
-		expect(lines[0]).toContain(`● #${running} worker · Fix src/index.ts`);
+		const lines = formatActiveRunLines(store.getRuns(), theme, 120, 62_000);
+		expect(lines).toHaveLength(1);
+		expect(lines[0]).toContain(`● #${running} worker · src/index.ts — edit src/index.ts`);
 		expect(lines[0]).toContain("gpt-5-mini/high");
 		expect(lines[0]).not.toContain("openai/");
-		expect(lines[0]).not.toContain("edit src/index.ts");
-		expect(lines[1]).toBe("  edit src/index.ts");
-		expect(lines.join("\n")).not.toContain(`#${done}`);
-		expect(lines.join("\n")).not.toContain(`#${parked}`);
+		// Telemetry column is right-aligned: the line ends at the width with elapsed.
+		expect(visibleWidth(lines[0])).toBe(120);
+		expect(lines[0].endsWith("1m01s")).toBe(true);
+		expect(lines[0]).not.toContain(`#${done}`);
+		expect(lines[0]).not.toContain(`#${parked}`);
 	});
 
-	it("omits a blank activity line and handles missing model/thinking", () => {
+	it("labels queued rows with what they actually wait for", () => {
 		const store = new MonitorStore();
-		store.addRun("explorer", "Map the cleaner workflow");
+		const slot = store.addRun("explorer", "Map the cleaner workflow");
+		const lane = store.addRun("worker", "Fix src/cache.ts shared");
+		store.setWaitReason(lane, "repository-lane");
+		const starting = store.addRun("worker", "Spawn immediately", undefined, undefined, { waitReason: "starting" });
+
+		const lines = formatActiveRunLines(store.getRuns(), theme, 120);
+		expect(lines).toHaveLength(3);
+		expect(lines[0]).toContain(`○ #${slot} explorer · queued · Map the cleaner workflow`);
+		expect(lines[1]).toContain(`○ #${lane} worker · waiting on repo lane`);
+		expect(lines[2]).toContain(`○ #${starting} worker · starting`);
+		for (const line of lines) expect(line).not.toContain("undefined");
+	});
+
+	it("omits the model on queued rows because the route re-resolves at start", () => {
+		const store = new MonitorStore();
+		store.addRun("worker", "Queued work", "anthropic/claude-sonnet-4-5", "high");
 
 		const lines = formatActiveRunLines(store.getRuns(), theme, 120);
 		expect(lines).toHaveLength(1);
-		expect(lines[0]).toContain("explorer · queued · Map the cleaner workflow");
-		expect(lines[0]).not.toContain("undefined");
+		expect(lines[0]).not.toContain("sonnet");
+		expect(lines[0]).not.toContain("/high");
 	});
 
-	it("omits activity when indentation leaves no usable width", () => {
+	it("stays within tiny widths without emitting blank lines", () => {
 		const store = new MonitorStore();
 		const id = store.addRun("worker", "Fix the narrow widget");
 		store.setActivity(id, "edit src/widget.ts");
@@ -65,19 +83,7 @@ describe("formatActiveRunLines", () => {
 		}
 	});
 
-	it("keeps adjacent active groups compact with no blank rows", () => {
-		const store = new MonitorStore();
-		store.addRun("explorer", "Map config");
-		store.addRun("reviewer", "Review config");
-
-		const lines = formatActiveRunLines(store.getRuns(), theme, 80);
-		expect(lines).toHaveLength(2);
-		expect(lines[0]).toContain("explorer · queued · Map config");
-		expect(lines[1]).toContain("reviewer · queued · Review config");
-		expect(lines.every((line) => line.length > 0)).toBe(true);
-	});
-
-	it("renders a managed workflow timeline and nests current child telemetry under its stable parent", () => {
+	it("renders a managed workflow as two lines: parent identity and a timeline carrying live stage telemetry", () => {
 		const store = new MonitorStore();
 		const parent = store.addRun("worker", "Implement src/index.ts", "xai/grok-parent", "xhigh");
 		store.setStatus(parent, "running");
@@ -93,7 +99,7 @@ describe("formatActiveRunLines", () => {
 			"Fresh code gate for a managed worker workflow.\n- src/index.ts:42 bug",
 			"openai/gpt-worker",
 			"max",
-			{ groupId: `workflow-${parent}`, relationLabel: "review", parentRunId: parent },
+			{ groupId: `workflow-${parent}`, relationLabel: "review", parentRunId: parent, waitReason: "starting" },
 		);
 		store.setStatus(review, "running");
 		store.setActivity(review, "read src/index.ts");
@@ -102,22 +108,45 @@ describe("formatActiveRunLines", () => {
 			"Final documentation sync.",
 			"anthropic/claude-reviewer",
 			"high",
-			{ groupId: `workflow-${parent}`, relationLabel: "docs", parentRunId: parent },
+			{ groupId: `workflow-${parent}`, relationLabel: "docs", parentRunId: parent, waitReason: "starting" },
 		);
 		store.setStatus(docs, "queued");
 
 		const lines = formatActiveRunLines(store.getRuns(), theme, 120);
-		expect(lines).toHaveLength(5);
-		expect(lines[0]).toContain(`◆ #${parent} worker workflow · src/index.ts`);
+		expect(lines).toHaveLength(2);
+		expect(lines[0]).toContain(`◆ #${parent} worker · src/index.ts`);
 		expect(lines[0]).not.toContain("grok-parent");
 		expect(lines[0]).not.toContain("/xhigh");
 		expect(lines[1]).toContain("✓ implement ─ ● review ─ ○ docs");
-		// The timeline replaces the parent's generic workflow placeholder.
+		// The live stage's doing-now rides on the timeline instead of extra rows.
+		expect(lines[1]).toContain("read src/index.ts");
 		expect(lines.join("\n")).not.toContain("managed workflow running");
-		expect(lines[2]).toContain(`├ ● #${review} reviewer · review · src/index.ts · gpt-worker/max`);
-		expect(lines[3]).toBe("      read src/index.ts");
-		expect(lines[4]).toContain(`└ ○ #${docs} documenter · queued · docs`);
+		expect(lines.join("\n")).not.toContain(`#${review}`);
+		expect(lines.join("\n")).not.toContain(`#${docs}`);
 		expect(lines.join("\n")).not.toContain("claude-reviewer");
+	});
+
+	it("falls back to the live stage's model when it has no activity yet", () => {
+		const store = new MonitorStore();
+		const parent = store.addRun("worker", "Implement src/cache.ts");
+		store.setStatus(parent, "running");
+		store.setManagedWorkflow(parent, true);
+		store.setWorkflowStages(parent, [
+			{ agent: "worker", relation: "implement", status: "done" },
+			{ agent: "reviewer", relation: "review", status: "active" },
+		]);
+		const review = store.addRun(
+			"reviewer",
+			"Fresh code gate.",
+			"anthropic/claude-sonnet-4-5",
+			"high",
+			{ relationLabel: "review", parentRunId: parent, waitReason: "starting" },
+		);
+		store.setStatus(review, "running");
+
+		const lines = formatActiveRunLines(store.getRuns(), theme, 120);
+		expect(lines).toHaveLength(2);
+		expect(lines[1]).toContain("claude-sonnet-4-5");
 	});
 
 	it("labels the fix stage as reviewer-owned work, not a separate fixer", () => {
@@ -181,39 +210,26 @@ describe("formatActiveRunLines", () => {
 			"Final documentation sync.\n- src/widget.ts:10 issue",
 			undefined,
 			undefined,
-			{ groupId: "workflow-999", relationLabel: "docs sync", parentRunId: 999 },
+			{ groupId: "workflow-999", relationLabel: "docs sync", parentRunId: 999, waitReason: "starting" },
 		);
 		store.setStatus(orphan, "running");
 
 		const lines = formatActiveRunLines(store.getRuns(), theme, 120);
 		expect(lines).toHaveLength(1);
 		expect(lines[0]).toContain(`● #${orphan} documenter · docs sync · src/widget.ts`);
-		expect(lines[0]).not.toContain("└");
 	});
 
-	it("caps output at the host widget budget with an overflow marker", () => {
+	it("caps output at the host widget budget with an overflow marker counting hidden runs", () => {
 		const store = new MonitorStore();
-		// 7 queued roots × (primary + activity) exceeds the 10-line budget.
-		for (let index = 0; index < 7; index++) {
+		for (let index = 0; index < 12; index++) {
 			const id = store.addRun("explorer", `Map src/module-${index}.ts`);
 			store.setActivity(id, `grep pattern-${index}`);
 		}
 
 		const lines = formatActiveRunLines(store.getRuns(), theme, 120);
 		expect(lines).toHaveLength(10);
-		expect(lines.at(-1)).toContain("+5 more");
+		expect(lines.at(-1)).toContain("+3 more");
 		expect(lines.at(-1)).toContain("subagent_status");
-	});
-
-	it("marks queued runs as not started", () => {
-		const store = new MonitorStore();
-		const queued = store.addRun("worker", "Waiting for a slot to fix src/cache.ts");
-
-		const lines = formatActiveRunLines(store.getRuns(), theme, 120);
-		expect(lines).toHaveLength(1);
-		expect(lines[0]).toContain(`○ #${queued} worker`);
-		expect(lines[0]).toContain("queued");
-		expect(lines[0]).not.toContain("undefined");
 	});
 
 	it("shows the worktree group identity and integration state on the owning root", () => {
@@ -240,41 +256,7 @@ describe("formatActiveRunLines", () => {
 		expect(retained).toContain("wt:a91f3c retained");
 	});
 
-	it("keeps the worktree badge on the group owner while stage children inherit it via the tree", () => {
-		const store = new MonitorStore();
-		const parent = store.addRun(
-			"worker",
-			"Implement src/cache.ts",
-			undefined,
-			undefined,
-			{ isolation: "worktree", worktreeId: "b2c4d6" },
-		);
-		store.setStatus(parent, "running");
-		store.setManagedWorkflow(parent, true);
-		store.setWorkflowStages(parent, [
-			{ agent: "worker", relation: "implement", status: "done" },
-			{ agent: "reviewer", relation: "review", status: "active" },
-		]);
-		const review = store.addRun(
-			"reviewer",
-			"Fresh code gate for a managed worker workflow.",
-			undefined,
-			undefined,
-			{ relationLabel: "review", parentRunId: parent, isolation: "worktree", worktreeId: "b2c4d6" },
-		);
-		store.setStatus(review, "running");
-
-		const lines = formatActiveRunLines(store.getRuns(), theme, 120);
-		expect(lines[0]).toContain(`◆ #${parent} worker workflow`);
-		expect(lines[0]).toContain("wt:b2c4d6");
-		expect(lines[2]).toContain(`└ ● #${review} reviewer`);
-		expect(lines[2]).not.toContain("wt:");
-	});
-
-	it.each([
-		["retained resume", "resume-retained", "resume: current objective"],
-		["appended resume", "resume-appended", "resume: appended objective"],
-	] as const)("keeps %s semantics visible beside a path-heavy task at 80 columns", (_name, kind, label) => {
+	it("marks a resumed thread with a compact resume glyph and its cumulative time", () => {
 		const store = new MonitorStore();
 		const id = store.addRun("worker", "Original objective");
 		store.removeRun(id);
@@ -285,11 +267,12 @@ describe("formatActiveRunLines", () => {
 			"anthropic/claude-sonnet-4-5",
 			"high",
 			"shared",
-			{ elapsedMs: 61_000, continuationKind: kind },
+			{ elapsedMs: 61_000, continuationKind: "resume-appended" },
 		);
 		const [line] = formatActiveRunLines(store.getRuns(), theme, 80, 100_000);
 		expect(visibleWidth(line)).toBeLessThanOrEqual(80);
-		expect(line).toContain(label);
+		expect(line).toContain("↻ resumed");
+		expect(line).toContain("queued");
 		expect(line).toContain(".ts");
 		expect(line).toContain("1m01s");
 	});
@@ -310,14 +293,14 @@ describe("formatActiveRunLines", () => {
 		store.setActivity(id, "auto-fix chain running");
 		expect(run.endedAt).toBeUndefined();
 
-		const [primary, activity] = formatActiveRunLines(store.getRuns(), theme, 120, 63_000);
-		expect(primary).toContain("Review the change");
-		expect(primary).toContain("1m01s");
-		expect(activity).toBe("  auto-fix chain running");
-		expect(primary).not.toContain("done");
+		const lines = formatActiveRunLines(store.getRuns(), theme, 120, 63_000);
+		expect(lines).toHaveLength(1);
+		expect(lines[0]).toContain("Review the change — auto-fix chain running");
+		expect(lines[0]).toContain("1m01s");
+		expect(lines[0]).not.toContain("done");
 	});
 
-	it("keeps model/thinking and a meaningful activity-path tail within the width", () => {
+	it("keeps a meaningful activity tail beside model/thinking within a moderate width", () => {
 		const store = new MonitorStore();
 		const id = store.addRun(
 			"worker",
@@ -330,15 +313,15 @@ describe("formatActiveRunLines", () => {
 		store.findRun(id)!.startedAt = 1_000;
 		store.findRun(id)!.activeSince = 1_000;
 
-		const lines = formatActiveRunLines(store.getRuns(), theme, 52, 62_000);
-		expect(lines).toHaveLength(2);
-		for (const line of lines) expect(visibleWidth(line)).toBeLessThanOrEqual(52);
+		const lines = formatActiveRunLines(store.getRuns(), theme, 76, 62_000);
+		expect(lines).toHaveLength(1);
+		expect(visibleWidth(lines[0])).toBeLessThanOrEqual(76);
 		expect(lines[0]).toContain("/high");
 		expect(lines[0]).toContain("1m01s");
-		expect(lines[1]).toContain("meaningful-file.ts");
+		expect(lines[0]).toContain("file.ts");
 	});
 
-	it("drops the task before model/thinking on a narrow primary line", () => {
+	it("keeps identity and elapsed on a very narrow primary line", () => {
 		const store = new MonitorStore();
 		const id = store.addRun(
 			"worker",
@@ -350,11 +333,10 @@ describe("formatActiveRunLines", () => {
 		store.findRun(id)!.startedAt = 1_000;
 		store.findRun(id)!.activeSince = 1_000;
 
-		const [line] = formatActiveRunLines(store.getRuns(), theme, 34, 62_000);
-		expect(visibleWidth(line)).toBeLessThanOrEqual(34);
-		expect(line).toContain("/high");
+		const [line] = formatActiveRunLines(store.getRuns(), theme, 26, 62_000);
+		expect(visibleWidth(line)).toBeLessThanOrEqual(26);
+		expect(line).toContain(`#${id} worker`);
 		expect(line).toContain("1m01s");
-		expect(line).not.toContain("Implement");
 	});
 });
 

@@ -225,17 +225,23 @@ that is still settling.
 
 ## Results and live status
 
-The TUI widget projects each managed workflow as a timeline plus its current
-child:
+The TUI widget renders one compact line per run — identity, task label, live
+activity, and a right-aligned worktree/model/elapsed column — and exactly two
+lines per managed workflow, whose timeline carries the live stage's telemetry
+instead of extra child rows:
 
 ```text
-◆ #12 worker workflow · src/cache.ts · wt:a91f3c · 42s
-  ✓ implement ─ ● review ─ ○ docs
-  └ ● #15 reviewer · final review · claude-sonnet-4-5/high · 10s
-○ #23 worker · queued · redirect to ripgrep crates · 5m02s
+◆ #12 worker · src/cache.ts                      wt:a91f3c · 1m42s
+  ✓ implement ─ ● review                    read src/auth.ts · 10s
+● #15 explorer · src/models.ts — grep fallback    haiku-4-5 · 22s
+○ #23 worker · waiting on repo lane · src/config.ts
+○ #24 worker ↻ resumed · queued · tests/config.test.ts     5m02s
 ```
 
-The widget is capped at ten lines: when many runs are live at once, extra rows
+Queued rows say what they actually wait for — `queued` (a free process slot),
+`waiting on repo lane` (shared-checkout write serialization), or `starting` —
+and resumed threads carry a `↻ resumed` marker with their cumulative time. The
+widget is capped at ten lines: when many runs are live at once, extra runs
 collapse into a `… +N more (subagent_status)` marker so the editor area keeps
 its space; `subagent_status` always shows the full picture.
 
