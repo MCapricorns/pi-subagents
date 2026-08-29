@@ -1,6 +1,6 @@
 ---
 name: worker
-description: Default implementation route for any non-trivial, well-scoped, self-contained code change — implement, fix, refactor, or test, then verify and hand off.
+description: Default route for any non-trivial, self-contained code change — implement, fix, refactor, or test, then verify and hand off.
 thinking: high
 # No `tools` field => inherits all tools (full capability).
 ---

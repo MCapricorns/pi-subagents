@@ -62,14 +62,12 @@ export function registerLookupTools(pi: ExtensionAPI, runtime: SubagentRuntime):
 		name: "subagent_control",
 		label: "Subagent Control",
 		description: [
-			"Resume an existing sub-agent thread by stable run id.",
-			"resume restarts a parked, completed, or failed retained thread with the same run id and cumulative active time; omit objective to continue the current goal, or provide one to append it to retained context and make it the displayed current goal.",
-			"Threads parked or interrupted by a shutdown/reload are restorable; use subagent_stop for destructive cancellation.",
+			"Resume an existing sub-agent thread by stable run id: a parked, completed, or failed retained thread restarts with the same run id and cumulative active time.",
+			"Omit objective to continue the current goal, or provide one to append it to retained context and make it the displayed goal. Threads parked or interrupted by a shutdown/reload are restorable; use subagent_stop for destructive cancellation.",
 		].join(" "),
 		promptSnippet: "Resume a parked or settled subagent thread with its retained context.",
 		promptGuidelines: [
-			"Use subagent_control resume to continue a parked/settled thread on the same run id. Resume without objective keeps the current goal; resume with objective appends that goal to retained context.",
-			"Use subagent_stop only for destructive cancellation; it retires that thread's retained session.",
+			"Resume keeps the run id and retained context; use subagent_stop only for destructive cancellation, which retires that thread's session.",
 		],
 		parameters: SubagentControlParams,
 
@@ -142,18 +140,13 @@ export function registerLookupTools(pi: ExtensionAPI, runtime: SubagentRuntime):
 		label: "Subagent Wait",
 		description: [
 			"Look up background sub-agent run(s) and return their results.",
-			"PREFER NOT CALLING THIS: dispatching already ended your turn and results arrive as a message that wakes you automatically.",
-			"By default it does NOT block: a settled run returns its result immediately; a still-active run returns a 'still running — end your turn' note.",
-			"Pass an explicit timeoutMs ONLY when you must stay in the turn and need the result right now (sequential dependent steps).",
-			"NEVER sleep, poll, or wait with bash to get a sub-agent result: end the turn, or call this tool.",
-			"The same result is also delivered as a completion message that resumes the main agent, so you may see it twice (once here, once as a wake-up) — that is expected, not a duplicate.",
+			"PREFER NOT CALLING THIS: every result also arrives on its own as the message that wakes you, so seeing a result twice is expected.",
+			"It does NOT block by default: a settled run returns its result immediately, a still-active run returns a 'still running — end your turn' note. Pass timeoutMs only when you must stay in the turn for a directly dependent next step.",
 		].join(" "),
 		promptSnippet: "Look up a background subagent result in-turn (id: run id from dispatch/status output; omit for all). Non-blocking by default; pass timeoutMs to block.",
 		promptGuidelines: [
-			"Do NOT call subagent_wait to hold the turn: results arrive as wake-up messages automatically. The default call is a non-blocking lookup — settled results return immediately, active runs return a note telling you to end your turn.",
-			"Pass an explicit timeoutMs only when you must keep the turn AND the next step depends on the result right now — e.g. the user asked you to wait for it.",
-			"Never use bash sleep/timeout/polling to wait for a sub-agent — it blocks the turn and delays result delivery.",
-			"If subagent_wait times out, end the turn and wait for the wake-up message, or call it again with a longer timeoutMs.",
+			"Do NOT call subagent_wait to hold the turn: results arrive as wake-up messages automatically. Pass timeoutMs only when the next step depends on the result right now.",
+			"Never use bash sleep/timeout/polling to wait for a sub-agent; when a wait times out, end the turn or call it again with a longer timeoutMs.",
 		],
 		parameters: SubagentWaitParams,
 
@@ -306,13 +299,11 @@ export function registerLookupTools(pi: ExtensionAPI, runtime: SubagentRuntime):
 		label: "Subagent Status",
 		description: [
 			"List active background sub-agent runs (id, role, model, thinking, usage, elapsed, current activity) and recently finished results.",
-			"Pass id to read the full result of a finished run; pass no id for the overview.",
-			"Use it to decide whether to subagent_wait, subagent_stop, or re-dispatch — never to poll: results arrive by themselves.",
+			"Pass id to read the full result of a finished run; pass no id for the overview. Use it to decide whether to wait, stop, or re-dispatch — never to poll: results arrive by themselves.",
 		].join(" "),
 		promptSnippet: "Inspect background subagents: active runs, finished results, full result by id.",
 		promptGuidelines: [
-			"Call subagent_status to see what is running and what already finished.",
-			"Never poll subagent_status in a loop to wait for a run: end the turn (you will be woken) or call subagent_wait.",
+			"Call subagent_status to see what is running and what already finished, never in a loop to wait for a run.",
 			"A finished run's id stays available for the session; its full result is one subagent_status call away.",
 		],
 		parameters: SubagentStatusParams,
@@ -468,8 +459,7 @@ export function registerLookupTools(pi: ExtensionAPI, runtime: SubagentRuntime):
 		].join(" "),
 		promptSnippet: "Stop a running background subagent (id from dispatch output/subagent_status; or all: true).",
 		promptGuidelines: [
-			"Stop a run when its task is obsolete, stuck, or superseded — do not leave it burning tokens.",
-			"A stopped run reports as failed with 'aborted' and its partial output, so the next step knows it did not complete.",
+			"Stop a run when its task is obsolete, stuck, or superseded — do not leave it burning tokens. It then reports as failed with 'aborted' plus its partial output.",
 		],
 		parameters: SubagentStopParams,
 

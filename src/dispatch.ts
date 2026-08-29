@@ -489,11 +489,10 @@ export function registerSubagentTool(pi: ExtensionAPI, runtime: SubagentRuntime)
 		name: "subagent",
 		label: "Subagent",
 		description: [
-			"Dispatch enabled agents as isolated leaf Pi child processes, singly or in parallel. Dispatching never blocks your turn — runs proceed in the background and each completion resumes you automatically; never poll or restate delivered results.",
-			"Put every genuinely independent unit in one `tasks` array (no per-call cap). Process slots scale with the machine; when all slots are busy the extra runs simply wait and start automatically as slots free — waiting is pacing, never a rejection or a limit on how much you may dispatch.",
-			"Every parallel write-capable agent (worker, cleaner, documenter, custom writers) defaults to a detached Git worktree, so writers run concurrently; shared mode serializes same-repository writers. Explicit `shared` keeps the caller's checkout; setup failure never silently falls back to shared.",
-			"Successful worker/cleaner runs get one automatic reviewer gate; a failing gate is fixed by the reviewer itself in a write-enabled continuation of the same session and re-reviewed in bounded, converging rounds. Pass review: \"none\" on a worker/cleaner task to skip its automatic gate for mechanical, low-risk edits you verify yourself. A REVIEW_FAIL from a gate you dispatched directly returns its findings to you — fix them inline or via a briefed worker without waiting for the user.",
-			"A configured child-model failure continues the retained session on the current main model. Resume a parked or settled thread with subagent_control by run id; use subagent_stop for destructive cancellation.",
+			"Dispatch enabled agents as isolated leaf Pi child processes: single {agent, task} or parallel {tasks: [...]}. Dispatching never blocks your turn — runs proceed in the background and each completion resumes you automatically; never poll or restate delivered results.",
+			"Put every genuinely independent unit in one `tasks` array: there is no per-call cap, and runs beyond the machine's free process slots simply wait and start as slots free.",
+			"Parallel write-capable agents default to a detached Git worktree so writers run concurrently; explicit `shared` keeps the caller's checkout and serializes same-repository writers. Worktree setup failure never silently falls back to shared.",
+			"Successful worker/cleaner runs get one automatic reviewer gate; pass review: \"none\" on a worker/cleaner task to skip it for mechanical, low-risk edits you verify yourself. A REVIEW_FAIL from a gate you dispatched directly returns its findings to you. A configured child-model failure continues the retained session on the current main model.",
 		].join(" "),
 		promptSnippet:
 			"Dispatch isolated background agents for recon, implementation, cleanup, docs, or review; never blocks your turn, and REVIEW_FAIL findings return to you to fix.",

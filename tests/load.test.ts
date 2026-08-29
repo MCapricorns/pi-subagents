@@ -80,9 +80,11 @@ describe("extension registration", () => {
 		expect(tool.promptGuidelines).toBeUndefined();
 		expect(tool.description).toContain("Dispatching never blocks your turn");
 		expect(tool.description).toContain("Put every genuinely independent unit in one `tasks` array");
-		expect(tool.description).toContain("Every parallel write-capable agent (worker, cleaner, documenter, custom writers) defaults to a detached Git worktree");
-		expect(tool.description).toContain("waiting is pacing, never a rejection or a limit on how much you may dispatch");
-		expect(tool.description).toContain("a failing gate is fixed by the reviewer itself in a write-enabled continuation of the same session and re-reviewed in bounded, converging rounds");
+		expect(tool.description).toContain("there is no per-call cap");
+		expect(tool.description).toContain("Parallel write-capable agents default to a detached Git worktree");
+		expect(tool.description).toContain("never silently falls back to shared");
+		expect(tool.description).toContain("Successful worker/cleaner runs get one automatic reviewer gate");
+		expect(tool.description).toContain('review: "none"');
 		expect(tool.description).toContain("A REVIEW_FAIL from a gate you dispatched directly returns its findings to you");
 		expect(tool.description).toContain("never poll or restate delivered results");
 		expect(tool.description).toContain("continues the retained session on the current main model");
@@ -95,6 +97,16 @@ describe("extension registration", () => {
 		expect(tool.parameters.properties.tasks.items.properties.isolation).toBeDefined();
 		const control = stub.tools.find((t) => t.name === "subagent_control");
 		expect(control.promptSnippet).toContain("Resume a parked or settled subagent thread");
+	});
+
+	it("keeps the parent-paid tool prompt surface within budget", () => {
+		const stub = makeStub();
+		register(stub.api);
+		// Policy lives once in the always-injected directive, so tool text carries
+		// call-time mechanics only.
+		const parentPaid = stub.tools.reduce((total: number, tool: any) =>
+			total + [tool.description, tool.promptSnippet, ...(tool.promptGuidelines ?? [])].join(" ").length, 0);
+		expect(parentPaid).toBeLessThan(3_900);
 	});
 
 	it("points a first run without a config file at /subagents-setup", async () => {

@@ -1,6 +1,6 @@
 ---
 name: reviewer
-description: Adversarial read-only reviewer for generic audits, code health, plans, PR/issue validation, and independent diff gates. Advisory reports never trigger edits; a failing managed gate continues into the reviewer's own write-enabled fix stage of the same session.
+description: Adversarial read-only reviewer for generic audits, code health, plans, PR/issue validation, and independent diff gates.
 tools: read, grep, find, ls, bash
 # The shell slot follows the parent and parent-active plugin tools are appended;
 # listed non-shell Pi built-ins are the permission boundary. The runtime fix

@@ -29,7 +29,7 @@ describe("buildDelegationDirective", () => {
 
 	it("keeps the default injected directive below the prompt budget", () => {
 		const directive = buildDelegationDirective(loadBuiltinAgents());
-		expect(directive.length).toBeLessThan(4_000);
+		expect(directive.length).toBeLessThan(3_700);
 	});
 
 	it("states default-parallel fan-out with queue pacing for any agent count", () => {
@@ -47,7 +47,7 @@ describe("buildDelegationDirective", () => {
 		expect(directive).toContain("Delegate aggressively");
 		expect(directive).toContain("Inline only trivial work");
 		expect(directive).toContain("default every non-trivial implementation, fix, refactor, or test task to `worker`");
-		expect(directive).toContain("Split a broad question into several parallel explorers with disjoint scopes");
+		expect(directive).toContain("split a broad question into parallel explorers with disjoint scopes");
 		expect(directive).toContain("leads, never proof");
 		expect(directive).toContain("re-read load-bearing files before acting yourself");
 		expect(directive).toContain("a child you brief re-verifies");

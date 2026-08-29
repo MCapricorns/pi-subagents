@@ -30,10 +30,10 @@ export function buildDelegationDirective(
 	];
 
 	const dispatchRules = [
-		`Delegate aggressively: child contexts are cheap, yours is scarce. Inline only trivial work — a one-shot lookup, a single focused edit, an answer already in context${hasWorker ? "; default every non-trivial implementation, fix, refactor, or test task to `worker`" : ""}.`,
+		`Delegate aggressively: child contexts are cheap, yours is scarce. Inline only trivial work — a lookup, a single focused edit, an answer already in context${hasWorker ? "; default every non-trivial implementation, fix, refactor, or test task to `worker`" : ""}.`,
 		...(hasExplorer
 			? [
-				"`explorer`: broad or multi-file search. Its findings are leads, never proof — re-read load-bearing files before acting yourself (a child you brief re-verifies). Split a broad question into several parallel explorers with disjoint scopes.",
+				"`explorer`: split a broad question into parallel explorers with disjoint scopes. Its findings are leads, never proof — re-read load-bearing files before acting yourself (a child you brief re-verifies).",
 			]
 			: []),
 		...(hasCleaner

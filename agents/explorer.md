@@ -1,6 +1,6 @@
 ---
 name: explorer
-description: Fast read-only reconnaissance for broad or multi-file search and unfamiliar areas. Returns exact paths and compressed findings as retrieval leads; use direct tools for trivial lookups.
+description: Fast read-only reconnaissance for broad or multi-file search in unfamiliar areas; returns exact paths and compressed findings as retrieval leads.
 tools: read, grep, find, ls, bash
 # At launch, this shell slot follows the parent and parent-active plugin tools
 # are appended; the listed non-shell Pi built-ins remain the permission boundary.

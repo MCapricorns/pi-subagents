@@ -44,7 +44,6 @@ describe("shipped specialist agents", () => {
 		});
 		expect(cleaner?.tools).toBeUndefined();
 		expect(cleaner?.description).toContain("edit-authorizing cleanup");
-		expect(cleaner?.description).toContain("Read-only audits/reviews go to reviewer");
 		expect(cleaner?.systemPrompt).toContain("apply every safe, proven, in-scope cleanup end to end");
 		expect(cleaner?.systemPrompt).toContain("Finding no safe cut and making zero edits is valid");
 		expect(cleaner?.systemPrompt).toContain("without asking for approval item by item");

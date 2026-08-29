@@ -1,6 +1,6 @@
 ---
 name: cleaner
-description: Evidence-first, edit-authorizing cleanup, removal, simplification, or dedup. Applies every safe proven in-scope cut without per-item approval and may make zero edits. Read-only audits/reviews go to reviewer; never the gate.
+description: Evidence-first, edit-authorizing cleanup, removal, simplification, or dedup; verifies its cuts and may make zero edits. Read-only audits go to reviewer.
 thinking: high
 # No `tools` field => all tools (write-capable).
 ---
