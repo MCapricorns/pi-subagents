@@ -184,13 +184,12 @@ that delivers without another gate.
   where they are in `~/.pi/agent/pi-subagents-recovery.json`. Every later session
   start repeats that notice until you remove the artifacts.
 
-## Threads: wait, resume, stop
+## Threads: resume, stop
 
 Every dispatch returns a stable `#id`, which is the handle for the thread tools:
 
 | Tool               | What it does                                                                                                                                                                  |
 | ------------------ | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `subagent_wait`    | Block in-turn until already-dispatched run(s) settle and return their results (`id` or prefix; omit for all active runs).                                                        |
 | `subagent_control` | `resume` a parked or settled thread with its full retained context, optionally appending a new `objective`.                                                                     |
 | `subagent_stop`    | Destructively cancel, deliver the partial output, and retire the thread. Steering and follow-up messages still queued in the child are dropped so nothing can revive it later.  |
 
@@ -198,14 +197,14 @@ Every dispatch returns a stable `#id`, which is the handle for the thread tools:
 subagent_control({ action: "resume", id: 7, objective: "Finish the tests." });
 ```
 
-There is deliberately no status or polling tool. Every result delivers itself,
-the TUI widget shows what is live, and blocking is event-driven only: `wait:
-true` on a dispatch holds the turn for that call's results — the escape hatch
-for one-shot `pi -p` parents, which exit at end of turn and would otherwise
-never see them — and `subagent_wait` does the same for a run that is already
-in flight when the turn cannot proceed without it. Neither wait runs on a
-timer or a timeout the model picks: a waiter resolves the instant its run
-settles, a parked run answers immediately with its resume handle, and
+There is deliberately no status, polling, or wait tool. Every result delivers
+itself as a completion that wakes the main model, so a turn never blocks on a
+running subagent — keep working or end the turn, and the completion continues
+it. The one in-turn block is `wait: true` on a dispatch, which holds that call
+until the runs it started settle: the escape hatch for one-shot `pi -p`
+parents, which exit at end of turn and would otherwise never see them. That
+wait runs on no timer and no timeout the model picks: it resolves the instant
+its run settles, a parked run answers immediately with its resume handle, and
 aborting the turn is the escape hatch. Control operations are all bounded, so
 they never hang on a generation that is still settling.
 

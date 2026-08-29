@@ -1,10 +1,9 @@
 /**
- * Thread controls around the subagent runtime: subagent_control (resume),
- * subagent_wait (event-driven in-turn wait), and destructive subagent_stop.
- * There is no status/poll tool — completions carry each result (with an
- * on-disk artifact when truncated); `wait: true` on dispatch blocks for runs
- * it starts, and subagent_wait blocks for runs already dispatched. Both waits
- * resolve the moment a run settles, never on a timer.
+ * Thread controls around the subagent runtime: subagent_control (resume) and
+ * destructive subagent_stop. There is no status/poll tool — completions carry
+ * each result (with an on-disk artifact when truncated) and wake the main
+ * model, so waiting is never a tool call; the only in-turn block is `wait:
+ * true` on a dispatch, for one-shot parents that exit at end of turn.
  */
 
 import { StringEnum } from "@earendil-works/pi-ai";
@@ -13,11 +12,10 @@ import { Text } from "@earendil-works/pi-tui";
 import { existsSync } from "node:fs";
 import { Type } from "typebox";
 import { DEFAULT_MAX_RESULT_LINES, loadConfig } from "./config.ts";
-import { awaitRunResults } from "./dispatch.ts";
 import { removeThreadRecord } from "./durable.ts";
 import { formatCompletionBlock, matchRunIds } from "./format.ts";
 import { emptyUsage } from "./rpc-run.ts";
-import { formatTaskSummary, isRunActiveStatus, monitor } from "./monitor.ts";
+import { formatTaskSummary, monitor } from "./monitor.ts";
 import { persistRecoveryRecords, recoveryRecordFromFinalization } from "./recovery.ts";
 import type { SubagentRuntime, SubagentThread } from "./runtime.ts";
 import { CONTROL_QUIESCE_TIMEOUT_MS, projectResultsRoot, quiesced } from "./thread-lifecycle.ts";
@@ -109,56 +107,6 @@ export function registerLookupTools(pi: ExtensionAPI, runtime: SubagentRuntime):
 		},
 		renderResult(result, _options, theme) {
 			return renderFirstLine(result, "subagent_control ", theme);
-		},
-	});
-
-	const SubagentWaitParams = Type.Object({
-		id: Type.Optional(
-			Type.String({ description: "Run id or prefix to wait for (see dispatch output). Omit to wait for every active run." }),
-		),
-	});
-
-	pi.registerTool({
-		name: "subagent_wait",
-		label: "Subagent Wait",
-		description:
-			"Block until dispatched background run(s) settle, then return their results — resolves the moment a run settles, never on a timer.",
-		promptSnippet: "Block until dispatched runs settle; returns results the moment they finish.",
-		parameters: SubagentWaitParams,
-
-		async execute(_toolCallId, params, signal, _onUpdate, ctx) {
-			await runtime.durableRestore;
-			const config = await loadConfig(runtime.configPath);
-			const active = monitor.getRuns()
-				.filter((run) => isRunActiveStatus(run.status) || run.status === "parked")
-				.map((run) => run.id);
-			const requested = params.id?.trim();
-			// Settled runs stay addressable: a wait issued just after completion
-			// returns that result immediately instead of missing the run.
-			const targets = requested
-				? matchRunIds([...new Set([...active, ...runtime.settledRuns.keys()])], requested)
-				: active;
-			if (targets.length === 0) {
-				const activeList = active.map((id) => `#${id}`).join(", ");
-				return {
-					content: [{
-						type: "text",
-						text: requested
-							? `No subagent run matches "${requested}".${activeList ? ` Active runs: ${activeList}.` : ""}`
-							: "No active subagent runs to wait for.",
-					}],
-					details: {},
-				};
-			}
-			const blocks = await awaitRunResults(runtime, targets, signal, config.maxResultLines, ctx.cwd);
-			return { content: [{ type: "text", text: blocks }], details: {} };
-		},
-
-		renderCall(args, theme) {
-			return new Text(`${theme.fg("toolTitle", theme.bold("subagent_wait "))}${theme.fg("accent", args.id ? `#${args.id}` : "all")}`, 0, 0);
-		},
-		renderResult(result, _options, theme) {
-			return renderFirstLine(result, "subagent_wait ", theme);
 		},
 	});
 

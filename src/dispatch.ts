@@ -151,12 +151,14 @@ function withReviewerFixStageAgent(agent: AgentConfig): AgentConfig {
 	};
 }
 
-/** Event-driven in-turn wait shared by dispatch `wait: true` and
- * subagent_wait: hold the turn until every listed run settles, then hand back
- * their result blocks. No timer: a waiter resolves the moment its run's result
- * registers (children are bounded by the idle watchdog), an already-parked run
- * answers immediately with its resume handle, and the turn's abort signal
- * remains the escape hatch. */
+/** In-turn wait behind dispatch `wait: true` — the escape hatch for one-shot
+ * `pi -p` parents that exit at end of turn: hold the call until every run it
+ * started settles, then hand back their result blocks. Interactive sessions
+ * never take this path; their results arrive as completion wake-ups. No
+ * timer: a waiter resolves the moment its run's result registers (children
+ * are bounded by the idle watchdog), an already-parked run answers
+ * immediately with its resume handle, and the turn's abort signal remains the
+ * escape hatch. */
 export async function awaitRunResults(
 	runtime: SubagentRuntime,
 	runIds: number[],

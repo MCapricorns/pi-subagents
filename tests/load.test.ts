@@ -72,10 +72,10 @@ describe("extension registration", () => {
 		register(stub.api);
 		expect(stub.tools.map((t) => t.name)).toContain("subagent");
 		expect(stub.tools.map((t) => t.name)).toContain("subagent_control");
-		// No status/poll tool: results deliver themselves. Waiting is event-driven
-		// only — dispatch wait: true for runs a call starts, subagent_wait for
-		// runs already dispatched; both resolve the moment a run settles.
-		expect(stub.tools.map((t) => t.name)).toEqual(["subagent", "subagent_control", "subagent_wait", "subagent_stop"]);
+		// No status/poll tool and no wait tool: results deliver themselves as
+		// completion wake-ups. The only in-turn block is `wait: true` on the
+		// dispatch that starts the runs, for one-shot pi -p parents.
+		expect(stub.tools.map((t) => t.name)).toEqual(["subagent", "subagent_control", "subagent_stop"]);
 		expect(stub.commands).toContain("subagents-setup");
 		expect(stub.commands).not.toContain("subagents-inspect");
 		expect(typeof stub.hooks["before_agent_start"]).toBe("function");
