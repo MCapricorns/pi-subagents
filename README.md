@@ -134,6 +134,13 @@ outright for mechanical, low-risk edits you verify yourself: typos, comments, do
 strings, config value tweaks. The default remains one fresh gate whenever behavior
 can change, and a resumed thread keeps the choice its dispatch made.
 
+A run that changed nothing is not gated either — there is no diff to review, and
+making zero edits is a valid outcome for a cleaner that found no safe cut. That
+one is decided afterwards rather than at dispatch, and only on proof: an isolated
+worktree starts at its integration base, so an empty diff against that base is
+proof. A shared checkout is shared with you and your editor, so nothing in it can
+be attributed to one run and the gate always runs.
+
 A failing **managed** gate — the automatic one after a top-level `worker` or
 `cleaner` — converges inside the workflow. The same retained reviewer session
 gains write access and applies its own fix instructions, then a fresh gate
@@ -253,11 +260,19 @@ vision mode — assign a multimodal model and name the image paths in the task.
 
 Every dispatch, managed stage, resume, retry, and fallback snapshots the parent's
 currently active tools. A role with no explicit list inherits the full set. An
-explicit list keeps its pi built-in boundary, while its shell slot (`bash` or
-`powershell`) follows the parent and active extension tools are appended.
-Read-only roles never gain `edit` or `write`, and all `subagent*` tools are
-stripped so children stay leaves. An empty snapshot starts the child with
-`--no-tools`.
+explicit list keeps its pi built-in boundary and gains active extension tools,
+while its shell slot follows the parent: a role file naming `bash` runs
+`powershell` when that is the shell you enabled. When you run both, the child gets
+the one that fits the host — PowerShell on Windows, Bash elsewhere — rather than
+two terminals to choose between. A child never receives a shell you disabled,
+since pi's `--tools` allowlist overrides its own `defaultTools`. Read-only roles
+never gain `edit` or `write`, and all `subagent*` tools are stripped so children
+stay leaves. An empty snapshot starts the child with `--no-tools`.
+
+Shell guidance in the shipped roles is portable for the same reason: they reach
+for pi's own `read`/`grep`/`find`/`ls` tools, which behave identically everywhere,
+and keep shell examples to `git` queries instead of POSIX binaries a PowerShell
+child cannot run.
 
 ## Configuration
 
