@@ -1,4 +1,4 @@
-import { mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, utimesSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, utimesSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { pathToFileURL } from "node:url";
@@ -18,6 +18,7 @@ import {
 	RESULT_ARTIFACT_MAX_FILES_PER_PROJECT,
 	RESULT_LINE_MAX,
 	reviewVerdict,
+	sweepProjectResultArtifacts,
 	truncateResultOutput,
 	writeChildRetryPolicyExtension,
 	getProjectRoot,
@@ -523,12 +524,10 @@ describe("writeResultArtifact", () => {
 	it("bounds Markdown artifacts by age and count without touching other files", () => {
 		expect(RESULT_ARTIFACT_MAX_AGE_MS).toBe(7 * 24 * 60 * 60 * 1_000);
 		expect(RESULT_ARTIFACT_MAX_FILES_PER_PROJECT).toBe(50);
-		const root = mkdtempSync(join(isolatedTemp, "pi-subagents-artifact-prune-"));
-		const project = join(root, "project");
-		mkdirSync(project);
+		const results = mkdtempSync(join(isolatedTemp, "pi-subagents-artifact-prune-"));
 		const now = 10_000_000;
 		const writeAt = (name: string, mtimeMs: number): void => {
-			const path = join(project, name);
+			const path = join(results, name);
 			writeFileSync(path, name, "utf8");
 			utimesSync(path, mtimeMs / 1_000, mtimeMs / 1_000);
 		};
@@ -539,14 +538,50 @@ describe("writeResultArtifact", () => {
 		writeAt("unknown.md", now - 2_000);
 		writeAt("unrelated.txt", now - 2_000);
 
-		pruneResultArtifacts(root, { now, maxAgeMs: 1_000, maxFilesPerProject: 2 });
+		pruneResultArtifacts(results, { now, maxAgeMs: 1_000, maxFilesPerProject: 2 });
 
-		expect(readdirSync(project).sort()).toEqual([
+		expect(readdirSync(results).sort()).toEqual([
 			"pi-subagent-10000000000000-aaaaaaaaaaaa-newest.md",
 			"pi-subagent-10000000000001-bbbbbbbbbbbb-second.md",
 			"unknown.md",
 			"unrelated.txt",
 		]);
-		rmSync(root, { recursive: true, force: true });
+		rmSync(results, { recursive: true, force: true });
+	});
+
+	it("applies retention on every write, so an active project stays bounded", () => {
+		const results = mkdtempSync(join(isolatedTemp, "pi-subagents-artifact-write-prune-"));
+		const expired = join(results, "pi-subagent-10000000000000-aaaaaaaaaaaa-expired.md");
+		writeFileSync(expired, "old", "utf8");
+		const ancient = (Date.now() - RESULT_ARTIFACT_MAX_AGE_MS - 60_000) / 1_000;
+		utimesSync(expired, ancient, ancient);
+
+		const fresh = writeResultArtifact("new text\n", "worker", results);
+
+		// Nothing else prunes a project that keeps producing results, so the write
+		// path has to age out its own directory — and never the file it just wrote.
+		expect(existsSync(expired)).toBe(false);
+		expect(existsSync(fresh)).toBe(true);
+		rmSync(results, { recursive: true, force: true });
+	});
+
+	it("sweeps result retention across every project root", () => {
+		const durableRoot = mkdtempSync(join(isolatedTemp, "pi-subagents-artifact-sweep-"));
+		const now = 10_000_000;
+		const projects = ["one-aaaaaaaaaaaa", "two-bbbbbbbbbbbb"];
+		for (const project of projects) {
+			const results = join(durableRoot, project, "results");
+			mkdirSync(results, { recursive: true });
+			const path = join(results, "pi-subagent-10000000000000-cccccccccccc-expired.md");
+			writeFileSync(path, "old", "utf8");
+			utimesSync(path, (now - 2_000) / 1_000, (now - 2_000) / 1_000);
+		}
+
+		sweepProjectResultArtifacts(durableRoot, { now, maxAgeMs: 1_000 });
+
+		for (const project of projects) {
+			expect(readdirSync(join(durableRoot, project, "results"))).toEqual([]);
+		}
+		rmSync(durableRoot, { recursive: true, force: true });
 	});
 });

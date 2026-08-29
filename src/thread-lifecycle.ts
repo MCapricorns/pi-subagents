@@ -77,6 +77,7 @@ import {
 	reviewVerdict,
 	runSingleAgentWithMainFallback,
 	sessionExists,
+	sweepProjectResultArtifacts,
 	type SingleResult,
 	type SubagentDetails,
 	type SubagentLiveEvent,
@@ -1429,10 +1430,18 @@ export function bootstrapDurableState(runtime: SubagentRuntime): Promise<void> {
 		} catch {
 			/* retention is best-effort */
 		}
+		const projectRoots = join(dirname(runtime.configPath), PROJECT_ROOTS_DIR_NAME);
 		try {
-			sweepProjectTempDirs(join(dirname(runtime.configPath), PROJECT_ROOTS_DIR_NAME));
+			sweepProjectTempDirs(projectRoots);
 		} catch {
 			/* temp hygiene is best-effort */
+		}
+		try {
+			// Result excerpts are bounded on write, which never reaches a project
+			// that has stopped producing them.
+			sweepProjectResultArtifacts(projectRoots);
+		} catch {
+			/* result retention is best-effort */
 		}
 		try {
 			await pruneStaleProjectRoots(runtime.configPath);

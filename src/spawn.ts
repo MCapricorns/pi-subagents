@@ -137,52 +137,61 @@ interface ResultArtifactRetentionOptions {
 	maxFilesPerProject?: number;
 }
 
-/** Remove only stale/overflow Markdown result artifacts. Unknown files and
- * symlinks are never touched. Called on each artifact write, so storage stays
- * bounded without deleting a result that the current completion just linked. */
+/** Remove stale and overflowing Markdown result artifacts from one project's
+ * results directory, newest kept first. Unknown files and symlinks are never
+ * touched. Runs on every artifact write, so an active project stays bounded
+ * without ever deleting the result the current completion just linked. */
 export function pruneResultArtifacts(
-	rootDir: string,
+	resultsDir: string,
 	options: ResultArtifactRetentionOptions = {},
 ): void {
 	const now = options.now ?? Date.now();
 	const maxAgeMs = Math.max(0, options.maxAgeMs ?? RESULT_ARTIFACT_MAX_AGE_MS);
 	const maxFiles = Math.max(0, Math.floor(options.maxFilesPerProject ?? RESULT_ARTIFACT_MAX_FILES_PER_PROJECT));
-	let projects: Dirent[];
+	let entries: Dirent[];
 	try {
-		projects = readdirSync(rootDir, { withFileTypes: true });
+		entries = readdirSync(resultsDir, { withFileTypes: true });
 	} catch {
 		return;
 	}
+	const artifacts = entries
+		.filter((entry) => entry.isFile() && !entry.isSymbolicLink() && RESULT_ARTIFACT_NAME.test(entry.name))
+		.flatMap((entry) => {
+			const path = join(resultsDir, entry.name);
+			try {
+				return [{ path, mtimeMs: statSync(path).mtimeMs }];
+			} catch {
+				return [];
+			}
+		})
+		.sort((left, right) => right.mtimeMs - left.mtimeMs);
 
+	for (const [index, artifact] of artifacts.entries()) {
+		if (index < maxFiles && now - artifact.mtimeMs <= maxAgeMs) continue;
+		try {
+			rmSync(artifact.path, { force: true });
+		} catch {
+			// Retention is best-effort; result delivery must still succeed.
+		}
+	}
+}
+
+/** Apply result retention to every project under the durable root. The write
+ * path only bounds the project being written to, so this is what ages out the
+ * results of projects that are no longer producing any. */
+export function sweepProjectResultArtifacts(
+	durableRoot: string,
+	options: ResultArtifactRetentionOptions = {},
+): void {
+	let projects: Dirent[];
+	try {
+		projects = readdirSync(durableRoot, { withFileTypes: true });
+	} catch {
+		return;
+	}
 	for (const project of projects) {
 		if (!project.isDirectory() || project.isSymbolicLink()) continue;
-		const projectDir = join(rootDir, project.name);
-		let entries: Dirent[];
-		try {
-			entries = readdirSync(projectDir, { withFileTypes: true });
-		} catch {
-			continue;
-		}
-		const artifacts = entries
-			.filter((entry) => entry.isFile() && !entry.isSymbolicLink() && RESULT_ARTIFACT_NAME.test(entry.name))
-			.flatMap((entry) => {
-				const path = join(projectDir, entry.name);
-				try {
-					return [{ path, mtimeMs: statSync(path).mtimeMs }];
-				} catch {
-					return [];
-				}
-			})
-			.sort((left, right) => right.mtimeMs - left.mtimeMs);
-
-		for (const [index, artifact] of artifacts.entries()) {
-			if (index < maxFiles && now - artifact.mtimeMs <= maxAgeMs) continue;
-			try {
-				rmSync(artifact.path, { force: true });
-			} catch {
-				// Temp cleanup is best-effort; result delivery must still succeed.
-			}
-		}
+		pruneResultArtifacts(join(durableRoot, project.name, "results"), options);
 	}
 }
 
