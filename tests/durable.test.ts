@@ -258,7 +258,12 @@ describe("stale project-root pruning", () => {
 			mkdirSync(checkout, { recursive: true });
 			const now = Date.now();
 			const old = new Date(now - PROJECT_ROOT_MAX_AGE_MS - 60_000);
-			writeFileSync(join(checkout, "live.ts"), "x", "utf8");
+			const live = join(checkout, "live.ts");
+			writeFileSync(live, "x", "utf8");
+			// Freeze the live file at `now` so a write that lands a millisecond
+			// later is not discarded as a future timestamp (those neither keep a
+			// root alive nor let one age out).
+			utimesSync(live, new Date(now), new Date(now));
 			// Every directory above the live file looks long abandoned, so the age
 			// probe only finds the one thing keeping this project alive by
 			// descending all the way to it.
