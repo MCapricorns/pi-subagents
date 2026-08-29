@@ -235,7 +235,11 @@ checkpoints, and result excerpts live under
 written to the OS temp directory — transient per-run scratch lives in the
 project's `tmp/` and is swept for dead owners on the next load) and are
 restored when pi reloads or restarts — a reload
-interrupts a live run into a restorable checkpoint instead of losing it. A
+interrupts a live run into a restorable checkpoint instead of losing it. That
+restore runs at load, and everything that answers for a run waits for it —
+`subagent_control resume`, `subagent_stop`, and a new dispatch before it takes an
+id — so the first call after a reload can never report parked work as missing
+or hand its id to something else. A
 thread that completes or fails cleanly drops its durable record, so the
 threads manifest exists only
 while interrupted work needs it; parked work stays resumable for 30 days, and

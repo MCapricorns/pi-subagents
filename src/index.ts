@@ -78,10 +78,11 @@ export default function (pi: ExtensionAPI): void {
 
 	registerAnnouncements(pi, runtime);
 
-	// Durable bootstrap: restore parked/settled threads from the manifest so a
-	// reload or restart keeps status and resume working, then age out old
-	// records and sweep leaked temp/state directories. Fire-and-forget; every
-	// stage is best-effort and never blocks registration.
+	// Durable bootstrap: restore parked threads from the manifest so a reload or
+	// restart keeps status and resume working, then age out old records and sweep
+	// leaked temp/state directories. Registration never blocks on it and every
+	// stage is best-effort; the restore pass is published as runtime.durableRestore
+	// so the tools and the session-start notice wait for it instead of racing it.
 	void bootstrapDurableState(runtime);
 
 	// Proactive dispatch: inject the delegation directive into the parent system prompt.
