@@ -131,7 +131,7 @@ subagent({
 
 The main agent owns the breadth — there is no per-call task cap. The runtime
 runs a machine-scaled pool of child processes at once and queues the rest;
-dispatch confirmations and `subagent_status` state the live counts with each
+dispatch confirmations state the live counts with each
 run's real wait reason — waiting for a free process slot, serialized behind
 the shared-checkout repository write lane, or already starting its child
 process — plus the slot capacity, so neither pacing nor write serialization is
@@ -213,8 +213,13 @@ Every dispatch returns a stable `#id` — the handle for all control tools:
 | Tool               | What it does                                                                                                                                                     |
 | ------------------ | ---------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `subagent_control` | `resume` a parked/settled thread with its full retained context, optionally with a new `objective` appended. Only interrupted (parked) threads survive a reload. |
-| `subagent_status`  | List active and recent runs, or return one run's full result and failed-tool diagnostics. `waitMs` blocks in-turn for active runs (one-shot `pi -p` parents, or a dependent next step). |
 | `subagent_stop`    | Destructively cancel, deliver the partial output, retire the thread. Stopping also drops any steering/follow-up messages still queued in the child so a stopped or later resumed thread cannot be revived by stale queue entries.      |
+
+There is no status/lookup tool: every result delivers itself (with the full
+text in an on-disk artifact when truncated), the TUI widget shows live runs,
+and `wait: true` on a dispatch blocks in-turn for that call's results — the
+escape hatch for one-shot `pi -p` parents, which exit at end of turn and would
+otherwise never see them.
 
 ```ts
 subagent_control({ action: "resume", id: 7, objective: "Finish the tests." });
@@ -254,14 +259,15 @@ Queued rows say what they actually wait for — `queued` (a free process slot),
 `waiting on repo lane` (shared-checkout write serialization), or `starting` —
 and resumed threads carry a `↻ resumed` marker with their cumulative time. The
 widget is capped at ten lines: when many runs are live at once, extra runs
-collapse into a `… +N more (subagent_status)` marker so the editor area keeps
-its space; `subagent_status` always shows the full picture.
+collapse into a `… +N more` marker so the editor area keeps its space.
 
 Completions resume the main agent automatically with a compact block (40 lines
 by default; longer output lands unchanged in a temporary Markdown artifact
-reachable via `subagent_status`). Roles author result-only handoffs — outcome,
-paths, verification, unresolved blockers — and the main agent is told to add
-its conclusion, not restate what you already saw.
+whose path is included in the message). Roles author result-only handoffs —
+outcome, paths, verification, unresolved blockers — and the main agent is told
+to add its conclusion, not restate what you already saw. A successful managed
+workflow delivers the writer's handoff plus the integration outcome; a failed
+run additionally carries its failed-tool diagnostics.
 
 ## Models, thinking, and vision
 

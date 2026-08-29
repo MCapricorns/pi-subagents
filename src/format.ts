@@ -1,7 +1,7 @@
 /**
- * Pure formatting/result helpers shared by the subagent tool and the lookup
- * tools (subagent_status): usage rendering, completion blocks, synthetic
- * result constructors, and run-id matching.
+ * Pure formatting/result helpers shared by the subagent tool and completion
+ * delivery: usage rendering, completion blocks, synthetic result constructors,
+ * and run-id matching.
  */
 
 import type { AgentConfig } from "./agents.ts";
@@ -74,8 +74,6 @@ export function formatUsage(usage: UsageStats): string {
 }
 
 export interface CompletionFormatOptions {
-	/** Include individual failed-tool errors. Reserved for explicit status lookup. */
-	failedToolDetails?: boolean;
 	/** Project-scoped directory the full result is written to when the output
 	 * is truncated: <projectRoot>/results. */
 	resultRoot?: string;
@@ -88,11 +86,7 @@ export function formatCompletionBlock(
 ): string {
 	const failed = isFailedResult(result);
 	const failedTools = result.failedTools ?? [];
-	const status = failed
-		? "failed"
-		: options.failedToolDetails && failedTools.length > 0
-			? `completed with ${failedTools.length} failed tool call${failedTools.length === 1 ? "" : "s"}`
-			: "completed";
+	const status = failed ? "failed" : "completed";
 	const usage = formatUsage(result.usage);
 	const output = getResultOutput(result);
 	const { text, truncated } = truncateResultOutput(output, maxResultLines);const fallbackNote = result.modelFallbackFrom
@@ -121,10 +115,10 @@ export function formatCompletionBlock(
 		lines.push("");
 	}
 	lines.push(text);
-	// Failed-tool diagnostics are deliberate opt-in via subagent_status: agents
-	// report their own verification in the output above, and a transient failed
-	// call (no-match grep, rejected edit) is noise in an automatic delivery.
-	if (options.failedToolDetails && failedTools.length > 0) {
+	// Failed-tool diagnostics ride along only when the run itself failed: they
+	// explain the failure, while on a successful run a transient failed call
+	// (no-match grep, rejected edit) is noise the agent already worked around.
+	if (failed && failedTools.length > 0) {
 		lines.push(
 			"",
 			`⚠ ${failedTools.length} failed tool call${failedTools.length === 1 ? "" : "s"}:`,

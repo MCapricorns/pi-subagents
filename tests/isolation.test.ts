@@ -145,7 +145,7 @@ afterEach(async () => {
 	else process.env.PI_CODING_AGENT_DIR = savedAgentDir;
 });
 
-function registered(): { stub: StubPi; subagent: any; control: any; stop: any; status: any } {
+function registered(): { stub: StubPi; subagent: any; control: any; stop: any } {
 	const stub = makeStub();
 	activeStubs.push(stub);
 	register(stub.api);
@@ -154,7 +154,6 @@ function registered(): { stub: StubPi; subagent: any; control: any; stop: any; s
 		subagent: stub.tools.find((tool) => tool.name === "subagent"),
 		control: stub.tools.find((tool) => tool.name === "subagent_control"),
 		stop: stub.tools.find((tool) => tool.name === "subagent_stop"),
-		status: stub.tools.find((tool) => tool.name === "subagent_status"),
 	};
 }
 
@@ -456,13 +455,12 @@ describe("logical worktree reuse and guarded finalization", () => {
 			expect(options.agent.systemPrompt).toContain("temporary detached Git worktree");
 			return result("reviewer", options.task, "APPROVE\nVERDICT: REVIEW_PASS");
 		});
-		const { stub, subagent, status } = registered();
-		const dispatched = await execute(subagent, {
+		const { stub, subagent } = registered();
+		await execute(subagent, {
 			agent: "worker",
 			task: "managed isolated writer",
 			isolation: "worktree",
 		}, root);
-		const parentRunId = dispatched.details.results[0].runId;
 		await queued(controller.signal, controller);
 
 		expect(run.mock.calls.map(([options]) => options.agentName)).toEqual(["worker", "reviewer"]);
@@ -470,8 +468,8 @@ describe("logical worktree reuse and guarded finalization", () => {
 		expect(handle.finalizeMock).toHaveBeenCalledTimes(1);
 		expect(stub.messages).toHaveLength(1);
 		expect(stub.messages[0].message.content).toContain("## Managed workflow:");
-		const full = await execute(status, { id: String(parentRunId) }, root);
-		expect(full.content[0].text).toContain("worktree · changes integrated");
+		// The delivery carries the final result block, including integration state.
+		expect(stub.messages[0].message.content).toContain("worktree · changes integrated");
 		rmSync(root, { recursive: true, force: true });
 	});
 
@@ -620,7 +618,7 @@ describe("logical worktree reuse and guarded finalization", () => {
 		handle.finalizeMock.mockImplementation(() => finalization.promise);
 		vi.spyOn(worktreeModule, "createWorktreeIsolation").mockResolvedValue(handle);
 		vi.spyOn(spawnModule, "runSingleAgentWithMainFallback").mockResolvedValue(emptyResult("stop while settling"));
-		const { stub, subagent, stop, status } = registered();
+		const { stub, subagent, stop } = registered();
 		const dispatched = await execute(subagent, {
 			agent: "worker",
 			task: "stop while settling",
@@ -643,9 +641,6 @@ describe("logical worktree reuse and guarded finalization", () => {
 		expect(stub.messages[0].message.content).toContain("Stopped by subagent_stop");
 		expect(stub.messages[0].message.content).toContain("--- Partial output ---");
 		expect(stub.messages[0].message.content).toContain("done");
-		const full = await execute(status, { id: String(runId) }, root);
-		expect(full.content[0].text).toContain("Stopped by subagent_stop");
-		expect(full.content[0].text).not.toContain("done\n");
 		rmSync(root, { recursive: true, force: true });
 	});
 
@@ -667,18 +662,16 @@ describe("logical worktree reuse and guarded finalization", () => {
 			return new AbortController();
 		});
 		vi.spyOn(spawnModule, "runSingleAgentWithMainFallback").mockResolvedValue(emptyResult("conflict"));
-		const { stub, subagent, status } = registered();
-		const dispatched = await execute(subagent, { agent: "worker", task: "conflict", isolation: "worktree" }, root);
-		const runId = dispatched.details.results[0].runId;
+		const { stub, subagent } = registered();
+		await execute(subagent, { agent: "worker", task: "conflict", isolation: "worktree" }, root);
 		await queued(new AbortController().signal, new AbortController());
-		const full = await execute(status, { id: String(runId) }, root);
-		const text = full.content[0].text;
+		const text = stub.messages[0].message.content as string;
+		expect(text).toContain("recovery artifacts retained");
 		expect(text).toContain("worktree · integration failed");
 		expect(text).toContain(`Retained worktree: ${retainedResult.worktreePath}`);
 		expect(text).toContain(`Retained patch: ${retainedResult.patchPath}`);
 		expect(text).toContain("Integration error: patch does not apply");
 		expect(text).not.toContain("diff --git");
-		expect(stub.messages[0].message.content).toContain("recovery artifacts retained");
 		rmSync(root, { recursive: true, force: true });
 	});
 });
@@ -788,7 +781,7 @@ describe("shutdown and destructive-stop integration", () => {
 				errorMessage: "stopped",
 			});
 		});
-		const { stub, subagent, stop, status } = registered();
+		const { stub, subagent, stop } = registered();
 		// Occupy every process slot (the pool scales with the machine) so the
 		// isolated worker below stays queued and its stop can be observed pre-start.
 		const capacity = resolveSubagentConcurrency();
@@ -814,8 +807,6 @@ describe("shutdown and destructive-stop integration", () => {
 		await new Promise((resolve) => setTimeout(resolve, 20));
 		expect(stopResolved).toBe(false);
 		expect(monitor.findRun(runId)?.status).toBe("queued");
-		const duringCleanup = await execute(status, { id: String(runId) }, root);
-		expect(duringCleanup.content[0].text).toContain("still active");
 		expect(stub.messages).toHaveLength(0);
 
 		finalization.resolve({ status: "no_changes", integrated: false, hadChanges: false });
@@ -985,17 +976,15 @@ describe("shutdown and destructive-stop integration", () => {
 				messages: [{ role: "assistant", content: [{ type: "text", text: "partial output" }], stopReason: "aborted" }],
 			});
 		});
-		const { stub, subagent, stop, status } = registered();
+		const { stub, subagent, stop } = registered();
 		const dispatched = await execute(subagent, { agent: "worker", task: "partial", isolation: "worktree" }, root);
 		const runId = dispatched.details.results[0].runId;
 		await waitFor(() => monitor.findRun(runId)?.status === "running");
 		await execute(stop, { id: String(runId) }, root);
 		await waitFor(() => readFileSync(join(root, "partial.txt"), "utf8") === "partial worker edit\n");
-		const full = await execute(status, { id: String(runId) }, root);
-		expect(full.content[0].text).toContain("worktree · changes integrated");
-		expect(full.content[0].text).toContain("partial output");
 		expect(stub.messages).toHaveLength(1);
 		expect(stub.messages[0].message.content).toContain("partial output");
+		expect(stub.messages[0].message.content).toContain("worktree · changes integrated");
 		rmSync(root, { recursive: true, force: true });
 	});
 });

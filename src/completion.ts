@@ -172,5 +172,5 @@ export function formatActiveRunsFooter(runs: readonly ActiveRunFoot[], maxListed
 		.map((run) => `#${run.id} ${run.agent}${run.label ? `·${run.label}` : ""}${activeRunWaitTag(run.wait)}`)
 		.join(", ");
 	const more = runs.length > listed.length ? `, +${runs.length - listed.length} more` : "";
-	return `\n\n⚠ ${runs.length} other run${runs.length === 1 ? "" : "s"} still active: ${items}${more}. Do not conclude the overall task yet — wait for their results (they wake you automatically) or check subagent_status.`;
+	return `\n\n⚠ ${runs.length} other run${runs.length === 1 ? "" : "s"} still active: ${items}${more}. Do not conclude the overall task yet — their results wake you automatically.`;
 }

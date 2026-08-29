@@ -229,7 +229,6 @@ describe("formatActiveRunLines", () => {
 		const lines = formatActiveRunLines(store.getRuns(), theme, 120);
 		expect(lines).toHaveLength(10);
 		expect(lines.at(-1)).toContain("+3 more");
-		expect(lines.at(-1)).toContain("subagent_status");
 	});
 
 	it("shows the worktree group identity and integration state on the owning root", () => {

@@ -157,11 +157,11 @@ describe("parent tool inheritance", () => {
 		);
 		expect(builtins).toHaveLength(3);
 		for (const agent of builtins) {
-			const resolved = resolveAgentTools(agent, [...activeTools, "subagent", "subagent_status"]);
+			const resolved = resolveAgentTools(agent, [...activeTools, "subagent", "subagent_control"]);
 			expect(resolved.tools?.filter((tool) => tool === "bash" || tool === "powershell")).toEqual(expectedShells);
 			expect(resolved.tools).toEqual(expect.arrayContaining(["web_search", "query_docs"]));
 			expect(resolved.tools).not.toContain("subagent");
-			expect(resolved.tools).not.toContain("subagent_status");
+			expect(resolved.tools).not.toContain("subagent_control");
 			if (agent.name !== "documenter") {
 				expect(resolved.tools).not.toContain("edit");
 				expect(resolved.tools).not.toContain("write");
@@ -194,7 +194,7 @@ describe("parent tool inheritance", () => {
 
 	it("represents an empty inherited active set explicitly", () => {
 		const worker = loadBuiltinAgents().find((agent) => agent.name === "worker")!;
-		expect(resolveAgentTools(worker, ["subagent", "subagent_status"]).tools).toEqual([]);
+		expect(resolveAgentTools(worker, ["subagent", "subagent_stop"]).tools).toEqual([]);
 	});
 });
 

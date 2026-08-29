@@ -779,14 +779,25 @@ export function createBackgroundDispatcher(options: BackgroundDispatcherOptions)
 
 					if (workflowOutcome) {
 						const lastStep = workflowOutcome.steps[workflowOutcome.steps.length - 1]!;
-						let block = formatManagedWorkflowSummary(workflowOutcome.steps, result);
 						const finalVerdict = lastStep.result.agent === "reviewer"
 							? reviewVerdict(getResultOutput(lastStep.result))
 							: undefined;
-						const needsFullFinal = failed || (lastStep.result.agent === "reviewer" && finalVerdict !== "pass");
-						if (needsFullFinal) {
-							block += `\n\n${formatCompletionBlock(result, runConfig.maxResultLines, { resultRoot: projectResultsRoot(runtime.configPath, result.projectCwd ?? originalCwd) })}`;
-						}
+						// The delivery is the model's only view of the workflow. On success
+						// the writer's handoff is the actionable detail (overlaid with the
+						// parent's integration outcome); on failure the terminal result is.
+						const writerHandoff = !failed && finalVerdict === "pass"
+							? {
+								...workflowOutcome.steps[0]!.result,
+								runId: result.runId ?? workflowOutcome.steps[0]!.result.runId,
+								isolation: result.isolation,
+								integrationStatus: result.integrationStatus,
+								integrationApplied: result.integrationApplied,
+								integrationWorktreePath: result.integrationWorktreePath,
+								integrationPatchPath: result.integrationPatchPath,
+								integrationError: result.integrationError,
+							}
+							: result;
+						let block = `${formatManagedWorkflowSummary(workflowOutcome.steps, result)}\n\n${formatCompletionBlock(writerHandoff, runConfig.maxResultLines, { resultRoot: projectResultsRoot(runtime.configPath, result.projectCwd ?? originalCwd) })}`;
 						if (finalVerdict === "fail") {
 							block += `\n\n${reviewFailFollowUpNote()}`;
 						}

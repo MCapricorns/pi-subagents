@@ -13,7 +13,7 @@ import { join, resolve } from "node:path";
 import { Type } from "typebox";
 import { discoverAgents, isWriteCapableAgent, resolveAgentTools, type AgentConfig } from "./agents.ts";
 import { loadConfig } from "./config.ts";
-import { formatUsage, queuedResult } from "./format.ts";
+import { formatCompletionBlock, formatUsage, queuedResult } from "./format.ts";
 import {
 	buildFinalReviewBrief,
 	buildReReviewBrief,
@@ -47,6 +47,7 @@ import {
 } from "./spawn.ts";
 import {
 	createBackgroundDispatcher,
+	projectResultsRoot,
 	resolveDispatchModelRoute,
 	runInManagedRepositoryLane,
 	withWorktreeSystemPrompt,
@@ -64,6 +65,13 @@ const ISOLATION_DESCRIPTION =
 
 const IsolationSchema = Type.Optional(
 	StringEnum(["shared", "worktree"] as const, { description: ISOLATION_DESCRIPTION }),
+);
+
+const WaitSchema = Type.Optional(
+	Type.Boolean({
+		description:
+			"Block until every run started by this call settles, then return their results in-turn (each result still arrives as a completion message too). Only for one-shot (pi -p) sessions or a next step that needs these results within this turn.",
+	}),
 );
 
 const REVIEW_DESCRIPTION =
@@ -93,6 +101,7 @@ const SubagentParams = Type.Object({
 	cwd: Type.Optional(Type.String({ description: "Working directory for the agent process (single mode)" })),
 	isolation: IsolationSchema,
 	review: ReviewSchema,
+	wait: WaitSchema,
 });
 
 /** Roles that default to worktree isolation in parallel dispatches even when
@@ -470,6 +479,81 @@ export function registerSubagentTool(pi: ExtensionAPI, runtime: SubagentRuntime)
 		}
 	};
 
+	/** In-turn blocking behind `wait: true`: hold the turn until every run
+	 * started by this call settles, then hand back their result blocks. This is
+	 * the one blocking path — a one-shot (pi -p) parent cannot end its turn and
+	 * be woken by the completion message, and a directly dependent next step
+	 * needs the results now. No timer: children are bounded by the idle
+	 * watchdog, and the turn's abort signal remains the escape hatch. */
+	const awaitStartedRuns = async (
+		runIds: number[],
+		signal: AbortSignal | undefined,
+		maxResultLines: number,
+		fallbackCwd: string,
+	): Promise<string> => {
+		const waitForRun = (runId: number): Promise<{ result?: SingleResult; note?: string }> => {
+			const already = runtime.settledRuns.get(runId);
+			if (already) return Promise.resolve({ result: already });
+			return new Promise((resolve) => {
+				let done = false;
+				let unsub: (() => void) | undefined;
+				const cleanup = (): void => {
+					if (unsub) unsub();
+					signal?.removeEventListener("abort", onAbort);
+					const listeners = runtime.settledListeners.get(runId);
+					if (listeners) {
+						listeners.delete(onSettled);
+						if (listeners.size === 0) runtime.settledListeners.delete(runId);
+					}
+				};
+				const finish = (outcome: { result?: SingleResult; note?: string }): void => {
+					if (done) return;
+					done = true;
+					cleanup();
+					resolve(outcome);
+				};
+				const onSettled = (result: SingleResult): void => finish({ result });
+				const onMonitor = (): void => {
+					const current = runtime.settledRuns.get(runId);
+					if (current) {
+						finish({ result: current });
+						return;
+					}
+					const live = monitor.findRun(runId);
+					if (live?.status === "parked") {
+						finish({ note: `run #${runId} was parked at a stable checkpoint; use subagent_control resume to continue it` });
+						return;
+					}
+					if (!live) {
+						// Removal is followed synchronously by registerRunResult in the
+						// finishing task; re-check on the next tick so the result wins.
+						setTimeout(() => {
+							const late = runtime.settledRuns.get(runId);
+							if (late) finish({ result: late });
+							else finish({ note: `run #${runId} was removed before its result was recorded (cancelled or session ended)` });
+						}, 0);
+					}
+				};
+				const onAbort = (): void => finish({ note: "wait aborted" });
+				let listeners = runtime.settledListeners.get(runId);
+				if (!listeners) {
+					listeners = new Set();
+					runtime.settledListeners.set(runId, listeners);
+				}
+				listeners.add(onSettled);
+				unsub = monitor.subscribe(onMonitor);
+				if (signal?.aborted) onAbort();
+				else signal?.addEventListener("abort", onAbort, { once: true });
+			});
+		};
+		const outcomes = await Promise.all(runIds.map(waitForRun));
+		return outcomes.map((outcome) =>
+			outcome.result
+				? formatCompletionBlock(outcome.result, maxResultLines, { resultRoot: projectResultsRoot(runtime.configPath, outcome.result.projectCwd ?? fallbackCwd) })
+				: (outcome.note ?? "(no outcome)"),
+		).join("\n\n");
+	};
+
 	const startBackground = createBackgroundDispatcher({
 		runtime,
 		getEnvironment: () => {
@@ -498,7 +582,7 @@ export function registerSubagentTool(pi: ExtensionAPI, runtime: SubagentRuntime)
 			"Dispatch isolated background agents for recon, implementation, cleanup, docs, or review; never blocks your turn, and REVIEW_FAIL findings return to you to fix.",
 		parameters: SubagentParams,
 
-		async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
+		async execute(_toolCallId, params, signal, _onUpdate, ctx) {
 			monitor.beginTurn();
 			const config = await loadConfig(runtime.configPath);
 
@@ -595,6 +679,24 @@ export function registerSubagentTool(pi: ExtensionAPI, runtime: SubagentRuntime)
 					// `isError` property is still a successful AgentToolResult.
 					throw new Error(`No background subagents were started.\n${failureLines.join("\n")}`);
 				}
+				if (params.wait) {
+					const startedIds = startedRuns
+						.map((result) => result.runId)
+						.filter((id): id is number => id !== undefined);
+					const blocks = await awaitStartedRuns(startedIds, signal, config.maxResultLines, ctx.cwd);
+					const text = [
+						`Started ${started} subagent${started === 1 ? "" : "s"} (${startedRefs.join(", ")}) and waited in-turn.`,
+						...(failureLines.length > 0
+							? [`${failureLines.length} task${failureLines.length === 1 ? "" : "s"} failed before launch:`, ...failureLines]
+							: []),
+						"",
+						blocks,
+					].join("\n");
+					return {
+						content: [{ type: "text", text }],
+						details: makeDetails("parallel", true)(results),
+					};
+				}
 				const text = [
 					`Started ${started} background subagent${started === 1 ? "" : "s"}: ${startedRefs.join(", ")}. They run in the background and never block you — dispatch more independent units now or keep working; each result resumes you automatically when you are idle.`,
 					...(failureLines.length > 0
@@ -618,6 +720,13 @@ export function registerSubagentTool(pi: ExtensionAPI, runtime: SubagentRuntime)
 				throw new Error(getResultOutput(result));
 			}
 			const runRef = result.runId === undefined ? result.agent : `#${result.runId} ${result.agent}`;
+			if (params.wait && result.runId !== undefined) {
+				const blocks = await awaitStartedRuns([result.runId], signal, config.maxResultLines, ctx.cwd);
+				return {
+					content: [{ type: "text", text: `Started ${runRef} and waited in-turn.\n\n${blocks}` }],
+					details: makeDetails("single", true)([result]),
+				};
+			}
 			return {
 				content: [{ type: "text", text: `Started ${runRef} in the background. It never blocks you — dispatch more independent units now or keep working; its result resumes you automatically when you are idle.${queuePacingNote()}` }],
 				details: makeDetails("single", true)([result]),

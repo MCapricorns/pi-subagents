@@ -130,7 +130,7 @@ describe("runSingleAgent transport and lifecycle", () => {
 				});
 				const args = JSON.parse(getFinalOutput(result.messages)) as string[];
 				expect(args[args.indexOf("--exclude-tools") + 1]).toBe(
-					"subagent,subagent_control,subagent_status,subagent_stop",
+					"subagent,subagent_control,subagent_stop",
 				);
 				const flagIndex = args.indexOf(expectedFlag);
 				expect(flagIndex).toBeGreaterThanOrEqual(0);

@@ -230,8 +230,7 @@ function workflowTimelineLine(
 
 /** Render active runs as compact per-run line groups: one line per simple run,
  * two per managed workflow. Internal stage children fold into their parent's
- * timeline instead of adding rows; ids for control remain available through
- * subagent_status. */
+ * timeline instead of adding rows. */
 export function formatActiveRunLines(
 	runs: readonly RunView[],
 	theme: Theme,
@@ -271,7 +270,7 @@ export function formatActiveRunLines(
 	}
 	const hiddenRoots = roots.length - shownRoots;
 	if (hiddenRoots > 0) {
-		lines.push(theme.fg("dim", `… +${hiddenRoots} more (subagent_status)`));
+		lines.push(theme.fg("dim", `… +${hiddenRoots} more`));
 	}
 	return lines;
 }

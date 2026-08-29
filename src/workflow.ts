@@ -156,11 +156,10 @@ export function buildReReviewBrief(fixResult: SingleResult, round: number): stri
 }
 
 /**
- * One step of a managed workflow as delivered: the run id (so the condensed
- * summary can point at per-run detail via subagent_status), the result, and
- * the human-readable role within the workflow ("initial implementation",
- * "final review"). runId is optional only for synthetic steps that never
- * spawned a child.
+ * One step of a managed workflow as delivered: the run id (the stable handle
+ * for resume/stop), the result, and the human-readable role within the
+ * workflow ("initial implementation", "final review"). runId is optional only
+ * for synthetic steps that never spawned a child.
  */
 export interface ChainStep {
 	runId?: number;
@@ -193,8 +192,6 @@ function appendWorkflowFooter(lines: string[], steps: readonly ChainStep[]): voi
 	const total = sumUsage(steps.map((step) => step.result.usage));
 	const usage = formatUsageCompact(total);
 	lines.push("", `Totals: ${steps.length} run${steps.length === 1 ? "" : "s"}${usage ? ` · ${usage}` : ""}`);
-	const ids = steps.filter((step) => step.runId !== undefined).map((step) => `#${step.runId}`);
-	lines.push(`Per-run details: subagent_status ${ids.join(" ")}`);
 }
 
 /** One clear final delivery for managed writer → gate workflows. */

@@ -37,7 +37,6 @@ const PI_BUILTIN_TOOL_NAMES = new Set(["read", "bash", "powershell", "edit", "wr
 export const SUBAGENT_TOOL_NAMES = [
 	"subagent",
 	"subagent_control",
-	"subagent_status",
 	"subagent_stop",
 ] as const;
 const SUBAGENT_TOOL_NAME_SET = new Set<string>(SUBAGENT_TOOL_NAMES);

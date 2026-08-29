@@ -120,7 +120,7 @@ describe("buildDelegationDirective", () => {
 		expect(directive).toContain("each completion resumes you automatically");
 		expect(directive).toContain("Never sleep or poll for it");
 		expect(directive).toContain("never a restatement");
-		expect(directive).toContain("`subagent_status` must show no active runs");
+		expect(directive).toContain("Never declare the overall task done while a dispatched run is still active");
 	});
 
 	it("includes reviewer gate rules only when reviewer is enabled", () => {

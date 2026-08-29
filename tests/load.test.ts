@@ -72,8 +72,9 @@ describe("extension registration", () => {
 		register(stub.api);
 		expect(stub.tools.map((t) => t.name)).toContain("subagent");
 		expect(stub.tools.map((t) => t.name)).toContain("subagent_control");
-		// The former standalone wait tool is folded into subagent_status waitMs.
-		expect(stub.tools.map((t) => t.name)).not.toContain("subagent_wait");
+		// Lookup needs no tool: results deliver themselves, and dispatch wait: true
+		// blocks in-turn. Only start (subagent), resume (control), and stop remain.
+		expect(stub.tools.map((t) => t.name)).toEqual(["subagent", "subagent_control", "subagent_stop"]);
 		expect(stub.commands).toContain("subagents-setup");
 		expect(stub.commands).not.toContain("subagents-inspect");
 		expect(typeof stub.hooks["before_agent_start"]).toBe("function");
@@ -108,7 +109,7 @@ describe("extension registration", () => {
 		// call-time mechanics only.
 		const parentPaid = stub.tools.reduce((total: number, tool: any) =>
 			total + [tool.description, tool.promptSnippet, ...(tool.promptGuidelines ?? [])].join(" ").length, 0);
-		expect(parentPaid).toBeLessThan(3_400);
+		expect(parentPaid).toBeLessThan(2_500);
 	});
 
 	it("points a first run without a config file at /subagents-setup", async () => {
@@ -385,7 +386,7 @@ describe("registered tool background dispatch", () => {
 		}
 	});
 
-	it("reports a clean-exit run whose tool calls failed as completed-with-failures", async () => {
+	it("keeps transient failed tool calls out of a completed run's delivery", async () => {
 		vi.useFakeTimers();
 		vi.setSystemTime(0);
 		configureEnabledAgents(["worker"]);
@@ -414,34 +415,25 @@ send({
 
 			register(stub.api);
 			const tool = stub.tools.find((candidate) => candidate.name === "subagent");
-			const dispatch = await runTool(tool, "call-f", { agent: "worker", task: "Fix the compile error" }, executionContext());
-			const runId = dispatch.details.results[0].runId;
+			await runTool(tool, "call-f", { agent: "worker", task: "Fix the compile error" }, executionContext());
 			await capturedTasks[0](controllers[0].signal, controllers[0]);
 			vi.advanceTimersByTime(150);
 			expect(stub.messages).toHaveLength(1);
 			const content = stub.messages[0].message.content;
 			expect(content).toContain("[worker] completed");
-			// Failed-tool diagnostics are opt-in via subagent_status, never delivered.
+			// The agent already worked around them; diagnostics ride along only
+			// when the run itself fails.
 			expect(content).not.toContain("failed tool call");
 			expect(content).not.toContain("MSBuild.exe failed");
 			expect(content).not.toContain("fatal error C3861");
 			expect(stub.messages[0].options).toEqual({ deliverAs: "steer", triggerTurn: true });
-
-			const status = stub.tools.find((candidate) => candidate.name === "subagent_status");
-			const full = await runTool(status, "status-f", { id: String(runId) }, executionContext());
-			expect(full.content[0].text).toContain("completed with 4 failed tool calls");
-			for (let i = 1; i <= 4; i++) {
-				expect(full.content[0].text).toContain(`- bash-${i}: MSBuild.exe failed ${i}`);
-				expect(full.content[0].text).toContain(`fatal error C3861: execute_wake_task: undeclared identifier ${i}`);
-			}
-			expect(full.content[0].text).not.toContain("… and");
 		} finally {
 			restoreChild();
 			await shutdownExtension(stub, { controllers });
 		}
 	});
 
-	it("subagent_status waitMs blocks for the result in-turn instead of sleeping", async () => {
+	it("dispatch with wait: true blocks for the result in-turn instead of sleeping", async () => {
 		configureEnabledAgents(["worker"]);
 		const stub = makeStub();
 		const { tasks: capturedTasks, controllers } = captureEnqueue();
@@ -459,170 +451,56 @@ send({
 
 			register(stub.api);
 			const tool = stub.tools.find((candidate) => candidate.name === "subagent");
-			const statusTool = stub.tools.find((candidate) => candidate.name === "subagent_status");
-			expect(statusTool).toBeDefined();
 
-			await runTool(tool, "call-w", { agent: "worker", task: "Fix the build" }, executionContext());
-			expect(capturedTasks).toHaveLength(1);
-
-			// An explicit waitMs opts into blocking (the default is a
-			// non-blocking lookup); let the run settle afterwards and the same
-			// promise resolves with it.
-			const runId = monitor.getRuns().find((run) => run.task === "Fix the build")?.id;
-			expect(runId).toBeDefined();
-			const waitPromise = statusTool.execute(
-				"wait-1",
-				{ id: String(runId), waitMs: 30_000 },
+			// wait: true holds the dispatch call open until the run settles, then
+			// hands back the result in-turn (a one-shot pi -p parent has no
+			// wake-up message to end its turn into).
+			const waitPromise = tool.execute(
+				"call-w",
+				{ agent: "worker", task: "Fix the build", wait: true },
 				new AbortController().signal,
 				() => {},
 				executionContext(),
 			);
+			await waitFor(() => capturedTasks.length === 1);
 			await capturedTasks[0](controllers[0].signal, controllers[0]);
 			const waitResult = await waitPromise;
 
 			const text = waitResult.content[0].text;
+			expect(text).toContain("waited in-turn");
 			expect(text).toContain("### [worker] completed");
 			expect(text).toContain("worker result payload");
 			expect(text).toContain("Task: Fix the build");
-
-			// A settled run resolves immediately on a second call, waiting or not.
-			const second = await runTool(statusTool, "wait-2", { id: String(runId), waitMs: 30_000 }, executionContext());
-			expect(second.content[0].text).toContain("worker result payload");
 		} finally {
 			restoreChild();
 			await shutdownExtension(stub, { controllers });
 		}
 	});
 
-	it("subagent_status waitMs reports no active runs and times out on still-running ones", async () => {
+	it("dispatch with wait: true resolves when the calling turn's signal is aborted", async () => {
 		const stub = makeStub();
 		const { tasks: capturedTasks, controllers } = captureEnqueue();
 
 		try {
 			register(stub.api);
 			const tool = stub.tools.find((candidate) => candidate.name === "subagent");
-			const statusTool = stub.tools.find((candidate) => candidate.name === "subagent_status");
 
-			const none = await runTool(statusTool, "wait-none", { waitMs: 100 }, executionContext());
-			expect(none.content[0].text).toContain("No active subagent runs");
-
-			await runTool(tool, "call-w2", { agent: "worker", task: "Long task" }, executionContext());
-			// The captured task never runs, so the run stays active: the wait times out.
-			const runId = monitor.getRuns().find((run) => run.task === "Long task")?.id;
-			expect(runId).toBeDefined();
-			const timedOut = await runTool(statusTool, "wait-to", { id: String(runId), waitMs: 100 }, executionContext());
-			expect(timedOut.content[0].text).toContain("wait timed out");
-			expect(timedOut.content[0].text).toContain(`#${runId}`);
-
-			// Without waitMs the lookup NEVER blocks: a still-active run returns a
-			// note immediately (the model ends its turn and the wake-up message
-			// delivers the result) instead of holding the turn.
-			const nonBlocking = await runTool(statusTool, "wait-nb", { id: String(runId) }, executionContext());
-			expect(nonBlocking.content[0].text).toContain(`Run #${runId} worker is still active`);
-			expect(nonBlocking.content[0].text).toContain("End your turn");
-			expect(nonBlocking.content[0].text).toContain("waitMs");
-
-			const unknown = await runTool(statusTool, "wait-x", { id: "99", waitMs: 100 }, executionContext());
-			expect(unknown.content[0].text).toContain('No active subagent run matches "99"');
-		} finally {
-			await shutdownExtension(stub, { controllers });
-		}
-	});
-
-	it("subagent_status waitMs resolves with a note when the calling turn's signal is aborted", async () => {
-		const stub = makeStub();
-		const { tasks: capturedTasks, controllers } = captureEnqueue();
-
-		try {
-			register(stub.api);
-			const tool = stub.tools.find((candidate) => candidate.name === "subagent");
-			const statusTool = stub.tools.find((candidate) => candidate.name === "subagent_status");
-			await runTool(tool, "call-wa", { agent: "worker", task: "Long task" }, executionContext());
-			const runId = monitor.getRuns().find((run) => run.task === "Long task")?.id;
-			expect(runId).toBeDefined();
-
-			// Already-aborted signal: the wait resolves immediately without blocking.
-			const alreadyAborted = new AbortController();
-			alreadyAborted.abort();
-			const immediate = await statusTool.execute(
-				"wait-ab1",
-				{ id: String(runId), waitMs: 30_000 },
-				alreadyAborted.signal,
-				() => {},
-				executionContext(),
-			);
-			expect(immediate.content[0].text).toContain("wait aborted");
-
-			// Mid-wait abort: the onAbort listener resolves the pending wait.
+			// The captured task never runs, so the run stays active; aborting the
+			// turn resolves the pending wait with a note instead of hanging.
 			const midWait = new AbortController();
-			const pending = statusTool.execute(
-				"wait-ab2",
-				{ id: String(runId), waitMs: 30_000 },
+			const pending = tool.execute(
+				"call-wa",
+				{ agent: "worker", task: "Long task", wait: true },
 				midWait.signal,
 				() => {},
 				executionContext(),
 			);
+			await waitFor(() => capturedTasks.length === 1);
 			midWait.abort();
 			const aborted = await pending;
+			expect(aborted.content[0].text).toContain("waited in-turn");
 			expect(aborted.content[0].text).toContain("wait aborted");
 		} finally {
-			await shutdownExtension(stub, { controllers });
-		}
-	});
-
-	it("subagent_status lists active runs and returns full results by id", async () => {
-		configureEnabledAgents(["worker"]);
-		const stub = makeStub();
-		const { tasks: capturedTasks, controllers } = captureEnqueue();
-
-			const restoreChild = fakeChild(`send({ type: "message_end", message: { role: "assistant", content: [{ type: "text", text: "status payload" }], usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, cost: { total: 0 }, totalTokens: 0 }, stopReason: "stop" } });`);
-		try {
-
-			register(stub.api);
-			const tool = stub.tools.find((candidate) => candidate.name === "subagent");
-			const statusTool = stub.tools.find((candidate) => candidate.name === "subagent_status");
-			expect(statusTool).toBeDefined();
-
-			// No runs yet: empty overview.
-			const empty = await runTool(statusTool, "st-0", {}, executionContext());
-			expect(empty.content[0].text).toContain("Active subagent runs (0 running");
-
-			await runTool(tool, "call-s", { agent: "worker", task: "Inspect the build" }, executionContext());
-
-			// Queued run shows in the overview with its id.
-			const runId = monitor.getRuns().find((run) => run.task === "Inspect the build")?.id;
-			expect(runId).toBeDefined();
-			monitor.recordToolStart(
-				runId!,
-				"bash",
-				"bash curl -H 'Authorization: Bearer DO_NOT_LEAK_TEST_TOKEN' x?token=DO_NOT_LEAK_QUERY \x1b]0;unsafe\x07",
-			);
-			const overview = await runTool(statusTool, "st-1", {}, executionContext());
-			expect(overview.content[0].text).toContain("Active subagent runs (0 running · 1 queued for a free process slot");
-			expect(overview.content[0].text).toContain(`#${runId} worker`);
-			expect(overview.content[0].text).toContain("Authorization: Bearer <redacted>");
-			expect(overview.content[0].text).not.toContain("DO_NOT_LEAK");
-			expect(overview.content[0].text).not.toContain("\x1b");
-			expect(overview.content[0].text).toContain("Finished this session (0)");
-
-			// While active, an id lookup reports the run is still running without
-			// exposing the raw tool arguments stored by the live monitor.
-			const stillActive = await runTool(statusTool, "st-2", { id: String(runId) }, executionContext());
-			expect(stillActive.content[0].text).toContain("still active");
-			expect(stillActive.content[0].text).not.toContain("DO_NOT_LEAK");
-			expect(stillActive.content[0].text).not.toContain("\x1b");
-
-			// After the run settles, the same id returns the full result.
-			await capturedTasks[0](controllers[0].signal, controllers[0]);
-			const settledView = await runTool(statusTool, "st-3", { id: String(runId) }, executionContext());
-			expect(settledView.content[0].text).toContain("### [worker] completed");
-			expect(settledView.content[0].text).toContain("status payload");
-
-			const after = await runTool(statusTool, "st-4", {}, executionContext());
-			expect(after.content[0].text).toContain("Finished this session (1)");
-			expect(after.content[0].text).toContain(`#${runId} worker · Inspect the build · completed`);
-		} finally {
-			restoreChild();
 			await shutdownExtension(stub, { controllers });
 		}
 	});
@@ -634,7 +512,6 @@ send({
 		try {
 			register(stub.api);
 			const tool = stub.tools.find((candidate) => candidate.name === "subagent");
-			const statusTool = stub.tools.find((candidate) => candidate.name === "subagent_status");
 			const stopTool = stub.tools.find((candidate) => candidate.name === "subagent_stop");
 			expect(stopTool).toBeDefined();
 
@@ -642,18 +519,18 @@ send({
 			const unknown = await runTool(stopTool, "stop-x", { id: "99" }, executionContext());
 			expect(unknown.content[0].text).toContain('No subagent thread matches "99"');
 
-			await runTool(tool, "call-st", { agent: "worker", task: "Long task" }, executionContext());
-
-			// A waiter blocks on the queued run; stopping resolves it.
-			const runId = monitor.getRuns().find((run) => run.task === "Long task")?.id;
-			expect(runId).toBeDefined();
-			const waitPromise = statusTool.execute(
-				"wait-st",
-				{ id: String(runId), waitMs: 30_000 },
+			// A dispatch waiting in-turn blocks on the queued run; stopping resolves
+			// it with the aborted result.
+			const waitPromise = tool.execute(
+				"call-st",
+				{ agent: "worker", task: "Long task", wait: true },
 				new AbortController().signal,
 				() => {},
 				executionContext(),
 			);
+			await waitFor(() => monitor.getRuns().some((run) => run.task === "Long task"));
+			const runId = monitor.getRuns().find((run) => run.task === "Long task")?.id;
+			expect(runId).toBeDefined();
 			const stopped = await runTool(stopTool, "stop-1", { id: String(runId) }, executionContext());
 			expect(stopped.content[0].text).toContain(`Stopped 1 thread: #${runId} worker (queued)`);
 
@@ -1142,7 +1019,10 @@ describe("managed post-writer workflows", () => {
 			expect(content).toContain("review fix · completed");
 			expect(content).toContain("re-review · PASS");
 			expect(content).toContain("final PASS");
-			expect(content).toMatch(/^Per-run details: subagent_status( #\d+){4}$/m);
+			// The delivery is the only view of the workflow: the writer's own
+			// handoff rides along instead of a pointer to a lookup tool.
+			expect(content).toContain("### [worker] completed");
+			expect(content).not.toContain("Per-run details");
 			expect(content).not.toContain("findings are yours to resolve now");
 		} finally {
 			await shutdownExtension(stub, { controllers });
@@ -1421,7 +1301,6 @@ describe("managed post-writer workflows", () => {
 		try {
 			register(stub.api);
 			const tool = stub.tools.find((candidate) => candidate.name === "subagent");
-			const statusTool = stub.tools.find((candidate) => candidate.name === "subagent_status");
 			const first = await runTool(tool, "lane-first", { agent: "worker", task: "First shared writer" }, executionContext());
 			const second = await runTool(tool, "lane-second", { agent: "worker", task: "Second shared writer" }, executionContext());
 			const firstId = first.details.results[0].runId as number;
@@ -1439,13 +1318,6 @@ describe("managed post-writer workflows", () => {
 			expect(confirmation).toContain("1 waiting for a free process slot");
 			expect(confirmation).toContain("waiting for the repository write lane — write serialization, not slot capacity");
 			expect(confirmation).toContain("Keep dispatching independent units");
-
-			const overview = await runTool(statusTool, "lane-status", {}, executionContext());
-			const overviewText = overview.content[0].text as string;
-			expect(overviewText).toContain("1 waiting for the repository write lane (write serialization, not slot capacity)");
-			expect(overviewText).toContain("dispatch is never capped");
-			expect(overviewText).toContain(`#${secondId} worker`);
-			expect(overviewText).toContain("waiting for the repository write lane");
 
 			releaseWriter();
 			await Promise.all([firstRun, secondRun]);
@@ -1532,21 +1404,9 @@ describe("managed workflow dispatch", () => {
 			expect(content).toContain("VERDICT: REVIEW_FAIL");
 			expect(content).toContain("findings are yours to resolve now");
 			expect(content).not.toContain("Managed workflow");
+			expect(content).toContain(`run #${parentRunId}`);
 			expect(stub.messages[0].options).toEqual({ deliverAs: "steer", triggerTurn: true });
 			expect(monitor.getRuns()).toHaveLength(0);
-
-			// The parent id resolves to the delivered report.
-			const statusTool = stub.tools.find((candidate) => candidate.name === "subagent_status");
-			const result = await statusTool.execute(
-				"",
-				{ id: String(parentRunId) },
-				new AbortController().signal,
-				() => {},
-				executionContext(),
-			);
-			const parentReport = result.content[0].text;
-			expect(parentReport).toContain(`run #${parentRunId}`);
-			expect(parentReport).toContain("VERDICT: REVIEW_FAIL");
 		} finally {
 			restoreChild();
 			await shutdownExtension(stub, { controllers });

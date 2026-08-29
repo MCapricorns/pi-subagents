@@ -121,7 +121,7 @@ describe("formatManagedWorkflowSummary", () => {
 		expect(summary).not.toContain("src/index.ts");
 		expect(summary).not.toContain("changed:");
 		expect(summary).toContain("Totals: 2 runs");
-		expect(summary).toContain("Per-run details: subagent_status #2 #3");
+		expect(summary).not.toContain("Per-run details");
 		expect(summary).not.toContain("failed tools");
 	});
 

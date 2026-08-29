@@ -60,7 +60,6 @@ function registerWithScript(script: string): {
 	subagent: any;
 	control: any;
 	stop: any;
-	status: any;
 } {
 	process.argv[1] = script;
 	const stub = makeStub();
@@ -71,7 +70,6 @@ function registerWithScript(script: string): {
 		subagent: stub.tools.find((tool) => tool.name === "subagent"),
 		control: stub.tools.find((tool) => tool.name === "subagent_control"),
 		stop: stub.tools.find((tool) => tool.name === "subagent_stop"),
-		status: stub.tools.find((tool) => tool.name === "subagent_status"),
 	};
 }
 
@@ -93,7 +91,7 @@ send({ type: "message_end", message: { role: "assistant", content: [{ type: "tex
 			}),
 			"utf8",
 		);
-		const { stub, subagent, control, status } = registerWithScript(script);
+		const { stub, subagent, control } = registerWithScript(script);
 		await execute(subagent, { agent: "worker", task: "Initial objective" });
 		const runId = monitor.getRuns()[0]?.id;
 		await waitFor(() => stub.messages.length === 1);
@@ -113,8 +111,7 @@ send({ type: "message_end", message: { role: "assistant", content: [{ type: "tex
 		expect(monitor.findRun(runId!)?.id).toBe(runId);
 		await waitFor(() => stub.messages.length === 1);
 		expect(stub.messages[0].message.content).toContain("second completion");
-		const full = await execute(status, { id: String(runId) });
-		expect(full.content[0].text).toContain("Task: Follow-on objective");
+		expect(stub.messages[0].message.content).toContain("Task: Follow-on objective");
 		const prompts = commandLog(log).filter((entry) => entry.type === "prompt");
 		expect(prompts[1].message).toBe("Follow-on objective");
 		expect(prompts[1].argv[prompts[1].argv.indexOf("--model") + 1]).toBe("openai/new-main");
@@ -249,7 +246,7 @@ describe("queued controls and stale generations", () => {
 		});
 		const script = join(testDir, "unused-queued-resume.mjs");
 		writeFileSync(script, "", "utf8");
-		const { stub, subagent, control, stop, status } = registerWithScript(script);
+		const { stub, subagent, control, stop } = registerWithScript(script);
 		const completed = await execute(subagent, { agent: "worker", task: "Completed objective" });
 		const runId = completed.details.results[0].runId;
 		await waitFor(() => stub.messages.length === 1);
@@ -272,9 +269,6 @@ describe("queued controls and stale generations", () => {
 		expect(stoppedContent).toContain("Task: Queued follow-on objective");
 		expect(stoppedContent).toContain("Stopped by subagent_stop before the run started");
 		expect(stoppedContent).not.toContain("OLD COMPLETED OUTPUT");
-		const full = await execute(status, { id: String(runId) });
-		expect(full.content[0].text).toContain("Task: Queued follow-on objective");
-		expect(full.content[0].text).not.toContain("OLD COMPLETED OUTPUT");
 		expect(existsSync(oldSessionDir)).toBe(false);
 
 		await execute(stop, { id: String(occupyingId) });

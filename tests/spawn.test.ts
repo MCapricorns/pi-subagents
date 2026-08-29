@@ -436,7 +436,7 @@ describe("extractToolErrorText", () => {
 });
 
 describe("failed tool diagnostics", () => {
-	it("shows every retained diagnostic in explicit status even when the run failed", () => {
+	it("attaches every retained diagnostic to a failed run's delivery", () => {
 		const failed = result({
 			exitCode: 1,
 			stopReason: "error",
@@ -446,10 +446,21 @@ describe("failed tool diagnostics", () => {
 				error: `error-${index + 1}`,
 			})),
 		});
-		const formatted = formatCompletionBlock(failed, 80, { failedToolDetails: true });
+		const formatted = formatCompletionBlock(failed, 80);
 		for (let index = 1; index <= 4; index++) {
 			expect(formatted).toContain(`- tool-${index}: error-${index}`);
 		}
+	});
+
+	it("keeps transient failed calls out of a successful run's delivery", () => {
+		const completed = result({
+			exitCode: 0,
+			messages: [assistant("done")],
+			failedTools: [{ toolName: "grep", error: "no matches" }],
+		});
+		const formatted = formatCompletionBlock(completed, 80);
+		expect(formatted).toContain("### [worker] completed");
+		expect(formatted).not.toContain("no matches");
 	});
 });
 

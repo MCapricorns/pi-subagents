@@ -269,7 +269,7 @@ export function threadRecordFromThread(
 }
 
 /** Rebuild a displayable in-turn result from a persisted summary. The retained
- * session holds the real context; this only lets subagent_status show
+ * session holds the real context; this only lets a restored thread report
  * what the previous session's generation concluded. */
 export function restoredResultFromSummary(record: ThreadRecord): SingleResult | undefined {
 	const summary = record.resultSummary;
