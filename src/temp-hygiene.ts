@@ -1,12 +1,21 @@
 /**
- * Temp hygiene: ownership markers and startup sweeps for the transient
- * directories this extension creates.
+ * Temp hygiene: ownership markers and startup sweeps for the directories this
+ * extension creates under a project's durable root.
  *
- * Transient per-run files (child prompt copies, the no-retry policy extension)
- * live under the project's durable tmp directory, never the OS temp dir. Each
- * mkdtemp directory gets an owner marker with the creating pid. At extension
- * load, directories whose owner is dead are removed; unmarked leftovers fall
- * back to an age cap.
+ * Two classes live there and both are swept the same way. Transient per-run
+ * files (child prompt copies, the no-retry policy extension) sit in `tmp/`;
+ * retained child sessions and isolated worktrees sit in `sessions/` and
+ * `worktrees/`, where they must outlive the process that made them so a reload
+ * can resume from them. Every mkdtemp directory gets an owner marker with the
+ * creating pid. At extension load, directories whose owner is dead are removed;
+ * unmarked leftovers fall back to an age cap.
+ *
+ * Ownership is what makes this safe for the durable class. A retained session
+ * that no manifest record claims — a settled thread still resumable in the
+ * session that produced it — belongs to a live owner and survives; the same
+ * directory left behind by a crash does not. Callers sweeping durable roots
+ * additionally pass the paths their manifest still references, so parked work is
+ * never removed even if its owner is long gone.
  *
  * A live sibling pi instance never loses its directories: `kill(pid, 0)` only
  * reports "no such process" when the pid genuinely does not exist, so a live
@@ -22,9 +31,17 @@ export const TEMP_OWNER_FILE_NAME = "owner.json";
 
 /** Transient directories created under `<project>/tmp`: the child prompt
  * copies (`pi-subagents-*`) and the no-retry policy extension
- * (`pi-subagents-policy-*`). Durable sessions and worktrees use the singular
- * `pi-subagent-` prefixes and live in their own roots, never swept here. */
+ * (`pi-subagents-policy-*`). The singular `pi-subagent-` prefixes below belong
+ * to the durable roots and are swept separately, under a reference guard. */
 const TEMP_DIR_PREFIXES = ["pi-subagents-"] as const;
+
+/** Durable directories created under `<project>/sessions` and
+ * `<project>/worktrees`: retained child sessions (including resume forks) and
+ * isolated worktree groups. */
+const DURABLE_DIR_PREFIXES = ["pi-subagent-session-", "pi-subagent-worktree-"] as const;
+
+/** Durable subdirectories of a project root that hold owner-marked state. */
+const DURABLE_SUBDIRS = ["sessions", "worktrees"] as const;
 
 /** Unmarked directories (crash before the marker write) must outlive this age
  * before removal. */
@@ -97,6 +114,10 @@ export interface SweepOptions {
 	isAlive?: (pid: number) => boolean;
 	/** Override the unmarked-directory age cap for tests. */
 	unmarkedMaxAgeMs?: number;
+	/** Directory-name prefixes this sweep owns; defaults to the transient set. */
+	prefixes?: readonly string[];
+	/** Directories a durable record still claims. Kept whatever their owner. */
+	keep?: (path: string) => boolean;
 }
 
 function removeDir(path: string): boolean {
@@ -117,7 +138,7 @@ function directoryAgeMs(entry: Dirent, dir: string, now: number): number | undef
 	}
 }
 
-/** Remove dead-owner and old-unmarked transient directories under `rootDir`.
+/** Remove dead-owner and old-unmarked directories under `rootDir`.
  * Returns how many directories were removed. */
 export function sweepOrphanTempDirs(
 	rootDir: string,
@@ -126,6 +147,7 @@ export function sweepOrphanTempDirs(
 	const now = options.now ?? Date.now();
 	const isAlive = options.isAlive ?? isProcessAlive;
 	const unmarkedMaxAgeMs = options.unmarkedMaxAgeMs ?? UNMARKED_TEMP_MAX_AGE_MS;
+	const prefixes = options.prefixes ?? TEMP_DIR_PREFIXES;
 	let entries: Dirent[];
 	try {
 		entries = readdirSync(rootDir, { withFileTypes: true });
@@ -135,8 +157,9 @@ export function sweepOrphanTempDirs(
 	let removed = 0;
 	for (const entry of entries) {
 		if (!entry.isDirectory() || entry.isSymbolicLink()) continue;
-		if (!TEMP_DIR_PREFIXES.some((prefix) => entry.name.startsWith(prefix))) continue;
+		if (!prefixes.some((prefix) => entry.name.startsWith(prefix))) continue;
 		const path = join(rootDir, entry.name);
+		if (options.keep?.(path)) continue;
 		const owner = readTempOwnerMarker(path);
 		if (owner) {
 			// An unmarked fresh sibling race is impossible here: the marker is
@@ -168,6 +191,39 @@ export function sweepProjectTempDirs(
 	for (const project of projects) {
 		if (!project.isDirectory() || project.isSymbolicLink()) continue;
 		removed += sweepOrphanTempDirs(join(durableRoot, project.name, "tmp"), options);
+	}
+	return removed;
+}
+
+/** Sweep every project's retained sessions and isolated worktrees whose owning
+ * process is gone and which no durable record claims. Without this, a crash
+ * leaves a full worktree checkout and its session behind until the whole project
+ * goes idle for days — which never happens in a checkout still being worked in.
+ *
+ * `keep` must report every path the threads manifest still references; parked
+ * work outlives its owner by design. Removal is a plain recursive delete, the
+ * same as the idle-project rule: an abandoned worktree may leave a prunable
+ * registration in its origin repository, which `git worktree prune` and routine
+ * gc clear on their own. */
+export function sweepProjectDurableDirs(
+	durableRoot: string,
+	options: SweepOptions = {},
+): number {
+	let projects: Dirent[];
+	try {
+		projects = readdirSync(durableRoot, { withFileTypes: true });
+	} catch {
+		return 0;
+	}
+	let removed = 0;
+	for (const project of projects) {
+		if (!project.isDirectory() || project.isSymbolicLink()) continue;
+		for (const subdir of DURABLE_SUBDIRS) {
+			removed += sweepOrphanTempDirs(join(durableRoot, project.name, subdir), {
+				...options,
+				prefixes: options.prefixes ?? DURABLE_DIR_PREFIXES,
+			});
+		}
 	}
 	return removed;
 }

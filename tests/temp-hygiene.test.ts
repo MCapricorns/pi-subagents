@@ -6,6 +6,7 @@ import {
 	isProcessAlive,
 	killProcessTree,
 	sweepOrphanTempDirs,
+	sweepProjectDurableDirs,
 	sweepProjectTempDirs,
 	TEMP_OWNER_FILE_NAME,
 	UNMARKED_TEMP_MAX_AGE_MS,
@@ -124,6 +125,66 @@ describe("temp owner markers and orphan sweep", () => {
 		expect(existsSync(goneB)).toBe(false);
 		expect(existsSync(liveDir)).toBe(true);
 		expect(existsSync(join(durableRoot, "proj-c", "sessions"))).toBe(true);
+	});
+});
+
+describe("durable session and worktree sweep", () => {
+	function deadOwnerDir(project: string, relative: string): string {
+		const dir = makeDir(project, relative);
+		writeFileSync(
+			join(dir, TEMP_OWNER_FILE_NAME),
+			`${JSON.stringify({ pid: 999_999, createdAt: 0 })}\n`,
+			"utf8",
+		);
+		return dir;
+	}
+
+	it("removes state whose owner is gone, keeps live owners and claimed paths", () => {
+		const durableRoot = mkdtempSync(join(tmpdir(), "pi-subagents-durable-sweep-"));
+		roots.push(durableRoot);
+		const project = join(durableRoot, "proj-a");
+		const orphanSession = deadOwnerDir(project, join("sessions", "pi-subagent-session-orphan"));
+		const orphanWorktree = deadOwnerDir(project, join("worktrees", "pi-subagent-worktree-orphan"));
+		const parkedWorktree = deadOwnerDir(project, join("worktrees", "pi-subagent-worktree-parked"));
+		const liveSession = makeDir(project, join("sessions", "pi-subagent-session-live"));
+		writeTempOwnerMarker(liveSession, 0);
+		const transient = deadOwnerDir(project, join("tmp", "pi-subagents-policy-dead"));
+
+		const removed = sweepProjectDurableDirs(durableRoot, {
+			isAlive: (pid) => pid === process.pid,
+			keep: (path) => path === parkedWorktree,
+		});
+
+		expect(removed).toBe(2);
+		// A crash leaves a full worktree checkout and its session behind; nothing
+		// else reaches them while the checkout is still being worked in.
+		expect(existsSync(orphanSession)).toBe(false);
+		expect(existsSync(orphanWorktree)).toBe(false);
+		// Parked work outlives the process that made it, so a path the manifest
+		// still claims stays even though its owner is gone.
+		expect(existsSync(parkedWorktree)).toBe(true);
+		// A settled session that no record claims is still resumable in the
+		// session that produced it; its live owner is what protects it.
+		expect(existsSync(liveSession)).toBe(true);
+		// tmp/ belongs to the transient sweep, which has its own prefixes.
+		expect(existsSync(transient)).toBe(true);
+	});
+
+	it("gives unmarked durable leftovers the age cap rather than deleting on sight", () => {
+		const durableRoot = mkdtempSync(join(tmpdir(), "pi-subagents-durable-sweep-age-"));
+		roots.push(durableRoot);
+		const project = join(durableRoot, "proj-a");
+		const fresh = makeDir(project, join("sessions", "pi-subagent-session-fresh"));
+		const stale = makeDir(project, join("sessions", "pi-subagent-session-stale"));
+		const now = Date.now();
+		const aged = new Date(now - UNMARKED_TEMP_MAX_AGE_MS - 1_000);
+		utimesSync(stale, aged, aged);
+
+		const removed = sweepProjectDurableDirs(durableRoot, { now, isAlive: () => true });
+
+		expect(removed).toBe(1);
+		expect(existsSync(fresh)).toBe(true);
+		expect(existsSync(stale)).toBe(false);
 	});
 });
 

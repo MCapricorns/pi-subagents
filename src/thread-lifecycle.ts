@@ -29,6 +29,7 @@ import {
 import {
 	isCurrentBoot,
 	readThreadRecords,
+	referencedDurablePaths,
 	removeThreadRecord,
 	pruneStaleProjectRoots,
 	pruneThreadRecords,
@@ -85,10 +86,12 @@ import {
 import {
 	isProcessAlive,
 	killProcessTree,
+	sweepProjectDurableDirs,
 	sweepProjectTempDirs,
 } from "./temp-hygiene.ts";
 import {
 	createWorktreeIsolation,
+	isPathInside,
 	resolveRepositoryRoot,
 	restoreWorktreeIsolation,
 	worktreeGroupId,
@@ -1435,6 +1438,18 @@ export function bootstrapDurableState(runtime: SubagentRuntime): Promise<void> {
 			sweepProjectTempDirs(projectRoots);
 		} catch {
 			/* temp hygiene is best-effort */
+		}
+		try {
+			// Sessions and worktrees outlive their process on purpose, so only
+			// ownership separates state a live pi still resumes from state a crash
+			// abandoned. Parked work is claimed by the manifest and always kept.
+			const records = await readThreadRecords(runtime.configPath);
+			const referenced = [...referencedDurablePaths(records)];
+			sweepProjectDurableDirs(projectRoots, {
+				keep: (path) => referenced.some((claimed) => isPathInside(path, claimed)),
+			});
+		} catch {
+			/* durable-state hygiene is best-effort */
 		}
 		try {
 			// Result excerpts are bounded on write, which never reaches a project

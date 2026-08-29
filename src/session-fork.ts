@@ -4,6 +4,7 @@ import { SessionManager } from "@earendil-works/pi-coding-agent";
 import { existsSync } from "node:fs";
 import { mkdir, mkdtemp, rm } from "node:fs/promises";
 import { join } from "node:path";
+import { writeTempOwnerMarker } from "./temp-hygiene.ts";
 
 export interface ForkedSession {
 	sessionDir: string;
@@ -53,6 +54,7 @@ export async function forkRetainedSession(options: {
 	const root = options.targetRoot;
 	await mkdir(root, { recursive: true });
 	const sessionDir = await mkdtemp(join(root, "pi-subagent-session-fork-"));
+	writeTempOwnerMarker(sessionDir);
 	try {
 		// Supplying the new directory makes createBranchedSession write there.
 		// cwdOverride rewrites the cloned header so a settled isolated session can

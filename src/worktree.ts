@@ -12,6 +12,7 @@ import { spawn, type ChildProcess } from "node:child_process";
 import { existsSync } from "node:fs";
 import { copyFile, mkdir, mkdtemp, realpath, rm, stat, writeFile } from "node:fs/promises";
 import { isAbsolute, join, relative, resolve } from "node:path";
+import { writeTempOwnerMarker } from "./temp-hygiene.ts";
 
 export type IsolationMode = "shared" | "worktree";
 
@@ -679,6 +680,9 @@ export async function createWorktreeIsolation(
 	const tempBase = resolve(options.tempBaseDir);
 	await mkdir(tempBase, { recursive: true });
 	const tempDir = await mkdtemp(join(tempBase, "pi-subagent-worktree-"));
+	// Ownership is how a later load tells a worktree still in use from one a
+	// crash abandoned, since neither has a durable record until it checkpoints.
+	writeTempOwnerMarker(tempDir);
 	const worktreePath = join(tempDir, "worktree");
 	const patchPath = join(tempDir, "changes.patch");
 	let added = false;

@@ -31,6 +31,7 @@ import {
 	type SubagentLiveEvent,
 	type UsageStats,
 } from "./rpc-run.ts";
+import { writeTempOwnerMarker } from "./temp-hygiene.ts";
 
 export {
 	currentSubagentDepth,
@@ -348,10 +349,14 @@ export function buildResumePrompt(task: string, reason: string): string {
 	return `You are resuming an earlier sub-agent session after ${reason}. Your earlier work — searches, reads, edits, and reasoning — is preserved in this session's history above; review it before acting. Current objective: ${task}. Pick up exactly where you left off and finish it. Do NOT redo searches, reads, or edits you already completed unless a step clearly failed. Continue now.`;
 }
 
-/** Create a fresh private session directory under the given root. */
+/** Create a fresh private session directory under the given root. The owner
+ * marker is what lets a later load tell a session this process still owns from
+ * one a crash abandoned. */
 export async function createSessionDir(root: string): Promise<string> {
 	await mkdir(root, { recursive: true });
-	return mkdtemp(join(root, "pi-subagent-session-"));
+	const dir = await mkdtemp(join(root, "pi-subagent-session-"));
+	writeTempOwnerMarker(dir);
+	return dir;
 }
 
 export function buildFallbackResumeReason(fromModel?: string): string {
