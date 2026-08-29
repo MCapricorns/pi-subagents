@@ -62,8 +62,6 @@ export interface SubagentsConfig {
 	 * is included in the message. Default: 80.
 	 */
 	maxResultLines: number;
-	/** Whether to inject the delegation directive into the parent system prompt. Default: true. */
-	proactiveInjection: boolean;
 	/** Which agent directories to discover from. Default: "user". */
 	agentScope: AgentScope;
 	/**
@@ -80,7 +78,6 @@ export const DEFAULT_CONFIG: SubagentsConfig = {
 	agentThinkingLevels: {},
 	notifyOnReviewPass: false,
 	maxResultLines: DEFAULT_MAX_RESULT_LINES,
-	proactiveInjection: true,
 	agentScope: "user",
 	idleTimeoutSec: DEFAULT_IDLE_TIMEOUT_SEC,
 };
@@ -154,10 +151,6 @@ export function normalizeConfig(raw: unknown): SubagentsConfig {
 
 	const maxResultLines = clampCount(raw.maxResultLines, MAX_RESULT_LINES_LIMIT);
 	if (maxResultLines !== undefined) config.maxResultLines = maxResultLines;
-
-	if (typeof raw.proactiveInjection === "boolean") {
-		config.proactiveInjection = raw.proactiveInjection;
-	}
 
 	if (isAgentScope(raw.agentScope)) {
 		config.agentScope = raw.agentScope;

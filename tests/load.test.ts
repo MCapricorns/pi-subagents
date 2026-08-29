@@ -1815,6 +1815,15 @@ describe("before_agent_start injection", () => {
 		expect(result.systemPrompt).not.toContain("- plan:");
 	});
 
+	it("injects regardless of a legacy proactiveInjection toggle in the config file", async () => {
+		configureEnabledAgents(["worker"], { proactiveInjection: false });
+		const stub = makeStub();
+		register(stub.api);
+		const result = await stub.hooks["before_agent_start"]({ systemPrompt: "BASE PROMPT" }, { cwd: process.cwd() });
+		expect(result.systemPrompt).toContain("Sub-agent delegation");
+		expect(result.systemPrompt).toContain("- worker:");
+	});
+
 	it("excludes untrusted project agent overrides from injection and dispatch", async () => {
 		if (!testAgentDir) throw new Error("test agent directory was not initialized");
 		writeFileSync(join(testAgentDir, "pi-subagents.json"), JSON.stringify({

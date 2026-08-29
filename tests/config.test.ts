@@ -21,7 +21,6 @@ describe("normalizeConfig", () => {
 		expect(BUILTIN_AGENT_NAMES).toEqual(["explorer", "worker", "cleaner", "documenter", "reviewer"]);
 		expect(DEFAULT_ENABLED_AGENTS).toEqual([...BUILTIN_AGENT_NAMES]);
 		expect(config.enabledAgents).toEqual([...DEFAULT_ENABLED_AGENTS]);
-		expect(config.proactiveInjection).toBe(true);
 		expect(config.agentScope).toBe("user");
 		expect(config.agentModels).toEqual({});
 		expect(config.agentThinkingLevels).toEqual({});
@@ -87,9 +86,9 @@ describe("normalizeConfig", () => {
 		expect(normalizeConfig({ notifyOnReviewPass: "yes" }).notifyOnReviewPass).toBe(false);
 	});
 
-	it("accepts a boolean proactiveInjection", () => {
-		expect(normalizeConfig({ proactiveInjection: false }).proactiveInjection).toBe(false);
-		expect(normalizeConfig({ proactiveInjection: "nope" }).proactiveInjection).toBe(true);
+	it("drops the retired proactiveInjection toggle", () => {
+		expect("proactiveInjection" in normalizeConfig({ proactiveInjection: false })).toBe(false);
+		expect("proactiveInjection" in normalizeConfig({})).toBe(false);
 	});
 
 	it("validates agentScope", () => {
@@ -142,7 +141,8 @@ describe("loadConfig", () => {
 		const { writeFile } = await import("node:fs/promises");
 		await writeFile(path, "{ not json", "utf8");
 		const config = await loadConfig(path);
-		expect(config.proactiveInjection).toBe(true);
+		expect(config.enabledAgents).toEqual([...DEFAULT_ENABLED_AGENTS]);
+		expect(config.agentScope).toBe("user");
 	});
 
 	it("persists the normalized shape and drops every legacy key", async () => {
@@ -157,6 +157,7 @@ describe("loadConfig", () => {
 			agentBackupModels: { explorer: "openai/backup" },
 			maxConcurrency: 12,
 			maxFixRounds: 5,
+			proactiveInjection: false,
 			announcedFeatures: ["cleanerDefaulted", "documenterDefaulted"],
 		}), "utf8");
 
@@ -169,7 +170,7 @@ describe("loadConfig", () => {
 		expect(saved.enabledAgents).toEqual(["explorer"]);
 		expect(saved.agentModels).toEqual({ explorer: "anthropic/legacy" });
 		expect(saved.agentThinkingLevels).toEqual({ explorer: "low" });
-		for (const key of ["agentBackupModels", "thinkingLevel", "maxConcurrency", "maxFixRounds", "announcedFeatures"]) {
+		for (const key of ["agentBackupModels", "thinkingLevel", "maxConcurrency", "maxFixRounds", "proactiveInjection", "announcedFeatures"]) {
 			expect(saved).not.toHaveProperty(key);
 		}
 	});

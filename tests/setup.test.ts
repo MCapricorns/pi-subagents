@@ -293,30 +293,26 @@ describe("setup back navigation", () => {
 		}
 	});
 
-	it("returns an escaped injection toggle to the settings menu", async () => {
-		const dir = mkdtempSync(join(tmpdir(), "pi-subagents-setup-injection-back-"));
+	it("offers only agent settings, with no delegation-injection toggle", async () => {
+		const dir = mkdtempSync(join(tmpdir(), "pi-subagents-setup-menu-"));
 		const configPath = join(dir, "pi-subagents.json");
 		const original = existingConfig();
 		writeFileSync(configPath, JSON.stringify(original), "utf8");
-		const titles: string[] = [];
-		let settingsVisits = 0;
+		let offered: string[] = [];
 		const ctx = setupContext(dir, {
 			notify: vi.fn(),
-			select: vi.fn(async (title: string, options: string[]) => {
-				titles.push(title);
-				if (title !== "pi-subagents settings") return undefined;
-				return settingsVisits++ === 0
-					? options.find((option) => option.startsWith("Proactive injection"))
-					: undefined;
+			select: vi.fn(async (_title: string, options: string[]) => {
+				offered = options;
+				return undefined;
 			}),
 			custom: vi.fn(),
 		});
 		try {
 			await runSetup(ctx, configPath);
-			expect(titles).toEqual([
-				"pi-subagents settings",
-				"Proactive dispatch injection?",
-				"pi-subagents settings",
+			expect(offered).toEqual([
+				"Enable/disable agents",
+				"Configure an agent (model + thinking)",
+				"Full re-setup",
 			]);
 			expect(JSON.parse(readFileSync(configPath, "utf8"))).toEqual(original);
 		} finally {
@@ -351,7 +347,7 @@ describe("setup back navigation", () => {
 });
 
 describe("settings preservation", () => {
-	it("keeps unrelated agent model and thinking choices when toggling injection", async () => {
+	it("keeps unrelated agent model and thinking choices when the enabled set changes", async () => {
 		const dir = mkdtempSync(join(tmpdir(), "pi-subagents-setup-preserve-agent-"));
 		const configPath = join(dir, "pi-subagents.json");
 		const original = existingConfig({
@@ -362,18 +358,19 @@ describe("settings preservation", () => {
 		writeFileSync(configPath, JSON.stringify(original), "utf8");
 		const ctx = setupContext(dir, {
 			notify: vi.fn(),
-			select: vi.fn(async (title: string, options: string[]) => {
-				if (title === "pi-subagents settings") {
-					return options.find((option) => option.startsWith("Proactive injection"));
-				}
-				return options.find((option) => option.startsWith("Off"));
+			select: vi.fn(async (_title: string, options: string[]) =>
+				options.find((option) => option.startsWith("Enable"))),
+			custom: pickerDriver((component) => {
+				// Worker is the second built-in row: toggle it on and confirm.
+				component.handleInput("down");
+				component.handleInput(" ");
+				component.handleInput("enter");
 			}),
-			custom: vi.fn(),
 		});
 		try {
 			await runSetup(ctx, configPath);
 			const saved = JSON.parse(readFileSync(configPath, "utf8"));
-			expect(saved.proactiveInjection).toBe(false);
+			expect(saved.enabledAgents).toContain("worker");
 			expect(saved.agentModels.documenter).toBe("deepseek/deepseek-v4-flash");
 			expect(saved.agentThinkingLevels.documenter).toBe("max");
 		} finally {
@@ -481,8 +478,9 @@ describe("full setup flow", () => {
 			expect(config.agentThinkingLevels).toEqual({});
 			expect(config).not.toHaveProperty("agentBackupModels");
 			expect(config).not.toHaveProperty("thinkingLevel");
-			// First-run asks exactly one select question: the injection toggle.
-			expect(selectTitles).toEqual(["Proactive dispatch injection?"]);
+			expect(config).not.toHaveProperty("proactiveInjection");
+			// First run is pickers only — no plain select questions remain.
+			expect(selectTitles).toEqual([]);
 			expect(screens.some((screen) => screen.includes("cleaner — apply proven cleanup and deduplicate"))).toBe(true);
 			expect(screens.some((screen) => screen.includes("documenter — sync diff"))).toBe(true);
 			for (const agent of ["explorer", "worker", "cleaner", "documenter", "reviewer"]) {

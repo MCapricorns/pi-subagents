@@ -2,11 +2,10 @@
  * Interactive configuration wizard for /subagents-setup.
  *
  * The wizard stays one level deep and exposes only what most users touch:
- * which agents run, the model and thinking strength each runs on, and the
- * delegation directive toggle. Everything else (agent scope, idle timeout,
- * result lines, notifications) is config-file-only; model failures hand
- * directly to the current main model, and thinking defaults to capability-
- * aware Auto.
+ * which agents run and the model and thinking strength each runs on.
+ * Everything else (agent scope, idle timeout, result lines, notifications) is
+ * config-file-only; model failures hand directly to the current main model,
+ * and thinking defaults to capability-aware Auto.
  */
 
 import { stat } from "node:fs/promises";
@@ -230,14 +229,6 @@ async function configureOneAgent(
 	}
 }
 
-async function pickInjection(ctx: ExtensionCommandContext, current: boolean): Promise<boolean | undefined> {
-	const on = "On — inject the delegation directive (recommended)";
-	const off = "Off — rely on tool descriptions only";
-	const choice = await ctx.ui.select("Proactive dispatch injection?", [current ? `${on} (current)` : on, current ? off : `${off} (current)`]);
-	if (choice === undefined) return undefined;
-	return choice.startsWith("On");
-}
-
 function keepAgentEntries<T>(record: Record<string, T>, enabled: readonly string[]): Record<string, T> {
 	const keep = new Set(enabled);
 	return Object.fromEntries(Object.entries(record).filter(([name]) => keep.has(name)));
@@ -254,9 +245,6 @@ async function runFullSetup(ctx: ExtensionCommandContext, configPath: string, ba
 		agentModels = applyAgentModelChoice(agentModels, agentName, choice);
 	}
 
-	const injection = await pickInjection(ctx, base.proactiveInjection);
-	if (injection === undefined) return false;
-
 	const next: SubagentsConfig = {
 		enabledAgents: enabled,
 		agentModels,
@@ -264,7 +252,6 @@ async function runFullSetup(ctx: ExtensionCommandContext, configPath: string, ba
 		agentThinkingLevels: {},
 		notifyOnReviewPass: base.notifyOnReviewPass,
 		maxResultLines: base.maxResultLines,
-		proactiveInjection: injection,
 		agentScope: base.agentScope,
 		idleTimeoutSec: base.idleTimeoutSec,
 	};
@@ -278,7 +265,6 @@ async function runMenu(ctx: ExtensionCommandContext, configPath: string, config:
 		const choice = await ctx.ui.select("pi-subagents settings", [
 			"Enable/disable agents",
 			"Configure an agent (model + thinking)",
-			"Proactive injection",
 			"Full re-setup",
 		]);
 		if (choice === undefined) return;
@@ -320,7 +306,7 @@ async function runMenu(ctx: ExtensionCommandContext, configPath: string, config:
 			}
 			next.agentModels = keepAgentEntries(next.agentModels, enabled);
 			next.agentThinkingLevels = keepAgentEntries(next.agentThinkingLevels, enabled);
-		} else if (choice.startsWith("Configure")) {
+		} else {
 			// Per-agent loop: thinking Esc returns to that agent's model picker;
 			// model Esc returns to the agent picker; agent-picker Esc saves completed
 			// choices and returns to this settings menu.
@@ -338,10 +324,6 @@ async function runMenu(ctx: ExtensionCommandContext, configPath: string, config:
 			ctx.ui.notify(`pi-subagents updated. Saved to ${configPath}`, "info");
 			config = next;
 			continue;
-		} else {
-			const injection = await pickInjection(ctx, next.proactiveInjection);
-			if (injection === undefined) continue;
-			next.proactiveInjection = injection;
 		}
 
 		await saveConfig(next, configPath);

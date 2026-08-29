@@ -87,7 +87,6 @@ export default function (pi: ExtensionAPI): void {
 	// Proactive dispatch: inject the delegation directive into the parent system prompt.
 	pi.on("before_agent_start", async (event, ctx) => {
 		const config = await loadConfig(configPath);
-		if (!config.proactiveInjection) return undefined;
 		const { agents } = discoverAgents(ctx.cwd, {
 			scope: config.agentScope,
 			enabledNames: config.enabledAgents,

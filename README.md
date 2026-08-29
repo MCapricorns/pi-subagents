@@ -18,8 +18,8 @@ burden — when to delegate, how wide to fan out, who reviews, what happens when
 model dies, how results come back — stays with you. pi-subagents owns that
 burden:
 
-- **The main model actually delegates.** A lean delegation directive is injected
-  into its system prompt: child contexts are cheap and yours is scarce —
+- **The main model actually delegates.** A lean delegation directive is always
+  injected into its system prompt: child contexts are cheap and yours is scarce —
   non-trivial implementation defaults to `worker`, trivial work stays inline,
   and dispatching never blocks or ends the main turn, so it can fire several
   dispatches and keep working while they run.
@@ -286,9 +286,8 @@ stripped so children stay leaves. An empty snapshot starts the child with
 
 ## Configuration
 
-`/subagents-setup` stays one level deep: enabled agents, per-agent models and
-thinking strengths, and the delegation-injection toggle. Everything else is
-config-file only, stored at
+`/subagents-setup` stays one level deep: enabled agents plus a per-agent model
+and thinking strength. Everything else is config-file only, stored at
 `~/.pi/agent/pi-subagents.json` (follows `PI_CODING_AGENT_DIR`):
 
 ```json
@@ -298,7 +297,6 @@ config-file only, stored at
   "agentThinkingLevels": { "reviewer": "high" },
   "notifyOnReviewPass": false,
   "maxResultLines": 40,
-  "proactiveInjection": true,
   "agentScope": "user",
   "idleTimeoutSec": 90
 }
@@ -311,12 +309,12 @@ config-file only, stored at
 | `agentThinkingLevels` | Optional manual level per agent; missing = Auto.                                  |
 | `notifyOnReviewPass`  | Deliver a standalone passing gate without waking the main agent. Default `false`. |
 | `maxResultLines`      | Lines kept in a completion message before the artifact takes over. Default `40`.  |
-| `proactiveInjection`  | Inject the delegation directive into the main system prompt. Default `true`.      |
 | `agentScope`          | Discover `user`, `project`, or `both` agent directories. Default `user`.          |
 | `idleTimeoutSec`      | Seconds without child RPC output before termination; `0` disables. Default `90`.  |
 
-Invalid values fall back safely; stale keys (including the former
-`maxConcurrency`/`maxFixRounds` knobs) are dropped automatically. At session
+The delegation directive is always injected — there is no toggle. Invalid values
+fall back safely; stale keys (including the former `proactiveInjection`,
+`maxConcurrency`, and `maxFixRounds` knobs) are dropped automatically. At session
 start, model overrides Pi no longer reports are removed with a one-time notice.
 When pi's own session compaction fails mid-thread, a notice surfaces the error
 (and the automatic retry) instead of failing silently.
