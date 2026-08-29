@@ -3,7 +3,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { SessionManager } from "@earendil-works/pi-coding-agent";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { readThreadRecords, upsertThreadRecord, type ThreadRecord } from "../src/durable.ts";
+import { currentBootId, readThreadRecords, upsertThreadRecord, type ThreadRecord } from "../src/durable.ts";
 import { monitor } from "../src/monitor.ts";
 import { emptyUsage, RpcRunControl } from "../src/rpc-run.ts";
 import { createRuntime, type SubagentRuntime, type SubagentThread } from "../src/runtime.ts";
@@ -305,11 +305,46 @@ describe("durable thread restore", () => {
 			sessionId: session.id,
 			sessionDir: session.dir,
 			childPids: [424242, 424243],
+			bootId: currentBootId(),
 		}));
 
 		await restoreDurableThreads(runtime);
 		expect(kill).toHaveBeenCalledWith(424242);
 		expect(kill).toHaveBeenCalledWith(424243);
+	});
+
+	it("leaves pids recorded before a reboot alone and still restores the thread", async () => {
+		const session = createSession("C:/repo");
+		const kill = vi.fn();
+		vi.spyOn(tempHygieneModule, "isProcessAlive").mockReturnValue(true);
+		vi.spyOn(tempHygieneModule, "killProcessTree").mockImplementation(kill);
+		// Pids are unique only within a boot: after a restart these numbers name
+		// whatever process claimed them, so signalling them is never safe.
+		await upsertThreadRecord(runtime.configPath, record({
+			sessionId: session.id,
+			sessionDir: session.dir,
+			childPids: [424242],
+			bootId: currentBootId() - 6 * 60 * 60 * 1_000,
+		}));
+
+		expect(await restoreDurableThreads(runtime)).toEqual([5]);
+		expect(kill).not.toHaveBeenCalled();
+		expect(runtime.threads.get(5)?.state).toBe("parked");
+	});
+
+	it("leaves pids from a record written before boot ids existed alone", async () => {
+		const session = createSession("C:/repo");
+		const kill = vi.fn();
+		vi.spyOn(tempHygieneModule, "isProcessAlive").mockReturnValue(true);
+		vi.spyOn(tempHygieneModule, "killProcessTree").mockImplementation(kill);
+		await upsertThreadRecord(runtime.configPath, record({
+			sessionId: session.id,
+			sessionDir: session.dir,
+			childPids: [424242],
+		}));
+
+		expect(await restoreDurableThreads(runtime)).toEqual([5]);
+		expect(kill).not.toHaveBeenCalled();
 	});
 
 	it("publishes the restore pass before returning, so readers can wait for it", async () => {

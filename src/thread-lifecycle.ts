@@ -27,6 +27,7 @@ import {
 	type ThinkingLevel,
 } from "./config.ts";
 import {
+	isCurrentBoot,
 	readThreadRecords,
 	removeThreadRecord,
 	pruneStaleProjectRoots,
@@ -1354,9 +1355,13 @@ export async function restoreDurableThreads(runtime: SubagentRuntime): Promise<n
 			continue;
 		}
 		// A child orphaned by reload/crash may still hold the retained session.
-		// The on-disk session checkpoint is what survives; kill the writer.
-		for (const pid of record.childPids) {
-			if (isProcessAlive(pid)) killProcessTree(pid);
+		// The on-disk session checkpoint is what survives; kill the writer — but
+		// only while the recorded pids are still ours. Across a reboot the same
+		// numbers belong to unrelated processes.
+		if (isCurrentBoot(record)) {
+			for (const pid of record.childPids) {
+				if (isProcessAlive(pid)) killProcessTree(pid);
+			}
 		}
 		const sessionValid =
 			record.sessionId !== undefined &&
