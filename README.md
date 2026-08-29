@@ -171,12 +171,17 @@ delivers without another gate.
 
 ## Safe parallel editing
 
-- Single tasks default to the shared checkout; parallel `worker` tasks default
-  to detached Git worktrees (requires a committed `HEAD`; read-only agents
-  reject worktree mode).
+- Single tasks default to the shared checkout; every parallel write-capable
+  agent (`worker`, `cleaner`, `documenter`, custom writers) defaults to a
+  detached Git worktree (requires a committed `HEAD`; read-only agents reject
+  worktree mode), so parallel writers run concurrently.
 - An isolated workflow's reviewer and documenter run inside the same worktree;
   tracked, deleted, untracked, and binary changes integrate back exactly once
   after the workflow settles — nothing is staged and your index is untouched.
+- Integration is a three-way merge: parallel workers that touched disjoint
+  files or regions land cleanly even when earlier patches drifted the checkout.
+  A genuine overlap keeps conflict markers in the checkout plus the retained
+  worktree and patch for you to resolve.
 - Shared-checkout writers (and reviewers snapshotting their diff) serialize
   through one repository lane, so two shared writers never race.
 - Setup or integration failures keep the useful patch/worktree and record
@@ -199,14 +204,17 @@ subagent_control({ action: "resume", id: 7, objective: "Finish the tests." });
 ```
 
 Threads are durable while work is unfinished: parked sessions, worktree
-checkpoints, and state live under `~/.pi/agent/ferris-pi-subagents/<project>/`
-(grouped per project; not the OS temp directory)
-and are restored when pi reloads or restarts — a reload interrupts a live run
-into a restorable checkpoint instead of losing it. A thread that completes or
-fails cleanly drops its durable record, so the threads manifest exists only
-while interrupted work needs it; parked work stays resumable for 30 days. All
-control operations are bounded; they never hang on a generation that is still
-settling.
+checkpoints, and result excerpts live under
+`~/.pi/agent/ferris-pi-subagents/<project>/` (grouped per project; not the OS
+temp directory) and are restored when pi reloads or restarts — a reload
+interrupts a live run into a restorable checkpoint instead of losing it. A
+thread that completes or fails cleanly drops its durable record, so the
+threads manifest exists only
+while interrupted work needs it; parked work stays resumable for 30 days, and
+a project directory idle for three days is deleted wholesale on the next load
+(parked threads' references always win), so per-project storage never grows
+forever. All control operations are bounded; they never hang on a generation
+that is still settling.
 
 ## Results and live status
 
