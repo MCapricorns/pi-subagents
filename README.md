@@ -184,12 +184,13 @@ that delivers without another gate.
   where they are in `~/.pi/agent/pi-subagents-recovery.json`. Every later session
   start repeats that notice until you remove the artifacts.
 
-## Threads: follow, resume, stop
+## Threads: wait, resume, stop
 
-Every dispatch returns a stable `#id`, which is the handle for both control tools:
+Every dispatch returns a stable `#id`, which is the handle for the thread tools:
 
 | Tool               | What it does                                                                                                                                                                  |
 | ------------------ | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `subagent_wait`    | Block in-turn until already-dispatched run(s) settle and return their results (`id` or prefix; omit for all active runs).                                                        |
 | `subagent_control` | `resume` a parked or settled thread with its full retained context, optionally appending a new `objective`.                                                                     |
 | `subagent_stop`    | Destructively cancel, deliver the partial output, and retire the thread. Steering and follow-up messages still queued in the child are dropped so nothing can revive it later.  |
 
@@ -197,11 +198,16 @@ Every dispatch returns a stable `#id`, which is the handle for both control tool
 subagent_control({ action: "resume", id: 7, objective: "Finish the tests." });
 ```
 
-There is deliberately no status or lookup tool. Every result delivers itself, the
-TUI widget shows what is live, and `wait: true` on a dispatch blocks in-turn for
-that call's results — the escape hatch for one-shot `pi -p` parents, which exit at
-end of turn and would otherwise never see them. Control operations are all
-bounded, so they never hang on a generation that is still settling.
+There is deliberately no status or polling tool. Every result delivers itself,
+the TUI widget shows what is live, and blocking is event-driven only: `wait:
+true` on a dispatch holds the turn for that call's results — the escape hatch
+for one-shot `pi -p` parents, which exit at end of turn and would otherwise
+never see them — and `subagent_wait` does the same for a run that is already
+in flight when the turn cannot proceed without it. Neither wait runs on a
+timer or a timeout the model picks: a waiter resolves the instant its run
+settles, a parked run answers immediately with its resume handle, and
+aborting the turn is the escape hatch. Control operations are all bounded, so
+they never hang on a generation that is still settling.
 
 A thread stays durable while its work is unfinished. Parked sessions, worktree
 checkpoints, and result excerpts are recorded in a manifest beside your config, so
