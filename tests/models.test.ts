@@ -68,14 +68,11 @@ describe("resolveAgentModelRoute", () => {
 		});
 	});
 
-	it("uses main without an override and declared default only without main", () => {
-		expect(resolveAgentModelRoute({
-			mainRef: "openai/main",
-			declaredDefaultRef: "agent/default",
-		}).candidateRefs).toEqual(["openai/main"]);
-		expect(resolveAgentModelRoute({ declaredDefaultRef: "agent/default" }).candidateRefs).toEqual([
-			"agent/default",
-		]);
+	it("uses main without an override and Pi's own default without main", () => {
+		expect(resolveAgentModelRoute({ mainRef: "openai/main" }).candidateRefs).toEqual(["openai/main"]);
+		const noModels = resolveAgentModelRoute({});
+		expect(noModels.primaryRef).toBeUndefined();
+		expect(noModels.candidateRefs).toEqual([]);
 	});
 });
 

@@ -23,6 +23,7 @@ export interface AgentConfig {
 	name: string;
 	description: string;
 	tools?: string[];
+	/** Model ref this run was routed to; filled in by dispatch, never declared by the agent file. */
 	model?: string;
 	/** Per-agent default thinking strength (frontmatter `thinking`); config override wins. */
 	thinking?: ThinkingLevel;
@@ -138,7 +139,6 @@ function loadAgentsFromDir(dir: string, source: AgentSource): AgentConfig[] {
 			name,
 			description,
 			tools: tools && tools.length > 0 ? tools : undefined,
-			model: str(frontmatter.model),
 			...(thinking ? { thinking } : {}),
 			systemPrompt: body,
 			source,

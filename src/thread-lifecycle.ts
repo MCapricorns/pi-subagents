@@ -319,7 +319,6 @@ export function resolveDispatchModelRoute(
 	const route = resolveAgentModelRoute({
 		selectedRef: config.agentModels[agent.name],
 		mainRef,
-		declaredDefaultRef: agent.model,
 		availableRefs: availableModels.map(modelRef),
 	});
 	const preferred = config.agentThinkingLevels[agent.name] ?? agent.thinking ?? DEFAULT_THINKING_LEVEL;

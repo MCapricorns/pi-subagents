@@ -45,7 +45,6 @@ export interface ResolvedAgentModelRoute {
 export interface AgentModelRouteInput {
 	selectedRef?: string;
 	mainRef?: string;
-	declaredDefaultRef?: string;
 	/** When supplied, a configured selection outside this live set is skipped. */
 	availableRefs?: readonly string[];
 }
@@ -107,20 +106,19 @@ export function filterUnavailableModelOverrides(
  *
  * configured selection -> current main-window model
  *
- * Without an override, current main is primary; the agent-declared default is
- * used only when no main model exists. A configured selection that Pi no longer
- * reports as available is skipped immediately instead of spawning a doomed child.
+ * Without an override the current main model is primary, so an agent never
+ * pins its own model. A configured selection that Pi no longer reports as
+ * available is skipped immediately instead of spawning a doomed child.
  */
 export function resolveAgentModelRoute(input: AgentModelRouteInput): ResolvedAgentModelRoute {
 	const selectedRef = cleanModelRef(input.selectedRef);
 	const mainRef = cleanModelRef(input.mainRef);
-	const declaredDefaultRef = cleanModelRef(input.declaredDefaultRef);
 	const available = input.availableRefs
 		? new Set(input.availableRefs.map((ref) => ref.trim()).filter(Boolean))
 		: undefined;
 	const selectedAvailable = !selectedRef || !available || available.has(selectedRef);
 	const usableSelectedRef = selectedAvailable ? selectedRef : undefined;
-	const primaryRef = usableSelectedRef ?? mainRef ?? declaredDefaultRef;
+	const primaryRef = usableSelectedRef ?? mainRef;
 	const ordered = [primaryRef, usableSelectedRef && usableSelectedRef !== mainRef ? mainRef : undefined];
 	const candidateRefs = [...new Set(ordered.filter((ref): ref is string => Boolean(ref)))];
 	return {

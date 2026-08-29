@@ -39,7 +39,6 @@ describe("shipped specialist agents", () => {
 		const cleaner = loadBuiltinAgents().find((agent) => agent.name === "cleaner");
 		expect(cleaner).toBeDefined();
 		expect(cleaner).toMatchObject({
-			model: "claude-sonnet-4-5",
 			thinking: "high",
 			source: "builtin",
 		});
@@ -71,7 +70,6 @@ describe("shipped specialist agents", () => {
 	it("ships documenter as a low-cost write-capable drift-sync specialist", () => {
 		const documenter = loadBuiltinAgents().find((agent) => agent.name === "documenter");
 		expect(documenter).toMatchObject({
-			model: "claude-haiku-4-5",
 			thinking: "low",
 			source: "builtin",
 		});
@@ -128,18 +126,13 @@ describe("shipped specialist agents", () => {
 		expect(explorer?.systemPrompt).not.toContain("## Architecture");
 	});
 
-	it("keeps runtime model defaults while excluding frontmatter comments from child prompts", () => {
+	it("leaves the model to dispatch routing and keeps frontmatter comments out of child prompts", () => {
 		const agents = loadBuiltinAgents();
 		expect(agents.map((agent) => agent.name)).not.toContain("explore");
-		expect(Object.fromEntries(agents.map((agent) => [agent.name, agent.model]))).toEqual({
-			cleaner: "claude-sonnet-4-5",
-			documenter: "claude-haiku-4-5",
-			explorer: "claude-haiku-4-5",
-			reviewer: "claude-sonnet-4-5",
-			worker: "claude-sonnet-4-5",
-		});
+		// Models come only from /subagents-setup; no agent file pins one.
 		for (const agent of agents) {
-			expect(agent.systemPrompt).not.toContain("# Model selection:");
+			expect(agent.model).toBeUndefined();
+			expect(agent.systemPrompt).not.toContain("permission boundary");
 		}
 	});
 
@@ -225,7 +218,8 @@ describe("discoverAgents", () => {
 		const { agents } = discoverAgents(cwd, { scope: "user", builtinDir });
 		expect(agents.map((a) => a.name)).toEqual(["explorer"]);
 		expect(agents[0].tools).toEqual(["read", "grep"]);
-		expect(agents[0].model).toBe("fast");
+		// A frontmatter model declaration is ignored: dispatch routing owns the model.
+		expect(agents[0].model).toBeUndefined();
 		expect(agents[0].systemPrompt.trim()).toBe("body");
 	});
 

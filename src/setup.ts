@@ -39,7 +39,7 @@ import { promptSelectMany, promptSelectOne } from "./ui.ts";
 
 /** Short, selection-friendly descriptions for the built-in agents. */
 const MODULE_HINTS: Record<string, string> = {
-	explorer: "read-only codebase recon (fast model)",
+	explorer: "read-only codebase recon (fast, read-only tools)",
 	worker: "implement / fix / refactor / test (full tools)",
 	cleaner: "apply proven cleanup and deduplicate code (full tools)",
 	documenter: "sync diff or whole-codebase comments/docs (docs write)",

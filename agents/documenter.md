@@ -3,9 +3,7 @@ name: documenter
 description: "Write-capable synchronizer for explicitly requested or drift-driven comment/README/docs maintenance. May make zero edits; never changes runtime behavior."
 tools: read, grep, find, ls, bash, edit, write
 # The shell slot follows the parent and parent-active plugin tools are appended;
-# listed non-shell Pi built-ins are the permission boundary. Explorer-class fast
-# model by design: fast diff reading + precise writing, not the strongest coder.
-model: claude-haiku-4-5
+# listed non-shell Pi built-ins are the permission boundary.
 thinking: low
 ---
 

@@ -98,7 +98,7 @@ directly for exact control.
 
 | Agent        | Access                                | Best for                                                                                                                                                         |
 | ------------ | ------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `explorer`   | Read-only                             | Broad search, unfamiliar-area mapping, symbol/dependency tracing. Fast model, returns a retrieval index — never proof.                                           |
+| `explorer`   | Read-only                             | Broad search, unfamiliar-area mapping, symbol/dependency tracing. Returns a retrieval index — never proof.                                                       |
 | `worker`     | Full                                  | The default route for any non-trivial, self-contained implementation, fix, refactor, or test task carried through verification.                                  |
 | `cleaner`    | Full                                  | Cleanup, removal, simplification, deduplication — requested by the user or dispatched proactively when finished work leaves dead code; the brief is its edit authorization and every safe proven cut applies. |
 | `documenter` | Docs/comments                         | Standalone docs/comments work, including syncing real drift a change left behind. May make zero edits; never changes runtime behavior.                           |
@@ -331,16 +331,17 @@ Built-ins ship in the package; add or replace them with Markdown files:
 ---
 name: explorer
 description: Fast read-only codebase reconnaissance
-model: anthropic/claude-haiku-4-5
 thinking: low
 tools: read, bash
 ---
 …additional system prompt…
 ```
 
-Wizard choices override frontmatter defaults; an explicit `tools` list stays the
-capability boundary (shell slot follows the parent, active extension tools are
-appended), and omitting it inherits the parent's complete active set.
+`description` is the routing line the main model reads, and `thinking` is the
+role's Auto preference (a wizard choice overrides it). Models come only from
+`/subagents-setup`; an agent file cannot pin one. An explicit `tools` list stays
+the capability boundary (shell slot follows the parent, active extension tools
+are appended), and omitting it inherits the parent's complete active set.
 
 ## Development
 
