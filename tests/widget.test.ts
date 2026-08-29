@@ -1,7 +1,7 @@
 import type { Theme } from "@earendil-works/pi-coding-agent";
 import { visibleWidth } from "@earendil-works/pi-tui";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { MonitorStore, monitor } from "../src/monitor.ts";
+import { MonitorStore, monitor, type WorkflowStage } from "../src/monitor.ts";
 import {
 	formatActiveRunLines,
 	installActiveRunsWidget,
@@ -20,27 +20,32 @@ afterEach(() => {
 });
 
 describe("formatActiveRunLines", () => {
-	it("renders a running run as one line with inline activity and a right-aligned telemetry tail", () => {
+	it("renders a running run with model, token flow, cost, and seconds-precision elapsed", () => {
 		const store = new MonitorStore();
 		const running = store.addRun("worker", "Fix src/index.ts", "anthropic/claude-sonnet-4-5", "high");
 		store.setModel(running, "openai/gpt-5-mini", "anthropic/claude-sonnet-4-5");
 		store.setStatus(running, "running");
 		store.setActivity(running, "edit src/index.ts");
-		store.findRun(running)!.startedAt = 1_000;
-		store.findRun(running)!.activeSince = 1_000;
+		store.setUsage(running, { input: 1_200, output: 3400, cacheRead: 91_000, cacheWrite: 1_050, cost: 0.05, contextTokens: 0, turns: 3 });
+		const run = store.findRun(running)!;
+		run.startedAt = 3_600_000;
+		run.activeSince = 3_600_000;
 		const done = store.addRun("reviewer", "Review src/index.ts");
 		store.setStatus(done, "done");
 		const parked = store.addRun("worker", "Park work");
 		store.setStatus(parked, "parked");
 
-		const lines = formatActiveRunLines(store.getRuns(), theme, 120, 62_000);
+		const lines = formatActiveRunLines(store.getRuns(), theme, 120, 3_600_000 + 3_725_000);
 		expect(lines).toHaveLength(1);
 		expect(lines[0]).toContain(`● #${running} worker  src/index.ts — edit src/index.ts`);
 		expect(lines[0]).toContain("gpt-5-mini/high");
 		expect(lines[0]).not.toContain("openai/");
+		expect(lines[0]).toContain("↑1.2k ↓3.4k R91.0k W1.1k");
+		expect(lines[0]).toContain("$0.0500");
+		// Elapsed carries seconds even at hour magnitude.
+		expect(lines[0].endsWith("1h02m05s")).toBe(true);
 		// Telemetry column is right-aligned: the line ends at the width with elapsed.
 		expect(visibleWidth(lines[0])).toBe(120);
-		expect(lines[0].endsWith("1m01s")).toBe(true);
 		expect(lines[0]).not.toContain(`#${done}`);
 		expect(lines[0]).not.toContain(`#${parked}`);
 	});
@@ -87,13 +92,21 @@ describe("formatActiveRunLines", () => {
 		}
 	});
 
-	it("renders a managed workflow as two lines: parent identity and a timeline carrying live stage telemetry", () => {
+	it("renders a managed workflow as a tree chain: parent totals plus one telemetry row per stage", () => {
 		const store = new MonitorStore();
 		const parent = store.addRun("worker", "Implement src/index.ts", "xai/grok-parent", "xhigh");
 		store.setStatus(parent, "running");
 		store.setManagedWorkflow(parent, true);
+		store.setUsage(parent, { input: 1_000, output: 12_000, cacheRead: 40_000, cacheWrite: 1_200, cost: 0.51, contextTokens: 0, turns: 4 });
 		store.setWorkflowStages(parent, [
-			{ agent: "worker", relation: "implement", status: "done" },
+			{
+				agent: "worker",
+				relation: "implement",
+				status: "done",
+				model: "xai/grok-parent",
+				usage: { input: 1_000, output: 12_000, cacheRead: 40_000, cacheWrite: 1_200, cost: 0.51, contextTokens: 0, turns: 4 },
+				elapsedMs: 161_000,
+			},
 			{ agent: "reviewer", relation: "review", status: "active" },
 			{ agent: "documenter", relation: "docs", status: "pending" },
 		]);
@@ -107,27 +120,25 @@ describe("formatActiveRunLines", () => {
 		);
 		store.setStatus(review, "running");
 		store.setActivity(review, "read src/index.ts");
-		const docs = store.addRun(
-			"documenter",
-			"Final documentation sync.",
-			"anthropic/claude-reviewer",
-			"high",
-			{ groupId: `workflow-${parent}`, relationLabel: "docs", parentRunId: parent, waitReason: "starting" },
-		);
-		store.setStatus(docs, "queued");
+		store.setUsage(review, { input: 500, output: 2_000, cacheRead: 8_000, cacheWrite: 400, cost: 0.09, contextTokens: 0, turns: 1 });
 
 		const lines = formatActiveRunLines(store.getRuns(), theme, 120);
-		expect(lines).toHaveLength(2);
+		// Parent row + one row per stage; internal child rows never repeat as roots.
+		expect(lines).toHaveLength(4);
 		expect(lines[0]).toContain(`◆ #${parent} worker  src/index.ts`);
 		expect(lines[0]).not.toContain("grok-parent");
 		expect(lines[0]).not.toContain("/xhigh");
-		expect(lines[1]).toContain("└ ✓ implement ─ ● review ─ ○ docs");
-		// The live stage's doing-now rides on the timeline instead of extra rows.
-		expect(lines[1]).toContain("read src/index.ts");
+		// Parent totals aggregate the settled snapshot plus the live stage.
+		expect(lines[0]).toContain("↑1.5k ↓14.0k R48.0k W1.6k");
+		expect(lines[0]).toContain("$0.6000");
+		expect(lines[1]).toContain("├ ✓ implement");
+		expect(lines[1]).toContain("grok-parent");
+		expect(lines[1]).toContain("2m41s");
+		expect(lines[2]).toContain("├ ● review — read src/index.ts");
+		expect(lines[2]).toContain("gpt-worker/max");
+		expect(lines[3]).toBe("  └ ○ docs");
 		expect(lines.join("\n")).not.toContain("managed workflow running");
 		expect(lines.join("\n")).not.toContain(`#${review}`);
-		expect(lines.join("\n")).not.toContain(`#${docs}`);
-		expect(lines.join("\n")).not.toContain("claude-reviewer");
 	});
 
 	it("falls back to the live stage's model when it has no activity yet", () => {
@@ -149,8 +160,8 @@ describe("formatActiveRunLines", () => {
 		store.setStatus(review, "running");
 
 		const lines = formatActiveRunLines(store.getRuns(), theme, 120);
-		expect(lines).toHaveLength(2);
-		expect(lines[1]).toContain("claude-sonnet-4-5");
+		expect(lines).toHaveLength(3);
+		expect(lines[2]).toContain("claude-sonnet-4-5");
 	});
 
 	it("labels the fix stage as reviewer-owned work, not a separate fixer", () => {
@@ -166,7 +177,10 @@ describe("formatActiveRunLines", () => {
 		store.setActivity(parent, "managed workflow running");
 
 		const lines = formatActiveRunLines(store.getRuns(), theme, 120);
-		expect(lines[1]).toContain("! review ─ ● review fix");
+		expect(lines).toHaveLength(4);
+		expect(lines[1]).toContain("├ ✓ implement");
+		expect(lines[2]).toContain("├ ! review");
+		expect(lines[3]).toContain("└ ● review fix");
 	});
 
 	it("removes conditionally skipped docs and distinguishes process failure from review changes", () => {
@@ -181,8 +195,9 @@ describe("formatActiveRunLines", () => {
 		store.setActivity(parent, "managed workflow running");
 
 		const lines = formatActiveRunLines(store.getRuns(), theme, 100);
-		expect(lines).toHaveLength(2);
-		expect(lines[1]).toContain("✓ implement ─ ✗ review");
+		expect(lines).toHaveLength(3);
+		expect(lines[1]).toContain("├ ✓ implement");
+		expect(lines[2]).toContain("└ ✗ review");
 		expect(lines.join("\n")).not.toContain("docs");
 		expect(lines.join("\n")).not.toContain("managed workflow running");
 	});
@@ -201,10 +216,31 @@ describe("formatActiveRunLines", () => {
 		store.findRun(parent)!.activeSince = 1_000;
 
 		const lines = formatActiveRunLines(store.getRuns(), theme, 34, 62_000);
-		expect(lines).toHaveLength(2);
+		expect(lines).toHaveLength(4);
 		for (const line of lines) expect(visibleWidth(line)).toBeLessThanOrEqual(34);
 		expect(lines[0]).toContain("1m01s");
-		expect(lines[1]).toContain("● docs");
+		expect(lines.at(-1)).toContain("● docs");
+	});
+
+	it("anchors an oversized stage chain on the live stage with overflow markers", () => {
+		const store = new MonitorStore();
+		const parent = store.addRun("worker", "Implement src/cache.ts");
+		store.setStatus(parent, "running");
+		store.setManagedWorkflow(parent, true);
+		const stages: WorkflowStage[] = Array.from({ length: 12 }, (_unused, index) => ({
+			agent: "reviewer",
+			relation: index === 7 ? "review fix" : `review ${index}`,
+			status: index === 7 ? "active" : index < 7 ? "done" : "pending",
+		}));
+		store.setWorkflowStages(parent, stages);
+
+		const lines = formatActiveRunLines(store.getRuns(), theme, 120);
+		// Nine rows for the group (the tenth stays reserved for the hidden-roots
+		// marker): parent + `… +5` marker + a seven-stage window.
+		expect(lines).toHaveLength(9);
+		expect(lines[1]).toContain("… +5");
+		expect(lines.some((line) => line.includes("● review fix"))).toBe(true);
+		expect(lines.some((line) => line.includes("✓ review 0"))).toBe(false);
 	});
 
 	it("renders a chain child at root level with its relation when the parent row is gone", () => {

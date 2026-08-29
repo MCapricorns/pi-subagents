@@ -6,12 +6,16 @@
  *   agent so every label starts at the same column; a resumed thread carries
  *   a dim `↻` inside the agent column.
  * - Visual hierarchy: the label (what the run owns) is plain, the live
- *   activity after ` — ` is dim, and all telemetry — worktree badge,
- *   model/thinking, wait state, elapsed — is one dim right-aligned column,
- *   so times and states line up at the right edge.
- * - Two lines per managed workflow: the stable parent line plus a `└`-connected
- *   stage timeline; the live stage's activity/model/elapsed rides right-aligned
- *   on the timeline line. Internal child rows are not repeated as extra lines.
+ *   activity after ` — ` is dim, and all telemetry — worktree badge, token
+ *   flow (↑in ↓out R/W cache), cost, model/thinking, wait state, elapsed — is
+ *   one dim right-aligned column, so telemetry lines up at the right edge.
+ * - Elapsed always carries seconds, at every magnitude.
+ * - A managed workflow renders as a tree chain: the stable parent line (with
+ *   the workflow-wide token/cost totals and total elapsed) plus one
+ *   `├`/`└`-connected row per stage, each carrying its own model, token flow,
+ *   and elapsed — settled stages from the snapshot frozen at settlement, the
+ *   live stage from its child row. When the group outgrows the line budget,
+ *   the visible window anchors on the live stage.
  * - Queued rows say what they actually wait for ("queued" for a process slot,
  *   "repo lane" for shared-writer serialization, "starting" while the child
  *   process launches) instead of one catch-all "queued".
@@ -20,14 +24,20 @@
 import type { ExtensionContext, Theme } from "@earendil-works/pi-coding-agent";
 import { truncateToWidth, visibleWidth } from "@earendil-works/pi-tui";
 import {
+	formatDuration,
 	formatElapsed,
 	formatTaskSummary,
+	formatUsageTokens,
 	isRunActiveStatus,
 	monitor,
 	statusIcon,
+	sumUsage,
+	usageCostPart,
 	type RunView,
 	type WorkflowStage,
+	type WorkflowStageStatus,
 } from "./monitor.ts";
+import type { UsageStats } from "./rpc-run.ts";
 
 export const SUBAGENTS_WIDGET_ID = "pi-subagents";
 
@@ -124,27 +134,47 @@ function identitySegment(run: RunView, theme: Theme, layout: ColumnLayout): stri
 	return `${icon} ${theme.fg("dim", id)} ${name}${resumed}${pad}`;
 }
 
-/** One primary line per run. Left: identity  label — activity, where the
- * label stays plain and the live activity is dim. Right: one dim telemetry
- * column (worktree badge, model/thinking, wait state, elapsed). The activity
- * outranks the label when space runs out; the identity and elapsed survive
- * every width. */
-function primaryLine(run: RunView, theme: Theme, width: number, now: number, layout: ColumnLayout): string {
-	const dim = (text: string): string => theme.fg("dim", text);
-	const identity = identitySegment(run, theme, layout);
-	const elapsed = formatElapsed(run, now);
+/** One footer-style usage part: token flow plus accrued cost, dropped as a
+ * unit before the model under width pressure. */
+function usagePart(usage: UsageStats | undefined): string | undefined {
+	return [formatUsageTokens(usage), usageCostPart(usage)].filter(Boolean).join(" ") || undefined;
+}
+
+/** Telemetry tail parts shared by primary and stage rows: badge and wait word
+ * first (dropped first under pressure), then the usage part, the model, and
+ * the always-surviving elapsed. `usage` defaults to the run's own; the managed
+ * workflow parent overrides it with the workflow-wide aggregate. */
+function telemetryTailParts(run: RunView, now: number, usage: UsageStats = run.usage): Array<string | undefined> {
 	const modelId = run.model?.split("/").at(-1);
 	// Queued rows omit the model (the route is re-resolved at actual start);
-	// workflow parents omit it too (each stage owns its own model).
+	// workflow parents omit it too (each stage row owns its own model).
 	const modelPart = run.status === "queued" || run.managedWorkflow || !modelId
 		? undefined
 		: `${modelId}${run.thinking ? `/${run.thinking}` : ""}`;
 	const badge = run.isolation === "worktree" ? worktreeBadge(run) : undefined;
 	const wait = run.status === "queued" ? waitWord(run) : undefined;
-	const tailBudget = Math.max(0, width - visibleWidth(identity) - LEFT_MIN_CONTENT);
-	// Drop order under pressure: badge, then model, then wait word; elapsed
+	// Drop order under pressure: badge, wait word, usage, model; elapsed
 	// survives every width the identity leaves room for.
-	const tail = composeTail([badge, modelPart, wait, elapsed || undefined], tailBudget);
+	return [badge, wait, usagePart(usage), modelPart, formatElapsed(run, now) || undefined];
+}
+
+/** One primary line per run. Left: identity  label — activity, where the
+ * label stays plain and the live activity is dim. Right: one dim telemetry
+ * column (worktree badge, token flow, cost, model/thinking, wait state,
+ * elapsed). The activity outranks the label when space runs out; the identity
+ * and elapsed survive every width. */
+function primaryLine(
+	run: RunView,
+	theme: Theme,
+	width: number,
+	now: number,
+	layout: ColumnLayout,
+	usage: UsageStats = run.usage,
+): string {
+	const dim = (text: string): string => theme.fg("dim", text);
+	const identity = identitySegment(run, theme, layout);
+	const tailBudget = Math.max(0, width - visibleWidth(identity) - LEFT_MIN_CONTENT);
+	const tail = composeTail(telemetryTailParts(run, now, usage), tailBudget);
 
 	// A chain child rendered at root level (its parent row is gone) keeps its
 	// workflow relation; the templated brief itself would only repeat content.
@@ -188,76 +218,122 @@ function primaryLine(run: RunView, theme: Theme, width: number, now: number, lay
 	return layoutLine(left, tail ? dim(tail) : "", width);
 }
 
-function workflowStageToken(stage: WorkflowStage, theme: Theme): string {
-	const content = (icon: string): string => `${icon} ${stage.relation}`;
-	switch (stage.status) {
+function stageIcon(status: WorkflowStageStatus, theme: Theme): string {
+	switch (status) {
 		case "done":
-			return theme.fg("success", content("✓"));
+			return theme.fg("success", "✓");
 		case "active":
-			return theme.fg("accent", theme.bold(content("●")));
+			return theme.fg("accent", theme.bold("●"));
 		case "changes":
-			return theme.fg("warning", content("!"));
+			return theme.fg("warning", "!");
 		case "failed":
-			return theme.fg("error", content("✗"));
+			return theme.fg("error", "✗");
 		default:
-			return theme.fg("dim", content("○"));
+			return theme.fg("dim", "○");
 	}
 }
 
-/** Stage timeline, sliced from the active (or next actionable) stage when the
- * full sequence does not fit, so the current position always survives. */
-function timelineSegment(stages: readonly WorkflowStage[], theme: Theme, width: number): string {
-	const separator = theme.fg("dim", " ─ ");
-	const render = (items: readonly WorkflowStage[]): string =>
-		items.map((stage) => workflowStageToken(stage, theme)).join(separator);
-	const full = render(stages);
-	if (visibleWidth(full) <= width) return full;
-	let focusIndex = stages.findIndex((stage) => stage.status === "active");
-	if (focusIndex === -1) {
-		focusIndex = stages.findLastIndex((stage) => stage.status === "changes" || stage.status === "failed");
-	}
-	if (focusIndex === -1) focusIndex = stages.findIndex((stage) => stage.status === "pending");
-	if (focusIndex === -1) focusIndex = stages.length - 1;
-	const omittedPrefix = focusIndex > 0 ? theme.fg("dim", "… ─ ") : "";
-	return truncateToWidth(`${omittedPrefix}${render(stages.slice(focusIndex))}`, width, "…");
+/** Stage telemetry source: the live child while the stage runs, the frozen
+ * snapshot once it has settled. */
+interface StageTelemetry {
+	model?: string;
+	thinking?: string;
+	usage?: UsageStats;
+	elapsed: string;
+	activity?: string;
 }
 
-/** Timeline line under a managed workflow parent, tied to it with a dim `└`.
- * The live stage's telemetry (its activity or model, plus stage elapsed) rides
- * right-aligned, so the two workflow lines replace what used to be four
- * (parent, timeline, child row, child activity). */
-function workflowTimelineLine(
-	run: RunView,
+function stageTelemetry(
+	stage: WorkflowStage,
+	live: RunView | undefined,
+	now: number,
+): StageTelemetry {
+	if (live) {
+		return {
+			model: live.model,
+			thinking: live.thinking,
+			usage: live.usage,
+			elapsed: formatElapsed(live, now),
+			activity: live.activity?.trim() || undefined,
+		};
+	}
+	return { model: stage.model, usage: stage.usage, elapsed: stage.elapsedMs !== undefined ? formatDuration(stage.elapsedMs) : "" };
+}
+
+/** One `├`/`└`-connected row per managed-workflow stage: status icon, relation,
+ * live activity for the running stage, and its own right-aligned model/token/
+ * cost/elapsed telemetry. The chain hangs off the parent line, so who
+ * dispatched what stays visible while the auto-fix workflow progresses. */
+function workflowStageLines(
+	stages: readonly WorkflowStage[],
 	children: readonly RunView[],
 	theme: Theme,
 	width: number,
 	now: number,
-): string | undefined {
-	const stages = run.workflowStages;
-	const indent = `  ${theme.fg("dim", "└")} `;
-	const budget = width - visibleWidth(indent);
-	if (!stages || stages.length === 0 || budget <= 0) return undefined;
-	const child = children.find((candidate) => candidate.status === "running" || candidate.status === "interrupting")
+): { lines: string[]; activeIndex: number } {
+	const live = children.find((candidate) => candidate.status === "running" || candidate.status === "interrupting")
 		?? children.at(-1);
-	const childDoing = child?.activity?.trim() || child?.model?.split("/").at(-1) || "";
-	const childElapsed = child ? formatElapsed(child, now) : "";
-	const timeline = timelineSegment(stages, theme, budget);
-	const room = budget - visibleWidth(timeline) - 1;
-	let tail = "";
-	if (room >= ACTIVITY_MIN_WIDTH) {
-		const doingBudget = room - (childElapsed ? visibleWidth(childElapsed) + (childDoing ? visibleWidth(SEPARATOR) : 0) : 0);
-		const doingText = childDoing && doingBudget >= ACTIVITY_MIN_WIDTH
-			? formatTaskSummary(childDoing, doingBudget)
-			: "";
-		const parts = [doingText, childElapsed].filter(Boolean);
-		if (parts.length > 0) tail = theme.fg("dim", parts.join(SEPARATOR));
+	const activeIndex = stages.findIndex((stage) => stage.status === "active");
+	const lines: string[] = [];
+	for (const [index, stage] of stages.entries()) {
+		const telemetry = stageTelemetry(stage, index === activeIndex ? live : undefined, now);
+		const connector = theme.fg("dim", index === stages.length - 1 ? "└" : "├");
+		const indent = `  ${connector} `;
+		const budget = width - visibleWidth(indent);
+		if (budget <= 0) break;
+		const icon = stageIcon(stage.status, theme);
+		const label = `${icon} ${stage.relation}`;
+		const modelId = telemetry.model?.split("/").at(-1);
+		const modelPart = modelId ? `${modelId}${telemetry.thinking ? `/${telemetry.thinking}` : ""}` : undefined;
+		const parts = [
+			usagePart(telemetry.usage),
+			modelPart,
+			telemetry.elapsed || undefined,
+		];
+		const tailBudget = Math.max(0, budget - visibleWidth(label) - ACTIVITY_MIN_WIDTH);
+		const tail = composeTail(parts, tailBudget);
+		const contentBudget = budget - (tail ? visibleWidth(tail) + 1 : 0);
+		let left = label;
+		if (telemetry.activity && contentBudget - visibleWidth(label) - visibleWidth(ACTIVITY_SEPARATOR) >= ACTIVITY_MIN_WIDTH) {
+			const activityBudget = contentBudget - visibleWidth(label) - visibleWidth(ACTIVITY_SEPARATOR);
+			left = `${label}${theme.fg("dim", ACTIVITY_SEPARATOR)}${theme.fg("dim", formatTaskSummary(telemetry.activity, activityBudget))}`;
+		}
+		lines.push(`${indent}${layoutLine(left, tail ? theme.fg("dim", tail) : "", budget)}`);
 	}
-	return `${indent}${layoutLine(timeline, tail, budget)}`;
+	return { lines, activeIndex };
+}
+
+/** Fit one workflow group into the remaining line budget: the primary line
+ * always survives, and the stage window anchors on the live stage — settled
+ * stages above the window collapse into one `… +N` marker, never the live
+ * stage itself. */
+function fitGroupLines(
+	primary: string,
+	stages: readonly string[],
+	activeIndex: number,
+	remaining: number,
+	theme: Theme,
+): string[] {
+	if (stages.length === 0 || stages.length + 1 <= remaining) return [primary, ...stages];
+	const slots = remaining - 1;
+	if (slots <= 0) return [primary];
+	// Reserve one line for an overflow marker so a cut is always announced.
+	const room = Math.max(1, slots - 1);
+	const anchor = activeIndex >= 0 ? activeIndex : 0;
+	const start = Math.max(0, Math.min(anchor, stages.length - room));
+	const window = stages.slice(start, start + room);
+	const parts = [
+		...(start > 0 ? [theme.fg("dim", `… +${start}`)] : []),
+		...window,
+		...(start + room < stages.length ? [theme.fg("dim", `… +${stages.length - start - room}`)] : []),
+	];
+	while (parts.length > slots) parts.pop();
+	return [primary, ...parts];
 }
 
 /** Render active runs as compact per-run line groups: one line per simple run,
- * two per managed workflow. Internal stage children fold into their parent's
- * timeline instead of adding rows, and all rows share one column layout. */
+ * a tree chain per managed workflow (parent line + one row per stage). All
+ * rows share one column layout. */
 export function formatActiveRunLines(
 	runs: readonly RunView[],
 	theme: Theme,
@@ -281,13 +357,25 @@ export function formatActiveRunLines(
 		idWidth: Math.max(...roots.map((root) => visibleWidth(`#${root.id}`)), 0),
 		agentWidth: Math.max(...roots.map((root) => visibleWidth(agentColumnText(root))), 0),
 	};
-	const groups: string[][] = roots.map((root) => {
-		const lines = [primaryLine(root, theme, width, now, layout)];
-		const timeline = root.managedWorkflow
-			? workflowTimelineLine(root, childrenOf.get(root.id) ?? [], theme, width, now)
-			: undefined;
-		if (timeline) lines.push(timeline);
-		return lines;
+	const groups: Array<{ lines: string[]; activeIndex: number }> = roots.map((root) => {
+		const children = childrenOf.get(root.id) ?? [];
+		// Workflow-wide tokens/cost on the parent line: every stage snapshot plus
+		// the live child (whose snapshot is frozen only at settlement). Without
+		// a stage projection the parent's own usage stands in.
+		let usage = root.usage;
+		if (root.managedWorkflow && root.workflowStages) {
+			const settled = root.workflowStages.map((stage) => stage.usage).filter((u): u is UsageStats => Boolean(u));
+			const live = children.find((candidate) => candidate.usage.input || candidate.usage.output || candidate.usage.cost);
+			usage = sumUsage([...(settled.length > 0 ? settled : [root.usage]), ...(live ? [live.usage] : [])]);
+		}
+		const lines = [primaryLine(root, theme, width, now, layout, usage)];
+		let activeIndex = -1;
+		if (root.managedWorkflow && root.workflowStages && root.workflowStages.length > 0) {
+			const rendered = workflowStageLines(root.workflowStages, children, theme, width, now);
+			lines.push(...rendered.lines);
+			activeIndex = rendered.activeIndex;
+		}
+		return { lines, activeIndex };
 	});
 
 	const lines: string[] = [];
@@ -295,8 +383,7 @@ export function formatActiveRunLines(
 	for (const group of groups) {
 		const remaining = MAX_WIDGET_LINES - 1 - lines.length;
 		if (remaining <= 0) break;
-		// A group that no longer fits whole keeps its primary line only.
-		lines.push(...(group.length <= remaining ? group : group.slice(0, remaining)));
+		lines.push(...fitGroupLines(group.lines[0]!, group.lines.slice(1), group.activeIndex, remaining, theme));
 		shownRoots++;
 	}
 	const hiddenRoots = roots.length - shownRoots;

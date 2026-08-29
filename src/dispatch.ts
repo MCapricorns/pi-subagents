@@ -30,6 +30,7 @@ import {
 	monitor,
 	statusIcon,
 	type RunChainMeta,
+	type RunView,
 	type RunWaitReason,
 	type WorkflowStage,
 	type WorkflowStageStatus,
@@ -239,18 +240,21 @@ export function registerSubagentTool(pi: ExtensionAPI, runtime: SubagentRuntime)
 	const environmentRef: { current: DispatchEnvironment | undefined } = { current: undefined };
 
 	// Finished runs leave the active monitor immediately. Their final findings
-	// are sent as a custom message that starts a follow-up turn.
+	// are sent as a custom message that starts a follow-up turn. Returns the
+	// removed row so workflow callers can freeze its exact elapsed time onto
+	// the stage projection before the row is gone.
 	const finishRun = (
 		runId: number,
 		status: "done" | "failed",
 		opts?: { silent?: boolean },
-	): void => {
+	): RunView | undefined => {
 		monitor.setStatus(runId, status); // stamps endedAt for the elapsed time
 		const run = monitor.removeRun(runId);
-		if (!run) return; // already finished — stay idempotent
-		if (opts?.silent || !runtime.sessionActive) return;
+		if (!run) return undefined; // already finished — stay idempotent
+		if (opts?.silent || !runtime.sessionActive) return run;
 		const icon = status === "done" ? "✓" : "✗";
 		environmentRef.current?.ctx.ui.notify(`${icon} #${run.id} ${monitor.summarize(run)}`, status === "done" ? "info" : "error");
+		return run;
 	};
 
 	// Live sub-agent activity → concise one-line status ("thinking",
@@ -354,7 +358,7 @@ export function registerSubagentTool(pi: ExtensionAPI, runtime: SubagentRuntime)
 			agentOverride?: AgentConfig;
 			session?: { sessionId: string; sessionDir: string };
 		} = {},
-	): Promise<{ runId: number; result: SingleResult }> => {
+	): Promise<{ runId: number; result: SingleResult; elapsedMs?: number }> => {
 		const discoveredAgent = request.agents.find((candidate) => candidate.name === agentName);
 		if (!discoveredAgent) {
 			throw new Error(`Managed workflow requires enabled agent "${agentName}", but discovery did not provide it.`);
@@ -411,11 +415,11 @@ export function registerSubagentTool(pi: ExtensionAPI, runtime: SubagentRuntime)
 			runtime.retainSession(result);
 			monitor.setModel(runId, result.model, result.modelFallbackFrom);
 			monitor.setThinking(runId, result.thinking);
-			finishRun(runId, isFailedResult(result) ? "failed" : "done", { silent: true });
+			const finished = finishRun(runId, isFailedResult(result) ? "failed" : "done", { silent: true });
 			runtime.registerRunResult(runId, result);
-			return { runId, result };
+			return { runId, result, elapsedMs: finished?.elapsedMs };
 		} catch (error) {
-			finishRun(runId, "failed", { silent: true });
+			const finished = finishRun(runId, "failed", { silent: true });
 			const errorMessage = error instanceof Error ? error.message : String(error);
 			const crashed: SingleResult = {
 				...queuedResult(route.agent, task, thinkingLevel),
@@ -473,6 +477,11 @@ export function registerSubagentTool(pi: ExtensionAPI, runtime: SubagentRuntime)
 			agent: initialStepResult.agent,
 			relation: initialStageRelation,
 			status: workflowStageStatus(initialStepResult),
+			// The initial stage is the parent's own run; freeze its telemetry now,
+			// before the reopened parent row starts counting workflow-wide time.
+			model: initialStepResult.model,
+			usage: initialStepResult.usage,
+			elapsedMs: monitor.getElapsedMs(request.parentRunId),
 		}];
 		let reviewStage: WorkflowStage | undefined;
 		if (enabled("reviewer")) {
@@ -483,6 +492,14 @@ export function registerSubagentTool(pi: ExtensionAPI, runtime: SubagentRuntime)
 			monitor.setWorkflowStages(request.parentRunId, workflowStages);
 		};
 		publishWorkflowStages();
+
+		/** Freeze the settled step's telemetry onto its stage: once the child row
+		 * leaves the monitor, this snapshot is the only per-stage record. */
+		const settleStage = (stage: WorkflowStage, step: { result: SingleResult; elapsedMs?: number }): void => {
+			stage.model = step.result.model;
+			stage.usage = step.result.usage;
+			if (step.elapsedMs !== undefined) stage.elapsedMs = step.elapsedMs;
+		};
 
 		const launchStep = async (
 			agentName: string,
@@ -506,6 +523,7 @@ export function registerSubagentTool(pi: ExtensionAPI, runtime: SubagentRuntime)
 					parentRunId: request.parentRunId,
 				}, stageOptions);
 				stage.status = workflowStageStatus(step.result, relation);
+				settleStage(stage, step);
 				publishWorkflowStages();
 				request.rememberLatest(step.result);
 				steps.push({ ...step, relation });

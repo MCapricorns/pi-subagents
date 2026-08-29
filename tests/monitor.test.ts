@@ -8,9 +8,11 @@ import {
 	formatTaskSummary,
 	formatToolActivity,
 	formatUsageCompact,
+	formatUsageTokens,
 	runLabel,
 	runWaitLabel,
 	statusLabel,
+	usageCostPart,
 } from "../src/monitor.ts";
 
 describe("MonitorStore", () => {
@@ -401,6 +403,14 @@ describe("formatUsageCompact", () => {
 			}),
 		).toBe("R1.2k W9.0k");
 	});
+
+	it("splits the token flow from the cost part", () => {
+		const usage = { input: 1200, output: 3400, cacheRead: 0, cacheWrite: 0, cost: 0.05, contextTokens: 0, turns: 0 };
+		expect(formatUsageTokens(usage)).toBe("↑1.2k ↓3.4k");
+		expect(usageCostPart(usage)).toBe("$0.0500");
+		expect(formatUsageTokens(undefined)).toBeUndefined();
+		expect(usageCostPart({ ...usage, cost: 0 })).toBeUndefined();
+	});
 });
 
 describe("formatToolActivity", () => {
@@ -567,7 +577,7 @@ describe("status labels and timing", () => {
 		expect(formatDuration(0)).toBe("0s");
 		expect(formatDuration(5_000)).toBe("5s");
 		expect(formatDuration(65_000)).toBe("1m05s");
-		expect(formatDuration(3_725_000)).toBe("1h02m");
+		expect(formatDuration(3_725_000)).toBe("1h02m05s");
 	});
 
 	it("records startedAt on running and endedAt on completion", () => {

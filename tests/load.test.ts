@@ -854,9 +854,11 @@ describe("managed post-writer workflows", () => {
 			releaseReviewer();
 			await workflow;
 			unsubscribe();
+			// Settled stages keep their telemetry snapshot (model/usage frozen at
+			// settlement) next to the status the flow cares about.
 			expect(observedProjections).toContainEqual([
-				{ agent: "worker", relation: "implement", status: "done" },
-				{ agent: "reviewer", relation: "review", status: "done" },
+				expect.objectContaining({ agent: "worker", relation: "implement", status: "done", model: "openai/gpt-worker", usage: workerUsage }),
+				expect.objectContaining({ agent: "reviewer", relation: "review", status: "done", model: "xai/grok-reviewer", usage: reviewerUsage }),
 			]);
 		} finally {
 			releaseReviewer();
@@ -1094,8 +1096,8 @@ describe("managed post-writer workflows", () => {
 
 			expect(run.mock.calls.map(([options]) => options.agentName)).toEqual(["worker", "reviewer"]);
 			expect(observedProjections).toContainEqual([
-				{ agent: "worker", relation: "implement", status: "done" },
-				{ agent: "reviewer", relation: "review", status: "failed" },
+				expect.objectContaining({ agent: "worker", relation: "implement", status: "done" }),
+				expect.objectContaining({ agent: "reviewer", relation: "review", status: "failed" }),
 			]);
 			expect(stub.messages).toHaveLength(1);
 			const content = stub.messages[0].message.content as string;

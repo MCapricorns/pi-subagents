@@ -1,6 +1,6 @@
 {
   "name": "@ferris1225/pi-subagents",
-  "version": "4.1.21",
+  "version": "4.1.22",
   "description": "A managed sub-agent team for pi: specialized roles, pre-commit documentation sync, retained threads, auto-fix chains, model fallback, and Git worktree isolation.",
   "type": "module",
   "license": "MIT",

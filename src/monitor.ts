@@ -38,6 +38,11 @@ export interface WorkflowStage {
 	agent: string;
 	relation: string;
 	status: WorkflowStageStatus;
+	/** Telemetry snapshot frozen when the stage settled (the live child row
+	 * leaves the monitor at that moment); the active stage reads its live child. */
+	model?: string;
+	usage?: UsageStats;
+	elapsedMs?: number;
 }
 
 export function isRunActiveStatus(status: RunStatus): boolean {
@@ -289,14 +294,26 @@ function formatTokens(count: number): string {
 	return String(count);
 }
 
-export function formatUsageCompact(usage: UsageStats): string {
+/** Token flow in the pi-footer vocabulary: ↑input ↓output, R cache-read,
+ * W cache-write; zero components are omitted. No cost — callers place it as
+ * its own droppable part. */
+export function formatUsageTokens(usage: UsageStats | undefined): string | undefined {
+	if (!usage) return undefined;
 	const parts: string[] = [];
 	if (usage.input) parts.push(`↑${formatTokens(usage.input)}`);
 	if (usage.output) parts.push(`↓${formatTokens(usage.output)}`);
 	if (usage.cacheRead) parts.push(`R${formatTokens(usage.cacheRead)}`);
 	if (usage.cacheWrite) parts.push(`W${formatTokens(usage.cacheWrite)}`);
-	if (usage.cost) parts.push(`$${usage.cost.toFixed(4)}`);
-	return parts.join(" ");
+	return parts.length > 0 ? parts.join(" ") : undefined;
+}
+
+export function formatUsageCompact(usage: UsageStats): string {
+	return [formatUsageTokens(usage), usageCostPart(usage)].filter(Boolean).join(" ");
+}
+
+/** Cost as its own droppable part: `$0.0421`, undefined when nothing accrued. */
+export function usageCostPart(usage: UsageStats | undefined): string | undefined {
+	return usage?.cost ? `$${usage.cost.toFixed(4)}` : undefined;
 }
 
 /** Aggregate usage across several runs (chain steps or a completion group). */
@@ -319,9 +336,11 @@ export function formatDuration(ms: number): string {
 	if (totalSeconds < 60) return `${totalSeconds}s`;
 	const minutes = Math.floor(totalSeconds / 60);
 	const seconds = totalSeconds % 60;
+	// Seconds stay visible at every magnitude: a long-running chain is judged
+	// by whether it is still moving, and "5s ago" is exactly that signal.
 	if (minutes < 60) return `${minutes}m${String(seconds).padStart(2, "0")}s`;
 	const hours = Math.floor(minutes / 60);
-	return `${hours}h${String(minutes % 60).padStart(2, "0")}m`;
+	return `${hours}h${String(minutes % 60).padStart(2, "0")}m${String(seconds).padStart(2, "0")}s`;
 }
 
 /** Cumulative active time across generations; parked gaps never count. */
