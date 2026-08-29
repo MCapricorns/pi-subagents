@@ -22,6 +22,12 @@ function readLog(path: string): Array<Record<string, unknown>> {
 	}
 }
 
+/** Every run gets an isolated throwaway session root; nothing lands in the
+ * real per-project tree during tests. */
+function sessionRootForTests(): string {
+	return mkdtempSync(join(tmpdir(), "pi-subagents-test-sessions-"));
+}
+
 describe("RPC JSONL framing", () => {
 	it("uses --mode rpc and preserves split UTF-8 plus U+2028/U+2029 inside LF records", async () => {
 		const dir = mkdtempSync(join(tmpdir(), "pi-subagents-rpc-framing-"));
@@ -42,6 +48,7 @@ for (let index = 0; index < record.length; index++) process.stdout.write(record.
 		try {
 			const result = await runSingleAgent({
 				defaultCwd: process.cwd(),
+				sessionRoot: sessionRootForTests(),
 				agent,
 				agentName: agent.name,
 				task: value,
@@ -76,6 +83,7 @@ for (let index = 0; index < record.length; index++) process.stdout.write(record.
 		try {
 			const result = await runSingleAgent({
 				defaultCwd: process.cwd(),
+				sessionRoot: sessionRootForTests(),
 				agent,
 				agentName: agent.name,
 				task: "/subagents-setup",
@@ -113,6 +121,7 @@ send({ type: "message_end", message: { role: "assistant", content: [{ type: "tex
 		try {
 			await runSingleAgent({
 				defaultCwd: process.cwd(),
+				sessionRoot: sessionRootForTests(),
 				agent,
 				agentName: agent.name,
 				task: "record",
@@ -154,6 +163,7 @@ send({ type: "message_end", message: { role: "assistant", content: [{ type: "tex
 		try {
 			const result = await runSingleAgent({
 				defaultCwd: process.cwd(),
+				sessionRoot: sessionRootForTests(),
 				agent,
 				agentName: agent.name,
 				task: "handshake",
@@ -183,6 +193,7 @@ send({ type: "message_end", message: { role: "assistant", content: [{ type: "tex
 		try {
 			const result = await runSingleAgent({
 				defaultCwd: process.cwd(),
+				sessionRoot: sessionRootForTests(),
 				agent,
 				agentName: agent.name,
 				task: "slow boot",
@@ -224,6 +235,7 @@ send({ type: "agent_settled" });`,
 		try {
 			const running = runSingleAgent({
 				defaultCwd: process.cwd(),
+				sessionRoot: sessionRootForTests(),
 				agent,
 				agentName: agent.name,
 				task: "objective",

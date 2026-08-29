@@ -11,8 +11,7 @@
 import { createHash, randomUUID } from "node:crypto";
 import { type Dirent, mkdirSync, readdirSync, realpathSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { mkdir, mkdtemp, rm } from "node:fs/promises";
-import { tmpdir } from "node:os";
-import { basename, join, resolve } from "node:path";
+import { basename, dirname, join, resolve } from "node:path";
 import type { Message } from "@earendil-works/pi-ai";
 import type { AgentConfig } from "./agents.ts";
 import { DEFAULT_THINKING_LEVEL, type ThinkingLevel } from "./config.ts";
@@ -120,6 +119,18 @@ export const RESULT_ARTIFACT_MAX_FILES_PER_PROJECT = 50;
 // Explicit current prefix plus the strict timestamp/token convention used by 1.1.0.
 const RESULT_ARTIFACT_NAME = /^(?:pi-subagent-\d{13,}-[0-9a-f]{12}|\d{13,}-[a-z0-9]{6})-[\w.-]+\.md$/;
 
+/** Name of the single per-extension root under the pi home directory that
+ * holds every project-scoped artifact (sessions, worktrees, result excerpts).
+ * Nothing long-lived is written to the OS temp directory. */
+export const PROJECT_ROOTS_DIR_NAME = "ferris-pi-subagents";
+
+/** Per-project directory that groups every durable artifact of one checkout:
+ * `<pi home>/ferris-pi-subagents/<project-slug-hash>/{sessions,worktrees,results}`.
+ * Callers join the kind-specific subdirectory themselves. */
+export function getProjectRoot(configPath: string, cwd?: string): string {
+	return join(dirname(configPath), PROJECT_ROOTS_DIR_NAME, resultArtifactProjectKey(cwd));
+}
+
 interface ResultArtifactRetentionOptions {
 	now?: number;
 	maxAgeMs?: number;
@@ -130,7 +141,7 @@ interface ResultArtifactRetentionOptions {
  * symlinks are never touched. Called on each artifact write, so storage stays
  * bounded without deleting a result that the current completion just linked. */
 export function pruneResultArtifacts(
-	rootDir: string = join(tmpdir(), "pi-subagents-results"),
+	rootDir: string,
 	options: ResultArtifactRetentionOptions = {},
 ): void {
 	const now = options.now ?? Date.now();
@@ -189,15 +200,13 @@ export function resultArtifactProjectKey(cwd?: string): string {
 	return `${slug}-${digest}`;
 }
 
-export function writeResultArtifact(output: string, agentName: string, cwd?: string): string {
-	const rootDir = join(tmpdir(), "pi-subagents-results");
-	const dir = join(rootDir, resultArtifactProjectKey(cwd));
-	mkdirSync(dir, { recursive: true });
+export function writeResultArtifact(output: string, agentName: string, resultsRoot: string): string {
+	mkdirSync(resultsRoot, { recursive: true });
 	const safeName = agentName.replace(/[^\w.-]+/g, "_") || "agent";
 	const unique = `pi-subagent-${Date.now()}-${randomUUID().replaceAll("-", "").slice(0, 12)}`;
-	const filePath = join(dir, `${unique}-${safeName}.md`);
+	const filePath = join(resultsRoot, `${unique}-${safeName}.md`);
 	writeFileSync(filePath, output, "utf8");
-	pruneResultArtifacts(rootDir);
+	pruneResultArtifacts(resultsRoot);
 	return filePath;
 }
 
@@ -331,7 +340,7 @@ export function buildResumePrompt(task: string, reason: string): string {
 }
 
 /** Create a fresh private session directory under the given root. */
-export async function createSessionDir(root: string = tmpdir()): Promise<string> {
+export async function createSessionDir(root: string): Promise<string> {
 	await mkdir(root, { recursive: true });
 	return mkdtemp(join(root, "pi-subagent-session-"));
 }
@@ -355,10 +364,9 @@ export interface RunSingleOptions {
 	startupRetryDelaysMs?: readonly number[];
 	sessionDir?: string;
 	sessionId?: string;
-	/** Parent directory for a fresh session directory. Defaults to the OS temp
-	 * dir; dispatch passes the durable state root so retained sessions survive
-	 * reloads and restarts. */
-	sessionRoot?: string;
+	/** Parent directory for a fresh session directory: the project-scoped
+	 * sessions root, so retained sessions survive reloads and restarts. */
+	sessionRoot: string;
 	/** Initial RPC prompt. Kept under the old name to limit caller churn. */
 	stdinText?: string;
 	/** Refresh parent-derived tools immediately before every startup retry and

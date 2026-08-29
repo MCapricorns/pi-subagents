@@ -10,7 +10,7 @@
 
 import { spawn, type ChildProcess } from "node:child_process";
 import { existsSync } from "node:fs";
-import { mkdir, mkdtemp, realpath, rm, stat, writeFile } from "node:fs/promises";
+import { copyFile, mkdir, mkdtemp, realpath, rm, stat, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { isAbsolute, join, relative, resolve } from "node:path";
 
@@ -34,6 +34,8 @@ export interface CommandRunOptions {
 	signal?: AbortSignal;
 	timeoutMs?: number;
 	maxOutputBytes?: number;
+	/** Extra environment entries merged over the inherited environment. */
+	env?: Record<string, string>;
 }
 
 export interface CommandResult {
@@ -54,33 +56,9 @@ export const GIT_COMMAND_KILL_GRACE_MS = 2_000;
 export const GIT_OUTPUT_MAX_BYTES = 64 * 1024 * 1024;
 export const WORKTREE_PATCH_MAX_BYTES = GIT_OUTPUT_MAX_BYTES;
 
-/** Git apply validates and writes in one process, but two apply processes can
- * validate the same old bytes concurrently before either writes. Chain applies
- * per canonical source worktree so an overlapping later patch conflicts instead
- * of silently winning a last-writer race. */
-const originalRootApplyTails = new Map<string, Promise<void>>();
-
-async function withSerializedOriginalRootApply<T>(
-	originalRoot: string,
-	operation: () => Promise<T>,
-): Promise<T> {
-	const key = process.platform === "win32" ? originalRoot.toLowerCase() : originalRoot;
-	const previous = originalRootApplyTails.get(key) ?? Promise.resolve();
-	let release!: () => void;
-	const gate = new Promise<void>((resolveGate) => {
-		release = resolveGate;
-	});
-	const tail = previous.catch(() => undefined).then(() => gate);
-	originalRootApplyTails.set(key, tail);
-	await previous.catch(() => undefined);
-	try {
-		return await operation();
-	} finally {
-		release();
-		if (originalRootApplyTails.get(key) === tail) originalRootApplyTails.delete(key);
-	}
-}
-
+/** Git apply validates and writes in one process. The repository lane
+ * (thread-lifecycle) already serializes every finalize against all writers of
+ * the same canonical checkout, so applies never race each other here. */
 function terminateCommandTree(child: ChildProcess, force: boolean, processGroup: boolean): void {
 	if (process.platform === "win32" && child.pid !== undefined) {
 		const fallback = (): void => {
@@ -126,6 +104,7 @@ export const runCommand: CommandRunner = (command, args, options) =>
 			windowsHide: true,
 			stdio: ["pipe", "pipe", "pipe"],
 			detached: usePosixProcessGroup,
+			...(options.env ? { env: { ...process.env, ...options.env } } : {}),
 		});
 		const stdout: Buffer[] = [];
 		const stderr: Buffer[] = [];
@@ -315,12 +294,14 @@ async function runGit(
 	args: readonly string[],
 	action: string,
 	input?: Buffer,
+	env?: Record<string, string>,
 ): Promise<CommandResult> {
 	let result: CommandResult;
 	try {
 		result = await runner("git", args, {
 			cwd,
 			input,
+			env,
 			timeoutMs: GIT_COMMAND_TIMEOUT_MS,
 			maxOutputBytes: GIT_OUTPUT_MAX_BYTES,
 		});
@@ -560,15 +541,7 @@ class GitWorktreeIsolation implements WorktreeIsolation {
 			if (hadChanges) {
 				await writeFile(this.patchPath, diff.stdout, { flag: "wx" });
 				patchWritten = true;
-				await withSerializedOriginalRootApply(this.originalRoot, () =>
-					runGit(
-						this.runner,
-						this.originalRoot,
-						["apply", "--binary", "--whitespace=nowarn", this.patchPath],
-						`Applying isolated patch to ${this.originalRoot}`,
-					),
-				);
-				integrated = true;
+				integrated = await this.applyPatchThreeWay();
 			}
 
 			const cleanupError = await this.removeAndPrune();
@@ -604,6 +577,60 @@ class GitWorktreeIsolation implements WorktreeIsolation {
 			...(patchWritten && existsSync(this.patchPath) ? { patchPath: this.patchPath } : {}),
 			error,
 		};
+	}
+
+	/** Apply the patch as a three-way merge against its recorded preimage
+	 * blobs, so parallel workers that touched disjoint regions (or disjoint
+	 * files) of the same checkout integrate cleanly instead of the whole patch
+	 * failing on context drift. A genuine overlap still fails and retains the
+	 * artifacts, with conflict markers left in place for the main model to
+	 * resolve. `--3way` implies `--index` and demands a working tree matching
+	 * that index, so everything runs against a private copy of the checkout's
+	 * index: the copy first absorbs the current unstaged state (`add -A`),
+	 * making the working tree "ours" of the merge, and the user's real staged
+	 * state is never touched. */
+	private async applyPatchThreeWay(): Promise<boolean> {
+		const indexCopy = join(this.tempDir, "apply-index");
+		try {
+			const indexPath = resolve(
+				this.originalRoot,
+				(await runGit(
+					this.runner,
+					this.originalRoot,
+					["rev-parse", "--git-path", "index"],
+					`Resolving index path for ${this.originalRoot}`,
+				)).stdout.toString("utf8").trim(),
+			);
+			if (!existsSync(indexPath)) {
+				await runGit(
+					this.runner,
+					this.originalRoot,
+					["apply", "--binary", "--whitespace=nowarn", this.patchPath],
+					`Applying isolated patch to ${this.originalRoot}`,
+				);
+				return true;
+			}
+			await copyFile(indexPath, indexCopy);
+			await runGit(
+				this.runner,
+				this.originalRoot,
+				["add", "-A", "--", "."],
+				`Staging checkout state for isolated merge in ${this.originalRoot}`,
+				undefined,
+				{ GIT_INDEX_FILE: indexCopy },
+			);
+			await runGit(
+				this.runner,
+				this.originalRoot,
+				["apply", "--binary", "--3way", "--whitespace=nowarn", this.patchPath],
+				`Three-way applying isolated patch to ${this.originalRoot}`,
+				undefined,
+				{ GIT_INDEX_FILE: indexCopy },
+			);
+			return true;
+		} finally {
+			await rm(indexCopy, { force: true }).catch(() => undefined);
+		}
 	}
 
 	/** Return an error string instead of throwing so applied work is never retried. */

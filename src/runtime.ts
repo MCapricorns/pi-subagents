@@ -10,7 +10,7 @@
 
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { rmSync } from "node:fs";
-import { BackgroundTaskQueue, MAX_CONCURRENT_SUBAGENTS } from "./background.ts";
+import { resolveSubagentConcurrency, BackgroundTaskQueue } from "./background.ts";
 import {
 	completionGroupTriggersTurn,
 	createCompletionBatcher,
@@ -120,7 +120,7 @@ export interface SubagentRuntime {
 }
 
 export function createRuntime(pi: ExtensionAPI, configPath: string): SubagentRuntime {
-	const backgroundQueue = new BackgroundTaskQueue(MAX_CONCURRENT_SUBAGENTS);
+	const backgroundQueue = new BackgroundTaskQueue(resolveSubagentConcurrency());
 
 	const runtime: SubagentRuntime = {
 		configPath,
@@ -140,7 +140,7 @@ export function createRuntime(pi: ExtensionAPI, configPath: string): SubagentRun
 			const active = monitor
 				.getRuns()
 				.filter((run) => isRunActiveStatus(run.status))
-				.map((run) => ({ id: run.id, agent: run.agent, label: run.label }));
+				.map((run) => ({ id: run.id, agent: run.agent, label: run.label, queued: run.status === "queued" }));
 			const message = {
 				customType: "subagent-result",
 				content: formatCompletionMessage(items) + formatActiveRunsFooter(active),

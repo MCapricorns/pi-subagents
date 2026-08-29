@@ -193,34 +193,55 @@ describe("Git worktree isolation lifecycle", { timeout: 30_000 }, () => {
 		expect(readFileSync(join(repo, "fork-two.txt"), "utf8")).toBe("two\n");
 	});
 
-	it("serializes concurrent overlapping fork integration per source worktree", async () => {
+	it("three-way merges a later fork whose patch context drifted in the checkout", async () => {
 		const repo = createRepo();
 		repos.push(repo);
-		let activeApplies = 0;
-		let maxConcurrentApplies = 0;
-		const delayedRunner: CommandRunner = async (command, args, options) => {
-			if (command !== "git" || args[0] !== "apply") return runCommand(command, args, options);
-			activeApplies++;
-			maxConcurrentApplies = Math.max(maxConcurrentApplies, activeApplies);
-			try {
-				await new Promise((resolveDelay) => setTimeout(resolveDelay, 40));
-				return await runCommand(command, args, options);
-			} finally {
-				activeApplies--;
-			}
-		};
-		const firstFork = await createWorktreeIsolation(repo, { runner: delayedRunner });
-		const secondFork = await createWorktreeIsolation(repo, { runner: delayedRunner });
+		const lines = ["one", "two", "three", "four", "five", "six", "seven"];
+		writeFileSync(join(repo, "tracked.txt"), `${lines.join("\n")}\n`, "utf8");
+		git(repo, ["add", "."]);
+		git(repo, ["commit", "-qm", "seven lines"]);
+
+		const firstFork = await createWorktreeIsolation(repo);
+		const secondFork = await createWorktreeIsolation(repo);
+		retained.push({ repo, handle: firstFork }, { repo, handle: secondFork });
+		// The second fork's patch context includes line one, which the first
+		// fork will have already changed by the time it integrates.
+		writeFileSync(join(firstFork.worktreePath, "tracked.txt"), `${["A1", ...lines.slice(1)].join("\n")}\n`, "utf8");
+		writeFileSync(join(secondFork.worktreePath, "tracked.txt"), `${[...lines.slice(0, 3), "B4", ...lines.slice(4)].join("\n")}\n`, "utf8");
+
+		// Integration is serialized by the repository lane in production; drive
+		// the same order here.
+		expect(await firstFork.finalize()).toMatchObject({ status: "integrated", integrated: true });
+		expect(await secondFork.finalize()).toMatchObject({ status: "integrated", integrated: true });
+		const merged = readFileSync(join(repo, "tracked.txt"), "utf8").split("\n");
+		expect(merged[0]).toBe("A1");
+		expect(merged[3]).toBe("B4");
+		// The three-way apply still never stages anything for the user.
+		expect(git(repo, ["diff", "--cached", "--name-only"])).toBe("");
+	});
+
+	it("retains a later fork that edits the same lines as an integrated one", async () => {
+		const repo = createRepo();
+		repos.push(repo);
+		const firstFork = await createWorktreeIsolation(repo);
+		const secondFork = await createWorktreeIsolation(repo);
 		retained.push({ repo, handle: firstFork }, { repo, handle: secondFork });
 		writeFileSync(join(firstFork.worktreePath, "tracked.txt"), "fork one\n", "utf8");
 		writeFileSync(join(secondFork.worktreePath, "tracked.txt"), "fork two\n", "utf8");
 
-		const results = await Promise.all([firstFork.finalize(), secondFork.finalize()]);
-
-		expect(maxConcurrentApplies).toBe(1);
-		expect(results.map((result) => result.status).sort()).toEqual(["integrated", "retained"]);
-		expect(results.filter((result) => result.integrated)).toHaveLength(1);
-		expect(["fork one\n", "fork two\n"]).toContain(readFileSync(join(repo, "tracked.txt"), "utf8"));
+		expect(await firstFork.finalize()).toMatchObject({ status: "integrated", integrated: true });
+		const conflicted = await secondFork.finalize();
+		expect(conflicted.status).toBe("retained");
+		expect(conflicted.integrated).toBe(false);
+		expect(conflicted.patchPath).toBeDefined();
+		// A genuine overlap leaves conflict markers in the checkout (ours =
+		// the integrated winner, theirs = the losing fork) plus the retained
+		// worktree and patch, so the main model can resolve it in place.
+		const conflictedFile = readFileSync(join(repo, "tracked.txt"), "utf8");
+		expect(conflictedFile).toContain("fork one");
+		expect(conflictedFile).toContain("fork two");
+		expect(conflictedFile).toContain("<<<<<<< ours");
+		expect(git(repo, ["diff", "--cached", "--name-only"])).toBe("");
 	});
 
 	it("recognizes an integrated seed after the parent commits it", async () => {
@@ -281,10 +302,16 @@ describe("Git worktree isolation lifecycle", { timeout: 30_000 }, () => {
 		expect(result.hadChanges).toBe(true);
 		expect(result.worktreePath).toBe(handle.worktreePath);
 		expect(result.patchPath).toBe(handle.patchPath);
-		expect(result.error).toMatch(/Applying isolated patch.*failed/i);
+		expect(result.error).toMatch(/(three-way applying|applying) isolated patch.*failed/i);
 		expect(existsSync(handle.worktreePath)).toBe(true);
 		expect(existsSync(handle.patchPath)).toBe(true);
-		expect(readFileSync(join(repo, "conflict.txt"), "utf8")).toBe("parent version\n");
+		// Both sides of the unresolved overlap stay visible: conflict markers
+		// carry the parent's version in the checkout while the worktree and
+		// patch keep the worker's.
+		const conflictedFile = readFileSync(join(repo, "conflict.txt"), "utf8");
+		expect(conflictedFile).toContain("parent version");
+		expect(conflictedFile).toContain("worker version");
+		expect(conflictedFile).toContain("<<<<<<< ours");
 		expect(readFileSync(join(handle.worktreePath, "conflict.txt"), "utf8")).toBe("worker version\n");
 		expect(readFileSync(handle.patchPath).includes(Buffer.from("worker version"))).toBe(true);
 		expect(git(repo, ["diff", "--cached", "--name-only"])).toBe("");

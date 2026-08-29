@@ -13,13 +13,14 @@
  */
 
 import { withFileMutationQueue } from "@earendil-works/pi-coding-agent";
-import { existsSync } from "node:fs";
+import { existsSync, type Dirent, readdirSync, statSync } from "node:fs";
 import { mkdir, readFile, rename, rm, writeFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import type { UsageStats } from "./rpc-run.ts";
 import type { SubagentThread } from "./runtime.ts";
-import { getResultOutput, isFailedResult, type SingleResult } from "./spawn.ts";
+import { getResultOutput, isFailedResult, getProjectRoot, PROJECT_ROOTS_DIR_NAME, type SingleResult } from "./spawn.ts";
 import {
+	isPathInside,
 	restoreWorktreeIsolation,
 	type IsolationMode,
 	normalizeWorktreeSnapshot,
@@ -29,7 +30,12 @@ import {
 
 export const THREADS_MANIFEST_FILE_NAME = "pi-subagents-threads.json";
 const THREADS_MANIFEST_VERSION = 1;
-export const STATE_DIR_NAME = "pi-subagents-state";
+
+/** Project directories whose newest file has not been touched for this long
+ * are deleted wholesale on load, so per-project sessions/worktrees/results
+ * can never accumulate forever. Parked threads' manifest references always
+ * win over the age rule. */
+export const PROJECT_ROOT_MAX_AGE_MS = 3 * 24 * 60 * 60 * 1_000;
 
 /** Fixed retention: parked work (which may hold unintegrated changes) stops
  * being resumable after a month. Older manifests may still carry settled
@@ -74,10 +80,6 @@ export interface ThreadRecord {
 interface ThreadsManifest {
 	version: number;
 	records: ThreadRecord[];
-}
-
-export function getStateRoot(configPath: string): string {
-	return join(dirname(configPath), STATE_DIR_NAME);
 }
 
 export function getThreadsManifestPath(configPath: string): string {
@@ -334,4 +336,67 @@ export function referencedDurablePaths(records: readonly ThreadRecord[]): Set<st
 		}
 	}
 	return paths;
+}
+
+/** Newest modification time anywhere under root (directories count via their
+ * own entries); undefined when root cannot be read. */
+function newestMtimeMs(root: string, now: number = Date.now()): number | undefined {
+	let newest: number | undefined;
+	const stack: string[] = [root];
+	while (stack.length > 0) {
+		const dir = stack.pop()!;
+		let entries: Dirent[];
+		try {
+			entries = readdirSync(dir, { withFileTypes: true });
+		} catch {
+			continue;
+		}
+		for (const entry of entries) {
+			const path = join(dir, entry.name);
+			let mtime: number;
+			try {
+				mtime = statSync(path).mtimeMs;
+			} catch {
+				continue;
+			}
+			if (mtime > 0 && mtime <= now && (newest === undefined || mtime > newest)) newest = mtime;
+			if (entry.isDirectory() && !entry.isSymbolicLink()) stack.push(path);
+		}
+	}
+	return newest;
+}
+
+/** Delete project directories under the ferris-pi-subagents root that have
+ * been idle past PROJECT_ROOT_MAX_AGE_MS. A directory containing any path the
+ * threads manifest still references is never touched, so parked work outlives
+ * the age rule. Returns the removed directory names. */
+export async function pruneStaleProjectRoots(configPath: string, options: { now?: number } = {}): Promise<string[]> {
+	const now = options.now ?? Date.now();
+	const records = await readThreadRecords(configPath).catch(() => [] as ThreadRecord[]);
+	const referenced = referencedDurablePaths(records);
+	const root = join(dirname(configPath), PROJECT_ROOTS_DIR_NAME);
+	let projects: Dirent[];
+	try {
+		projects = readdirSync(root, { withFileTypes: true });
+	} catch {
+		return [];
+	}
+	const removed: string[] = [];
+	for (const project of projects) {
+		if (!project.isDirectory() || project.isSymbolicLink()) continue;
+		const projectDir = join(root, project.name);
+		if (containsReferencedPath(projectDir, referenced)) continue;
+		const newest = newestMtimeMs(projectDir, now);
+		if (newest === undefined || now - newest <= PROJECT_ROOT_MAX_AGE_MS) continue;
+		await rm(projectDir, { recursive: true, force: true }).catch(() => undefined);
+		if (!existsSync(projectDir)) removed.push(project.name);
+	}
+	return removed;
+}
+
+function containsReferencedPath(projectDir: string, referenced: ReadonlySet<string>): boolean {
+	for (const path of referenced) {
+		if (isPathInside(projectDir, path)) return true;
+	}
+	return false;
 }

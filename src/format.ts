@@ -76,12 +76,14 @@ export function formatUsage(usage: UsageStats): string {
 export interface CompletionFormatOptions {
 	/** Include individual failed-tool errors. Reserved for explicit status lookup. */
 	failedToolDetails?: boolean;
+	/** Project-scoped directory the full result is written to when the output
+	 * is truncated: <projectRoot>/results. */
+	resultRoot?: string;
 }
 
 export function formatCompletionBlock(
 	result: SingleResult,
 	maxResultLines: number,
-	cwd?: string,
 	options: CompletionFormatOptions = {},
 ): string {
 	const failed = isFailedResult(result);
@@ -93,8 +95,7 @@ export function formatCompletionBlock(
 			: "completed";
 	const usage = formatUsage(result.usage);
 	const output = getResultOutput(result);
-	const { text, truncated } = truncateResultOutput(output, maxResultLines);
-	const fallbackNote = result.modelFallbackFrom
+	const { text, truncated } = truncateResultOutput(output, maxResultLines);const fallbackNote = result.modelFallbackFrom
 		? ` (selected model ${result.modelFallbackFrom} failed → main ${result.model ?? "dynamic default"})`
 		: "";
 	const startupRetryNote = result.startupRetries
@@ -132,7 +133,10 @@ export function formatCompletionBlock(
 	}
 	if (truncated) {
 		// The full text lives on disk so the main agent can read it on demand.
-		lines.push("", `(output truncated to ${maxResultLines} lines; full result: ${writeResultArtifact(output, result.agent, result.projectCwd ?? cwd)})`);
+		const artifact = options.resultRoot
+			? writeResultArtifact(output, result.agent, options.resultRoot)
+			: "(result root unavailable)";
+		lines.push("", `(output truncated to ${maxResultLines} lines; full result: ${artifact})`);
 	}
 	return lines.join("\n");
 }

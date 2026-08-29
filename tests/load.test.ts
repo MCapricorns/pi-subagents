@@ -80,7 +80,8 @@ describe("extension registration", () => {
 		expect(tool.promptGuidelines).toBeUndefined();
 		expect(tool.description).toContain("Dispatching never blocks your turn");
 		expect(tool.description).toContain("Put every genuinely independent unit in one `tasks` array");
-		expect(tool.description).toContain("parallel workers default to detached Git worktrees");
+		expect(tool.description).toContain("Every parallel write-capable agent (worker, cleaner, documenter, custom writers) defaults to a detached Git worktree");
+		expect(tool.description).toContain("waiting is pacing, never a rejection or a limit on how much you may dispatch");
 		expect(tool.description).toContain("a failing gate is fixed by the reviewer itself in a write-enabled continuation of the same session and re-reviewed in bounded, converging rounds");
 		expect(tool.description).toContain("A REVIEW_FAIL from a gate you dispatched directly returns its findings to you");
 		expect(tool.description).toContain("never poll or restate delivered results");
@@ -326,7 +327,7 @@ describe("registered tool background dispatch", () => {
 			expect(runId).toBeTypeOf("number");
 			expect(dispatch.content[0].text).toContain(`#${runId} worker`);
 			expect(renderToolResult(tool, dispatch)).toContain(`#${runId} worker`);
-			await capturedTasks[0](controllers[0].signal);
+			await capturedTasks[0](controllers[0].signal, controllers[0]);
 
 			expect(stub.messages).toHaveLength(0);
 			vi.advanceTimersByTime(150);
@@ -373,7 +374,7 @@ send({
 			const tool = stub.tools.find((candidate) => candidate.name === "subagent");
 			const dispatch = await runTool(tool, "call-f", { agent: "worker", task: "Fix the compile error" }, executionContext());
 			const runId = dispatch.details.results[0].runId;
-			await capturedTasks[0](controllers[0].signal);
+			await capturedTasks[0](controllers[0].signal, controllers[0]);
 			vi.advanceTimersByTime(150);
 			expect(stub.messages).toHaveLength(1);
 			const content = stub.messages[0].message.content;
@@ -434,7 +435,7 @@ send({
 				() => {},
 				executionContext(),
 			);
-			await capturedTasks[0](controllers[0].signal);
+			await capturedTasks[0](controllers[0].signal, controllers[0]);
 			const waitResult = await waitPromise;
 
 			const text = waitResult.content[0].text;
@@ -541,7 +542,7 @@ send({
 
 			// No runs yet: empty overview.
 			const empty = await runTool(statusTool, "st-0", {}, executionContext());
-			expect(empty.content[0].text).toContain("Active subagent runs (0)");
+			expect(empty.content[0].text).toContain("Active subagent runs (0 running");
 
 			await runTool(tool, "call-s", { agent: "worker", task: "Inspect the build" }, executionContext());
 
@@ -554,7 +555,7 @@ send({
 				"bash curl -H 'Authorization: Bearer DO_NOT_LEAK_TEST_TOKEN' x?token=DO_NOT_LEAK_QUERY \x1b]0;unsafe\x07",
 			);
 			const overview = await runTool(statusTool, "st-1", {}, executionContext());
-			expect(overview.content[0].text).toContain("Active subagent runs (1)");
+			expect(overview.content[0].text).toContain("Active subagent runs (0 running · 1 queued for a free process slot");
 			expect(overview.content[0].text).toContain(`#${runId} worker`);
 			expect(overview.content[0].text).toContain("Authorization: Bearer <redacted>");
 			expect(overview.content[0].text).not.toContain("DO_NOT_LEAK");
@@ -569,7 +570,7 @@ send({
 			expect(stillActive.content[0].text).not.toContain("\x1b");
 
 			// After the run settles, the same id returns the full result.
-			await capturedTasks[0](controllers[0].signal);
+			await capturedTasks[0](controllers[0].signal, controllers[0]);
 			const settledView = await runTool(statusTool, "st-3", { id: String(runId) }, executionContext());
 			expect(settledView.content[0].text).toContain("### [worker] completed");
 			expect(settledView.content[0].text).toContain("status payload");
@@ -652,7 +653,7 @@ send({
 				expect(renderedDispatch).toContain(`#${runId} ${agent}`);
 			}
 			for (let index = 0; index < capturedTasks.length; index++) {
-				await capturedTasks[index](controllers[index].signal);
+				await capturedTasks[index](controllers[index].signal, controllers[index]);
 			}
 			expect(stub.messages).toHaveLength(0);
 
@@ -685,7 +686,7 @@ send({
 			const tool = stub.tools.find((candidate) => candidate.name === "subagent");
 			await runTool(tool, "call-review-pass", { agent: "reviewer", task: "Review the change" }, executionContext());
 
-			await tasks[0](controllers[0].signal);
+			await tasks[0](controllers[0].signal, controllers[0]);
 			expect(stub.messages).toHaveLength(0);
 			vi.advanceTimersByTime(150);
 			expect(stub.messages).toHaveLength(1);
@@ -718,10 +719,10 @@ send({ type: "message_end", message: { role: "assistant", content: [{ type: "tex
 				}, executionContext());
 
 			expect(capturedTasks).toHaveLength(2);
-			await capturedTasks[0](controllers[0].signal);
+			await capturedTasks[0](controllers[0].signal, controllers[0]);
 			expect(stub.messages).toHaveLength(0);
 
-			await capturedTasks[1](controllers[1].signal);
+			await capturedTasks[1](controllers[1].signal, controllers[1]);
 			expect(stub.messages).toHaveLength(2);
 			expect(stub.messages[0].message.content).toContain("### [reviewer] failed");
 			expect(stub.messages[0].options).toEqual({ deliverAs: "steer", triggerTurn: true });
@@ -749,7 +750,7 @@ send({ type: "message_end", message: { role: "assistant", content: [{ type: "tex
 			const tool = stub.tools.find((candidate) => candidate.name === "subagent");
 			await runTool(tool, "call-truncate", { agent: "reviewer", task: "Review the change" }, executionContext());
 
-			await tasks[0](controllers[0].signal);
+			await tasks[0](controllers[0].signal, controllers[0]);
 			vi.advanceTimersByTime(150);
 			expect(stub.messages).toHaveLength(1);
 			const content = stub.messages[0].message.content as string;
@@ -840,7 +841,7 @@ describe("managed post-writer workflows", () => {
 			register(stub.api);
 			const tool = stub.tools.find((candidate) => candidate.name === "subagent");
 			await runTool(tool, "adaptive-tools-chain", { agent: "worker", task: "Implement adaptive tools" }, executionContext());
-			await tasks[0](controllers[0].signal);
+			await tasks[0](controllers[0].signal, controllers[0]);
 
 			const calls = run.mock.calls.map(([options]) => options);
 			expect(calls.map((options) => options.agentName)).toEqual([
@@ -905,7 +906,7 @@ describe("managed post-writer workflows", () => {
 				const stages = monitor.findRun(parentRunId)?.workflowStages;
 				if (stages) observedProjections.push(stages.map((stage) => ({ ...stage })));
 			});
-			const workflow = tasks[0](controllers[0].signal);
+			const workflow = tasks[0](controllers[0].signal, controllers[0]);
 			await atReviewer;
 
 			const parent = monitor.findRun(parentRunId)!;
@@ -968,7 +969,7 @@ describe("managed post-writer workflows", () => {
 				executionContext(),
 			);
 			const parentRunId = dispatch.details.results[0].runId;
-			await tasks[0](controllers[0].signal);
+			await tasks[0](controllers[0].signal, controllers[0]);
 
 			expect(run.mock.calls.map(([options]) => options.agentName)).toEqual(expectedOrder);
 			expect(stub.messages).toHaveLength(1);
@@ -1002,7 +1003,7 @@ describe("managed post-writer workflows", () => {
 			register(stub.api);
 			const tool = stub.tools.find((candidate) => candidate.name === "subagent");
 			await runTool(tool, "post-writer-gate", { agent: "worker", task: "Implement src/cache.ts" }, executionContext());
-			await tasks[0](controllers[0].signal);
+			await tasks[0](controllers[0].signal, controllers[0]);
 
 			expect(run.mock.calls.map(([options]) => options.agentName)).toEqual(["worker", "reviewer"]);
 			expect(stub.messages).toHaveLength(1);
@@ -1052,7 +1053,7 @@ describe("managed post-writer workflows", () => {
 			register(stub.api);
 			const tool = stub.tools.find((candidate) => candidate.name === "subagent");
 			await runTool(tool, "gate-converge", { agent: "worker", task: "Implement then converge" }, executionContext());
-			await tasks[0](controllers[0].signal);
+			await tasks[0](controllers[0].signal, controllers[0]);
 
 			expect(calls.map((call) => call.agentName)).toEqual(["worker", "reviewer", "reviewer", "reviewer"]);
 			expect(calls[2]!.stdinText).toContain("Apply every one of your own fix instructions");
@@ -1092,7 +1093,7 @@ describe("managed post-writer workflows", () => {
 			register(stub.api);
 			const tool = stub.tools.find((candidate) => candidate.name === "subagent");
 			await runTool(tool, "gate-cap", { agent: "worker", task: "Never converges" }, executionContext());
-			await tasks[0](controllers[0].signal);
+			await tasks[0](controllers[0].signal, controllers[0]);
 
 			// worker + gate + 2 × (fix + re-review); the capped failing re-review
 			// returns to the main agent with the fix-now note.
@@ -1131,7 +1132,7 @@ describe("managed post-writer workflows", () => {
 				const stages = monitor.findRun(parentRunId)?.workflowStages;
 				if (stages) observedProjections.push(stages.map((stage) => ({ ...stage })));
 			});
-			await tasks[0](controllers[0].signal);
+			await tasks[0](controllers[0].signal, controllers[0]);
 
 			expect(run.mock.calls.map(([options]) => options.agentName)).toEqual(["worker", "reviewer"]);
 			expect(observedProjections).toContainEqual([
@@ -1161,7 +1162,7 @@ describe("managed post-writer workflows", () => {
 			register(stub.api);
 			const tool = stub.tools.find((candidate) => candidate.name === "subagent");
 			await runTool(tool, "standalone-documenter", { agent: "documenter", task: "Update README.md for the explicit docs request" }, executionContext());
-			await tasks[0](controllers[0].signal);
+			await tasks[0](controllers[0].signal, controllers[0]);
 			vi.advanceTimersByTime(150);
 
 			expect(run.mock.calls.map(([options]) => options.agentName)).toEqual(["documenter"]);
@@ -1187,7 +1188,7 @@ describe("managed post-writer workflows", () => {
 			register(stub.api);
 			const tool = stub.tools.find((candidate) => candidate.name === "subagent");
 			await runTool(tool, "direct-pass", { agent: "reviewer", task: "Gate pending diff" }, executionContext());
-			await tasks[0](controllers[0].signal);
+			await tasks[0](controllers[0].signal, controllers[0]);
 			vi.advanceTimersByTime(150);
 
 			expect(run.mock.calls.map(([options]) => options.agentName)).toEqual(["reviewer"]);
@@ -1213,7 +1214,7 @@ describe("managed post-writer workflows", () => {
 			register(stub.api);
 			const tool = stub.tools.find((candidate) => candidate.name === "subagent");
 			await runTool(tool, "reverify", { agent: "reviewer", task: "Re-verify the pending diff after my fixes." }, executionContext());
-			await tasks[0](controllers[0].signal);
+			await tasks[0](controllers[0].signal, controllers[0]);
 			vi.advanceTimersByTime(150);
 
 			expect(run.mock.calls.map(([options]) => options.agentName)).toEqual(["reviewer"]);
@@ -1238,7 +1239,7 @@ describe("managed post-writer workflows", () => {
 			register(stub.api);
 			const tool = stub.tools.find((candidate) => candidate.name === "subagent");
 			await runTool(tool, "advisory", { agent: "reviewer", task: "Audit architecture, report only" }, executionContext());
-			await tasks[0](controllers[0].signal);
+			await tasks[0](controllers[0].signal, controllers[0]);
 			vi.advanceTimersByTime(150);
 
 			expect(run.mock.calls.map(([options]) => options.agentName)).toEqual(["reviewer"]);
@@ -1268,7 +1269,7 @@ describe("managed post-writer workflows", () => {
 			register(stub.api);
 			const tool = stub.tools.find((candidate) => candidate.name === "subagent");
 			await runTool(tool, "disabled-roles", { agent: "worker", task: "Implement with selected roles" }, executionContext());
-			await tasks[0](controllers[0].signal);
+			await tasks[0](controllers[0].signal, controllers[0]);
 			vi.advanceTimersByTime(150);
 
 			expect(run.mock.calls.map(([options]) => options.agentName)).toEqual(expectedOrder);
@@ -1307,9 +1308,9 @@ describe("managed post-writer workflows", () => {
 			const tool = stub.tools.find((candidate) => candidate.name === "subagent");
 			await runTool(tool, "shared-writer", { agent: "worker", task: "Shared writer" }, executionContext());
 			await runTool(tool, "direct-reviewer", { agent: "reviewer", task: "Direct advisory" }, executionContext());
-			const writerRun = queued[0](controllers[0].signal);
+			const writerRun = queued[0](controllers[0].signal, controllers[0]);
 			await vi.waitFor(() => expect(order).toEqual(["writer"]));
-			const reviewerRun = queued[1](controllers[1].signal);
+			const reviewerRun = queued[1](controllers[1].signal, controllers[1]);
 			await new Promise((resolveDelay) => setTimeout(resolveDelay, 20));
 			expect(order).toEqual(["writer"]);
 
@@ -1352,9 +1353,9 @@ describe("managed post-writer workflows", () => {
 			const tool = stub.tools.find((candidate) => candidate.name === "subagent");
 			await runTool(tool, "writer-first", { agent: "worker", task: "Writer first", cwd: repo }, executionContext());
 			await runTool(tool, "standalone-docs", { agent: "documenter", task: "Standalone docs", cwd: nested }, executionContext());
-			const writerRun = queued[0](controllers[0].signal);
+			const writerRun = queued[0](controllers[0].signal, controllers[0]);
 			await vi.waitFor(() => expect(order).toEqual(["writer"]));
-			const documenterRun = queued[1](controllers[1].signal);
+			const documenterRun = queued[1](controllers[1].signal, controllers[1]);
 			await new Promise((resolveDelay) => setTimeout(resolveDelay, 20));
 			expect(order).toEqual(["writer"]);
 
@@ -1387,7 +1388,7 @@ describe("managed workflow dispatch", () => {
 			const parentRunId = dispatched.details.results[0].runId as number;
 
 			expect(capturedTasks).toHaveLength(1);
-			await capturedTasks[0](controllers[0].signal);
+			await capturedTasks[0](controllers[0].signal, controllers[0]);
 			vi.advanceTimersByTime(150);
 
 			// No managed continuation: the failing gate is one plain, turn-triggering
@@ -1446,7 +1447,7 @@ describe("managed workflow dispatch", () => {
 			register(stub.api);
 			const tool = stub.tools.find((candidate) => candidate.name === "subagent");
 			await runTool(tool, "call-chain-cwd", { agent: "worker", task: "Implement target repo", cwd: targetRepo }, { ...executionContext(), cwd: outerRepo });
-			await capturedTasks[0](controllers[0].signal);
+			await capturedTasks[0](controllers[0].signal, controllers[0]);
 			expect(capturedTasks).toHaveLength(1);
 
 			expect(run).toHaveBeenCalledTimes(2);
@@ -1503,8 +1504,8 @@ describe("managed workflow dispatch", () => {
 			]);
 			expect(capturedTasks).toHaveLength(2);
 			const chains = [
-				capturedTasks[0](controllers[0].signal),
-				capturedTasks[1](controllers[1].signal),
+				capturedTasks[0](controllers[0].signal, controllers[0]),
+				capturedTasks[1](controllers[1].signal, controllers[1]),
 			];
 			await vi.waitFor(() => expect(workerStarts).toBe(1));
 			await new Promise((resolveDelay) => setTimeout(resolveDelay, 30));
@@ -1593,7 +1594,7 @@ describe("managed workflow dispatch", () => {
 			register(stub.api);
 			const tool = stub.tools.find((candidate) => candidate.name === "subagent");
 			await runTool(tool, "call-no-worker", { agent: "reviewer", task: "Gate without worker" }, executionContext());
-			await capturedTasks[0](controllers[0].signal);
+			await capturedTasks[0](controllers[0].signal, controllers[0]);
 			expect(capturedTasks).toHaveLength(1);
 			vi.advanceTimersByTime(150);
 			expect(stub.messages).toHaveLength(1);
@@ -1627,7 +1628,7 @@ describe("managed workflow dispatch", () => {
 			// crashed reviewer's output is not a review verdict, so no chain may
 			// start and no "auto-fix chain running" activity may appear.
 			const spy = vi.spyOn(spawn, "runSingleAgentWithMainFallback").mockRejectedValueOnce(new Error("spawn infra exploded"));
-			await capturedTasks[0](controllers[0].signal);
+			await capturedTasks[0](controllers[0].signal, controllers[0]);
 			spy.mockRestore();
 
 			expect(capturedTasks).toHaveLength(1);
@@ -1663,7 +1664,7 @@ describe("managed workflow dispatch", () => {
 			// The child crashed (non-zero exit, error stop reason) after emitting a
 			// partial report that ends in VERDICT: REVIEW_FAIL. A crash is not a
 			// review verdict: the failure is delivered and no chain may start.
-			await capturedTasks[0](controllers[0].signal);
+			await capturedTasks[0](controllers[0].signal, controllers[0]);
 
 			expect(capturedTasks).toHaveLength(1);
 			expect(stub.messages).toHaveLength(1);
@@ -1742,7 +1743,7 @@ describe("before_agent_start injection", () => {
 
 			const tool = stub.tools.find((candidate) => candidate.name === "subagent");
 			await runTool(tool, "untrusted-dispatch", { agent: "worker", task: "safe task" }, untrustedCtx);
-			await tasks[0](controllers[0].signal);
+			await tasks[0](controllers[0].signal, controllers[0]);
 			expect(run).toHaveBeenCalledTimes(1);
 			const options = run.mock.calls[0]![0]!;
 			expect(options.agent!.source).toBe("builtin");
@@ -1789,7 +1790,7 @@ describe("selected agent model dispatch", () => {
 		const tool = stub.tools.find((candidate) => candidate.name === "subagent");
 		await runTool(tool, "call-model", { agent: "reviewer", task: "Review the change" }, { ...executionContext({ uiNotify }), model: AVAILABLE[0], modelRegistry: { getAvailable: () => AVAILABLE } });
 		expect(captured).toHaveLength(1);
-		await captured[0](controller.signal);
+		await captured[0](controller.signal, controller);
 		expect(runSpy).toHaveBeenCalledTimes(1);
 		return { controller, runSpy };
 	}

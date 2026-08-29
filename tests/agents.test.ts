@@ -8,6 +8,7 @@ import {
 	loadBuiltinAgents,
 	resolveAgentTools,
 } from "../src/agents.ts";
+import { defaultIsolationMode } from "../src/dispatch.ts";
 
 let builtinDir: string;
 let agentDir: string;
@@ -290,6 +291,23 @@ describe("discoverAgents", () => {
 		expect(byName.get("explorer")?.thinking).toBeUndefined();
 		expect(byName.get("worker")?.tools).toBeUndefined();
 		expect(byName.has("broken")).toBe(false);
+	});
+
+	it("defaults parallel write-capable dispatches to worktree isolation", () => {
+		// Built-in writer roles default to a detached worktree in parallel mode.
+		for (const writer of ["worker", "cleaner", "documenter"]) {
+			expect(defaultIsolationMode("parallel", writer)).toBe("worktree");
+		}
+		// Read-only roles and single dispatches stay on the caller's checkout.
+		expect(defaultIsolationMode("parallel", "explorer")).toBe("shared");
+		expect(defaultIsolationMode("parallel", "reviewer")).toBe("shared");
+		expect(defaultIsolationMode("single", "worker")).toBe("shared");
+		// A custom write-capable agent joins the worktree default when the
+		// execute path passes the catalog verdict; explicit requests win.
+		expect(defaultIsolationMode("parallel", "custom-writer", undefined, true)).toBe("worktree");
+		expect(defaultIsolationMode("parallel", "custom-reader", undefined, false)).toBe("shared");
+		expect(defaultIsolationMode("parallel", "worker", "shared")).toBe("shared");
+		expect(defaultIsolationMode("single", "explorer", "worktree")).toBe("worktree");
 	});
 
 	it("user agents override builtin agents of the same name", () => {

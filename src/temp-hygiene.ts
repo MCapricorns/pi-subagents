@@ -164,31 +164,3 @@ export function sweepOrphanTempDirs(
 	return removed;
 }
 
-/** Remove state-root directories no manifest record references. Fresh
- * directories (a run just created but not yet recorded) are protected by the
- * age cap, since the sweep only runs at extension load before new work. */
-export function sweepUnreferencedState(
-	stateRoot: string,
-	referencedPaths: ReadonlySet<string>,
-	options: SweepOptions = {},
-): number {
-	const now = options.now ?? Date.now();
-	const maxAgeMs = options.unmarkedMaxAgeMs ?? UNREFERENCED_STATE_MAX_AGE_MS;
-	const pathKey = (path: string): string => (process.platform === "win32" ? path.toLowerCase() : path);
-	const referenced = new Set([...referencedPaths].map(pathKey));
-	let entries: Dirent[];
-	try {
-		entries = readdirSync(stateRoot, { withFileTypes: true });
-	} catch {
-		return 0;
-	}
-	let removed = 0;
-	for (const entry of entries) {
-		if (!entry.isDirectory() || entry.isSymbolicLink()) continue;
-		const path = join(stateRoot, entry.name);
-		if (referenced.has(pathKey(path))) continue;
-		const ageMs = directoryAgeMs(entry, stateRoot, now);
-		if (ageMs !== undefined && ageMs > maxAgeMs && removeDir(path)) removed++;
-	}
-	return removed;
-}

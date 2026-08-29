@@ -759,11 +759,13 @@ export function statusIcon(status: RunStatus, theme: Theme): string {
 	}
 }
 
-/** User-facing status label used by tool/status rendering. */
+/** User-facing status label used by tool/status rendering. Queued runs say
+ * so: anything vaguer ("ready") reads like an unexplained cap and made models
+ * stop dispatching while slots were merely pacing. */
 export function statusLabel(status: RunStatus): string {
 	switch (status) {
 		case "queued":
-			return "ready";
+			return "queued";
 		case "running":
 			return "running";
 		case "interrupting":

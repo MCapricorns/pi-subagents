@@ -9,10 +9,9 @@
 import { StringEnum } from "@earendil-works/pi-ai";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { Text } from "@earendil-works/pi-tui";
-import { resolve } from "node:path";
+import { join, resolve } from "node:path";
 import { Type } from "typebox";
-import { discoverAgents, resolveAgentTools, type AgentConfig } from "./agents.ts";
-import { getStateRoot } from "./durable.ts";
+import { discoverAgents, isWriteCapableAgent, resolveAgentTools, type AgentConfig } from "./agents.ts";
 import { loadConfig } from "./config.ts";
 import { formatUsage, queuedResult } from "./format.ts";
 import {
@@ -35,6 +34,7 @@ import {
 import type { SubagentRuntime } from "./runtime.ts";
 import { persistThreadCheckpoint } from "./thread-lifecycle.ts";
 import {
+	getProjectRoot,
 	getResultOutput,
 	isFailedResult,
 	reviewVerdict,
@@ -84,9 +84,23 @@ const SubagentParams = Type.Object({
 	isolation: IsolationSchema,
 });
 
-export function defaultIsolationMode(mode: "single" | "parallel", agentName: string, requested?: IsolationMode): IsolationMode {
+/** Roles that default to worktree isolation in parallel dispatches even when
+ * the live catalog cannot be consulted (render-only call sites). Custom
+ * write-capable agents join them via isWriteCapableAgent on the execute path. */
+const WORKTREE_DEFAULT_AGENTS = new Set(["worker", "cleaner", "documenter"]);
+
+/** Resolve the default isolation for a dispatch. Parallel write-capable agents
+ * get a detached worktree: shared writers serialize on the repository lane, so
+ * defaulting them to shared would turn one parallel batch into a convoy that
+ * also parks process slots. Explicit requests always win. */
+export function defaultIsolationMode(
+	mode: "single" | "parallel",
+	agentName: string,
+	requested?: IsolationMode,
+	writeCapable = WORKTREE_DEFAULT_AGENTS.has(agentName),
+): IsolationMode {
 	if (requested) return requested;
-	return mode === "parallel" && agentName === "worker" ? "worktree" : "shared";
+	return mode === "parallel" && writeCapable ? "worktree" : "shared";
 }
 
 function workflowStageStatus(result: SingleResult, relation?: string): WorkflowStageStatus {
@@ -188,6 +202,17 @@ export function registerSubagentTool(pi: ExtensionAPI, runtime: SubagentRuntime)
 		(mode: "single" | "parallel", background = false) =>
 		(results: SingleResult[]): SubagentDetails => ({ mode, results, background });
 
+	/** Pacing note appended to dispatch confirmations whenever runs are actually
+	 * waiting: states the real slot capacity so ordinary queueing is never
+	 * mistaken for a hard dispatch limit. Empty when everything is running. */
+	const queuePacingNote = (): string => {
+		const runs = monitor.getRuns();
+		const waiting = runs.filter((run) => run.status === "queued").length;
+		if (waiting === 0) return "";
+		const running = runs.filter((run) => run.status === "running" || run.status === "interrupting").length;
+		return ` Pacing: ${running} running · ${waiting} waiting for a free process slot (capacity ${runtime.backgroundQueue.capacity}); waiting runs start automatically as slots free — keep dispatching independent units.`;
+	};
+
 	/** Launch one workflow-internal child in a fresh model context. It sees the
 	 * parent's exact repository/worktree state and is registered by its own id,
 	 * but never enters top-level lifecycle policy or completion delivery.
@@ -241,7 +266,7 @@ export function registerSubagentTool(pi: ExtensionAPI, runtime: SubagentRuntime)
 					onLive,
 					makeDetails: makeDetails("single", true),
 					idleTimeoutMs: stageConfig.idleTimeoutSec * 1000,
-					sessionRoot: getStateRoot(runtime.configPath),
+					sessionRoot: join(getProjectRoot(runtime.configPath, request.executionCwd), "sessions"),
 					...(stage.session
 						? { sessionId: stage.session.sessionId, sessionDir: stage.session.sessionDir, stdinText: task }
 						: {}),
@@ -430,7 +455,8 @@ export function registerSubagentTool(pi: ExtensionAPI, runtime: SubagentRuntime)
 		label: "Subagent",
 		description: [
 			"Dispatch enabled agents as isolated leaf Pi child processes, singly or in parallel. Dispatching never blocks your turn — runs proceed in the background and each completion resumes you automatically; never poll or restate delivered results.",
-			"Put every genuinely independent unit in one `tasks` array (no per-call cap; extras queue for a free process slot). Single tasks share the checkout; parallel workers default to detached Git worktrees — write-capable agents only, and setup failure never silently falls back to shared.",
+			"Put every genuinely independent unit in one `tasks` array (no per-call cap). Process slots scale with the machine; when all slots are busy the extra runs simply wait and start automatically as slots free — waiting is pacing, never a rejection or a limit on how much you may dispatch.",
+			"Every parallel write-capable agent (worker, cleaner, documenter, custom writers) defaults to a detached Git worktree, so writers run concurrently; shared mode serializes same-repository writers. Explicit `shared` keeps the caller's checkout; setup failure never silently falls back to shared.",
 			"Successful worker/cleaner runs get one automatic reviewer gate; a failing gate is fixed by the reviewer itself in a write-enabled continuation of the same session and re-reviewed in bounded, converging rounds. A REVIEW_FAIL from a gate you dispatched directly returns its findings to you — fix them inline or via a briefed worker without waiting for the user.",
 			"A configured child-model failure continues the retained session on the current main model. Resume a parked or settled thread with subagent_control by run id; use subagent_stop for destructive cancellation.",
 		].join(" "),
@@ -504,11 +530,17 @@ export function registerSubagentTool(pi: ExtensionAPI, runtime: SubagentRuntime)
 				// Preserve caller order (and deterministic completion batching) while
 				// preparing each isolated filesystem before its queue entry can start.
 				for (const item of params.tasks) {
+					const catalogAgent = agents.find((candidate) => candidate.name === item.agent);
 					results.push(await startBackground(
 						item.agent,
 						item.task,
 						item.cwd,
-						defaultIsolationMode("parallel", item.agent, item.isolation as IsolationMode | undefined),
+						defaultIsolationMode(
+							"parallel",
+							item.agent,
+							item.isolation as IsolationMode | undefined,
+							catalogAgent ? isWriteCapableAgent(catalogAgent) : undefined,
+						),
 					));
 				}
 				const startedRuns = results.filter((result) => result.exitCode === -1);
@@ -533,7 +565,7 @@ export function registerSubagentTool(pi: ExtensionAPI, runtime: SubagentRuntime)
 					...(failureLines.length > 0
 						? [`${failureLines.length} task${failureLines.length === 1 ? "" : "s"} failed before launch:`, ...failureLines]
 						: []),
-				].join("\n");
+				].join("\n") + queuePacingNote();
 				return {
 					content: [{ type: "text", text }],
 					details: makeDetails("parallel", true)(results),
@@ -551,7 +583,7 @@ export function registerSubagentTool(pi: ExtensionAPI, runtime: SubagentRuntime)
 			}
 			const runRef = result.runId === undefined ? result.agent : `#${result.runId} ${result.agent}`;
 			return {
-				content: [{ type: "text", text: `Started ${runRef} in the background. It never blocks you — dispatch more independent units now or keep working; its result resumes you automatically when you are idle.` }],
+				content: [{ type: "text", text: `Started ${runRef} in the background. It never blocks you — dispatch more independent units now or keep working; its result resumes you automatically when you are idle.${queuePacingNote()}` }],
 				details: makeDetails("single", true)([result]),
 			};
 

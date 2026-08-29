@@ -1,9 +1,11 @@
-import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { getProjectRoot, resultArtifactProjectKey } from "../src/spawn.ts";
+import { existsSync, mkdirSync, mkdtempSync, rmSync, utimesSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import {
-	getStateRoot,
+	PROJECT_ROOT_MAX_AGE_MS,
+	pruneStaleProjectRoots,
 	getThreadsManifestPath,
 	PARKED_RECORD_MAX_AGE_MS,
 	pruneThreadRecords,
@@ -11,7 +13,6 @@ import {
 	referencedDurablePaths,
 	removeThreadRecord,
 	restoredResultFromSummary,
-	STATE_DIR_NAME,
 	THREADS_MANIFEST_FILE_NAME,
 	threadRecordFromThread,
 	upsertThreadRecord,
@@ -189,9 +190,52 @@ describe("thread manifest", () => {
 		expect([...paths].sort()).toEqual(["C:/state/session-a", "C:/state/session-b", "C:/state/worktree-b"].sort());
 	});
 
-	it("places the state root and manifest beside the config", () => {
-		expect(getStateRoot("C:/agent/settings.json")).toBe(join("C:/agent", STATE_DIR_NAME));
+	it("places the manifest beside the config and project roots under the extension home", () => {
 		expect(getThreadsManifestPath("C:/agent/settings.json")).toBe(join("C:/agent", THREADS_MANIFEST_FILE_NAME));
+		expect(getProjectRoot("C:/agent/settings.json")).toBe(join("C:/agent", "ferris-pi-subagents", resultArtifactProjectKey(undefined)));
+	});
+});
+
+describe("stale project-root pruning", () => {
+	it("deletes project directories idle past the age limit, keeps active and referenced ones", async () => {
+		const home = mkdtempSync(join(tmpdir(), "pi-subagents-project-prune-"));
+		try {
+			const configPath = join(home, "settings.json");
+			const roots = join(home, "ferris-pi-subagents");
+			const stale = join(roots, "stale-project");
+			const active = join(roots, "active-project");
+			const referenced = join(roots, "referenced-project");
+			for (const dir of [stale, active, referenced]) mkdirSync(dir, { recursive: true });
+			const now = Date.now();
+			const old = new Date(now - PROJECT_ROOT_MAX_AGE_MS - 60_000);
+			mkdirSync(join(stale, "results"), { recursive: true });
+			writeFileSync(join(stale, "results", "pi-subagent-1.md"), "x", "utf8");
+			utimesSync(join(stale, "results"), old, old);
+			utimesSync(join(stale, "results", "pi-subagent-1.md"), old, old);
+			// Referenced but equally stale: manifest references win.
+			utimesSync(referenced, old, old);
+			await upsertThreadRecord(configPath, makeRecord({
+				sessionDir: join(referenced, "sessions", "kept"),
+			}));
+
+			const removed = await pruneStaleProjectRoots(configPath, { now });
+
+			expect(removed).toEqual(["stale-project"]);
+			expect(existsSync(stale)).toBe(false);
+			expect(existsSync(active)).toBe(true);
+			expect(existsSync(referenced)).toBe(true);
+		} finally {
+			rmSync(home, { recursive: true, force: true });
+		}
+	});
+
+	it("is a no-op when the extension home has no project roots yet", async () => {
+		const home = mkdtempSync(join(tmpdir(), "pi-subagents-project-prune-empty-"));
+		try {
+			expect(await pruneStaleProjectRoots(join(home, "settings.json"))).toEqual([]);
+		} finally {
+			rmSync(home, { recursive: true, force: true });
+		}
 	});
 });
 

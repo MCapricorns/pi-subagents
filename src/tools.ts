@@ -23,7 +23,7 @@ import {
 } from "./monitor.ts";
 import { persistRecoveryRecords, recoveryRecordFromFinalization } from "./recovery.ts";
 import type { SubagentRuntime, SubagentThread } from "./runtime.ts";
-import { CONTROL_QUIESCE_TIMEOUT_MS, quiesced } from "./thread-lifecycle.ts";
+import { CONTROL_QUIESCE_TIMEOUT_MS, projectResultsRoot, quiesced } from "./thread-lifecycle.ts";
 import { getResultOutput, isFailedResult, type SingleResult } from "./spawn.ts";
 import type { WorktreeFinalization } from "./worktree.ts";
 
@@ -176,7 +176,7 @@ export function registerLookupTools(pi: ExtensionAPI, runtime: SubagentRuntime):
 						content: [
 							{ type: "text", text: settledIds.map((id) => {
 								const result = runtime.settledRuns.get(id)!;
-								return formatCompletionBlock(result, config.maxResultLines, result.projectCwd ?? ctx.cwd);
+								return formatCompletionBlock(result, config.maxResultLines, { resultRoot: projectResultsRoot(runtime.configPath, result.projectCwd ?? ctx.cwd) });
 							}).join("\n\n") },
 						],
 						details: {},
@@ -273,7 +273,7 @@ export function registerLookupTools(pi: ExtensionAPI, runtime: SubagentRuntime):
 			const outcomes = await Promise.all(targets.map((run) => waitForRun(run.id)));
 			const blocks = outcomes.map((outcome) =>
 				outcome.result
-					? formatCompletionBlock(outcome.result, config.maxResultLines, outcome.result.projectCwd ?? ctx.cwd)
+					? formatCompletionBlock(outcome.result, config.maxResultLines, { resultRoot: projectResultsRoot(runtime.configPath, outcome.result.projectCwd ?? ctx.cwd) })
 					: (outcome.note ?? "(no outcome)"),
 			);
 			return { content: [{ type: "text", text: blocks.join("\n\n") }], details: {} };
@@ -330,8 +330,7 @@ export function registerLookupTools(pi: ExtensionAPI, runtime: SubagentRuntime):
 									.map((id) => formatCompletionBlock(
 										runtime.settledRuns.get(id)!,
 										config.maxResultLines,
-										runtime.settledRuns.get(id)!.projectCwd ?? ctx.cwd,
-										{ failedToolDetails: true },
+										{ failedToolDetails: true, resultRoot: projectResultsRoot(runtime.configPath, runtime.settledRuns.get(id)!.projectCwd ?? ctx.cwd) },
 									))
 									.join("\n\n"),
 							},
@@ -411,7 +410,12 @@ export function registerLookupTools(pi: ExtensionAPI, runtime: SubagentRuntime):
 			});
 
 			const sections: string[] = [];
-			sections.push(`### Active subagent runs (${activeRuns.length})`);
+			const queuedCount = activeRuns.filter((run) => run.status === "queued").length;
+			const runningCount = activeRuns.length - queuedCount;
+			const pacing = queuedCount > 0
+				? `${runningCount} running · ${queuedCount} queued for a free process slot`
+				: `${runningCount} running`;
+			sections.push(`### Active subagent runs (${pacing}; process capacity ${runtime.backgroundQueue.capacity} — queued runs start automatically, dispatch is never capped)`);
 			sections.push(activeLines.length > 0 ? activeLines.join("\n") : "(none)");
 			sections.push(`### Parked subagent threads (${parkedThreads.length})`);
 			sections.push(parkedLines.length > 0 ? parkedLines.join("\n") : "(none)");
@@ -678,7 +682,7 @@ export function registerLookupTools(pi: ExtensionAPI, runtime: SubagentRuntime):
 				const maxResultLines = (await configPromise)?.maxResultLines ?? DEFAULT_MAX_RESULT_LINES;
 				runtime.sendCompletionGroup(completionResults.map((result) => ({
 					agent: result.agent,
-					block: formatCompletionBlock(result, maxResultLines, result.projectCwd ?? ctx.cwd),
+					block: formatCompletionBlock(result, maxResultLines, { resultRoot: projectResultsRoot(runtime.configPath, result.projectCwd ?? ctx.cwd) }),
 					triggerTurn: true,
 					usage: result.usage,
 				})));

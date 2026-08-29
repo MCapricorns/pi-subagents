@@ -5,7 +5,7 @@ import { Agent } from "@earendil-works/pi-agent-core";
 import { SessionManager } from "@earendil-works/pi-coding-agent";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { loadBuiltinAgents } from "../src/agents.ts";
-import { BackgroundTaskQueue, type BackgroundTask } from "../src/background.ts";
+import { BackgroundTaskQueue, resolveSubagentConcurrency, type BackgroundTask } from "../src/background.ts";
 import { isWorktreeCapableAgent } from "../src/dispatch.ts";
 import { readThreadRecords } from "../src/durable.ts";
 import register from "../src/index.ts";
@@ -412,7 +412,7 @@ describe("logical worktree reuse and guarded finalization", () => {
 			isolation: "worktree",
 		}, root);
 		const runId = dispatched.details.results[0].runId;
-		await queued[0].task(queued[0].controller.signal);
+		await queued[0].task(queued[0].controller.signal, queued[0].controller);
 		expect(firstHandle.state).toBe("no_changes");
 
 		const resumed = await execute(control, {
@@ -424,7 +424,7 @@ describe("logical worktree reuse and guarded finalization", () => {
 		expect(resumed.details ?? {}).toBeDefined();
 		expect(create).toHaveBeenCalledTimes(2);
 		expect(monitor.findRun(runId)?.integrationStatus).toBe("pending");
-		await queued[1].task(queued[1].controller.signal);
+		await queued[1].task(queued[1].controller.signal, queued[1].controller);
 		expect(resumedOptions.cwd).toBe(secondHandle.cwd);
 		expect(resumedOptions.agent.systemPrompt).toContain("temporary detached Git worktree");
 		const sessions = await SessionManager.listAll(resumedOptions.sessionDir);
@@ -473,16 +473,16 @@ describe("logical worktree reuse and guarded finalization", () => {
 			isolation: "worktree",
 		}, root);
 		const runId = dispatched.details.results[0].runId;
-		await queued[0].task(queued[0].controller.signal);
+		await queued[0].task(queued[0].controller.signal, queued[0].controller);
 
 		await execute(control, { action: "resume", id: runId, objective: "generation two" }, root);
-		await queued[1].task(queued[1].controller.signal);
+		await queued[1].task(queued[1].controller.signal, queued[1].controller);
 		expect(secondHandle.state).toBe("no_changes");
 		await execute(control, { action: "resume", id: runId, objective: "generation three" }, root);
 
 		expect(create).toHaveBeenCalledTimes(3);
 		expect(create.mock.calls[2]![1]).toMatchObject({ seedIsIntegrated: true });
-		await queued[2].task(queued[2].controller.signal);
+		await queued[2].task(queued[2].controller.signal, queued[2].controller);
 		rmSync(root, { recursive: true, force: true });
 	});
 
@@ -498,7 +498,7 @@ describe("logical worktree reuse and guarded finalization", () => {
 		const run = vi.spyOn(spawnModule, "runSingleAgentWithMainFallback").mockResolvedValue(emptyResult("route"));
 		const { subagent } = registered();
 		await execute(subagent, { agent: "worker", task: "route", isolation: "worktree" }, root);
-		await queued(new AbortController().signal);
+		await queued(new AbortController().signal, new AbortController());
 		expect(create).toHaveBeenCalledTimes(1);
 		expect(run).toHaveBeenCalledTimes(1);
 		expect(run.mock.calls[0][0].cwd).toBe(handle.cwd);
@@ -549,7 +549,7 @@ describe("logical worktree reuse and guarded finalization", () => {
 			isolation: "worktree",
 		}, root);
 		const parentRunId = dispatched.details.results[0].runId;
-		await queued(controller.signal);
+		await queued(controller.signal, controller);
 
 		expect(run.mock.calls.map(([options]) => options.agentName)).toEqual(["worker", "reviewer"]);
 		expect(order).toEqual(["worker", "reviewer", "integrate"]);
@@ -616,10 +616,10 @@ describe("logical worktree reuse and guarded finalization", () => {
 				isolation: "worktree",
 			}, root);
 			expect(queued).toHaveLength(2);
-			const sharedRun = queued[0]!.task(queued[0]!.controller.signal);
+			const sharedRun = queued[0]!.task(queued[0].controller.signal, queued[0].controller);
 			await waitFor(() => order.includes("shared reviewer start"));
 			let isolatedSettled = false;
-			const isolatedRun = queued[1]!.task(queued[1]!.controller.signal).then(() => {
+			const isolatedRun = queued[1]!.task(queued[1].controller.signal, queued[1].controller).then(() => {
 				isolatedSettled = true;
 			});
 			await waitFor(() => order.includes("isolated reviewer"));
@@ -756,7 +756,7 @@ describe("logical worktree reuse and guarded finalization", () => {
 		const { stub, subagent, status } = registered();
 		const dispatched = await execute(subagent, { agent: "worker", task: "conflict", isolation: "worktree" }, root);
 		const runId = dispatched.details.results[0].runId;
-		await queued(new AbortController().signal);
+		await queued(new AbortController().signal, new AbortController());
 		const full = await execute(status, { id: String(runId) }, root);
 		const text = full.content[0].text;
 		expect(text).toContain("worktree · integration failed");
@@ -875,13 +875,14 @@ describe("shutdown and destructive-stop integration", () => {
 			});
 		});
 		const { stub, subagent, stop, status } = registered();
-		// Concurrency is fixed at four slots; occupy all of them so the isolated
-		// worker below stays queued and its stop can be observed pre-start.
-		for (let index = 1; index <= 4; index++) {
+		// Occupy every process slot (the pool scales with the machine) so the
+		// isolated worker below stays queued and its stop can be observed pre-start.
+		const capacity = resolveSubagentConcurrency();
+		for (let index = 1; index <= capacity; index++) {
 			await execute(subagent, { agent: "explorer", task: `occupy slot ${index}` }, root);
 		}
 		await waitFor(() =>
-			monitor.getRuns().filter((run) => run.task?.startsWith("occupy slot") && run.status === "running").length === 4
+			monitor.getRuns().filter((run) => run.task?.startsWith("occupy slot") && run.status === "running").length === capacity
 		);
 		const queued = await execute(subagent, {
 			agent: "worker",
@@ -936,7 +937,7 @@ describe("shutdown and destructive-stop integration", () => {
 				isolation: "worktree",
 			}, root);
 			const runId = dispatched.details.results[0].runId;
-			await queued[0].task(queued[0].controller.signal);
+			await queued[0].task(queued[0].controller.signal, queued[0].controller);
 
 			const controlling = execute(control, { action: "resume", id: runId }, root);
 			await waitFor(() => create.mock.calls.length === 2);
@@ -988,7 +989,7 @@ describe("shutdown and destructive-stop integration", () => {
 			isolation: "worktree",
 		}, root);
 		const runId = dispatched.details.results[0].runId;
-		await queued[0].task(queued[0].controller.signal);
+		await queued[0].task(queued[0].controller.signal, queued[0].controller);
 
 		const resuming = execute(control, { action: "resume", id: runId }, root);
 		await waitFor(() => create.mock.calls.length === 2);

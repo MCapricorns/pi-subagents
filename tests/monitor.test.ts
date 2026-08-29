@@ -505,7 +505,7 @@ describe("MonitorStore tool tracking", () => {
 
 describe("status labels and timing", () => {
 	it("statusLabel maps statuses to user-facing words", () => {
-		expect(statusLabel("queued")).toBe("ready");
+		expect(statusLabel("queued")).toBe("queued");
 		expect(statusLabel("running")).toBe("running");
 		expect(statusLabel("interrupting")).toBe("interrupting");
 		expect(statusLabel("parked")).toBe("parked");

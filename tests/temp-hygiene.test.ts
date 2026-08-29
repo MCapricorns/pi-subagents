@@ -6,10 +6,8 @@ import {
 	isProcessAlive,
 	killProcessTree,
 	sweepOrphanTempDirs,
-	sweepUnreferencedState,
 	TEMP_OWNER_FILE_NAME,
 	UNMARKED_TEMP_MAX_AGE_MS,
-	UNREFERENCED_STATE_MAX_AGE_MS,
 	writeTempOwnerMarker,
 } from "../src/temp-hygiene.ts";
 
@@ -94,31 +92,3 @@ describe("temp owner markers and orphan sweep", () => {
 	});
 });
 
-describe("state-root sweep", () => {
-	it("removes only unreferenced directories past the grace age", () => {
-		const root = mkdtempSync(join(tmpdir(), "pi-subagents-hygiene-state-"));
-		roots.push(root);
-		const now = Date.now();
-		const referencedSession = makeDir(root, "session-kept");
-		const referencedWorktree = makeDir(root, "worktree-kept");
-		const orphan = makeDir(root, "session-orphan");
-		utimesSync(orphan, new Date(now - UNREFERENCED_STATE_MAX_AGE_MS - 1_000), new Date(now - UNREFERENCED_STATE_MAX_AGE_MS - 1_000));
-		const freshOrphan = makeDir(root, "worktree-fresh");
-
-		const removed = sweepUnreferencedState(
-			root,
-			new Set([referencedSession, referencedWorktree]),
-			{ now },
-		);
-
-		expect(removed).toBe(1);
-		expect(existsSync(referencedSession)).toBe(true);
-		expect(existsSync(referencedWorktree)).toBe(true);
-		expect(existsSync(orphan)).toBe(false);
-		expect(existsSync(freshOrphan)).toBe(true);
-	});
-
-	it("is a no-op when the state root does not exist", () => {
-		expect(sweepUnreferencedState(join(tmpdir(), "pi-subagents-hygiene-missing"), new Set())).toBe(0);
-	});
-});

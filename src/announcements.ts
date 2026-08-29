@@ -6,7 +6,6 @@ import { loadConfig, saveConfig } from "./config.ts";
 import { availableModelsInScope, filterUnavailableModelOverrides } from "./models.ts";
 import { announceRecoveryRecords } from "./recovery.ts";
 import type { SubagentRuntime } from "./runtime.ts";
-import { pruneResultArtifacts } from "./spawn.ts";
 import { installActiveRunsWidget } from "./widget.ts";
 
 /**
@@ -38,7 +37,6 @@ async function migrateUnavailableAgentModels(
 
 export function registerAnnouncements(pi: ExtensionAPI, runtime: SubagentRuntime): void {
 	pi.on("session_start", async (_event, ctx) => {
-		pruneResultArtifacts();
 		if (!existsSync(runtime.configPath)) {
 			ctx.ui.notify(
 				"pi-subagents: no configuration yet — run /subagents-setup to pick agents, models, and thinking strengths. Defaults (all five agents on the main model) apply until then.",

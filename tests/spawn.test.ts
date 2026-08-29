@@ -31,6 +31,7 @@ import {
 	SUBAGENT_STARTUP_RETRY_DELAYS_MS,
 	truncateResultOutput,
 	writeChildRetryPolicyExtension,
+	getProjectRoot,
 	writeResultArtifact,
 	type SingleResult,
 } from "../src/spawn.ts";
@@ -69,6 +70,12 @@ function result(overrides: Partial<SingleResult>): SingleResult {
 		usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, cost: 0, contextTokens: 0, turns: 0 },
 		...overrides,
 	};
+}
+
+/** Every run gets an isolated throwaway session root; nothing lands in the
+ * real per-project tree during tests. */
+function sessionRootForTests(): string {
+	return mkdtempSync(join(tmpdir(), "pi-subagents-test-sessions-"));
 }
 
 describe("getFinalOutput", () => {
@@ -198,6 +205,7 @@ describe("runSingleAgent transport and lifecycle", () => {
 		try {
 			const result = await runSingleAgent({
 				defaultCwd: process.cwd(),
+				sessionRoot: sessionRootForTests(),
 				agent,
 				agentName: agent.name,
 				task: "hello from stdin",
@@ -230,6 +238,7 @@ describe("runSingleAgent transport and lifecycle", () => {
 			] as const) {
 				const result = await runSingleAgent({
 					defaultCwd: process.cwd(),
+					sessionRoot: sessionRootForTests(),
 					agent: { ...agent, tools: [...tools] },
 					agentName: agent.name,
 					task: "inspect tool args",
@@ -267,6 +276,7 @@ describe("runSingleAgent transport and lifecycle", () => {
 		try {
 		const result = await runSingleAgent({
 			defaultCwd: process.cwd(),
+			sessionRoot: sessionRootForTests(),
 			agent,
 			agentName: agent.name,
 			task: "hang after one line",
@@ -309,6 +319,7 @@ describe("runSingleAgent transport and lifecycle", () => {
 		try {
 			const result = await runSingleAgent({
 				defaultCwd: process.cwd(),
+				sessionRoot: sessionRootForTests(),
 				agent,
 				agentName: agent.name,
 				task: "retry terminated streams",
@@ -350,6 +361,7 @@ const timer = setInterval(() => {
 		try {
 			const result = await runSingleAgent({
 				defaultCwd: process.cwd(),
+				sessionRoot: sessionRootForTests(),
 				agent,
 				agentName: agent.name,
 				task: "keep busy",
@@ -547,6 +559,7 @@ describe("runSingleAgentWithMainFallback", () => {
 			const result = await runSingleAgentWithMainFallback(
 				{
 					defaultCwd: process.cwd(),
+					sessionRoot: sessionRootForTests(),
 					agent: { ...agent, model: "openai-codex/gpt-5.6-sol" },
 					agentName: agent.name,
 					task: "review",
@@ -602,6 +615,7 @@ respond(command);`,
 			const result = await runSingleAgentWithMainFallback(
 				{
 					defaultCwd: process.cwd(),
+					sessionRoot: sessionRootForTests(),
 					agent: { ...agent, model: "selected/model" },
 					agentName: agent.name,
 					task: "review",
@@ -635,6 +649,7 @@ respond(command);`,
 			const result = await runSingleAgentWithMainFallback(
 				{
 					defaultCwd: process.cwd(),
+					sessionRoot: sessionRootForTests(),
 					agent: { ...agent, model: "openai-codex/gpt-5.6-sol" },
 					agentName: agent.name,
 					task: "review",
@@ -663,6 +678,7 @@ respond(command);`,
 		try {
 			const result = await runSingleAgentWithMainFallback({
 				defaultCwd: process.cwd(),
+				sessionRoot: sessionRootForTests(),
 				agent: { ...agent, model: "openai-codex/gpt-5.6-sol" },
 				agentName: agent.name,
 				task: "review",
@@ -696,6 +712,7 @@ respond(command);`,
 			const result = await runSingleAgentWithMainFallback(
 				{
 					defaultCwd: process.cwd(),
+					sessionRoot: sessionRootForTests(),
 					agent: { ...agent, model: "anthropic/primary" },
 					agentName: agent.name,
 					task: "run tests",
@@ -784,6 +801,7 @@ describe("runSingleAgentWithMainFallback session resume", () => {
 			const result = await runSingleAgentWithMainFallback(
 				{
 					defaultCwd: process.cwd(),
+					sessionRoot: sessionRootForTests(),
 					agent: { ...agent, model: "openai-codex/gpt-5.6-sol", tools: ["read"] },
 					resolveAgentForAttempt: (candidate) => ({
 						...candidate,
@@ -838,6 +856,7 @@ describe("runSingleAgentWithMainFallback session resume", () => {
 		await withArgv(script, async () => {
 			const result = await runSingleAgentWithMainFallback({
 				defaultCwd: process.cwd(),
+				sessionRoot: sessionRootForTests(),
 				agent: { ...agent, model: "openai-codex/gpt-5.6-sol" },
 				agentName: agent.name,
 				task: "review",
@@ -902,6 +921,7 @@ describe("runSingleAgentWithMainFallback startup retry", () => {
 			await withArgv(script, async () => {
 				const result = await runSingleAgentWithMainFallback({
 					defaultCwd: process.cwd(),
+					sessionRoot: sessionRootForTests(),
 					agent,
 					agentName: agent.name,
 					task: "survive a startup race",
@@ -960,6 +980,7 @@ if (attempt <= 2) {
 				const results = await Promise.all(Array.from({ length: 4 }, (_, index) =>
 					runSingleAgentWithMainFallback({
 						defaultCwd: process.cwd(),
+						sessionRoot: sessionRootForTests(),
 						agent,
 						agentName: agent.name,
 						task: `contender ${index + 1}`,
@@ -1001,6 +1022,7 @@ if (attempt <= 2) {
 			await withArgv(script, async () => {
 				const result = await runSingleAgentWithMainFallback({
 					defaultCwd: process.cwd(),
+					sessionRoot: sessionRootForTests(),
 					agent,
 					agentName: agent.name,
 					task: "do not hang on an invalid delay",
@@ -1032,6 +1054,7 @@ if (attempt <= 2) {
 				});
 				const running = runSingleAgentWithMainFallback({
 					defaultCwd: process.cwd(),
+					sessionRoot: sessionRootForTests(),
 					agent,
 					agentName: agent.name,
 					task: "abort during retry",
@@ -1076,6 +1099,7 @@ process.exit(1);`,
 			await withArgv(script, async () => {
 				const result = await runSingleAgentWithMainFallback({
 					defaultCwd: process.cwd(),
+					sessionRoot: sessionRootForTests(),
 					agent,
 					agentName: agent.name,
 					task: "real error",
@@ -1112,6 +1136,7 @@ process.exit(1);`,
 			await withArgv(script, async () => {
 				const result = await runSingleAgentWithMainFallback({
 					defaultCwd: process.cwd(),
+					sessionRoot: sessionRootForTests(),
 					agent,
 					agentName: agent.name,
 					task: "accepted then crashed",
@@ -1153,6 +1178,7 @@ const count = fs.readFileSync(process.env.LOG_PATH, "utf8").split("\\n").filter(
 				let snapshotIndex = 0;
 				const result = await runSingleAgentWithMainFallback({
 					defaultCwd: process.cwd(),
+					sessionRoot: sessionRootForTests(),
 					agent: { ...agent, tools: ["read"] },
 					resolveAgentForAttempt: (candidate) => ({
 						...candidate,
@@ -1207,6 +1233,7 @@ const count = fs.readFileSync(process.env.LOG_PATH, "utf8").split("\\n").filter(
 			await withArgv(script, async () => {
 				const result = await runSingleAgentWithMainFallback({
 					defaultCwd: process.cwd(),
+					sessionRoot: sessionRootForTests(),
 					agent,
 					agentName: agent.name,
 					task: "perform one side effect",
@@ -1253,6 +1280,7 @@ const count = fs.readFileSync(process.env.LOG_PATH, "utf8").split("\\n").filter(
 				const result = await runSingleAgentWithMainFallback(
 					{
 						defaultCwd: process.cwd(),
+						sessionRoot: sessionRootForTests(),
 						agent: { ...agent, model: "selected/model" },
 						agentName: agent.name,
 						task: "perform one side effect before going idle",
@@ -1295,6 +1323,7 @@ const count = fs.readFileSync(process.env.LOG_PATH, "utf8").split("\\n").filter(
 			await withArgv(script, async () => {
 				const result = await runSingleAgentWithMainFallback({
 					defaultCwd: process.cwd(),
+					sessionRoot: sessionRootForTests(),
 					agent,
 					agentName: agent.name,
 					task: "real model error",
@@ -1439,7 +1468,7 @@ describe("failed tool diagnostics", () => {
 				error: `error-${index + 1}`,
 			})),
 		});
-		const formatted = formatCompletionBlock(failed, 80, undefined, { failedToolDetails: true });
+		const formatted = formatCompletionBlock(failed, 80, { failedToolDetails: true });
 		for (let index = 1; index <= 4; index++) {
 			expect(formatted).toContain(`- tool-${index}: error-${index}`);
 		}
@@ -1472,50 +1501,33 @@ describe("getResultOutput", () => {
 });
 
 describe("writeResultArtifact", () => {
-	it("persists the full output and returns a readable path", () => {
-		const artifactPath = writeResultArtifact("full text\n", "reviewer");
-		expect(artifactPath).toContain("pi-subagents-results");
+	it("persists the full output inside the project results root", () => {
+		const resultsRoot = mkdtempSync(join(isolatedTemp, "results-root-"));
+		const artifactPath = writeResultArtifact("full text\n", "reviewer", resultsRoot);
+		expect(dirname(artifactPath)).toBe(resultsRoot);
 		expect(artifactPath).toContain("reviewer");
 		expect(readFileSync(artifactPath, "utf8")).toBe("full text\n");
-		rmSync(artifactPath, { force: true });
+		rmSync(resultsRoot, { recursive: true, force: true });
 	});
 
-	it("groups results by a stable full-project-path key", () => {
-		const artifactPath = writeResultArtifact("body", "worker", "/home/user/my-project");
-		expect(dirname(artifactPath)).toContain(join("pi-subagents-results", resultArtifactProjectKey("/home/user/my-project")));
-		expect(readFileSync(artifactPath, "utf8")).toBe("body");
-		rmSync(artifactPath, { force: true });
-	});
-
-	it("uses the result's original project cwd instead of the query cwd", () => {
-		const parent = mkdtempSync(join(isolatedTemp, "pi-subagents-result-cwd-"));
-		const original = join(parent, "original", "same-name");
-		const query = join(parent, "query", "same-name");
-		mkdirSync(original, { recursive: true });
-		mkdirSync(query, { recursive: true });
+	it("uses the caller-provided results root from formatCompletionBlock", () => {
+		const resultsRoot = mkdtempSync(join(isolatedTemp, "results-root-"));
 		const formatted = formatCompletionBlock(result({
-			projectCwd: original,
 			messages: [assistant("line one\nline two")],
-		}), 1, query);
+		}), 1, { resultRoot: resultsRoot });
 		const artifact = /full result: (.+)\)/.exec(formatted)?.[1];
 		expect(artifact).toBeDefined();
-		expect(dirname(artifact!)).toContain(resultArtifactProjectKey(original));
-		expect(dirname(artifact!)).not.toContain(resultArtifactProjectKey(query));
-		rmSync(artifact!, { force: true });
-		rmSync(parent, { recursive: true, force: true });
+		expect(dirname(artifact!)).toBe(resultsRoot);
+		rmSync(resultsRoot, { recursive: true, force: true });
 	});
 
-	it("keeps same-named projects in separate retention buckets", () => {
+	it("keeps same-named projects in separate project roots", () => {
 		const parent = mkdtempSync(join(isolatedTemp, "pi-subagents-project-keys-"));
 		const first = join(parent, "one", "same-name");
 		const second = join(parent, "two", "same-name");
 		mkdirSync(first, { recursive: true });
 		mkdirSync(second, { recursive: true });
-		const firstArtifact = writeResultArtifact("one", "worker", first);
-		const secondArtifact = writeResultArtifact("two", "worker", second);
-		expect(dirname(firstArtifact)).not.toBe(dirname(secondArtifact));
-		rmSync(firstArtifact, { force: true });
-		rmSync(secondArtifact, { force: true });
+		expect(getProjectRoot("C:/agent/settings.json", first)).not.toBe(getProjectRoot("C:/agent/settings.json", second));
 		rmSync(parent, { recursive: true, force: true });
 	});
 

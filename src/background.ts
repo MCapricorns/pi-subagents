@@ -9,7 +9,9 @@
  * the user and the main agent instead of it vanishing into the queue.
  */
 
-export type BackgroundTask = (signal: AbortSignal) => Promise<void>;
+import { cpus } from "node:os";
+
+export type BackgroundTask = (signal: AbortSignal, controller: AbortController) => Promise<void>;
 
 interface PendingTask {
 	task: BackgroundTask;
@@ -27,13 +29,14 @@ interface PendingTask {
 	onError?: (error: unknown) => void | Promise<void>;
 }
 
-/** How many sub-agent processes may run at once. This paces execution only —
- * it never rejects work, so a wider parallel `subagent` call simply queues.
- * Fixed by design: the queue sheds load by waiting, so the knob bought nothing
- * worth its maintenance. Only manually dispatched top-level generations hold
- * slots; runtime-initiated managed continuations (gate reviews, documentation
- * sync) suspend their task's slot so they never starve manual dispatches. */
-export const MAX_CONCURRENT_SUBAGENTS = 4;
+/** How many sub-agent processes may run at once, derived from the host instead
+ * of being fixed: children wait on model I/O far more than on CPU, so the pool
+ * scales with cores while the bounds keep tiny machines usable and huge ones
+ * from fanning out into an API-rate-limit wall. Pacing only — the queue never
+ * rejects work; a wider parallel `subagent` call simply waits for a slot. */
+export function resolveSubagentConcurrency(cpuCount: number = cpus().length): number {
+	return Math.min(16, Math.max(4, Math.floor(cpuCount / 2)));
+}
 
 export class BackgroundTaskQueue {
 	private concurrency: number;
@@ -77,9 +80,22 @@ export class BackgroundTaskQueue {
 		return this.completions.get(controller) ?? Promise.resolve();
 	}
 
+	/** Slot count, exposed so dispatch/status output can state the real pacing
+	 * limit instead of leaving queued work looking like an unexplained cap. */
+	get capacity(): number {
+		return this.concurrency;
+	}
+
 	/** Stop counting a running task toward the concurrency limit. Its body keeps
 	 * running under the same abort signal; completion still releases everything
-	 * waitForTask/waitForIdle promise. Frees a slot for queued work immediately. */
+	 * waitForTask/waitForIdle promise. Frees a slot for queued work immediately.
+	 *
+	 * Used by tasks whose execution is serialized elsewhere anyway (managed
+	 * workflow continuations, shared-checkout writers waiting on the repository
+	 * lane): letting such a task also hold a global slot would let waiters
+	 * starve independent work that could start right away. The controller is
+	 * handed to the task body directly, so a task can always suspend itself
+	 * without racing the enqueue() caller's assignment. */
 	suspend(controller: AbortController | undefined): void {
 		if (!controller || this.stopped) return;
 		if (!this.active.delete(controller)) return;
@@ -149,7 +165,7 @@ export class BackgroundTaskQueue {
 			}
 
 			this.active.add(entry.controller);
-			void entry.task(entry.controller.signal)
+			void entry.task(entry.controller.signal, entry.controller)
 				.catch(async (error: unknown) => {
 					// Cancellation is not a failure: aborted work (e.g. session
 					// shutdown) must never be reported as an exception.

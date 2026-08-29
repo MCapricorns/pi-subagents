@@ -25,9 +25,11 @@ burden:
   dispatches and keep working while they run.
 - **Fan-out is the model's call, not a cap.** One parallel dispatch carries as
   many tasks as the work genuinely decomposes into. The runtime paces execution
-  at four concurrent child processes; extra tasks simply queue, so wide batches
-  never fail and never flood your context (results deliver compact, with the
-  full text on disk).
+  at a process-slot pool that scales with the machine (cores/2, bounded 4–16);
+  extra tasks simply queue and start automatically as slots free, so wide
+  batches never fail, never flood your context (results deliver compact, with
+  the full text on disk), and queueing is always visible pacing — never a
+  hidden dispatch limit.
 - **Quality gates are built in and converge by themselves.** Successful
   worker/cleaner runs continue through one independent reviewer gate. A failing
   gate is fixed by the reviewer itself — the same retained session gets write
@@ -123,10 +125,16 @@ subagent({
 ```
 
 The main agent owns the breadth — there is no per-call task cap. The runtime
-runs four child processes at once and queues the rest; a generation that moves
-on to its managed stages (gate review, fix rounds) releases its slot, so managed
-work never starves new dispatches. One child owns one coherent deliverable and
-its files; dependent work starts only after its prerequisite delivers.
+runs a machine-scaled pool of child processes at once and queues the rest;
+dispatch confirmations and `subagent_status` state the live running/queued
+counts and the slot capacity, so pacing is never mistaken for a limit. A
+generation that moves on to its managed stages (gate review, fix rounds) or
+waits on the shared-checkout writer lane releases its slot, so neither managed
+work nor serialized writers starve new dispatches. Parallel write-capable
+agents default to isolated worktrees and integrate via a three-way merge, so
+disjoint edits from parallel workers land without conflicts. One child owns one
+coherent deliverable and its files; dependent work starts only after its
+prerequisite delivers.
 
 ## Review gates and fixes
 
@@ -191,7 +199,8 @@ subagent_control({ action: "resume", id: 7, objective: "Finish the tests." });
 ```
 
 Threads are durable while work is unfinished: parked sessions, worktree
-checkpoints, and state live under `~/.pi/agent/` (not the OS temp directory)
+checkpoints, and state live under `~/.pi/agent/ferris-pi-subagents/<project>/`
+(grouped per project; not the OS temp directory)
 and are restored when pi reloads or restarts — a reload interrupts a live run
 into a restorable checkpoint instead of losing it. A thread that completes or
 fails cleanly drops its durable record, so the threads manifest exists only

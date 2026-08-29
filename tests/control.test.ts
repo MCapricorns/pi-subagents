@@ -306,7 +306,7 @@ describe("queued controls and stale generations", () => {
 		const { subagent, control } = registerWithScript(script);
 		const dispatched = await execute(subagent, { agent: "worker", task: "race" });
 		const runId = dispatched.details.results[0].runId;
-		await captured[0](controllers[0].signal);
+		await captured[0](controllers[0].signal, controllers[0]);
 
 		const [first, second] = await Promise.all([
 			execute(control, { action: "resume", id: runId }),
@@ -316,7 +316,7 @@ describe("queued controls and stale generations", () => {
 		expect(second.content[0].text).toMatch(/resuming|must be parked or settled/i);
 		expect(captured).toHaveLength(2);
 		expect(runSpy).toHaveBeenCalledTimes(1);
-		await captured[1](controllers[1].signal);
+		await captured[1](controllers[1].signal, controllers[1]);
 		expect(runSpy).toHaveBeenCalledTimes(2);
 	});
 
@@ -361,7 +361,7 @@ describe("queued controls and stale generations", () => {
 		const { subagent, control } = registerWithScript(script);
 		await execute(subagent, { agent: "worker", task: "first" });
 		const runId = monitor.getRuns()[0]?.id;
-		await captured[0](controllers[0].signal);
+		await captured[0](controllers[0].signal, controllers[0]);
 		await execute(control, { action: "resume", id: runId, objective: "second" });
 		expect(monitor.findRun(runId!)?.status).toBe("queued");
 
@@ -372,9 +372,9 @@ describe("queued controls and stale generations", () => {
 		});
 		expect(monitor.findRun(runId!)?.status).toBe("queued");
 		expect(monitor.findRun(runId!)?.usage.input).toBe(0);
-		await captured[0](controllers[0].signal);
+		await captured[0](controllers[0].signal, controllers[0]);
 		expect(runSpy).toHaveBeenCalledTimes(1);
-		await captured[1](controllers[1].signal);
+		await captured[1](controllers[1].signal, controllers[1]);
 		expect(runSpy).toHaveBeenCalledTimes(2);
 	});
 });

@@ -139,6 +139,9 @@ export interface ActiveRunFoot {
 	agent: string;
 	/** Optional content label (task-derived) shown next to the agent name. */
 	label?: string;
+	/** True when the run is waiting for a free process slot rather than
+	 * executing; stated so pacing is never mistaken for a stall. */
+	queued?: boolean;
 }
 
 /**
@@ -153,7 +156,10 @@ export function formatActiveRunsFooter(runs: readonly ActiveRunFoot[], maxListed
 	if (runs.length === 0) return "";
 	const listed = runs.slice(0, maxListed);
 	const items = listed
-		.map((run) => `#${run.id} ${run.agent}${run.label ? `·${run.label}` : ""}`)
+		.map((run) => {
+			const tagged = run.queued ? " (queued, starts when a slot frees)" : "";
+			return `#${run.id} ${run.agent}${run.label ? `·${run.label}` : ""}${tagged}`;
+		})
 		.join(", ");
 	const more = runs.length > listed.length ? `, +${runs.length - listed.length} more` : "";
 	return `\n\n⚠ ${runs.length} other run${runs.length === 1 ? "" : "s"} still active: ${items}${more}. Do not conclude the overall task yet — wait for their results (they wake you automatically) or check subagent_status.`;

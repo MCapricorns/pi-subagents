@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { BackgroundTaskQueue } from "../src/background.ts";
+import { BackgroundTaskQueue, resolveSubagentConcurrency } from "../src/background.ts";
 
 function deferred(): { promise: Promise<void>; resolve: () => void } {
 	let resolve!: () => void;
@@ -298,5 +298,34 @@ describe("BackgroundTaskQueue", () => {
 		await nextTask();
 		await queue.waitForIdle();
 		expect(idle).toBe(true);
+	});
+
+	it("hands each task body its own controller so it can suspend itself before its first await", async () => {
+		const queue = new BackgroundTaskQueue(1);
+		const gate = deferred();
+		let secondStarted = false;
+		queue.enqueue((_signal, controller) => {
+			// Synchronous first line, exactly like a shared writer parking itself
+			// on the repository lane: the slot must free before any await.
+			queue.suspend(controller);
+			return gate.promise;
+		});
+		// The self-suspend already ran synchronously inside enqueue(), so the
+		// next task starts without waiting for the first one to finish.
+		queue.enqueue(async () => {
+			secondStarted = true;
+		});
+		expect(secondStarted).toBe(true);
+		gate.resolve();
+		await queue.waitForIdle();
+	});
+
+	it("derives concurrency from the host and reports it via capacity", () => {
+		expect(new BackgroundTaskQueue(resolveSubagentConcurrency(2)).capacity).toBe(4);
+		expect(resolveSubagentConcurrency(2)).toBe(4);
+		expect(resolveSubagentConcurrency(7)).toBe(4);
+		expect(resolveSubagentConcurrency(8)).toBe(4);
+		expect(resolveSubagentConcurrency(16)).toBe(8);
+		expect(resolveSubagentConcurrency(64)).toBe(16);
 	});
 });

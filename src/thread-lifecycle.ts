@@ -12,7 +12,7 @@ import type { ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { existsSync } from "node:fs";
 import { rm } from "node:fs/promises";
 import { realpath } from "node:fs/promises";
-import { resolve } from "node:path";
+import { join, resolve } from "node:path";
 import {
 	discoverAgents,
 	isWriteCapableAgent,
@@ -27,10 +27,9 @@ import {
 	type ThinkingLevel,
 } from "./config.ts";
 import {
-	getStateRoot,
 	readThreadRecords,
-	referencedDurablePaths,
 	removeThreadRecord,
+	pruneStaleProjectRoots,
 	pruneThreadRecords,
 	restoredResultFromSummary,
 	threadRecordFromThread,
@@ -67,6 +66,7 @@ import type { SubagentRuntime, SubagentThread, ThreadState } from "./runtime.ts"
 import { forkRetainedSession } from "./session-fork.ts";
 import {
 	buildResumePrompt,
+	getProjectRoot,
 	getResultOutput,
 	RpcRunControl,
 	isFailedResult,
@@ -82,7 +82,6 @@ import {
 	isProcessAlive,
 	killProcessTree,
 	sweepOrphanTempDirs,
-	sweepUnreferencedState,
 } from "./temp-hygiene.ts";
 import {
 	createWorktreeIsolation,
@@ -403,7 +402,6 @@ export function createBackgroundDispatcher(options: BackgroundDispatcherOptions)
 		const runCtx = baseEnvironment.ctx;
 		const runConfig = baseEnvironment.config;
 		const runAgents = baseEnvironment.agents;
-		const stateRoot = getStateRoot(runtime.configPath);
 		const discoveredAgent = runAgents.find((candidate) => candidate.name === agentName);
 		if (!discoveredAgent) return failedStartResult(agentName, task, `Unknown agent: "${agentName}".`);
 		const resolveLiveAgentTools = (candidate: AgentConfig): AgentConfig =>
@@ -417,6 +415,9 @@ export function createBackgroundDispatcher(options: BackgroundDispatcherOptions)
 		}
 
 		const originalCwd = resolve(cwd ?? runCtx.cwd);
+		const projectRoot = getProjectRoot(runtime.configPath, originalCwd);
+		const sessionsRoot = join(projectRoot, "sessions");
+		const worktreesRoot = join(projectRoot, "worktrees");
 		const previousWorktree = existingThread?.worktree;
 		let worktree = seed?.worktree ?? previousWorktree;
 		if (isolation === "worktree") {
@@ -429,7 +430,7 @@ export function createBackgroundDispatcher(options: BackgroundDispatcherOptions)
 			}
 			if (!worktree) {
 				try {
-					worktree = await createWorktreeIsolation(originalCwd, { tempBaseDir: stateRoot });
+					worktree = await createWorktreeIsolation(originalCwd, { tempBaseDir: worktreesRoot });
 				} catch (error) {
 					return {
 						...failedStartResult(agentName, task, error instanceof Error ? error.message : String(error)),
@@ -548,10 +549,7 @@ export function createBackgroundDispatcher(options: BackgroundDispatcherOptions)
 		const workflowAvailability = workflowAgentAvailability(runAgents);
 		const reserveManagedLane =
 			isolation === "shared" && canStartManagedWorkflow(agent, workflowAvailability);
-		// Assigned once enqueue returns; only read after the generation's first
-		// await, so the managed-continuation slot suspension always sees it.
-		let generationController: AbortController | undefined;
-		const runGeneration = async (backgroundSignal: AbortSignal): Promise<void> => {
+		const runGeneration = async (backgroundSignal: AbortSignal, controller: AbortController): Promise<void> => {
 				if (runtime.threads.get(runId)?.generation !== generation) return;
 				// Model/thinking config may have changed while this generation sat
 				// queued behind the concurrency limit. Re-resolve the route at actual
@@ -587,7 +585,7 @@ export function createBackgroundDispatcher(options: BackgroundDispatcherOptions)
 							control,
 							makeDetails: makeDetails("single", true),
 							idleTimeoutMs: activeIdleTimeoutMs,
-							sessionRoot: stateRoot,
+							sessionRoot: sessionsRoot,
 							...(priorSessionId && priorSessionDir
 								? {
 									sessionId: priorSessionId,
@@ -655,7 +653,7 @@ export function createBackgroundDispatcher(options: BackgroundDispatcherOptions)
 						// concurrency slot so managed chains never starve manual
 						// dispatches. Cancellation and quiescence guarantees are
 						// unchanged — the task stays abortable and awaited.
-						runtime.backgroundQueue.suspend(generationController);
+						runtime.backgroundQueue.suspend(controller);
 						thread.state = "running";
 						// The stable parent row now represents workflow ownership, not whichever
 						// model stage ran most recently. Internal rows own their exact role/model/
@@ -771,7 +769,7 @@ export function createBackgroundDispatcher(options: BackgroundDispatcherOptions)
 							: undefined;
 						const needsFullFinal = failed || (lastStep.result.agent === "reviewer" && finalVerdict !== "pass");
 						if (needsFullFinal) {
-							block += `\n\n${formatCompletionBlock(result, runConfig.maxResultLines, originalCwd)}`;
+							block += `\n\n${formatCompletionBlock(result, runConfig.maxResultLines, { resultRoot: projectResultsRoot(runtime.configPath, result.projectCwd ?? originalCwd) })}`;
 						}
 						if (finalVerdict === "fail") {
 							block += `\n\n${reviewFailFollowUpNote()}`;
@@ -790,10 +788,10 @@ export function createBackgroundDispatcher(options: BackgroundDispatcherOptions)
 					const completion: CompletionMessageItem = {
 						agent: result.agent,
 						block: modelLevel
-							? `${formatCompletionBlock(result, runConfig.maxResultLines, result.projectCwd ?? originalCwd)}\n\n${modelLevelTakeoverNote(result, { runId })}`
+							? `${formatCompletionBlock(result, runConfig.maxResultLines, { resultRoot: projectResultsRoot(runtime.configPath, result.projectCwd ?? originalCwd) })}\n\n${modelLevelTakeoverNote(result, { runId })}`
 							: result.agent === "reviewer" && reviewVerdict(getResultOutput(result)) === "fail"
-								? `${formatCompletionBlock(result, runConfig.maxResultLines, result.projectCwd ?? originalCwd)}\n\n${reviewFailFollowUpNote()}`
-								: formatCompletionBlock(result, runConfig.maxResultLines, result.projectCwd ?? originalCwd),
+								? `${formatCompletionBlock(result, runConfig.maxResultLines, { resultRoot: projectResultsRoot(runtime.configPath, result.projectCwd ?? originalCwd) })}\n\n${reviewFailFollowUpNote()}`
+								: formatCompletionBlock(result, runConfig.maxResultLines, { resultRoot: projectResultsRoot(runtime.configPath, result.projectCwd ?? originalCwd) }),
 						triggerTurn: completionTriggersTurn(result, runConfig.notifyOnReviewPass),
 						usage: result.usage,
 					};
@@ -814,13 +812,21 @@ export function createBackgroundDispatcher(options: BackgroundDispatcherOptions)
 				}
 			};
 		const queuedGeneration = reserveManagedLane
-			? async (backgroundSignal: AbortSignal): Promise<void> => {
-				await runInManagedRepositoryLane(
-					originalCwd,
-					() => runGeneration(backgroundSignal),
-					backgroundSignal,
-				);
-			}
+			? async (backgroundSignal: AbortSignal, controller: AbortController): Promise<void> => {
+					// This task may spend its whole life waiting for the repository
+					// lane (every shared write-capable generation serializes on it).
+					// Holding a process slot while only waiting let a batch of shared
+					// writers park the entire pool and starve independent read-only
+					// dispatches that could have started immediately, so the slot is
+					// released up front; the lane itself still serializes same-repo
+					// writers, and abort/quiesce guarantees are unchanged.
+					runtime.backgroundQueue.suspend(controller);
+					await runInManagedRepositoryLane(
+						originalCwd,
+						() => runGeneration(backgroundSignal, controller),
+						backgroundSignal,
+					);
+				}
 			: runGeneration;
 		const queueController = runtime.backgroundQueue.enqueue(
 			queuedGeneration,
@@ -892,7 +898,7 @@ export function createBackgroundDispatcher(options: BackgroundDispatcherOptions)
 						runtime.sendCompletionGroup([
 							{
 								agent: crashed.agent,
-								block: formatCompletionBlock(crashed, runConfig.maxResultLines, crashed.projectCwd ?? originalCwd),
+								block: formatCompletionBlock(crashed, runConfig.maxResultLines, { resultRoot: projectResultsRoot(runtime.configPath, crashed.projectCwd ?? originalCwd) }),
 								triggerTurn: true,
 								usage: crashed.usage,
 							},
@@ -906,7 +912,6 @@ export function createBackgroundDispatcher(options: BackgroundDispatcherOptions)
 				}
 			},
 		);
-		generationController = queueController;
 		thread.queueController = queueController;
 		thread.generationCompletion = runtime.backgroundQueue.waitForTask(queueController);
 		runtime.runControllers.set(runId, queueController);
@@ -923,7 +928,9 @@ export function createBackgroundDispatcher(options: BackgroundDispatcherOptions)
 export function installThreadLifecycle(thread: SubagentThread, deps: ThreadLifecycleDeps): void {
 	const { runtime, startBackground } = deps;
 	const runId = thread.id;
-	const stateRoot = getStateRoot(runtime.configPath);
+	const projectRoot = getProjectRoot(runtime.configPath, thread.cwd);
+	const sessionsRoot = join(projectRoot, "sessions");
+	const worktreesRoot = join(projectRoot, "worktrees");
 
 	thread.notifyIsolationFailure = (finalization) => {
 		const paths = [finalization.worktreePath, finalization.patchPath].filter(Boolean).join(" · ");
@@ -1058,7 +1065,7 @@ export function installThreadLifecycle(thread: SubagentThread, deps: ThreadLifec
 		return createWorktreeIsolation(thread.cwd, {
 			seedCheckpoint,
 			seedIsIntegrated,
-			tempBaseDir: stateRoot,
+			tempBaseDir: worktreesRoot,
 		});
 	};
 
@@ -1146,7 +1153,7 @@ export function installThreadLifecycle(thread: SubagentThread, deps: ThreadLifec
 						targetCwd: continuationWorktree.cwd,
 						sessionDir: previousSessionDir,
 						sessionId: previousSessionId,
-						targetRoot: stateRoot,
+						targetRoot: sessionsRoot,
 					});
 					runtime.sessionDirs.add(clonedSession.sessionDir);
 					if (!ownsResumeReservation(runtime, thread, reservation)) {
@@ -1250,6 +1257,11 @@ async function discardRestoredRecord(runtime: SubagentRuntime, record: ThreadRec
 		await worktree?.discard().catch(() => undefined);
 	}
 	await removeThreadRecord(runtime.configPath, record.runId).catch(() => undefined);
+}
+
+/** Project-scoped <projectRoot>/results for a completion's artifacts. */
+export function projectResultsRoot(configPath: string, cwd: string | undefined): string {
+	return join(getProjectRoot(configPath, cwd), "results");
 }
 
 function createRestoredThread(
@@ -1377,11 +1389,8 @@ export async function bootstrapDurableState(runtime: SubagentRuntime): Promise<v
 		/* temp hygiene is best-effort */
 	}
 	try {
-		sweepUnreferencedState(
-			getStateRoot(runtime.configPath),
-			referencedDurablePaths(await readThreadRecords(runtime.configPath)),
-		);
+		await pruneStaleProjectRoots(runtime.configPath);
 	} catch {
-		/* state hygiene is best-effort */
+		/* project-root hygiene is best-effort */
 	}
 }
