@@ -88,7 +88,10 @@ function createIsolation(
 	return createWorktreeIsolation(cwd, { ...options, tempBaseDir: base });
 }
 
-describe.concurrent("bounded Git command runner", () => {
+// Spawning real node children is subject to this machine's child-boot latency
+// (antivirus scanning alone can take seconds), so every assertion waits on the
+// bounded-runner's own error, never on a deadline near the boot cost.
+describe.concurrent("bounded Git command runner", { timeout: 30_000 }, () => {
 	it("terminates commands that exceed their deadline", async () => {
 		await expect(runCommand(process.execPath, ["-e", "setInterval(() => {}, 1000)"], {
 			cwd: process.cwd(),
@@ -98,9 +101,13 @@ describe.concurrent("bounded Git command runner", () => {
 	});
 
 	it("terminates commands before buffering oversized output", async () => {
-		await expect(runCommand(process.execPath, ["-e", "process.stdout.write('x'.repeat(4096))"], {
+		// An endless writer makes the assertion about the output cap itself: the
+		// run only settles when the cap terminates it. The safety timeout exists
+		// so a broken spawn cannot hang the suite; it must stay far above child
+		// boot cost or it preempts the cap error on slow machines.
+		await expect(runCommand(process.execPath, ["-e", "setInterval(() => process.stdout.write('x'.repeat(4096)), 1)"], {
 			cwd: process.cwd(),
-			timeoutMs: 5_000,
+			timeoutMs: 30_000,
 			maxOutputBytes: 128,
 		})).rejects.toThrow(/output exceeded 128 bytes/i);
 	});
