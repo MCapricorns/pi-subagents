@@ -262,7 +262,11 @@ strength per agent. Everything else is config-file only, stored at
 The delegation directive is always injected; there is no toggle. Invalid values
 fall back safely, and stale keys — including the former `proactiveInjection`,
 `maxConcurrency`, `maxFixRounds`, and `notifyOnReviewPass` knobs — are dropped
-automatically. At session
+automatically. Built-in roles a newer package no longer ships (such as the
+retired `worker`/`cleaner`/`documenter`/`synthesizer`/`reviewer` set) are pruned
+from `enabledAgents`, `knownAgents`, and the model/thinking tables at first
+load, so the setup wizard never mixes old and new roles; custom agents are
+untouched. At session
 start, model overrides pi no longer reports are removed with a one-time notice. If
 pi's own session compaction fails mid-thread, a notice surfaces the error and the
 automatic retry instead of failing quietly.

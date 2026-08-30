@@ -350,10 +350,12 @@ describe("settings preservation", () => {
 	it("keeps unrelated agent model and thinking choices when the enabled set changes", async () => {
 		const dir = mkdtempSync(join(tmpdir(), "pi-subagents-setup-preserve-agent-"));
 		const configPath = join(dir, "pi-subagents.json");
+		// A custom agent is the "unrelated" record here: a removed built-in name
+		// would be pruned on load, which is a different guarantee.
 		const original = existingConfig({
-			enabledAgents: ["explorer", "documenter"],
-			agentModels: { documenter: "deepseek/deepseek-v4-flash" },
-			agentThinkingLevels: { documenter: "max" },
+			enabledAgents: ["explorer", "my-custom-agent"],
+			agentModels: { "my-custom-agent": "deepseek/deepseek-v4-flash" },
+			agentThinkingLevels: { "my-custom-agent": "max" },
 		});
 		writeFileSync(configPath, JSON.stringify(original), "utf8");
 		const ctx = setupContext(dir, {
@@ -371,8 +373,8 @@ describe("settings preservation", () => {
 			await runSetup(ctx, configPath);
 			const saved = JSON.parse(readFileSync(configPath, "utf8"));
 			expect(saved.enabledAgents).toContain("executor");
-			expect(saved.agentModels.documenter).toBe("deepseek/deepseek-v4-flash");
-			expect(saved.agentThinkingLevels.documenter).toBe("max");
+			expect(saved.agentModels["my-custom-agent"]).toBe("deepseek/deepseek-v4-flash");
+			expect(saved.agentThinkingLevels["my-custom-agent"]).toBe("max");
 		} finally {
 			rmSync(dir, { recursive: true, force: true });
 		}

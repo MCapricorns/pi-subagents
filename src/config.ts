@@ -15,6 +15,13 @@ import { getAgentDir, withFileMutationQueue } from "@earendil-works/pi-coding-ag
 /** Full catalog of agents shipped with the package (selectable in /subagents-setup). */
 export const BUILTIN_AGENT_NAMES = ["explorer", "executor"] as const;
 
+/** Built-in agent names this package no longer ships. Loading an older config
+ * prunes them from every record so the setup wizard, dispatch catalog, and
+ * model-routing table never surface dead roles. Custom names stay untouched —
+ * except one that reuses a removed built-in name, which this cleanup cannot
+ * distinguish and deliberately treats as retired. */
+export const REMOVED_BUILTIN_AGENT_NAMES = ["worker", "cleaner", "documenter", "synthesizer", "reviewer"] as const;
+
 /** Agents enabled out of the box on a fresh install. */
 export const DEFAULT_ENABLED_AGENTS: readonly string[] = [...BUILTIN_AGENT_NAMES];
 
@@ -184,6 +191,29 @@ function defaultConfig(): SubagentsConfig {
 }
 
 /**
+ * Drop every removed built-in role from an already-normalized config: enabled
+ * and known lists, plus per-agent model and thinking routes. The schema-upgrade
+ * persistence in loadConfig writes the pruned shape back to disk.
+ */
+function pruneRemovedBuiltins(config: SubagentsConfig): SubagentsConfig {
+	const removed = new Set<string>(REMOVED_BUILTIN_AGENT_NAMES);
+	const filter = (names: readonly string[]): string[] => names.filter((name) => !removed.has(name));
+	const agentModels = { ...config.agentModels };
+	const agentThinkingLevels = { ...config.agentThinkingLevels };
+	for (const name of REMOVED_BUILTIN_AGENT_NAMES) {
+		delete agentModels[name];
+		delete agentThinkingLevels[name];
+	}
+	return {
+		...config,
+		enabledAgents: filter(config.enabledAgents),
+		knownAgents: filter(config.knownAgents),
+		agentModels,
+		agentThinkingLevels,
+	};
+}
+
+/**
  * A shipped agent the config has never recorded is new in this release; the
  * stale allow-list must not keep it dark. Enable it and adopt explorer's
  * configured model and thinking level, so an upgrade surfaces the new role on
@@ -216,6 +246,7 @@ function adoptNewBuiltins(config: SubagentsConfig): SubagentsConfig {
  * A file from an older version (missing newer keys or holding extra keys) is
  * normalized and persisted back, so the on-disk config stays current. Built-in
  * agents the file has never seen are adopted: enabled with explorer's route.
+ * Built-in roles this package retired are pruned from every record.
  */
 export async function loadConfig(configPath: string = getConfigPath()): Promise<SubagentsConfig> {
 	let text: string;
@@ -233,7 +264,10 @@ export async function loadConfig(configPath: string = getConfigPath()): Promise<
 		return defaultConfig();
 	}
 
-	const config = adoptNewBuiltins(normalizeConfig(parsed));
+	// Adopt newly shipped roles first so the prune below works on the final
+	// catalog, then drop roles this package stopped shipping and persist the
+	// cleaned shape back to disk.
+	const config = pruneRemovedBuiltins(adoptNewBuiltins(normalizeConfig(parsed)));
 
 	// Schema upgrade: persist the normalized shape when the file gained fields
 	// (new version) or dropped invalid ones.

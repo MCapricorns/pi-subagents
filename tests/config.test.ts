@@ -188,10 +188,10 @@ describe("loadConfig", () => {
 		}), "utf8");
 
 		const config = await loadConfig(path);
-		// Unseen names append in catalog order; previously known ones keep their
-		// place. Removed-role names in an old config stay listed but inert.
-		expect(config.enabledAgents).toEqual(["explorer", "worker", "reviewer", "executor"]);
-		expect([...config.knownAgents].sort()).toEqual(["executor", "explorer", "reviewer", "worker"]);
+		// Retired names in an old config are pruned; the unseen executor is
+		// adopted in catalog order after them.
+		expect(config.enabledAgents).toEqual(["explorer", "executor"]);
+		expect([...config.knownAgents].sort()).toEqual(["executor", "explorer"]);
 		// The adopted role follows the explorer lane the user picked.
 		expect(config.agentModels).toEqual({
 			explorer: "anthropic/claude-haiku-4-5",
@@ -203,7 +203,7 @@ describe("loadConfig", () => {
 		});
 
 		const saved = JSON.parse(readFileSync(path, "utf8"));
-		expect(saved.enabledAgents).toHaveLength(4);
+		expect(saved.enabledAgents).toHaveLength(2);
 		expect(saved.agentModels.executor).toBe("anthropic/claude-haiku-4-5");
 
 		// Reloading the persisted shape is a no-op: the adoption happened once.
@@ -224,5 +224,44 @@ describe("loadConfig", () => {
 
 		const saved = JSON.parse(readFileSync(path, "utf8"));
 		expect(saved.enabledAgents).toEqual(["explorer"]);
+	});
+
+	it("prunes retired built-in roles from every record and keeps custom names", async () => {
+		const dir = mkdtempSync(join(tmpdir(), "pi-subagents-test-"));
+		const path = join(dir, "pi-subagents.json");
+		writeFileSync(path, JSON.stringify({
+			enabledAgents: ["explorer", "worker", "cleaner", "documenter", "synthesizer", "reviewer", "my-custom-agent"],
+			knownAgents: ["explorer", "worker", "cleaner", "documenter", "synthesizer", "reviewer"],
+			agentModels: {
+				explorer: "anthropic/live",
+				worker: "anthropic/old",
+				reviewer: "anthropic/gate",
+				"my-custom-agent": "anthropic/custom",
+			},
+			agentThinkingLevels: { explorer: "low", reviewer: "high" },
+		}), "utf8");
+
+		const config = await loadConfig(path);
+		// The retired names vanish; executor is adopted as unseen; the custom
+		// role survives untouched.
+		expect(config.enabledAgents).toEqual(["explorer", "my-custom-agent", "executor"]);
+		expect(config.knownAgents).toEqual(["explorer", "my-custom-agent", "executor"]);
+		expect(config.agentModels).toEqual({
+			explorer: "anthropic/live",
+			"my-custom-agent": "anthropic/custom",
+			executor: "anthropic/live",
+		});
+		expect(config.agentThinkingLevels).toEqual({ explorer: "low", executor: "low" });
+
+		// The pruned shape is persisted, so a stale model route can never come back.
+		const saved = JSON.parse(readFileSync(path, "utf8"));
+		expect(saved.enabledAgents).toEqual(["explorer", "my-custom-agent", "executor"]);
+		expect(saved.agentModels).not.toHaveProperty("reviewer");
+		expect(saved.agentModels).not.toHaveProperty("worker");
+		expect(saved.agentThinkingLevels).not.toHaveProperty("reviewer");
+
+		// Reloading the persisted shape is a no-op.
+		const reloaded = await loadConfig(path);
+		expect(reloaded).toEqual(config);
 	});
 });
