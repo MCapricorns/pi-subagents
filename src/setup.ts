@@ -248,6 +248,9 @@ async function runFullSetup(ctx: ExtensionCommandContext, configPath: string, ba
 
 	const next: SubagentsConfig = {
 		enabledAgents: enabled,
+		// The wizard surfaces every built-in, so an untoggled one was seen and
+		// deliberately left off — record them all as known.
+		knownAgents: [...BUILTIN_AGENT_NAMES],
 		agentModels,
 		// Full setup returns every agent to capability-aware Auto thinking.
 		agentThinkingLevels: {},
@@ -283,23 +286,17 @@ async function runMenu(ctx: ExtensionCommandContext, configPath: string, config:
 			const enabled = await pickEnabledAgents(ctx, config.enabledAgents);
 			if (enabled === undefined) continue;
 			next.enabledAgents = enabled;
-			// A newly enabled role inherits a kindred role's configured model and
+			// A newly enabled role inherits explorer's configured model and
 			// thinking level, so the file reflects what it will actually run
-			// instead of silently falling back to the current main model: cleaner
-			// follows the reviewer; documenter and synthesizer intentionally
-			// follow the faster explorer route.
-			const modelInheritance: ReadonlyArray<[agent: string, from: string]> = [
-				["cleaner", "reviewer"],
-				["documenter", "explorer"],
-				["synthesizer", "explorer"],
-			];
-			for (const [agent, from] of modelInheritance) {
-				if (config.enabledAgents.includes(agent) || !enabled.includes(agent)) continue;
-				if (!next.agentModels[agent] && config.agentModels[from]) {
-					next.agentModels[agent] = config.agentModels[from];
+			// instead of silently falling back to the current main model: these
+			// roles do light migration-grade work on the fast explorer lane.
+			for (const agent of enabled) {
+				if (agent === "explorer" || config.enabledAgents.includes(agent)) continue;
+				if (!next.agentModels[agent] && config.agentModels.explorer) {
+					next.agentModels[agent] = config.agentModels.explorer;
 				}
-				if (!next.agentThinkingLevels[agent] && config.agentThinkingLevels[from]) {
-					next.agentThinkingLevels[agent] = config.agentThinkingLevels[from];
+				if (!next.agentThinkingLevels[agent] && config.agentThinkingLevels.explorer) {
+					next.agentThinkingLevels[agent] = config.agentThinkingLevels.explorer;
 				}
 			}
 			next.agentModels = keepAgentEntries(next.agentModels, enabled);

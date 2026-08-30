@@ -305,6 +305,7 @@ strength per agent. Everything else is config-file only, stored at
 ```json
 {
   "enabledAgents": ["explorer", "worker", "cleaner", "documenter", "synthesizer", "reviewer"],
+  "knownAgents": ["explorer", "worker", "cleaner", "documenter", "synthesizer", "reviewer"],
   "agentModels": { "explorer": "anthropic/claude-haiku-4-5" },
   "agentThinkingLevels": { "reviewer": "high" },
   "notifyOnReviewPass": false,
@@ -317,6 +318,7 @@ strength per agent. Everything else is config-file only, stored at
 | Field                 | Meaning                                                                           |
 | --------------------- | --------------------------------------------------------------------------------- |
 | `enabledAgents`       | Agents available for discovery and delegation. `[]` disables all.                 |
+| `knownAgents`         | Built-ins this config has seen; automatic bookkeeping — never edit it.            |
 | `agentModels`         | Optional `provider/model-id` per agent; missing = current main model.             |
 | `agentThinkingLevels` | Optional manual level per agent; missing = Auto.                                  |
 | `notifyOnReviewPass`  | Deliver a standalone passing gate without waking the main agent. Default `false`. |
@@ -330,6 +332,13 @@ fall back safely, and stale keys — including the former `proactiveInjection`,
 start, model overrides pi no longer reports are removed with a one-time notice. If
 pi's own session compaction fails mid-thread, a notice surfaces the error and the
 automatic retry instead of failing quietly.
+
+Agents shipped by a newer package version turn themselves on at the next
+session: a built-in the config has never seen is adopted into `enabledAgents`
+and follows explorer's configured model and thinking level — the fast lane
+these light roles need — while an agent you disabled stays disabled
+(`knownAgents` is what tells the two cases apart). Enabling a role in
+`/subagents-setup` adopts the same explorer route.
 
 ## Custom agents
 

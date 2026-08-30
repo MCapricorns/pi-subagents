@@ -2,7 +2,7 @@ import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "nod
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it, vi } from "vitest";
-import { DEFAULT_CONFIG, type SubagentsConfig } from "../src/config.ts";
+import { BUILTIN_AGENT_NAMES, DEFAULT_CONFIG, type SubagentsConfig } from "../src/config.ts";
 import { CURRENT_MAIN_MODEL, buildModelPickerItems } from "../src/models.ts";
 import { runSetup } from "../src/setup.ts";
 import { pickerItemSearchText } from "../src/ui.ts";
@@ -380,15 +380,16 @@ describe("settings preservation", () => {
 });
 
 describe("enable/disable flow", () => {
-	it("newly enabling cleaner inherits the reviewer's model and thinking", async () => {
+	it("newly enabling cleaner inherits the explorer model and thinking", async () => {
 		const dir = mkdtempSync(join(tmpdir(), "pi-subagents-setup-enable-"));
 		const configPath = join(dir, "pi-subagents.json");
 			writeFileSync(
 				configPath,
 				JSON.stringify({
 					enabledAgents: ["explorer", "worker", "reviewer"],
-					agentModels: { reviewer: "anthropic/sonnet" },
-					agentThinkingLevels: { reviewer: "low" },
+					knownAgents: [...BUILTIN_AGENT_NAMES],
+					agentModels: { explorer: "anthropic/haiku" },
+					agentThinkingLevels: { explorer: "low" },
 				}),
 				"utf8",
 			);
@@ -408,8 +409,8 @@ describe("enable/disable flow", () => {
 				await runSetup(ctx, configPath);
 				const saved = JSON.parse(readFileSync(configPath, "utf8"));
 				expect(saved.enabledAgents).toEqual(["explorer", "worker", "reviewer", "cleaner"]);
-				expect(saved.agentModels).toEqual({ reviewer: "anthropic/sonnet", cleaner: "anthropic/sonnet" });
-				expect(saved.agentThinkingLevels).toEqual({ reviewer: "low", cleaner: "low" });
+				expect(saved.agentModels).toEqual({ explorer: "anthropic/haiku", cleaner: "anthropic/haiku" });
+				expect(saved.agentThinkingLevels).toEqual({ explorer: "low", cleaner: "low" });
 			} finally {
 				rmSync(dir, { recursive: true, force: true });
 			}
@@ -422,6 +423,7 @@ describe("enable/disable flow", () => {
 				configPath,
 				JSON.stringify({
 					enabledAgents: ["explorer", "worker", "cleaner", "reviewer"],
+					knownAgents: [...BUILTIN_AGENT_NAMES],
 					agentModels: { explorer: "anthropic/haiku" },
 					agentThinkingLevels: { explorer: "low" },
 				}),

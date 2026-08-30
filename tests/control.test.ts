@@ -3,6 +3,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { BackgroundTaskQueue, type BackgroundTask } from "../src/background.ts";
+import { BUILTIN_AGENT_NAMES } from "../src/config.ts";
 import register from "../src/index.ts";
 import { monitor } from "../src/monitor.ts";
 import * as spawn from "../src/spawn.ts";
@@ -38,6 +39,7 @@ beforeEach(() => {
 	process.env.PI_CODING_AGENT_DIR = testDir;
 	writeFileSync(join(testDir, "pi-subagents.json"), JSON.stringify({
 		enabledAgents: ["worker"],
+		knownAgents: [...BUILTIN_AGENT_NAMES],
 		announcedFeatures: ["cleanerDefaulted", "documenterDefaulted"],
 	}), "utf8");
 });
@@ -129,6 +131,7 @@ send({ type: "message_end", message: { role: "assistant", content: [{ type: "tex
 	it("stops during the managed gate and publishes its partial instead of the old writer", async () => {
 		writeFileSync(join(testDir, "pi-subagents.json"), JSON.stringify({
 			enabledAgents: ["worker", "documenter", "reviewer"],
+			knownAgents: [...BUILTIN_AGENT_NAMES],
 			announcedFeatures: ["cleanerDefaulted", "documenterDefaulted"],
 		}), "utf8");
 		const script = join(testDir, "unused-doc-stop.mjs");
@@ -208,6 +211,7 @@ describe("queued controls and stale generations", () => {
 		writeFileSync(join(testDir, "pi-subagents.json"), JSON.stringify({
 			maxConcurrency: 1,
 			enabledAgents: ["worker"],
+			knownAgents: [...BUILTIN_AGENT_NAMES],
 			announcedFeatures: ["cleanerDefaulted", "documenterDefaulted"],
 		}), "utf8");
 		const oldSessionDir = mkdtempSync(join(testDir, "completed-session-"));

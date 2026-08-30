@@ -47,6 +47,11 @@ export const IDLE_TIMEOUT_SEC_LIMIT = 600;
 export interface SubagentsConfig {
 	/** Agent names that are discoverable and injected. Fresh-install default: every built-in agent. */
 	enabledAgents: string[];
+	/** Built-in names this config has already surfaced. A shipped agent outside
+	 * this set is new in an upgrade: loadConfig enables it instead of leaving it
+	 * dark behind a stale allow-list. Bookkeeping only — maintained automatically,
+	 * and it is what keeps an explicit disable from being undone. */
+	knownAgents: string[];
 	/** Per-agent model override, keyed by agent name, as "provider/model-id". */
 	agentModels: Record<string, string>;
 	/** Optional per-agent thinking preference. Runtime clamps it to the effective model's supported levels. */
@@ -74,6 +79,7 @@ export interface SubagentsConfig {
 
 export const DEFAULT_CONFIG: SubagentsConfig = {
 	enabledAgents: [...DEFAULT_ENABLED_AGENTS],
+	knownAgents: [...BUILTIN_AGENT_NAMES],
 	agentModels: {},
 	agentThinkingLevels: {},
 	notifyOnReviewPass: false,
@@ -121,6 +127,20 @@ export function normalizeConfig(raw: unknown): SubagentsConfig {
 		);
 		// An explicitly empty array is honored; duplicates collapse.
 		config.enabledAgents = [...new Set(names.map((name) => name.trim()))];
+	}
+
+	// Known-agent bookkeeping starts empty for a parsed record (not the fresh
+	// default) so loadConfig can still tell which shipped agents this config
+	// has never seen. Every enabled name was necessarily surfaced.
+	config.knownAgents = [];
+	if (Array.isArray(raw.knownAgents)) {
+		const names = raw.knownAgents.filter(
+			(name): name is string => typeof name === "string" && name.trim().length > 0,
+		);
+		config.knownAgents = [...new Set(names.map((name) => name.trim()))];
+	}
+	for (const name of config.enabledAgents) {
+		if (!config.knownAgents.includes(name)) config.knownAgents.push(name);
 	}
 
 	if (isRecord(raw.agentModels)) {
@@ -174,10 +194,38 @@ function defaultConfig(): SubagentsConfig {
 }
 
 /**
+ * A shipped agent the config has never recorded is new in this release; the
+ * stale allow-list must not keep it dark. Enable it and adopt explorer's
+ * configured model and thinking level, so an upgrade surfaces the new role on
+ * the fast light-task lane instead of silently spending the main model.
+ */
+function adoptNewBuiltins(config: SubagentsConfig): SubagentsConfig {
+	const known = new Set(config.knownAgents);
+	const fresh = BUILTIN_AGENT_NAMES.filter((name) => !known.has(name));
+	if (fresh.length === 0) return config;
+	const agentModels = { ...config.agentModels };
+	const agentThinkingLevels = { ...config.agentThinkingLevels };
+	for (const name of fresh) {
+		if (!agentModels[name] && config.agentModels.explorer) agentModels[name] = config.agentModels.explorer;
+		if (!agentThinkingLevels[name] && config.agentThinkingLevels.explorer) {
+			agentThinkingLevels[name] = config.agentThinkingLevels.explorer;
+		}
+	}
+	return {
+		...config,
+		enabledAgents: [...config.enabledAgents, ...fresh],
+		knownAgents: [...known, ...fresh],
+		agentModels,
+		agentThinkingLevels,
+	};
+}
+
+/**
  * Load config. A missing file is a normal state and yields the defaults (not an error).
  * A corrupt file also falls back to defaults rather than throwing, so startup never breaks.
  * A file from an older version (missing newer keys or holding extra keys) is
- * normalized and persisted back, so the on-disk config stays current.
+ * normalized and persisted back, so the on-disk config stays current. Built-in
+ * agents the file has never seen are adopted: enabled with explorer's route.
  */
 export async function loadConfig(configPath: string = getConfigPath()): Promise<SubagentsConfig> {
 	let text: string;
@@ -195,7 +243,7 @@ export async function loadConfig(configPath: string = getConfigPath()): Promise<
 		return defaultConfig();
 	}
 
-	const config = normalizeConfig(parsed);
+	const config = adoptNewBuiltins(normalizeConfig(parsed));
 
 	// Schema upgrade: persist the normalized shape when the file gained fields
 	// (new version) or dropped invalid ones.

@@ -21,10 +21,19 @@ describe("normalizeConfig", () => {
 		expect(BUILTIN_AGENT_NAMES).toEqual(["explorer", "worker", "cleaner", "documenter", "synthesizer", "reviewer"]);
 		expect(DEFAULT_ENABLED_AGENTS).toEqual([...BUILTIN_AGENT_NAMES]);
 		expect(config.enabledAgents).toEqual([...DEFAULT_ENABLED_AGENTS]);
+		expect(config.knownAgents).toEqual([...BUILTIN_AGENT_NAMES]);
 		expect(config.agentScope).toBe("user");
 		expect(config.agentModels).toEqual({});
 		expect(config.agentThinkingLevels).toEqual({});
 		expect(config.notifyOnReviewPass).toBe(false);
+	});
+
+	it("seeds knownAgents from enabledAgents and keeps explicit entries", () => {
+		const config = normalizeConfig({ enabledAgents: ["worker"], knownAgents: ["explorer", 42, "worker"] });
+		expect(config.enabledAgents).toEqual(["worker"]);
+		expect(config.knownAgents).toEqual(["explorer", "worker"]);
+		// An empty record still means the fresh-install default catalog.
+		expect(normalizeConfig({}).knownAgents).toEqual([...BUILTIN_AGENT_NAMES]);
 	});
 
 	it("drops the removed tuning keys instead of honoring them", () => {
@@ -151,6 +160,7 @@ describe("loadConfig", () => {
 		// A config written across many older versions.
 		writeFileSync(path, JSON.stringify({
 			enabledAgents: ["explorer"],
+			knownAgents: [...BUILTIN_AGENT_NAMES],
 			agentModels: { explorer: "anthropic/legacy" },
 			agentThinkingLevels: { explorer: "low" },
 			thinkingLevel: "max",
@@ -168,6 +178,7 @@ describe("loadConfig", () => {
 
 		const saved = JSON.parse(readFileSync(path, "utf8"));
 		expect(saved.enabledAgents).toEqual(["explorer"]);
+		expect(saved.knownAgents).toEqual([...BUILTIN_AGENT_NAMES]);
 		expect(saved.agentModels).toEqual({ explorer: "anthropic/legacy" });
 		expect(saved.agentThinkingLevels).toEqual({ explorer: "low" });
 		for (const key of ["agentBackupModels", "thinkingLevel", "maxConcurrency", "maxFixRounds", "proactiveInjection", "announcedFeatures"]) {
@@ -185,11 +196,65 @@ describe("loadConfig", () => {
 		);
 
 		const config = await loadConfig(path);
-		expect(config.enabledAgents).toEqual(["explorer"]);
+		// The file predates the current catalog, so every unseen built-in is
+		// adopted; explorer has no configured route, so nothing is copied.
+		expect(config.enabledAgents).toEqual([...BUILTIN_AGENT_NAMES]);
+		expect(config.knownAgents).toEqual([...BUILTIN_AGENT_NAMES]);
 		expect(config.agentModels).toEqual({});
 
 		const saved = JSON.parse(readFileSync(path, "utf8"));
-		expect(saved.enabledAgents).toEqual(["explorer"]);
+		expect(saved.enabledAgents).toEqual([...BUILTIN_AGENT_NAMES]);
 		expect(saved.agentModels).toEqual({});
+	});
+
+	it("adopts unseen built-ins on an old-version upgrade and follows explorer's route", async () => {
+		const dir = mkdtempSync(join(tmpdir(), "pi-subagents-test-"));
+		const path = join(dir, "pi-subagents.json");
+		writeFileSync(path, JSON.stringify({
+			enabledAgents: ["explorer", "worker", "reviewer"],
+			agentModels: { explorer: "anthropic/claude-haiku-4-5" },
+			agentThinkingLevels: { explorer: "low" },
+		}), "utf8");
+
+		const config = await loadConfig(path);
+		// Unseen names append in catalog order; previously known ones keep their place.
+		expect([...config.enabledAgents].sort()).toEqual([...BUILTIN_AGENT_NAMES].sort());
+		expect([...config.knownAgents].sort()).toEqual([...BUILTIN_AGENT_NAMES].sort());
+		// The adopted light roles follow the explorer lane the user picked.
+		expect(config.agentModels).toEqual({
+			explorer: "anthropic/claude-haiku-4-5",
+			cleaner: "anthropic/claude-haiku-4-5",
+			documenter: "anthropic/claude-haiku-4-5",
+			synthesizer: "anthropic/claude-haiku-4-5",
+		});
+		expect(config.agentThinkingLevels).toEqual({
+			explorer: "low",
+			cleaner: "low",
+			documenter: "low",
+			synthesizer: "low",
+		});
+
+		const saved = JSON.parse(readFileSync(path, "utf8"));
+		expect(saved.enabledAgents).toHaveLength(BUILTIN_AGENT_NAMES.length);
+		expect(saved.agentModels.synthesizer).toBe("anthropic/claude-haiku-4-5");
+
+		// Reloading the persisted shape is a no-op: the adoption happened once.
+		const reloaded = await loadConfig(path);
+		expect(reloaded).toEqual(config);
+	});
+
+	it("keeps an explicitly disabled agent disabled once the config knows it", async () => {
+		const dir = mkdtempSync(join(tmpdir(), "pi-subagents-test-"));
+		const path = join(dir, "pi-subagents.json");
+		writeFileSync(path, JSON.stringify({
+			enabledAgents: ["explorer", "worker", "reviewer"],
+			knownAgents: [...BUILTIN_AGENT_NAMES],
+		}), "utf8");
+
+		const config = await loadConfig(path);
+		expect(config.enabledAgents).toEqual(["explorer", "worker", "reviewer"]);
+
+		const saved = JSON.parse(readFileSync(path, "utf8"));
+		expect(saved.enabledAgents).toEqual(["explorer", "worker", "reviewer"]);
 	});
 });

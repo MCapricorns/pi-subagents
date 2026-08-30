@@ -3,6 +3,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { BackgroundTaskQueue, type BackgroundTask } from "../src/background.ts";
+import { BUILTIN_AGENT_NAMES } from "../src/config.ts";
 import register, { matchRunIds } from "../src/index.ts";
 import { monitor } from "../src/monitor.ts";
 import { persistRecoveryRecords } from "../src/recovery.ts";
@@ -32,6 +33,9 @@ function configureEnabledAgents(enabledAgents: string[], extra: Record<string, u
 	if (!testAgentDir) throw new Error("test agent directory was not initialized");
 	writeFileSync(join(testAgentDir, "pi-subagents.json"), JSON.stringify({
 		enabledAgents,
+		// Steady-state bookkeeping: every shipped built-in has been surfaced, so
+		// loadConfig must not re-enable roles this suite disabled on purpose.
+		knownAgents: [...BUILTIN_AGENT_NAMES],
 		announcedFeatures: ["cleanerDefaulted", "documenterDefaulted"],
 		...extra,
 	}), "utf8");
@@ -137,6 +141,7 @@ describe("extension registration", () => {
 		const patchPath = join(testAgentDir, "retained.patch");
 		writeFileSync(configPath, JSON.stringify({
 			enabledAgents: ["explorer", "worker", "reviewer"],
+			knownAgents: [...BUILTIN_AGENT_NAMES],
 		}), "utf8");
 		writeFileSync(patchPath, "patch", "utf8");
 		await persistRecoveryRecords(configPath, [{
@@ -1707,6 +1712,7 @@ describe("before_agent_start injection", () => {
 		writeFileSync(join(testAgentDir, "pi-subagents.json"), JSON.stringify({
 			agentScope: "both",
 			enabledAgents: ["worker"],
+			knownAgents: [...BUILTIN_AGENT_NAMES],
 			announcedFeatures: ["cleanerDefaulted", "documenterDefaulted"],
 		}), "utf8");
 		const project = mkdtempSync(join(tmpdir(), "pi-subagents-untrusted-project-"));
