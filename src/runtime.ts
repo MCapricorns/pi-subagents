@@ -25,7 +25,6 @@ import { isRunActiveStatus, monitor } from "./monitor.ts";
 import type { RpcRunControl } from "./rpc-run.ts";
 import type { StartBackgroundInternal } from "./thread-lifecycle.ts";
 import { isFailedResult, type SingleResult } from "./spawn.ts";
-import type { ReviewMode } from "./workflow.ts";
 import type { IsolationMode, WorktreeFinalization, WorktreeIsolation } from "./worktree.ts";
 
 export type ThreadState =
@@ -51,15 +50,12 @@ export interface SubagentThread {
 	executionCwd: string;
 	thinkingLevel?: ThinkingLevel;
 	isolation: IsolationMode;
-	/** Dispatch-time gate intensity; "none" skips the automatic post-writer
-	 * reviewer for this thread (kept across resumes and reloads). */
-	review?: ReviewMode;
 	worktree?: WorktreeIsolation;
 	state: ThreadState;
 	control: RpcRunControl;
 	queueController?: AbortController;
-	/** Resolves only after the current generation's top-level child, downstream
-	 * managed workflow, and queue work have fully quiesced and released their
+	/** Resolves only after the current generation's child process, isolation
+	 * finalization, and queue work have fully quiesced and released their
 	 * concurrency slot. */
 	generationCompletion: Promise<void>;
 	/** Synchronous CAS used by lifecycle controls across their async preflight. */
@@ -122,8 +118,7 @@ export interface SubagentRuntime {
 	/** Resume setup that has claimed a thread but has not yet enqueued its
 	 * next generation. Shutdown invalidates these claims and waits for cleanup. */
 	preflightOperations: Set<Promise<void>>;
-	/** Every session directory retained for this parent session, including
-	 * managed-workflow internals that are not directly controllable. */
+	/** Every session directory retained for this parent session. */
 	sessionDirs: Set<string>;
 	retainSession: (result: Pick<SingleResult, "sessionDir">) => void;
 	retireThreadSession: (thread: SubagentThread) => void;
@@ -148,8 +143,6 @@ export function createRuntime(pi: ExtensionAPI, configPath: string): SubagentRun
 			// Computing this at delivery (emit) time — not when the item was
 			// pushed — reflects the current monitor state, since finishing runs
 			// are removed from the monitor before their completion is pushed.
-			// Managed-workflow parents remain "running" through reviewer and
-			// documenter stages, so they are included without a special case.
 			const active = monitor
 				.getRuns()
 				.filter((run) => isRunActiveStatus(run.status))

@@ -32,7 +32,7 @@ function execute(tool: any, params: any, cwd: string): Promise<any> {
 
 function emptyResult(task: string, extra: Record<string, unknown> = {}): any {
 	return {
-		agent: "worker",
+		agent: "executor",
 		task,
 		exitCode: 0,
 		messages: [{ role: "assistant", content: [{ type: "text", text: "done" }], stopReason: "stop" }],
@@ -132,7 +132,7 @@ beforeEach(() => {
 	agentDir = mkdtempSync(join(tmpdir(), "pi-subagents-isolation-agent-"));
 	process.env.PI_CODING_AGENT_DIR = agentDir;
 	writeFileSync(join(agentDir, "pi-subagents.json"), JSON.stringify({
-		enabledAgents: ["explorer", "worker"],
+		enabledAgents: ["explorer", "executor"],
 		knownAgents: [...BUILTIN_AGENT_NAMES],
 		announcedFeatures: ["cleanerDefaulted", "documenterDefaulted"],
 	}), "utf8");
@@ -163,7 +163,7 @@ function registered(): { stub: StubPi; subagent: any; control: any; stop: any } 
 }
 
 describe("dispatch isolation selection", () => {
-	it("defaults single to shared and parallel worker items to worktree with explicit overrides", async () => {
+	it("defaults single to shared and parallel executor items to worktree with explicit overrides", async () => {
 		const root = mkdtempSync(join(tmpdir(), "pi-subagents-isolation-root-"));
 		const handles: WorktreeIsolation[] = [];
 		const create = vi.spyOn(worktreeModule, "createWorktreeIsolation").mockImplementation(async () => {
@@ -178,14 +178,14 @@ describe("dispatch isolation selection", () => {
 		});
 		const { subagent } = registered();
 
-		const single = await execute(subagent, { agent: "worker", task: "single" }, root);
+		const single = await execute(subagent, { agent: "executor", task: "single" }, root);
 		expect(single.details.results[0]).toMatchObject({ isolation: "shared" });
 		expect(create).not.toHaveBeenCalled();
 
 		const parallel = await execute(subagent, {
 			tasks: [
-				{ agent: "worker", task: "default isolated" },
-				{ agent: "worker", task: "explicit shared", isolation: "shared" },
+				{ agent: "executor", task: "default isolated" },
+				{ agent: "executor", task: "explicit shared", isolation: "shared" },
 				{ agent: "explorer", task: "read only" },
 			],
 		}, root);
@@ -198,7 +198,7 @@ describe("dispatch isolation selection", () => {
 		expect(tasks).toHaveLength(4);
 
 		const explicit = await execute(subagent, {
-			agent: "worker",
+			agent: "executor",
 			task: "single isolated",
 			isolation: "worktree",
 		}, root);
@@ -225,30 +225,27 @@ describe("dispatch isolation selection", () => {
 		const { subagent } = registered();
 		const partial = await execute(subagent, {
 			tasks: [
-				{ agent: "worker", task: "starts", cwd: root },
-				{ agent: "worker", task: "fails", cwd: nonGit },
+				{ agent: "executor", task: "starts", cwd: root },
+				{ agent: "executor", task: "fails", cwd: nonGit },
 			],
 		}, root);
 		expect(partial.content[0].text).toContain("Started 1 background subagent");
-		expect(partial.content[0].text).toContain("tasks[1] (worker) failed to start");
+		expect(partial.content[0].text).toContain("tasks[1] (executor) failed to start");
 		expect(partial.content[0].text).toContain(nonGit);
 		expect(partial.details.results).toHaveLength(2);
 		expect(tasks).toHaveLength(1);
 
 		await expect(execute(subagent, {
-			tasks: [{ agent: "worker", task: "all fail", cwd: nonGit }],
+			tasks: [{ agent: "executor", task: "all fail", cwd: nonGit }],
 		}, root)).rejects.toThrow(/No background subagents were started[\s\S]*tasks\[0\].*not a Git repository/i);
 		rmSync(root, { recursive: true, force: true });
 		rmSync(nonGit, { recursive: true, force: true });
 	});
 
-	it("recognizes cleaner, documenter, and custom writers but not explicit read-only agents", () => {
-		const cleaner = loadBuiltinAgents().find((agent) => agent.name === "cleaner");
-		expect(cleaner?.tools).toBeUndefined();
-		expect(cleaner && isWorktreeCapableAgent(cleaner)).toBe(true);
-		const documenter = loadBuiltinAgents().find((agent) => agent.name === "documenter");
-		expect(documenter?.tools).toContain("edit");
-		expect(documenter && isWorktreeCapableAgent(documenter)).toBe(true);
+	it("recognizes the executor and custom writers but not explicit read-only agents", () => {
+		const executor = loadBuiltinAgents().find((agent) => agent.name === "executor");
+		expect(executor?.tools).toBeUndefined();
+		expect(executor && isWorktreeCapableAgent(executor)).toBe(true);
 
 		const base = {
 			description: "test",
@@ -259,7 +256,7 @@ describe("dispatch isolation selection", () => {
 		expect(isWorktreeCapableAgent({ ...base, name: "custom-writer", tools: ["read", "edit"] })).toBe(true);
 		expect(isWorktreeCapableAgent({ ...base, name: "custom-full" })).toBe(true);
 		expect(isWorktreeCapableAgent({ ...base, name: "custom-reader", tools: ["read", "grep"] })).toBe(false);
-		expect(isWorktreeCapableAgent({ ...base, name: "reviewer" })).toBe(false);
+		expect(isWorktreeCapableAgent({ ...base, name: "explorer" })).toBe(false);
 	});
 
 	it("surfaces Git setup failure and never silently enqueues shared work", async () => {
@@ -267,7 +264,7 @@ describe("dispatch isolation selection", () => {
 		const enqueue = vi.spyOn(BackgroundTaskQueue.prototype, "enqueue");
 		const { subagent } = registered();
 		await expect(execute(subagent, {
-			agent: "worker",
+			agent: "executor",
 			task: "must isolate",
 			isolation: "worktree",
 		}, root)).rejects.toThrow(/requires cwd to be inside a Git worktree\/repository/i);
@@ -275,20 +272,13 @@ describe("dispatch isolation selection", () => {
 		rmSync(root, { recursive: true, force: true });
 	});
 
-	it("rejects worktree isolation for explorer/reviewer before enqueue", async () => {
-		writeFileSync(join(agentDir, "pi-subagents.json"), JSON.stringify({
-			enabledAgents: ["explorer", "worker", "reviewer"],
-			knownAgents: [...BUILTIN_AGENT_NAMES],
-			announcedFeatures: ["cleanerDefaulted", "documenterDefaulted"],
-		}), "utf8");
+	it("rejects worktree isolation for explorer before enqueue", async () => {
 		const root = mkdtempSync(join(tmpdir(), "pi-subagents-isolation-reject-"));
 		const create = vi.spyOn(worktreeModule, "createWorktreeIsolation");
 		const enqueue = vi.spyOn(BackgroundTaskQueue.prototype, "enqueue");
 		const { subagent } = registered();
-		for (const agent of ["explorer", "reviewer"]) {
-			await expect(execute(subagent, { agent, task: "read", isolation: "worktree" }, root))
-				.rejects.toThrow(/read-only.*worktree isolation/i);
-		}
+		await expect(execute(subagent, { agent: "explorer", task: "read", isolation: "worktree" }, root))
+			.rejects.toThrow(/read-only.*worktree isolation/i);
 		expect(create).not.toHaveBeenCalled();
 		expect(enqueue).not.toHaveBeenCalled();
 		rmSync(root, { recursive: true, force: true });
@@ -326,7 +316,7 @@ describe("logical worktree reuse and guarded finalization", () => {
 			});
 		const { subagent, control } = registered();
 		const dispatched = await execute(subagent, {
-			agent: "worker",
+			agent: "executor",
 			task: "generation one",
 			isolation: "worktree",
 		}, root);
@@ -387,7 +377,7 @@ describe("logical worktree reuse and guarded finalization", () => {
 			}));
 		const { subagent, control } = registered();
 		const dispatched = await execute(subagent, {
-			agent: "worker",
+			agent: "executor",
 			task: "generation one",
 			isolation: "worktree",
 		}, root);
@@ -416,7 +406,7 @@ describe("logical worktree reuse and guarded finalization", () => {
 		});
 		const run = vi.spyOn(spawnModule, "runSingleAgentWithMainFallback").mockResolvedValue(emptyResult("route"));
 		const { subagent } = registered();
-		await execute(subagent, { agent: "worker", task: "route", isolation: "worktree" }, root);
+		await execute(subagent, { agent: "executor", task: "route", isolation: "worktree" }, root);
 		await queued(new AbortController().signal, new AbortController());
 		expect(create).toHaveBeenCalledTimes(1);
 		expect(run).toHaveBeenCalledTimes(1);
@@ -426,12 +416,7 @@ describe("logical worktree reuse and guarded finalization", () => {
 		rmSync(root, { recursive: true, force: true });
 	});
 
-	it("runs the reviewer inside the worktree before one final integration", async () => {
-		writeFileSync(join(agentDir, "pi-subagents.json"), JSON.stringify({
-			enabledAgents: ["worker", "documenter", "reviewer"],
-			knownAgents: [...BUILTIN_AGENT_NAMES],
-			announcedFeatures: ["cleanerDefaulted", "documenterDefaulted"],
-		}), "utf8");
+	it("integrates an isolated run once after the child settles", async () => {
 		const root = mkdtempSync(join(tmpdir(), "pi-subagents-isolation-managed-"));
 		const order: string[] = [];
 		const handle = fakeWorktree(root, { status: "integrated", integrated: true, hadChanges: true });
@@ -446,8 +431,8 @@ describe("logical worktree reuse and guarded finalization", () => {
 			queued = task;
 			return controller;
 		});
-		const result = (agent: string, task: string, text: string): any => ({
-			agent,
+		const result = (task: string, text: string): any => ({
+			agent: "executor",
 			task,
 			exitCode: 0,
 			messages: [{ role: "assistant", content: [{ type: "text", text }], stopReason: "stop" }],
@@ -458,34 +443,29 @@ describe("logical worktree reuse and guarded finalization", () => {
 			order.push(options.agentName);
 			expect(options.cwd).toBe(handle.cwd);
 			expect(handle.finalizeMock).not.toHaveBeenCalled();
-			if (options.agentName === "worker") return result("worker", options.task, "worker report src/a.ts");
 			expect(options.agent.systemPrompt).toContain("temporary detached Git worktree");
-			return result("reviewer", options.task, "APPROVE\nVERDICT: REVIEW_PASS");
+			return result(options.task, "executor report src/a.ts");
 		});
 		const { stub, subagent } = registered();
 		await execute(subagent, {
-			agent: "worker",
-			task: "managed isolated writer",
+			agent: "executor",
+			task: "isolated writer",
 			isolation: "worktree",
 		}, root);
 		await queued(controller.signal, controller);
 
-		expect(run.mock.calls.map(([options]) => options.agentName)).toEqual(["worker", "reviewer"]);
-		expect(order).toEqual(["worker", "reviewer", "integrate"]);
+		expect(run.mock.calls.map(([options]) => options.agentName)).toEqual(["executor"]);
+		expect(order).toEqual(["executor", "integrate"]);
 		expect(handle.finalizeMock).toHaveBeenCalledTimes(1);
+		// Successful runs deliver through the completion batcher debounce.
+		await waitFor(() => stub.messages.length > 0);
 		expect(stub.messages).toHaveLength(1);
-		expect(stub.messages[0].message.content).toContain("## Managed workflow:");
 		// The delivery carries the final result block, including integration state.
 		expect(stub.messages[0].message.content).toContain("worktree · changes integrated");
 		rmSync(root, { recursive: true, force: true });
 	});
 
-	it("runs isolated workflow stages in parallel but waits to integrate behind the shared repository lane", async () => {
-		writeFileSync(join(agentDir, "pi-subagents.json"), JSON.stringify({
-			enabledAgents: ["worker", "reviewer"],
-			knownAgents: [...BUILTIN_AGENT_NAMES],
-			announcedFeatures: ["cleanerDefaulted", "documenterDefaulted"],
-		}), "utf8");
+	it("lets an isolated run work in parallel but waits to integrate behind the shared repository lane", async () => {
 		const root = mkdtempSync(join(tmpdir(), "pi-subagents-isolation-managed-lane-"));
 		const order: string[] = [];
 		const handle = fakeWorktree(root, { status: "integrated", integrated: true, hadChanges: true });
@@ -500,120 +480,90 @@ describe("logical worktree reuse and guarded finalization", () => {
 			queued.push({ task, controller });
 			return controller;
 		});
-		let releaseSharedReviewer!: () => void;
-		const sharedReviewerGate = new Promise<void>((resolveSharedReviewer) => {
-			releaseSharedReviewer = resolveSharedReviewer;
-		});
-		const result = (agent: string, task: string, text: string): any => ({
-			agent,
-			task,
-			exitCode: 0,
-			messages: [{ role: "assistant", content: [{ type: "text", text }], stopReason: "stop" }],
-			stderr: "",
-			usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, cost: 0, contextTokens: 0, turns: 1 },
+		let releaseSharedWriter!: () => void;
+		const sharedWriterGate = new Promise<void>((resolveSharedWriter) => {
+			releaseSharedWriter = resolveSharedWriter;
 		});
 		vi.spyOn(spawnModule, "runSingleAgentWithMainFallback").mockImplementation(async (options: any) => {
 			if (options.task === "Hold shared repository lane") {
-				order.push("shared reviewer start");
-				await sharedReviewerGate;
-				order.push("shared reviewer end");
-				return result("reviewer", options.task, "advisory only");
+				order.push("shared writer start");
+				await sharedWriterGate;
+				order.push("shared writer end");
+				return emptyResult(options.task);
 			}
-			if (options.agentName === "worker") {
-				order.push("isolated worker");
-				return result("worker", options.task, "isolated worker report");
-			}
-			order.push("isolated reviewer");
-			return result("reviewer", options.task, "VERDICT: REVIEW_PASS");
+			order.push("isolated executor");
+			return emptyResult(options.task);
 		});
 
 		const { subagent } = registered();
 		try {
-			await execute(subagent, { agent: "reviewer", task: "Hold shared repository lane" }, root);
+			await execute(subagent, { agent: "executor", task: "Hold shared repository lane" }, root);
 			await execute(subagent, {
-				agent: "worker",
-				task: "Run isolated managed workflow",
+				agent: "executor",
+				task: "Run isolated work",
 				isolation: "worktree",
 			}, root);
 			expect(queued).toHaveLength(2);
 			const sharedRun = queued[0]!.task(queued[0].controller.signal, queued[0].controller);
-			await waitFor(() => order.includes("shared reviewer start"));
+			await waitFor(() => order.includes("shared writer start"));
 			let isolatedSettled = false;
 			const isolatedRun = queued[1]!.task(queued[1].controller.signal, queued[1].controller).then(() => {
 				isolatedSettled = true;
 			});
-			await waitFor(() => order.includes("isolated reviewer"));
+			await waitFor(() => order.includes("isolated executor"));
 			await new Promise((resolveDelay) => setTimeout(resolveDelay, 30));
 
-			// Model work is not serialized behind the shared reader, but applying its
-			// completed worktree must wait for that reader's stable-diff lane.
+			// Model work in the worktree is not serialized behind the shared
+			// writer, but applying the completed worktree must wait for the lane.
 			expect(order).toEqual([
-				"shared reviewer start",
-				"isolated worker",
-				"isolated reviewer",
+				"shared writer start",
+				"isolated executor",
 			]);
 			expect(handle.finalizeMock).not.toHaveBeenCalled();
 			expect(isolatedSettled).toBe(false);
 
-			releaseSharedReviewer();
+			releaseSharedWriter();
 			await Promise.all([sharedRun, isolatedRun]);
 			expect(order).toEqual([
-				"shared reviewer start",
-				"isolated worker",
-				"isolated reviewer",
-				"shared reviewer end",
+				"shared writer start",
+				"isolated executor",
+				"shared writer end",
 				"integrate isolated",
 			]);
 			expect(handle.finalizeMock).toHaveBeenCalledTimes(1);
 		} finally {
-			releaseSharedReviewer();
+			releaseSharedWriter();
 			for (const item of queued) item.controller.abort();
 			rmSync(root, { recursive: true, force: true });
 		}
 	});
 
-	it("aborts a managed gate on shutdown without stale delivery and keeps the worktree resumable", async () => {
-		writeFileSync(join(agentDir, "pi-subagents.json"), JSON.stringify({
-			enabledAgents: ["worker", "documenter", "reviewer"],
-			knownAgents: [...BUILTIN_AGENT_NAMES],
-			announcedFeatures: ["cleanerDefaulted", "documenterDefaulted"],
-		}), "utf8");
-		const root = mkdtempSync(join(tmpdir(), "pi-subagents-isolation-doc-shutdown-"));
+	it("keeps a running isolated thread parked across shutdown without stale delivery", async () => {
+		const root = mkdtempSync(join(tmpdir(), "pi-subagents-isolation-shutdown-parked-"));
 		const handle = fakeWorktree(root);
 		vi.spyOn(worktreeModule, "createWorktreeIsolation").mockResolvedValue(handle);
-		const result = (agent: string, task: string, text: string, extra: Record<string, unknown> = {}): any => ({
-			agent,
-			task,
-			exitCode: 0,
-			messages: [{ role: "assistant", content: [{ type: "text", text }], stopReason: "stop" }],
-			stderr: "",
-			usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, cost: 0, contextTokens: 0, turns: 1 },
-			...extra,
-		});
-		let reviewerStarted = false;
 		vi.spyOn(spawnModule, "runSingleAgentWithMainFallback").mockImplementation(async (options: any) => {
-			if (options.agentName === "worker") return result("worker", options.task, "OLD WRITER REPORT");
-			reviewerStarted = true;
+			options.onLive?.({ kind: "status", status: "running" });
 			await new Promise<void>((resolveAborted) => {
 				if (options.signal.aborted) resolveAborted();
 				else options.signal.addEventListener("abort", () => resolveAborted(), { once: true });
 			});
-			return result("reviewer", options.task, "NEWEST REVIEW PARTIAL", {
+			return emptyResult(options.task, {
 				exitCode: 1,
 				stopReason: "aborted",
 				errorMessage: "Parent session shut down",
 			});
 		});
 		const { stub, subagent } = registered();
-		const dispatched = await execute(subagent, { agent: "worker", task: "shutdown in gate", isolation: "worktree" }, root);
+		const dispatched = await execute(subagent, { agent: "executor", task: "shutdown mid-run", isolation: "worktree" }, root);
 		const runId = dispatched.details.results[0].runId;
-		await waitFor(() => reviewerStarted);
+		await waitFor(() => monitor.findRun(runId)?.status === "running");
 		await stub.hooks["session_shutdown"]?.({}, {});
 		activeStubs = activeStubs.filter((candidate) => candidate !== stub);
 
 		expect(stub.messages).toHaveLength(0);
-		// Shutdown interrupts the workflow to its checkpoint instead of
-		// finalizing: the worktree and its partial gate stage stay resumable.
+		// Shutdown interrupts the run to its checkpoint instead of finalizing:
+		// the worktree and its partial output stay resumable.
 		expect(handle.finalizeMock).not.toHaveBeenCalled();
 		const records = await readThreadRecords(join(agentDir, "pi-subagents.json"));
 		expect(records).toContainEqual(expect.objectContaining({ runId, state: "parked" }));
@@ -629,7 +579,7 @@ describe("logical worktree reuse and guarded finalization", () => {
 		vi.spyOn(spawnModule, "runSingleAgentWithMainFallback").mockResolvedValue(emptyResult("stop while settling"));
 		const { stub, subagent, stop } = registered();
 		const dispatched = await execute(subagent, {
-			agent: "worker",
+			agent: "executor",
 			task: "stop while settling",
 			isolation: "worktree",
 		}, root);
@@ -672,7 +622,7 @@ describe("logical worktree reuse and guarded finalization", () => {
 		});
 		vi.spyOn(spawnModule, "runSingleAgentWithMainFallback").mockResolvedValue(emptyResult("conflict"));
 		const { stub, subagent } = registered();
-		await execute(subagent, { agent: "worker", task: "conflict", isolation: "worktree" }, root);
+		await execute(subagent, { agent: "executor", task: "conflict", isolation: "worktree" }, root);
 		await queued(new AbortController().signal, new AbortController());
 		const text = stub.messages[0].message.content as string;
 		expect(text).toContain("recovery artifacts retained");
@@ -688,7 +638,7 @@ describe("logical worktree reuse and guarded finalization", () => {
 describe("shutdown and destructive-stop integration", () => {
 	it("interrupts every stop-all lane holder before finalizing a running isolated thread", async () => {
 		writeFileSync(join(agentDir, "pi-subagents.json"), JSON.stringify({
-			enabledAgents: ["worker", "reviewer"],
+			enabledAgents: ["executor", "reviewer"],
 			knownAgents: [...BUILTIN_AGENT_NAMES],
 			maxConcurrency: 2,
 			announcedFeatures: ["cleanerDefaulted", "documenterDefaulted"],
@@ -701,9 +651,9 @@ describe("shutdown and destructive-stop integration", () => {
 			return { status: "no_changes", integrated: false, hadChanges: false };
 		});
 		vi.spyOn(worktreeModule, "createWorktreeIsolation").mockResolvedValue(handle);
-		let releaseSharedReviewer!: () => void;
-		const sharedReviewerGate = new Promise<void>((resolveSharedReviewer) => {
-			releaseSharedReviewer = resolveSharedReviewer;
+		let releaseSharedWriter!: () => void;
+		const sharedWriterGate = new Promise<void>((resolveSharedReviewer) => {
+			releaseSharedWriter = resolveSharedReviewer;
 		});
 		vi.spyOn(spawnModule, "runSingleAgentWithMainFallback").mockImplementation(async (options: any) => {
 			if (options.task === "Run isolated first") {
@@ -714,17 +664,17 @@ describe("shutdown and destructive-stop integration", () => {
 				});
 				return emptyResult(options.task, { exitCode: 1, stopReason: "aborted", errorMessage: "stopped" });
 			}
-			order.push("shared reviewer start");
+			order.push("shared writer start");
 			await Promise.race([
-				sharedReviewerGate,
+				sharedWriterGate,
 				new Promise<void>((resolveAborted) => {
 					if (options.signal.aborted) resolveAborted();
 					else options.signal.addEventListener("abort", () => resolveAborted(), { once: true });
 				}),
 			]);
-			order.push("shared reviewer end");
+			order.push("shared writer end");
 			return emptyResult(options.task, {
-				agent: "reviewer",
+				agent: "executor",
 				exitCode: options.signal.aborted ? 1 : 0,
 				stopReason: options.signal.aborted ? "aborted" : "stop",
 				errorMessage: options.signal.aborted ? "stopped" : undefined,
@@ -736,13 +686,13 @@ describe("shutdown and destructive-stop integration", () => {
 		let stopTimeout: ReturnType<typeof setTimeout> | undefined;
 		try {
 			await execute(subagent, {
-				agent: "worker",
+				agent: "executor",
 				task: "Run isolated first",
 				isolation: "worktree",
 			}, root);
 			await waitFor(() => monitor.getRuns().some((run) => run.task === "Run isolated first" && run.status === "running"));
-			await execute(subagent, { agent: "reviewer", task: "Hold shared lane for stop-all" }, root);
-			await waitFor(() => order.includes("shared reviewer start"));
+			await execute(subagent, { agent: "executor", task: "Hold shared lane for stop-all" }, root);
+			await waitFor(() => order.includes("shared writer start"));
 
 			stopping = execute(stop, { all: true }, root);
 			const stopped = await Promise.race([
@@ -756,14 +706,14 @@ describe("shutdown and destructive-stop integration", () => {
 			]);
 			expect(stopped.content[0].text).toContain("Stopped 2 threads");
 			expect(order).toEqual([
-				"shared reviewer start",
-				"shared reviewer end",
+				"shared writer start",
+				"shared writer end",
 				"integrate isolated",
 			]);
 			expect(handle.finalizeMock).toHaveBeenCalledTimes(1);
 		} finally {
 			if (stopTimeout) clearTimeout(stopTimeout);
-			releaseSharedReviewer();
+			releaseSharedWriter();
 			await stopping?.catch(() => undefined);
 			rmSync(root, { recursive: true, force: true });
 		}
@@ -772,7 +722,7 @@ describe("shutdown and destructive-stop integration", () => {
 	it("keeps a queued isolated stop active until worktree cleanup and result publication finish", async () => {
 		const root = mkdtempSync(join(tmpdir(), "pi-subagents-isolation-queued-stop-"));
 		writeFileSync(join(agentDir, "pi-subagents.json"), JSON.stringify({
-			enabledAgents: ["explorer", "worker"],
+			enabledAgents: ["explorer", "executor"],
 			knownAgents: [...BUILTIN_AGENT_NAMES],
 		}), "utf8");
 		const finalization = deferred<WorktreeFinalization>();
@@ -794,7 +744,7 @@ describe("shutdown and destructive-stop integration", () => {
 		});
 		const { stub, subagent, stop } = registered();
 		// Occupy every process slot (the pool scales with the machine) so the
-		// isolated worker below stays queued and its stop can be observed pre-start.
+		// isolated executor below stays queued and its stop can be observed pre-start.
 		const capacity = resolveSubagentConcurrency();
 		for (let index = 1; index <= capacity; index++) {
 			await execute(subagent, { agent: "explorer", task: `occupy slot ${index}` }, root);
@@ -803,7 +753,7 @@ describe("shutdown and destructive-stop integration", () => {
 			monitor.getRuns().filter((run) => run.task?.startsWith("occupy slot") && run.status === "running").length === capacity
 		);
 		const queued = await execute(subagent, {
-			agent: "worker",
+			agent: "executor",
 			task: "queued isolated",
 			isolation: "worktree",
 		}, root);
@@ -848,7 +798,7 @@ describe("shutdown and destructive-stop integration", () => {
 			);
 			const { stub, subagent, control } = registered();
 			const dispatched = await execute(subagent, {
-				agent: "worker",
+				agent: "executor",
 				task: "source",
 				isolation: "worktree",
 			}, root);
@@ -900,7 +850,7 @@ describe("shutdown and destructive-stop integration", () => {
 		);
 		const { stub, subagent, control } = registered();
 		const dispatched = await execute(subagent, {
-			agent: "worker",
+			agent: "executor",
 			task: "source",
 			isolation: "worktree",
 		}, root);
@@ -935,7 +885,7 @@ describe("shutdown and destructive-stop integration", () => {
 		git(["add", "."]);
 		git(["commit", "-m", "base"]);
 		vi.spyOn(spawnModule, "runSingleAgentWithMainFallback").mockImplementation(async (options: any) => {
-			writeFileSync(join(options.cwd, "parked.txt"), "parked worker edit\n", "utf8");
+			writeFileSync(join(options.cwd, "parked.txt"), "parked executor edit\n", "utf8");
 			options.onLive?.({ kind: "status", status: "running" });
 			await new Promise<void>((resolve) => {
 				if (options.signal.aborted) resolve();
@@ -944,7 +894,7 @@ describe("shutdown and destructive-stop integration", () => {
 			return emptyResult("parked", { exitCode: 1, stopReason: "aborted", errorMessage: "shutdown" });
 		});
 		const { stub, subagent } = registered();
-		const dispatched = await execute(subagent, { agent: "worker", task: "parked", isolation: "worktree" }, root);
+		const dispatched = await execute(subagent, { agent: "executor", task: "parked", isolation: "worktree" }, root);
 		const runId = dispatched.details.results[0].runId;
 		await waitFor(() => monitor.getRuns().some((run) => run.status === "running"));
 		await stub.hooks["session_shutdown"]?.({}, {});
@@ -974,7 +924,7 @@ describe("shutdown and destructive-stop integration", () => {
 		git(["commit", "-m", "base"]);
 
 		vi.spyOn(spawnModule, "runSingleAgentWithMainFallback").mockImplementation(async (options: any) => {
-			writeFileSync(join(options.cwd, "partial.txt"), "partial worker edit\n", "utf8");
+			writeFileSync(join(options.cwd, "partial.txt"), "partial executor edit\n", "utf8");
 			options.onLive?.({ kind: "status", status: "running" });
 			await new Promise<void>((resolve) => {
 				if (options.signal.aborted) resolve();
@@ -988,11 +938,11 @@ describe("shutdown and destructive-stop integration", () => {
 			});
 		});
 		const { stub, subagent, stop } = registered();
-		const dispatched = await execute(subagent, { agent: "worker", task: "partial", isolation: "worktree" }, root);
+		const dispatched = await execute(subagent, { agent: "executor", task: "partial", isolation: "worktree" }, root);
 		const runId = dispatched.details.results[0].runId;
 		await waitFor(() => monitor.findRun(runId)?.status === "running");
 		await execute(stop, { id: String(runId) }, root);
-		await waitFor(() => readFileSync(join(root, "partial.txt"), "utf8") === "partial worker edit\n");
+		await waitFor(() => readFileSync(join(root, "partial.txt"), "utf8") === "partial executor edit\n");
 		expect(stub.messages).toHaveLength(1);
 		expect(stub.messages[0].message.content).toContain("partial output");
 		expect(stub.messages[0].message.content).toContain("worktree · changes integrated");

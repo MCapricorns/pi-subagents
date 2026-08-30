@@ -15,38 +15,38 @@ import {
 } from "../src/config.ts";
 
 describe("normalizeConfig", () => {
-	it("ships five built-ins and enables all of them on a fresh install", () => {
+	it("ships two built-ins and enables all of them on a fresh install", () => {
 		const config = normalizeConfig(undefined);
-		expect(BUILTIN_AGENT_NAMES).toEqual(["explorer", "worker", "cleaner", "documenter", "synthesizer", "reviewer"]);
+		expect(BUILTIN_AGENT_NAMES).toEqual(["explorer", "executor"]);
 		expect(DEFAULT_ENABLED_AGENTS).toEqual([...BUILTIN_AGENT_NAMES]);
 		expect(config.enabledAgents).toEqual([...DEFAULT_ENABLED_AGENTS]);
 		expect(config.knownAgents).toEqual([...BUILTIN_AGENT_NAMES]);
 		expect(config.agentScope).toBe("user");
 		expect(config.agentModels).toEqual({});
 		expect(config.agentThinkingLevels).toEqual({});
-		expect(config.notifyOnReviewPass).toBe(false);
 	});
 
 	it("seeds knownAgents from enabledAgents and keeps explicit entries", () => {
-		const config = normalizeConfig({ enabledAgents: ["worker"], knownAgents: ["explorer", 42, "worker"] });
-		expect(config.enabledAgents).toEqual(["worker"]);
-		expect(config.knownAgents).toEqual(["explorer", "worker"]);
+		const config = normalizeConfig({ enabledAgents: ["executor"], knownAgents: ["explorer", 42, "executor"] });
+		expect(config.enabledAgents).toEqual(["executor"]);
+		expect(config.knownAgents).toEqual(["explorer", "executor"]);
 		// An empty record still means the fresh-install default catalog.
 		expect(normalizeConfig({}).knownAgents).toEqual([...BUILTIN_AGENT_NAMES]);
 	});
 
 	it("drops the removed tuning keys instead of honoring them", () => {
-		const config = normalizeConfig({ maxConcurrency: 9, maxFixRounds: 0, announcedFeatures: ["x"] });
+		const config = normalizeConfig({ maxConcurrency: 9, maxFixRounds: 0, announcedFeatures: ["x"], notifyOnReviewPass: true });
 		expect(config).not.toHaveProperty("maxConcurrency");
 		expect(config).not.toHaveProperty("maxFixRounds");
 		expect(config).not.toHaveProperty("announcedFeatures");
+		expect(config).not.toHaveProperty("notifyOnReviewPass");
 	});
 
 	it("keeps valid enabledAgents and drops non-strings", () => {
 		const config = normalizeConfig({
-			enabledAgents: ["explorer", "worker", 42, null, "explorer"],
+			enabledAgents: ["explorer", "executor", 42, null, "explorer"],
 		});
-		expect(config.enabledAgents).toEqual(["explorer", "worker"]);
+		expect(config.enabledAgents).toEqual(["explorer", "executor"]);
 	});
 
 	it("honors an explicitly empty enabledAgents array", () => {
@@ -75,12 +75,6 @@ describe("normalizeConfig", () => {
 		expect(config.agentThinkingLevels).toEqual({ explorer: "high" });
 	});
 
-	it("defaults notifyOnReviewPass to false and preserves an explicit true", () => {
-		expect(normalizeConfig({}).notifyOnReviewPass).toBe(false);
-		expect(normalizeConfig({ notifyOnReviewPass: true }).notifyOnReviewPass).toBe(true);
-		expect(normalizeConfig({ notifyOnReviewPass: "yes" }).notifyOnReviewPass).toBe(false);
-	});
-
 	it("validates agentScope", () => {
 		expect(normalizeConfig({ agentScope: "both" }).agentScope).toBe("both");
 		expect(normalizeConfig({ agentScope: "everywhere" }).agentScope).toBe("user");
@@ -102,16 +96,16 @@ describe("loadConfig", () => {
 		const dir = mkdtempSync(join(tmpdir(), "pi-subagents-test-"));
 		const path = join(dir, "pi-subagents.json");
 		const config = normalizeConfig({
-			agentModels: { worker: "anthropic/primary" },
-			agentThinkingLevels: { worker: "high" },
+			agentModels: { executor: "anthropic/primary" },
+			agentThinkingLevels: { executor: "high" },
 		});
 		await saveConfig(config, path);
 		const loaded = await loadConfig(path);
-		expect(loaded.agentModels).toEqual({ worker: "anthropic/primary" });
-		expect(loaded.agentThinkingLevels).toEqual({ worker: "high" });
+		expect(loaded.agentModels).toEqual({ executor: "anthropic/primary" });
+		expect(loaded.agentThinkingLevels).toEqual({ executor: "high" });
 		const saved = JSON.parse(readFileSync(path, "utf8"));
-		expect(saved.agentModels).toEqual({ worker: "anthropic/primary" });
-		expect(saved.agentThinkingLevels).toEqual({ worker: "high" });
+		expect(saved.agentModels).toEqual({ executor: "anthropic/primary" });
+		expect(saved.agentThinkingLevels).toEqual({ executor: "high" });
 	});
 
 	it("returns defaults when the file is missing", async () => {
@@ -145,6 +139,7 @@ describe("loadConfig", () => {
 			maxFixRounds: 5,
 			proactiveInjection: false,
 			announcedFeatures: ["cleanerDefaulted", "documenterDefaulted"],
+			notifyOnReviewPass: true,
 		}), "utf8");
 
 		const config = await loadConfig(path);
@@ -157,7 +152,7 @@ describe("loadConfig", () => {
 		expect(saved.knownAgents).toEqual([...BUILTIN_AGENT_NAMES]);
 		expect(saved.agentModels).toEqual({ explorer: "anthropic/legacy" });
 		expect(saved.agentThinkingLevels).toEqual({ explorer: "low" });
-		for (const key of ["agentBackupModels", "thinkingLevel", "maxConcurrency", "maxFixRounds", "proactiveInjection", "announcedFeatures"]) {
+		for (const key of ["agentBackupModels", "thinkingLevel", "maxConcurrency", "maxFixRounds", "proactiveInjection", "announcedFeatures", "notifyOnReviewPass"]) {
 			expect(saved).not.toHaveProperty(key);
 		}
 	});
@@ -183,7 +178,7 @@ describe("loadConfig", () => {
 		expect(saved.agentModels).toEqual({});
 	});
 
-	it("adopts unseen built-ins on an old-version upgrade and follows explorer's route", async () => {
+	it("adopts the newly shipped executor on an old-version upgrade and follows explorer's route", async () => {
 		const dir = mkdtempSync(join(tmpdir(), "pi-subagents-test-"));
 		const path = join(dir, "pi-subagents.json");
 		writeFileSync(path, JSON.stringify({
@@ -193,26 +188,23 @@ describe("loadConfig", () => {
 		}), "utf8");
 
 		const config = await loadConfig(path);
-		// Unseen names append in catalog order; previously known ones keep their place.
-		expect([...config.enabledAgents].sort()).toEqual([...BUILTIN_AGENT_NAMES].sort());
-		expect([...config.knownAgents].sort()).toEqual([...BUILTIN_AGENT_NAMES].sort());
-		// The adopted light roles follow the explorer lane the user picked.
+		// Unseen names append in catalog order; previously known ones keep their
+		// place. Removed-role names in an old config stay listed but inert.
+		expect(config.enabledAgents).toEqual(["explorer", "worker", "reviewer", "executor"]);
+		expect([...config.knownAgents].sort()).toEqual(["executor", "explorer", "reviewer", "worker"]);
+		// The adopted role follows the explorer lane the user picked.
 		expect(config.agentModels).toEqual({
 			explorer: "anthropic/claude-haiku-4-5",
-			cleaner: "anthropic/claude-haiku-4-5",
-			documenter: "anthropic/claude-haiku-4-5",
-			synthesizer: "anthropic/claude-haiku-4-5",
+			executor: "anthropic/claude-haiku-4-5",
 		});
 		expect(config.agentThinkingLevels).toEqual({
 			explorer: "low",
-			cleaner: "low",
-			documenter: "low",
-			synthesizer: "low",
+			executor: "low",
 		});
 
 		const saved = JSON.parse(readFileSync(path, "utf8"));
-		expect(saved.enabledAgents).toHaveLength(BUILTIN_AGENT_NAMES.length);
-		expect(saved.agentModels.synthesizer).toBe("anthropic/claude-haiku-4-5");
+		expect(saved.enabledAgents).toHaveLength(4);
+		expect(saved.agentModels.executor).toBe("anthropic/claude-haiku-4-5");
 
 		// Reloading the persisted shape is a no-op: the adoption happened once.
 		const reloaded = await loadConfig(path);
@@ -223,14 +215,14 @@ describe("loadConfig", () => {
 		const dir = mkdtempSync(join(tmpdir(), "pi-subagents-test-"));
 		const path = join(dir, "pi-subagents.json");
 		writeFileSync(path, JSON.stringify({
-			enabledAgents: ["explorer", "worker", "reviewer"],
+			enabledAgents: ["explorer"],
 			knownAgents: [...BUILTIN_AGENT_NAMES],
 		}), "utf8");
 
 		const config = await loadConfig(path);
-		expect(config.enabledAgents).toEqual(["explorer", "worker", "reviewer"]);
+		expect(config.enabledAgents).toEqual(["explorer"]);
 
 		const saved = JSON.parse(readFileSync(path, "utf8"));
-		expect(saved.enabledAgents).toEqual(["explorer", "worker", "reviewer"]);
+		expect(saved.enabledAgents).toEqual(["explorer"]);
 	});
 });

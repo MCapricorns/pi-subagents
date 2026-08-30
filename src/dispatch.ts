@@ -1,9 +1,8 @@
 /**
- * The `subagent` tool: dispatches the enabled agents (explorer, worker, cleaner,
- * documenter, synthesizer, reviewer, plus custom roles) as isolated pi
- * child processes, single or parallel. Owns the public dispatch contract,
- * per-run status tracking, the managed worker/cleaner → reviewer gate, and
- * internal step launching. Stable thread generations, final integration, and
+ * The `subagent` tool: dispatches the enabled agents (explorer, executor,
+ * plus custom roles) as isolated pi
+ * child processes, single or parallel. Owns the public dispatch contract and
+ * per-run status tracking. Stable thread generations, final integration, and
  * completion ownership live in thread-lifecycle.ts.
  */
 
@@ -16,24 +15,12 @@ import { discoverAgents, isWriteCapableAgent, resolveAgentTools, type AgentConfi
 import { loadConfig } from "./config.ts";
 import { formatCompletionBlock, formatUsage, queuedResult } from "./format.ts";
 import {
-	buildFinalReviewBrief,
-	buildReReviewBrief,
-	buildReviewerFixBrief,
-	MAX_REVIEW_FIX_ROUNDS,
-	type ChainStep,
-	type ManagedWorkflowOutcome,
-	type ReviewMode,
-} from "./workflow.ts";
-import {
 	formatTaskSummary,
 	formatToolActivity,
 	monitor,
 	statusIcon,
-	type RunChainMeta,
 	type RunView,
 	type RunWaitReason,
-	type WorkflowStage,
-	type WorkflowStageStatus,
 } from "./monitor.ts";
 import type { SubagentRuntime } from "./runtime.ts";
 import { persistThreadCheckpoint } from "./thread-lifecycle.ts";
@@ -41,7 +28,6 @@ import {
 	getProjectRoot,
 	getResultOutput,
 	isFailedResult,
-	reviewVerdict,
 	runSingleAgentWithMainFallback,
 	type SingleResult,
 	type SubagentDetails,
@@ -54,7 +40,6 @@ import {
 	runInManagedRepositoryLane,
 	withWorktreeSystemPrompt,
 	type DispatchEnvironment,
-	type ManagedWorkflowRequest,
 } from "./thread-lifecycle.ts";
 import type { IsolationMode } from "./worktree.ts";
 
@@ -63,7 +48,7 @@ export { isWorktreeCapableAgent, runInManagedRepositoryLane } from "./thread-lif
 const NON_BLANK_TASK_OPTIONS = { minLength: 1, pattern: "\\S" } as const;
 
 const ISOLATION_DESCRIPTION =
-	"Filesystem isolation: shared uses the caller's working tree; worktree creates a detached temporary Git worktree (write-capable agents, including worker, cleaner, and documenter, only)";
+	"Filesystem isolation: shared uses the caller's working tree; worktree creates a detached temporary Git worktree (write-capable agents, including executor, only)";
 
 const IsolationSchema = Type.Optional(
 	StringEnum(["shared", "worktree"] as const, { description: ISOLATION_DESCRIPTION }),
@@ -76,13 +61,6 @@ const WaitSchema = Type.Optional(
 	}),
 );
 
-const REVIEW_DESCRIPTION =
-	"Gate intensity for a worker/cleaner task: \"gate\" (default) runs one automatic reviewer after success; \"none\" skips it for mechanical, low-risk edits (typos, comments, doc strings, config value tweaks) that you verify yourself. Keep the default whenever behavior can change.";
-
-const ReviewSchema = Type.Optional(
-	StringEnum(["gate", "none"] as const, { description: REVIEW_DESCRIPTION }),
-);
-
 const TaskItem = Type.Object({
 	agent: Type.String({ description: "Name of the agent to invoke" }),
 	task: Type.String({
@@ -91,7 +69,6 @@ const TaskItem = Type.Object({
 	}),
 	cwd: Type.Optional(Type.String({ description: "Working directory for the agent process" })),
 	isolation: IsolationSchema,
-	review: ReviewSchema,
 });
 
 const SubagentParams = Type.Object({
@@ -102,14 +79,13 @@ const SubagentParams = Type.Object({
 	tasks: Type.Optional(Type.Array(TaskItem, { description: "Array of {agent, task} for parallel execution" })),
 	cwd: Type.Optional(Type.String({ description: "Working directory for the agent process (single mode)" })),
 	isolation: IsolationSchema,
-	review: ReviewSchema,
 	wait: WaitSchema,
 });
 
 /** Roles that default to worktree isolation in parallel dispatches even when
  * the live catalog cannot be consulted (render-only call sites). Custom
  * write-capable agents join them via isWriteCapableAgent on the execute path. */
-const WORKTREE_DEFAULT_AGENTS = new Set(["worker", "cleaner", "documenter"]);
+const WORKTREE_DEFAULT_AGENTS = new Set(["executor"]);
 
 /** Resolve the default isolation for a dispatch. Precedence: an explicit
  * per-call request, then the role's own frontmatter declaration (`worktree`
@@ -129,27 +105,6 @@ export function defaultIsolationMode(
 	if (declared === "shared") return "shared";
 	if (declared === "worktree" && writeCapable) return "worktree";
 	return mode === "parallel" && writeCapable ? "worktree" : "shared";
-}
-
-function workflowStageStatus(result: SingleResult, relation?: string): WorkflowStageStatus {
-	if (isFailedResult(result)) return "failed";
-	if (relation === "review fix") return "done";
-	if (result.agent !== "reviewer") return "done";
-	const verdict = reviewVerdict(getResultOutput(result));
-	if (verdict === "fail") return "changes";
-	return verdict === "pass" ? "done" : "failed";
-}
-
-/** The runtime-granted write continuation of a failed gate: same reviewer
- * role, model, and retained session, but the read-only boundary is lifted for
- * this one stage so it applies its own fix instructions. One line only: the
- * full fix-stage contract is already in the retained session's prompt. */
-function withReviewerFixStageAgent(agent: AgentConfig): AgentConfig {
-	return {
-		...agent,
-		tools: undefined,
-		systemPrompt: `${agent.systemPrompt.trimEnd()}\n\nRuntime workflow context: FIX STAGE — your gate just returned REVIEW_FAIL. Your read-only boundary is lifted for this stage only: apply your own fix instructions exactly as specified, verify, and report what changed; never edit during a review and never emit a verdict here.`,
-	};
 }
 
 /** In-turn wait behind dispatch `wait: true` — the escape hatch for one-shot
@@ -240,27 +195,24 @@ export function registerSubagentTool(pi: ExtensionAPI, runtime: SubagentRuntime)
 	const environmentRef: { current: DispatchEnvironment | undefined } = { current: undefined };
 
 	// Finished runs leave the active monitor immediately. Their final findings
-	// are sent as a custom message that starts a follow-up turn. Returns the
-	// removed row so workflow callers can freeze its exact elapsed time onto
-	// the stage projection before the row is gone.
+	// are sent as a custom message that starts a follow-up turn.
 	const finishRun = (
 		runId: number,
 		status: "done" | "failed",
 		opts?: { silent?: boolean },
-	): RunView | undefined => {
+	): void => {
 		monitor.setStatus(runId, status); // stamps endedAt for the elapsed time
 		const run = monitor.removeRun(runId);
-		if (!run) return undefined; // already finished — stay idempotent
-		if (opts?.silent || !runtime.sessionActive) return run;
+		if (!run) return; // already finished — stay idempotent
+		if (opts?.silent || !runtime.sessionActive) return;
 		const icon = status === "done" ? "✓" : "✗";
 		environmentRef.current?.ctx.ui.notify(`${icon} #${run.id} ${monitor.summarize(run)}`, status === "done" ? "info" : "error");
-		return run;
 	};
 
 	// Live sub-agent activity → concise one-line status ("thinking",
 	// "read src/index.ts", ...), never a raw args blob. The live handler
-	// only updates monitor state; the queue task / launchInWorkflow owns
-	// terminal removal, notification, and downstream workflow decisions.
+	// only updates monitor state; the queue task owns terminal removal,
+	// notification, and lifecycle decisions.
 	const makeLiveHandler =
 		(runId: number, generation?: number) =>
 		(e: SubagentLiveEvent): void => {
@@ -344,247 +296,6 @@ export function registerSubagentTool(pi: ExtensionAPI, runtime: SubagentRuntime)
 		return ` Pacing: ${parts.join(" · ")}. Keep dispatching independent units.`;
 	};
 
-	/** Launch one workflow-internal child in a fresh model context. It sees the
-	 * parent's exact repository/worktree state and is registered by its own id,
-	 * but never enters top-level lifecycle policy or completion delivery.
-	 * `stage` continues a retained session (the reviewer fix stage) and/or
-	 * replaces the resolved agent (lifting the reviewer read-only boundary). */
-	const launchInWorkflow = async (
-		request: ManagedWorkflowRequest,
-		agentName: string,
-		task: string,
-		meta: RunChainMeta,
-		stage: {
-			agentOverride?: AgentConfig;
-			session?: { sessionId: string; sessionDir: string };
-		} = {},
-	): Promise<{ runId: number; result: SingleResult; elapsedMs?: number }> => {
-		const discoveredAgent = request.agents.find((candidate) => candidate.name === agentName);
-		if (!discoveredAgent) {
-			throw new Error(`Managed workflow requires enabled agent "${agentName}", but discovery did not provide it.`);
-		}
-		const boundaryAgent = stage.agentOverride ?? discoveredAgent;
-		const resolveLiveAgentTools = (candidate: AgentConfig): AgentConfig =>
-			resolveAgentTools({ ...candidate, tools: boundaryAgent.tools }, runtime.getActiveTools());
-		const agent = resolveLiveAgentTools(boundaryAgent);
-		// Workflow policy (agents) stays fixed for the chain, but model/thinking
-		// routes are re-read per stage so config edits apply to stages that have
-		// not launched yet.
-		const stageConfig = await loadConfig(runtime.configPath).catch(() => request.config);
-		const resolvedRoute = resolveDispatchModelRoute(agent, stageConfig, request.ctx);
-		const route = request.isolation === "worktree"
-			? { ...resolvedRoute, agent: withWorktreeSystemPrompt(resolvedRoute.agent) }
-			: resolvedRoute;
-		const thinkingLevel = route.thinkingLevel;
-		const runId = monitor.addRun(agent.name, task, route.agent.model, thinkingLevel, {
-			...meta,
-			isolation: request.isolation,
-			...(request.worktreeId ? { worktreeId: request.worktreeId } : {}),
-			// Workflow-internal children spawn immediately: they never enter the
-			// process queue, so they must never be reported as slot-waiting.
-			waitReason: "starting",
-		});
-		const onLive = makeLiveHandler(runId);
-		const projectRoot = getProjectRoot(runtime.configPath, request.executionCwd);
-		try {
-			const result = await runSingleAgentWithMainFallback(
-				{
-					defaultCwd: request.executionCwd,
-					cwd: request.executionCwd,
-					agent: route.agent,
-					resolveAgentForAttempt: resolveLiveAgentTools,
-					agentName,
-					task,
-					thinkingLevel,
-					thinkingLevelForModel: route.thinkingLevelForModel,
-					signal: request.signal,
-					onLive,
-					makeDetails: makeDetails("single", true),
-					idleTimeoutMs: stageConfig.idleTimeoutSec * 1000,
-					sessionRoot: join(projectRoot, "sessions"),
-					scratchRoot: join(projectRoot, "tmp"),
-					...(stage.session
-						? { sessionId: stage.session.sessionId, sessionDir: stage.session.sessionDir, stdinText: task }
-						: {}),
-				},
-				route.mainFallbackRef,
-			);
-			result.runId = runId;
-			result.projectCwd = request.projectCwd;
-			result.isolation = request.isolation;
-			runtime.retainSession(result);
-			monitor.setModel(runId, result.model, result.modelFallbackFrom);
-			monitor.setThinking(runId, result.thinking);
-			const finished = finishRun(runId, isFailedResult(result) ? "failed" : "done", { silent: true });
-			runtime.registerRunResult(runId, result);
-			return { runId, result, elapsedMs: finished?.elapsedMs };
-		} catch (error) {
-			const finished = finishRun(runId, "failed", { silent: true });
-			const errorMessage = error instanceof Error ? error.message : String(error);
-			const crashed: SingleResult = {
-				...queuedResult(route.agent, task, thinkingLevel),
-				runId,
-				projectCwd: request.projectCwd,
-				isolation: request.isolation,
-				exitCode: 1,
-				stderr: errorMessage,
-				stopReason: request.signal.aborted ? "aborted" : "error",
-				errorMessage,
-				dispatchFailed: true,
-			};
-			runtime.registerRunResult(runId, crashed);
-			return { runId, result: crashed };
-		}
-	};
-
-	/** Drop any in-flight internal row. Normal internal settlement already
-	 * removes rows; this is a cancellation/crash guard. */
-	const removeWorkflowGroup = (groupId: string): void => {
-		for (const run of [...monitor.getRuns()]) {
-			if (run.groupId === groupId) monitor.removeRun(run.id);
-		}
-	};
-
-	/** Run every downstream role inline under the parent generation's queue
-	 * controller. That gives park/stop/shutdown one lifecycle owner and keeps
-	 * isolated worktrees unintegrated until the final reviewer settles. */
-	const runManagedWorkflow = async (
-		request: ManagedWorkflowRequest,
-	): Promise<ManagedWorkflowOutcome> => {
-		const initialStepRunId = monitor.reserveRunId();
-		const initialStepResult: SingleResult = {
-			...request.initialResult,
-			runId: initialStepRunId,
-		};
-		runtime.registerRunResult(initialStepRunId, initialStepResult);
-		const steps: ChainStep[] = [{
-			runId: initialStepRunId,
-			result: initialStepResult,
-			relation: request.plan.initialRelation,
-		}];
-		const enabled = (name: string): boolean =>
-			request.agents.some((candidate) => candidate.name === name);
-		const canContinue = (): boolean => runtime.sessionActive && !request.signal.aborted;
-
-		// Keep a live parent-owned projection because settled internal rows are
-		// intentionally removed. Only real/currently planned stages enter it.
-		const initialStageRelation = initialStepResult.agent === "worker"
-			? "implement"
-			: initialStepResult.agent === "cleaner"
-				? "cleanup"
-				: "review";
-		const workflowStages: WorkflowStage[] = [{
-			agent: initialStepResult.agent,
-			relation: initialStageRelation,
-			status: workflowStageStatus(initialStepResult),
-			// The initial stage is the parent's own run; freeze its telemetry now,
-			// before the reopened parent row starts counting workflow-wide time.
-			model: initialStepResult.model,
-			usage: initialStepResult.usage,
-			elapsedMs: monitor.getElapsedMs(request.parentRunId),
-		}];
-		let reviewStage: WorkflowStage | undefined;
-		if (enabled("reviewer")) {
-			reviewStage = { agent: "reviewer", relation: "review", status: "pending" };
-			workflowStages.push(reviewStage);
-		}
-		const publishWorkflowStages = (): void => {
-			monitor.setWorkflowStages(request.parentRunId, workflowStages);
-		};
-		publishWorkflowStages();
-
-		/** Freeze the settled step's telemetry onto its stage: once the child row
-		 * leaves the monitor, this snapshot is the only per-stage record. */
-		const settleStage = (stage: WorkflowStage, step: { result: SingleResult; elapsedMs?: number }): void => {
-			stage.model = step.result.model;
-			stage.usage = step.result.usage;
-			if (step.elapsedMs !== undefined) stage.elapsedMs = step.elapsedMs;
-		};
-
-		const launchStep = async (
-			agentName: string,
-			task: string,
-			relation: string,
-			stage: WorkflowStage,
-			stageOptions: {
-				agentOverride?: AgentConfig;
-				session?: { sessionId: string; sessionDir: string };
-			} = {},
-		): Promise<SingleResult> => {
-			if (!enabled(agentName)) {
-				throw new Error(`Managed workflow cannot launch disabled or missing agent "${agentName}".`);
-			}
-			stage.status = "active";
-			publishWorkflowStages();
-			try {
-				const step = await launchInWorkflow(request, agentName, task, {
-					groupId: request.groupId,
-					relationLabel: relation,
-					parentRunId: request.parentRunId,
-				}, stageOptions);
-				stage.status = workflowStageStatus(step.result, relation);
-				settleStage(stage, step);
-				publishWorkflowStages();
-				request.rememberLatest(step.result);
-				steps.push({ ...step, relation });
-				return step.result;
-			} catch (error) {
-				stage.status = "failed";
-				publishWorkflowStages();
-				throw error;
-			}
-		};
-
-		try {
-			// Park/stop/shutdown may win after the top-level child settles but
-			// before this continuation starts. Preserve that stable checkpoint and
-			// never create an already-aborted downstream child.
-			if (!canContinue()) return { steps };
-			if (reviewStage) {
-				const discoveredReviewer = request.agents.find((candidate) => candidate.name === "reviewer")!;
-				let gateReview = await launchStep(
-					"reviewer",
-					buildFinalReviewBrief(initialStepResult),
-					"final review",
-					reviewStage,
-				);
-				// The failing gate owns its fixes: the same retained
-				// reviewer session applies its own fix instructions with write access,
-				// then a converging re-review verifies the fixes. The cap only stops
-				// pathological burn and hands the still-failing gate to the main agent.
-				for (let round = 1; round <= MAX_REVIEW_FIX_ROUNDS; round++) {
-					const gateSession = gateReview.sessionId && gateReview.sessionDir
-						? { sessionId: gateReview.sessionId, sessionDir: gateReview.sessionDir }
-						: undefined;
-					if (reviewVerdict(getResultOutput(gateReview)) !== "fail" || !gateSession || !canContinue()) break;
-					const fixStage: WorkflowStage = { agent: "reviewer", relation: "review fix", status: "pending" };
-					workflowStages.push(fixStage);
-					publishWorkflowStages();
-					const fixResult = await launchStep(
-						"reviewer",
-						buildReviewerFixBrief(getResultOutput(gateReview)),
-						"review fix",
-						fixStage,
-						{ agentOverride: withReviewerFixStageAgent(discoveredReviewer), session: gateSession },
-					);
-					if (isFailedResult(fixResult) || !canContinue()) break;
-					const reReviewStage: WorkflowStage = { agent: "reviewer", relation: "review", status: "pending" };
-					workflowStages.push(reReviewStage);
-					publishWorkflowStages();
-					gateReview = await launchStep(
-						"reviewer",
-						buildReReviewBrief(fixResult, round),
-						round === 1 ? "re-review" : `re-review ${round}`,
-						reReviewStage,
-					);
-				}
-			}
-			return { steps };
-		} finally {
-			removeWorkflowGroup(request.groupId);
-		}
-	};
-
 	const startBackground = createBackgroundDispatcher({
 		runtime,
 		getEnvironment: () => {
@@ -596,7 +307,6 @@ export function registerSubagentTool(pi: ExtensionAPI, runtime: SubagentRuntime)
 		finishRun,
 		makeLiveHandler,
 		makeDetails,
-		runManagedWorkflow,
 	});
 	runtime.dispatcher = startBackground;
 
@@ -607,10 +317,10 @@ export function registerSubagentTool(pi: ExtensionAPI, runtime: SubagentRuntime)
 			"Dispatch enabled agents as isolated leaf Pi child processes: single {agent, task} or parallel {tasks: [...]}. Dispatching never blocks your turn — runs proceed in the background and each completion resumes you automatically; never poll or restate delivered results.",
 			"Put every genuinely independent unit in one `tasks` array: there is no per-call cap, and runs beyond the machine's free process slots simply wait and start as slots free.",
 			"Parallel write-capable agents default to a detached Git worktree so writers run concurrently; explicit `shared` keeps the caller's checkout and serializes same-repository writers. Worktree setup failure never silently falls back to shared.",
-			"Successful worker/cleaner runs get one automatic reviewer gate; pass review: \"none\" on a worker/cleaner task to skip it for mechanical, low-risk edits you verify yourself. A REVIEW_FAIL from a gate you dispatched directly returns its findings to you. A configured child-model failure continues the retained session on the current main model.",
+			"A configured child-model failure continues the retained session on the current main model.",
 		].join(" "),
 		promptSnippet:
-			"Dispatch isolated background agents for recon, implementation, cleanup, docs, or review; never blocks your turn, and REVIEW_FAIL findings return to you to fix.",
+			"Dispatch isolated background agents for recon, implementation, cleanup, docs sync, or result merging; never blocks your turn, and completions wake you automatically.",
 		parameters: SubagentParams,
 
 		async execute(_toolCallId, params, signal, _onUpdate, ctx) {
@@ -695,7 +405,6 @@ export function registerSubagentTool(pi: ExtensionAPI, runtime: SubagentRuntime)
 							catalogAgent ? isWriteCapableAgent(catalogAgent) : undefined,
 							catalogAgent?.isolation,
 						),
-						{ review: item.review as ReviewMode | undefined },
 					));
 				}
 				const startedRuns = results.filter((result) => result.exitCode === -1);
@@ -757,7 +466,6 @@ export function registerSubagentTool(pi: ExtensionAPI, runtime: SubagentRuntime)
 					singleCatalogAgent ? isWriteCapableAgent(singleCatalogAgent) : undefined,
 					singleCatalogAgent?.isolation,
 				),
-				{ review: params.review as ReviewMode | undefined },
 			);
 			if (result.exitCode !== -1) {
 				throw new Error(getResultOutput(result));
@@ -783,8 +491,7 @@ export function registerSubagentTool(pi: ExtensionAPI, runtime: SubagentRuntime)
 			for (const t of args.tasks.slice(0, 4)) {
 				const preview = formatTaskSummary(t.task, 48);
 				const isolation = defaultIsolationMode("parallel", t.agent, t.isolation) === "worktree" ? " [worktree]" : "";
-				const gate = t.review === "none" ? " [no gate]" : "";
-				text += `\n  ${theme.fg("accent", t.agent)}${theme.fg("dim", `${isolation}${gate}`)} ${theme.fg("dim", preview)}`;
+				text += `\n  ${theme.fg("accent", t.agent)}${theme.fg("dim", isolation)} ${theme.fg("dim", preview)}`;
 			}
 				if (args.tasks.length > 4) text += `\n  ${theme.fg("dim", `… +${args.tasks.length - 4} more`)}`;
 				return new Text(text, 0, 0);
@@ -792,9 +499,8 @@ export function registerSubagentTool(pi: ExtensionAPI, runtime: SubagentRuntime)
 			const task: string = args.task ?? "";
 			const preview = formatTaskSummary(task, 60);
 			const isolation = args.isolation === "worktree" ? " [worktree]" : "";
-			const gate = args.review === "none" ? " [no gate]" : "";
 			return new Text(
-				`${theme.fg("toolTitle", theme.bold("subagent "))}${theme.fg("accent", args.agent ?? "?")}${theme.fg("dim", `${isolation}${gate}`)} ${theme.fg("dim", preview)}`,
+				`${theme.fg("toolTitle", theme.bold("subagent "))}${theme.fg("accent", args.agent ?? "?")}${theme.fg("dim", `${isolation}`)} ${theme.fg("dim", preview)}`,
 				0,
 				0,
 			);

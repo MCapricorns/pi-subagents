@@ -1,36 +1,17 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import {
 	completionGroupTriggersTurn,
-	completionTriggersTurn,
 	createCompletionBatcher,
 	formatActiveRunsFooter,
 	formatCompletionMessage,
 	type ActiveRunFoot,
 	type CompletionMessageItem,
 } from "../src/completion.ts";
-import { DEFAULT_CONFIG } from "../src/config.ts";
 import type { UsageStats } from "../src/rpc-run.ts";
-import type { SingleResult } from "../src/spawn.ts";
 
 function useFakeClock(): void {
 	vi.useFakeTimers();
 	vi.setSystemTime(0);
-}
-
-function result(
-	agent: string,
-	output: string,
-	overrides: Partial<SingleResult> = {},
-): SingleResult {
-	return {
-		agent,
-		task: "Review the change",
-		exitCode: 0,
-		messages: [{ role: "assistant", content: [{ type: "text", text: output }] } as any],
-		stderr: "",
-		usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, cost: 0, contextTokens: 0, turns: 1 },
-		...overrides,
-	};
 }
 
 function messageItem(agent: string, triggerTurn: boolean, usage?: UsageStats): CompletionMessageItem {
@@ -58,13 +39,13 @@ describe("createCompletionBatcher", () => {
 		const emitted: string[][] = [];
 		const batcher = createCompletionBatcher<string>({ emit: (items) => emitted.push(items) });
 
-		batcher.push("worker");
+		batcher.push("executor");
 		vi.advanceTimersByTime(100);
-		batcher.push("reviewer");
+		batcher.push("explorer");
 		vi.advanceTimersByTime(149);
 		expect(emitted).toEqual([]);
 		vi.advanceTimersByTime(1);
-		expect(emitted).toEqual([["worker", "reviewer"]]);
+		expect(emitted).toEqual([["executor", "explorer"]]);
 		batcher.dispose();
 	});
 
@@ -76,11 +57,11 @@ describe("createCompletionBatcher", () => {
 			timings: { debounceMs: 2_000, maxWaitMs: 1_000 },
 		});
 
-		batcher.push("worker");
+		batcher.push("executor");
 		vi.advanceTimersByTime(999);
 		expect(emitted).toEqual([]);
 		vi.advanceTimersByTime(1);
-		expect(emitted).toEqual([["worker"]]);
+		expect(emitted).toEqual([["executor"]]);
 		batcher.dispose();
 	});
 
@@ -106,12 +87,12 @@ describe("createCompletionBatcher", () => {
 		const emitted: string[][] = [];
 		const batcher = createCompletionBatcher<string>({ emit: (items) => emitted.push(items) });
 
-		batcher.push("worker");
-		batcher.push("reviewer");
+		batcher.push("executor");
+		batcher.push("explorer");
 		batcher.flush();
-		expect(emitted).toEqual([["worker", "reviewer"]]);
+		expect(emitted).toEqual([["executor", "explorer"]]);
 		vi.advanceTimersByTime(1_000);
-		expect(emitted).toEqual([["worker", "reviewer"]]);
+		expect(emitted).toEqual([["executor", "explorer"]]);
 		batcher.dispose();
 	});
 
@@ -120,8 +101,8 @@ describe("createCompletionBatcher", () => {
 		const emitted: string[][] = [];
 		const batcher = createCompletionBatcher<string>({ emit: (items) => emitted.push(items) });
 
-		batcher.push("worker");
-		expect(batcher.dispose()).toEqual(["worker"]);
+		batcher.push("executor");
+		expect(batcher.dispose()).toEqual(["executor"]);
 		expect(batcher.dispose()).toEqual([]);
 		vi.advanceTimersByTime(1_000);
 		expect(emitted).toEqual([]);
@@ -129,51 +110,30 @@ describe("createCompletionBatcher", () => {
 });
 
 describe("completion trigger decisions", () => {
-	it("does not wake for an opted-in passing reviewer result", () => {
-		expect(completionTriggersTurn(result("reviewer", "VERDICT: REVIEW_PASS"), true)).toBe(false);
-	});
-
-	it("wakes for a failed reviewer result", () => {
-		expect(completionTriggersTurn(result("reviewer", "VERDICT: REVIEW_FAIL"), true)).toBe(true);
-		expect(
-			completionTriggersTurn(result("reviewer", "VERDICT: REVIEW_PASS", { exitCode: 1 }), true),
-		).toBe(true);
-	});
-
-	it("keeps passing reviews waking under the default config", () => {
-		expect(DEFAULT_CONFIG.notifyOnReviewPass).toBe(false);
-		expect(
-			completionTriggersTurn(
-				result("reviewer", "VERDICT: REVIEW_PASS"),
-				DEFAULT_CONFIG.notifyOnReviewPass,
-			),
-		).toBe(true);
-	});
-
 	it("wakes a mixed group when any item requires a turn", () => {
-		expect(completionGroupTriggersTurn([messageItem("reviewer", false), messageItem("worker", true)])).toBe(true);
-		expect(completionGroupTriggersTurn([messageItem("reviewer", false), messageItem("reviewer", false)])).toBe(false);
+		expect(completionGroupTriggersTurn([messageItem("explorer", false), messageItem("executor", true)])).toBe(true);
+		expect(completionGroupTriggersTurn([messageItem("explorer", false), messageItem("explorer", false)])).toBe(false);
 	});
 });
 
 describe("formatCompletionMessage", () => {
 	it("keeps the existing single-result block unchanged", () => {
-		const item = messageItem("worker", true);
+		const item = messageItem("executor", true);
 		expect(formatCompletionMessage([item])).toBe(item.block);
 	});
 
 	it("adds a group header and retains each result block", () => {
-		const worker = messageItem("worker", true);
-		const reviewer = messageItem("reviewer", false);
-		expect(formatCompletionMessage([worker, reviewer])).toBe(
-			`### Subagents completed (2): worker, reviewer\n\n${worker.block}\n\n${reviewer.block}`,
+		const executor = messageItem("executor", true);
+		const explorer = messageItem("explorer", false);
+		expect(formatCompletionMessage([executor, explorer])).toBe(
+			`### Subagents completed (2): executor, explorer\n\n${executor.block}\n\n${explorer.block}`,
 		);
 	});
 
 	it("appends aggregate token/cost totals for a group with usage", () => {
-		const worker = messageItem("worker", true, usage({ input: 1_000, output: 500, cacheRead: 5_000, cost: 0.25, turns: 3 }));
-		const reviewer = messageItem("reviewer", false, usage({ input: 2_000, output: 100, cacheWrite: 200, cost: 0.125, turns: 2 }));
-		const text = formatCompletionMessage([worker, reviewer]);
+		const executor = messageItem("executor", true, usage({ input: 1_000, output: 500, cacheRead: 5_000, cost: 0.25, turns: 3 }));
+		const explorer = messageItem("explorer", false, usage({ input: 2_000, output: 100, cacheWrite: 200, cost: 0.125, turns: 2 }));
+		const text = formatCompletionMessage([executor, explorer]);
 		expect(text).toContain(`\n\nTotals: 2 runs · ↑3.0k ↓600 R5.0k W200 $0.3750`);
 	});
 });
@@ -185,18 +145,18 @@ describe("formatActiveRunsFooter", () => {
 
 	it("names each active run with its label and warns against concluding", () => {
 		const runs: ActiveRunFoot[] = [
-			{ id: 3, agent: "worker", label: "src/index.ts" },
-			{ id: 4, agent: "reviewer" },
+			{ id: 3, agent: "executor", label: "src/index.ts" },
+			{ id: 4, agent: "explorer" },
 		];
 		const footer = formatActiveRunsFooter(runs);
 		expect(footer).toContain("2 other runs still active");
-		expect(footer).toContain("#3 worker·src/index.ts");
-		expect(footer).toContain("#4 reviewer");
+		expect(footer).toContain("#3 executor·src/index.ts");
+		expect(footer).toContain("#4 explorer");
 		expect(footer).toContain("Do not conclude the overall task yet");
 	});
 
 	it("collapses a long active list behind a +N more", () => {
-		const runs: ActiveRunFoot[] = Array.from({ length: 6 }, (_, i) => ({ id: i + 1, agent: "worker" }));
+		const runs: ActiveRunFoot[] = Array.from({ length: 6 }, (_, i) => ({ id: i + 1, agent: "executor" }));
 		const footer = formatActiveRunsFooter(runs);
 		expect(footer).toContain("6 other runs still active");
 		expect(footer).toContain("+2 more");
@@ -204,16 +164,16 @@ describe("formatActiveRunsFooter", () => {
 
 	it("tags each waiting run with its true wait so pacing is never read as a stall or a full pool", () => {
 		const runs: ActiveRunFoot[] = [
-			{ id: 1, agent: "worker", wait: "process-slot" },
-			{ id: 2, agent: "worker", wait: "repository-lane" },
-			{ id: 3, agent: "worker", wait: "starting" },
-			{ id: 4, agent: "worker" },
+			{ id: 1, agent: "executor", wait: "process-slot" },
+			{ id: 2, agent: "executor", wait: "repository-lane" },
+			{ id: 3, agent: "executor", wait: "starting" },
+			{ id: 4, agent: "executor" },
 		];
 		const footer = formatActiveRunsFooter(runs);
-		expect(footer).toContain("#1 worker (queued, starts when a process slot frees)");
-		expect(footer).toContain("#2 worker (waiting for the repository write lane, not for a slot)");
-		expect(footer).toContain("#3 worker (starting)");
-		expect(footer).toContain("#4 worker.");
-		expect(footer).not.toContain("#4 worker (");
+		expect(footer).toContain("#1 executor (queued, starts when a process slot frees)");
+		expect(footer).toContain("#2 executor (waiting for the repository write lane, not for a slot)");
+		expect(footer).toContain("#3 executor (starting)");
+		expect(footer).toContain("#4 executor.");
+		expect(footer).not.toContain("#4 executor (");
 	});
 });

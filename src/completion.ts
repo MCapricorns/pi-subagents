@@ -7,7 +7,6 @@
  * failure directly so it is never delayed.
  */
 
-import { getResultOutput, isFailedResult, reviewVerdict, type SingleResult } from "./spawn.ts";
 import { formatUsageCompact, sumUsage, type RunWaitReason } from "./monitor.ts";
 import type { UsageStats } from "./rpc-run.ts";
 
@@ -119,16 +118,6 @@ export function formatCompletionMessage(items: readonly CompletionMessageItem[])
 /** A grouped completion wakes the main agent when any member requires a turn. */
 export function completionGroupTriggersTurn(items: readonly CompletionMessageItem[]): boolean {
 	return items.some((item) => item.triggerTurn);
-}
-
-/** Passing reviewer notifications may opt out of waking; every other result wakes. */
-export function completionTriggersTurn(result: SingleResult, notifyOnReviewPass: boolean): boolean {
-	if (isFailedResult(result)) return true;
-	return !(
-		notifyOnReviewPass &&
-		result.agent === "reviewer" &&
-		reviewVerdict(getResultOutput(result)) === "pass"
-	);
 }
 
 /** Minimal shape of an active run, for the "others still running" footer. Kept

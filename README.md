@@ -6,15 +6,15 @@
 ![platform](https://img.shields.io/badge/platform-Windows%20%7C%20macOS%20%7C%20Linux-lightgrey)
 ![pi](https://img.shields.io/badge/pi-extension-orange)
 
-A managed engineering team for [pi](https://github.com/earendil-works/pi): six
-specialized sub-agents, durable threads, automatic review gates, and Git worktree
+A managed engineering team for [pi](https://github.com/earendil-works/pi): two
+focused sub-agents, durable threads, and Git worktree
 isolation. You install it once and your main agent delegates on its own.
 
 ## Why
 
 Delegation is supposed to remove coordination work. Most sub-agent launchers stop
 at "spawn a child with a prompt" and leave the hard parts — when to delegate, how
-wide to fan out, who reviews, what happens when a model dies, how results come
+wide to fan out, what happens when a model dies, how results come
 back — with you. This extension owns them:
 
 - The main model delegates without being asked, because a delegation directive is
@@ -22,8 +22,6 @@ back — with you. This extension owns them:
 - Dispatching never blocks or ends the main turn, so it can start several runs and
   keep working while they execute.
 - Results deliver themselves. There is no status tool to poll and no lookup step.
-- Successful implementation work goes through an independent reviewer gate, and a
-  failing gate fixes itself before it reaches you.
 - Parallel writers get their own Git worktrees, so concurrent edits do not collide
   and your index is never touched.
 - Threads keep their context across resume, stop, reload, and crash; a dead model
@@ -53,14 +51,12 @@ directly when you want exact control.
 
 ## The team
 
-| Agent         | Access                                | Best for                                                                                                                                                                                                 |
-| ------------- | ------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `explorer`    | Read-only                             | Broad search, unfamiliar-area mapping, symbol and dependency tracing. Returns a retrieval index — never proof.                                                                                             |
-| `worker`      | Full                                  | The default route for any non-trivial, self-contained implementation, fix, refactor, or test task, carried through verification.                                                                           |
-| `cleaner`     | Full                                  | Cleanup, removal, simplification, deduplication — requested by you or dispatched proactively when finished work leaves dead code. The brief is its edit authorization and every safe proven cut applies. It cleans the uncommitted diff by default; a brief can scope it to a Git range or a directory instead, and scope bounds its edits without ever narrowing the search that proves a cut safe. |
-| `documenter`  | Docs/comments                         | Standalone docs and comment work, including syncing real drift a change left behind. May make zero edits; never changes runtime behavior.                                                                  |
-| `synthesizer` | Read-only                             | Merging a fan-out's result artifacts or other long sources into one deduplicated, attributed brief. Conflicts and gaps stay explicit, and your main context never re-reads the inputs.                     |
-| `reviewer`    | Read-only (review) / full (fix stage) | Audits, code-health checks, plans, PR and issue validation, and independent gates. A failing managed gate continues into the reviewer's own write-enabled fix stage.                                        |
+| Agent         | Access    | Best for                                                                                                                                                                                                   |
+| ------------- | --------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `explorer`    | Read-only | Broad search, unfamiliar-area mapping, symbol and dependency tracing. Returns a retrieval index — never proof.                                                                                              |
+| `executor`    | Full      | The default route for any non-trivial, self-contained task: implementation, fixes, refactors, tests, evidence-first cleanup, docs/comment sync, or merging a fan-out's results into one brief — carried through verification and a result-only handoff. |
+
+Custom roles join them with a Markdown file (see [Custom agents](#custom-agents)).
 
 Every child is an isolated leaf pi process with its own context window and no
 memory of your conversation, so the brief is its only input. A good brief carries
@@ -70,13 +66,9 @@ injected delegation guidance produces when the main agent dispatches for you.
 ```text
 You
  └─ pi main agent
-     ├─ explorer ─── retrieval index only (never an automatic gate)
-     ├─ worker ───── implements ─┬─▶ reviewer ─ PASS → deliver
-     ├─ cleaner ──── cleans up ──┘            └─ FAIL → reviewer fixes itself
-     ├─ documenter ─ explicit docs/comments task → deliver                │
-     ├─ synthesizer ─ merges fan-out results into one brief               │
-     └─ reviewer ─── advisory report (no VERDICT), or managed gate ◀──────┘
-          └─ direct REVIEW_FAIL → findings + fix instructions → main agent fixes
+     ├─ explorer ─── parallel recon, retrieval leads only
+     └─ executor ─── one deliverable per child: implement, fix, clean up,
+                     sync docs, or merge fan-out results → verify → deliver
 ```
 
 ## Dispatching work
@@ -84,7 +76,7 @@ You
 ```ts
 // One task
 subagent({
-  agent: "worker",
+  agent: "executor",
   task: "Fix the cache invalidation bug in src/cache, add regression tests, run the checks.",
 });
 
@@ -92,7 +84,7 @@ subagent({
 subagent({
   tasks: [
     { agent: "explorer", task: "Trace model fallback from dispatch to completion." },
-    { agent: "worker", task: "Add edge-case tests for config migration." },
+    { agent: "executor", task: "Add edge-case tests for config migration." },
   ],
 });
 ```
@@ -106,78 +98,31 @@ as slots free.
 Because queueing is pacing rather than refusal, it is always reported as such.
 Dispatch confirmations name each waiting run's real reason — waiting for a free
 process slot, serialized behind the shared-checkout write lane, or already
-starting its child — alongside the slot capacity. A run that moves into its
-managed stages or waits for the write lane releases its slot first, so managed
-work and serialized writers never starve new dispatches.
+starting its child — alongside the slot capacity. A run that waits for the write
+lane releases its slot first, so serialized writers never starve new dispatches.
 
 One child owns one coherent deliverable and its files. Dependent work starts only
-after its prerequisite delivers.
-
-## Review gates
-
-```ts
-subagent({
-  agent: "reviewer",
-  task: "Gate the current diff for correctness, regressions, and missing tests.",
-});
-```
-
-A gate ends with exactly one verdict line, `VERDICT: REVIEW_PASS` or
-`VERDICT: REVIEW_FAIL`. Every finding carries a concrete fix instruction, and the
-complete finding set must arrive in one pass — findings are never rationed across
-later rounds.
-
-Gates are proportional to the change. A small, contained diff gets a fast review
-of its correctness, regressions, and blast radius rather than a whole-surface
-audit, and `review: "none"` on a `worker` or `cleaner` task skips the gate
-outright for mechanical, low-risk edits you verify yourself: typos, comments, doc
-strings, config value tweaks. The default remains one fresh gate whenever behavior
-can change, and a resumed thread keeps the choice its dispatch made.
-
-A run that changed nothing is not gated either — there is no diff to review, and
-making zero edits is a valid outcome for a cleaner that found no safe cut. That
-one is decided afterwards rather than at dispatch, and only on proof: an isolated
-worktree starts at its integration base, so an empty diff against that base is
-proof. A shared checkout is shared with you and your editor, so nothing in it can
-be attributed to one run and the gate always runs.
-
-A failing **managed** gate — the automatic one after a top-level `worker` or
-`cleaner` — converges inside the workflow. The same retained reviewer session
-gains write access and applies its own fix instructions, then a fresh gate
-verifies those fixes and hunts regressions they introduced. Re-reviews converge on
-the fixes instead of rescanning everything, and the loop is capped at two fix
-rounds, after which the still-failing gate returns to the main agent with every
-finding.
-
-A failing gate **you dispatched directly** returns its full findings to the main
-agent, which resolves them itself, inline or through a worker it briefs, without
-waiting for you. Only a genuinely destructive or scope-changing fix is worth
-asking about. It re-verifies once, then reports what remains and moves on: gate
-dispatches never loop.
-
-Generic audits and read-only reviews are advisory by default — no verdict, no
-edits. Role authority stays honest in both directions: asking for an audit never
-silently authorizes code changes, and asking for cleanup never rewards
-speculative deletion. A top-level `documenter` is an explicit docs-writing task
-that delivers without another gate.
+after its prerequisite delivers. Verification belongs to whoever did the work:
+every child runs the checks it can and reports exactly which ones ran, and the
+main agent inspects the actual changes before calling anything done.
 
 ## Parallel edits
 
-- Single tasks use your checkout. Every parallel write-capable agent (`worker`,
-  `cleaner`, `documenter`, custom writers) defaults to a detached Git worktree, so
+- Single tasks use your checkout. Every parallel write-capable agent (`executor`
+  and custom writers) defaults to a detached Git worktree, so
   parallel writers run at the same time. Worktree mode needs a committed `HEAD`,
   and read-only agents reject it.
 - A role file can pin its own default with `isolation: worktree` or
   `isolation: shared` in the frontmatter. Precedence is an explicit per-dispatch
   `isolation`, then the role's declaration, then the parallel write default.
-- An isolated workflow's reviewer and documenter run inside the same worktree.
-  Tracked, deleted, untracked, and binary changes integrate back exactly once,
-  after the workflow settles. Nothing is staged and your index is untouched.
+- An isolated run's tracked, deleted, untracked, and binary changes integrate
+  back exactly once, after the child settles. Nothing is staged and your index is
+  untouched.
 - Integration is a three-way merge, so parallel workers that touched disjoint
   files or regions land cleanly even when earlier patches moved the checkout
   underneath them. A genuine overlap leaves conflict markers in the checkout and
   keeps the worktree and patch for you to resolve.
-- Shared-checkout writers — and reviewers snapshotting a diff — serialize through
+- Shared-checkout writers serialize through
   one repository lane, so two of them never race. A run waiting there is reported
   as a lane wait, not as slot queueing, and its process slot is already released.
 - Setup and integration failures keep the useful patch and worktree, and record
@@ -223,34 +168,23 @@ threads that had already finished keep only their delivered result.
 
 ## Live status and results
 
-The TUI widget renders one line per participant in fixed identity columns —
+The TUI widget renders one line per active run in fixed identity columns —
 status icon, right-aligned `#id`, padded agent name, then the task label — so
 every label starts at the same column, with the live activity dimmed after
-` — ` and the rest of the telemetry flowing inline after ` · `: the worktree
-badge, the token flow in the footer vocabulary (`↑` input, `↓` output,
-`R`/`W` cache read/write), cost, the full `provider/model/thinking` ref, the
-wait state, and an elapsed time that always carries seconds. The first line is
-the parent session itself — what the current model is doing right now while
-its agent loop runs. A managed workflow (the automatic review / fix / re-review
-chain) renders as a tree: the parent line carries the workflow-wide token/cost
-totals and total elapsed, and every stage gets its own `├`/`└`-connected row
-with its own model, token flow, and elapsed — settled stages keep the
-telemetry frozen at settlement, the live stage shows its child's model and
-current activity. A live run renders two lines: what it is — agent, task,
-token flow, cost, provider/model, elapsed — and, dim under the label column,
-what it is doing right now:
+`↳` on its own line and the rest of the telemetry flowing inline after ` · `: the
+worktree badge, the token flow in the footer vocabulary (`↑` input, `↓` output,
+`R`/`W` cache read/write), cost, the full `provider/model` ref, the
+wait state, and an elapsed time that always carries seconds. A live run renders
+two lines: what it is — agent, task, token flow, cost, provider/model, elapsed —
+and, dim under the label column, what it is doing right now:
 
 ```text
-●    pi        subagent Implement the login redirect fix · openai/gpt-5/max · 12m06s
-◆ #12 worker    src/cache.ts · wt:a91f3c · ↑5.2k ↓41.0k R210.0k W6.1k $1.9400 · 12m06s
-  ├ ✓ implement · ↑1.0k ↓12.0k R40.0k W1.2k $0.5100 · xai/grok-4/xhigh · 2m41s
-  ├ ! review · ↑0.9k ↓6.0k R38.0k W0.9k $0.3300 · openai/gpt-5 · 1m12s
-  ├ ● review fix — edit src/auth.ts · ↑0.2k ↓3.0k R12.0k $0.1200 · openai/gpt-5/medium · 41s
-  └ ○ re-review
+● #12 executor  src/cache.ts · wt:a91f3c · ↑5.2k ↓41.0k R210.0k W6.1k $1.9400 · 12m06s
+  ↳ edit src/auth.ts
 ● #15 explorer  src/models.ts · ↑1.2k ↓8.4k R31.0k W1.1k $0.0900 · openai/gpt-5-mini · 3m07s
                 ↳ grep fallback
-○ #23 worker    src/config.ts · repo lane
-○ #24 worker ↻  tests/config.test.ts · queued · 5m02s
+○ #23 executor  src/config.ts · repo lane
+○ #24 executor ↻  tests/config.test.ts · queued · 5m02s
 ```
 
 Telemetry drops leftmost-first when a row runs out of width (badge, wait
@@ -258,17 +192,15 @@ state, usage, model) while the elapsed survives every width. Queued rows state
 what they actually wait for — `queued` for a free process slot, `repo lane`
 for shared-checkout write serialization, or `starting` — and a resumed thread
 carries a dim `↻` in its agent column with its cumulative time. The widget is
-capped at ten lines: when many runs are live, extra roots collapse into a
-`… +N more` marker, and an oversized stage chain keeps a window anchored on
-the live stage so the editor keeps its space.
+capped at ten lines: when many runs are live, extra runs collapse into a
+`… +N more` marker so the editor keeps its space.
 
 Completions resume the main agent on their own, with a compact block of at most 40
 lines by default; longer output lands unchanged in a Markdown artifact whose path
 comes with the message. Roles write result-only handoffs — outcome, paths,
 verification, unresolved blockers — and the main agent is told to add its
-conclusion rather than restate what you already read. A successful managed
-workflow delivers the writer's handoff plus the integration outcome, and a failed
-run adds its failed-tool diagnostics.
+conclusion rather than restate what you already read. A failed run adds its
+failed-tool diagnostics.
 
 ## Models, thinking, and tools
 
@@ -283,7 +215,7 @@ effective model supports. `/subagents-setup` → _Configure an agent_ also offer
 manual strength, listing only the levels that model supports. There is no separate
 vision mode — assign a multimodal model and name the image paths in the task.
 
-Every dispatch, managed stage, resume, retry, and fallback snapshots the parent's
+Every dispatch, resume, retry, and fallback snapshots the parent's
 currently active tools. A role with no explicit list inherits the full set. An
 explicit list keeps its pi built-in boundary and gains active extension tools,
 while its shell slot follows the parent: a role file naming `bash` runs
@@ -307,11 +239,10 @@ strength per agent. Everything else is config-file only, stored at
 
 ```json
 {
-  "enabledAgents": ["explorer", "worker", "cleaner", "documenter", "synthesizer", "reviewer"],
-  "knownAgents": ["explorer", "worker", "cleaner", "documenter", "synthesizer", "reviewer"],
+  "enabledAgents": ["explorer", "executor"],
+  "knownAgents": ["explorer", "executor"],
   "agentModels": { "explorer": "anthropic/claude-haiku-4-5" },
-  "agentThinkingLevels": { "reviewer": "high" },
-  "notifyOnReviewPass": false,
+  "agentThinkingLevels": { "executor": "high" },
   "maxResultLines": 40,
   "agentScope": "user",
   "idleTimeoutSec": 90
@@ -324,14 +255,14 @@ strength per agent. Everything else is config-file only, stored at
 | `knownAgents`         | Built-ins this config has seen; automatic bookkeeping — never edit it.            |
 | `agentModels`         | Optional `provider/model-id` per agent; missing = current main model.             |
 | `agentThinkingLevels` | Optional manual level per agent; missing = Auto.                                  |
-| `notifyOnReviewPass`  | Deliver a standalone passing gate without waking the main agent. Default `false`. |
 | `maxResultLines`      | Lines kept in a completion message before the artifact takes over. Default `40`.  |
 | `agentScope`          | Discover `user`, `project`, or `both` agent directories. Default `user`.          |
 | `idleTimeoutSec`      | Seconds without child RPC output before termination; `0` disables. Default `90`.  |
 
 The delegation directive is always injected; there is no toggle. Invalid values
 fall back safely, and stale keys — including the former `proactiveInjection`,
-`maxConcurrency`, and `maxFixRounds` knobs — are dropped automatically. At session
+`maxConcurrency`, `maxFixRounds`, and `notifyOnReviewPass` knobs — are dropped
+automatically. At session
 start, model overrides pi no longer reports are removed with a one-time notice. If
 pi's own session compaction fails mid-thread, a notice surfaces the error and the
 automatic retry instead of failing quietly.
@@ -401,7 +332,7 @@ npm test
 ```
 
 There are no bundled runtime dependencies; pi and TypeBox are peers. The source is
-split by responsibility: dispatch and workflow policy, thread lifecycle, RPC
+split by responsibility: dispatch policy, thread lifecycle, RPC
 transport, worktree integration, completion delivery, tools, and TUI status.
 
 ## License

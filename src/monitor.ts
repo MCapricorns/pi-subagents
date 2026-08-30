@@ -20,7 +20,6 @@ import type { IsolationMode, WorktreeFinalizationStatus } from "./worktree.ts";
 
 export type RunStatus = "queued" | "running" | "interrupting" | "parked" | "done" | "failed";
 export type ContinuationKind = "resume-retained" | "resume-appended";
-export type WorkflowStageStatus = "done" | "active" | "pending" | "changes" | "failed";
 
 /** Why a queued run has produced no output yet. Three genuinely different
  * situations used to be reported as one "queued": waiting for a free process
@@ -31,19 +30,6 @@ export type WorkflowStageStatus = "done" | "active" | "pending" | "changes" | "f
  * was not, so it stopped dispatching. Meaningful only while status is
  * "queued"; cleared on every transition out of it. */
 export type RunWaitReason = "process-slot" | "repository-lane" | "starting";
-
-/** Ephemeral projection of one real or currently planned managed stage. It is
- * live monitor state only; durable results remain the per-run chain records. */
-export interface WorkflowStage {
-	agent: string;
-	relation: string;
-	status: WorkflowStageStatus;
-	/** Telemetry snapshot frozen when the stage settled (the live child row
-	 * leaves the monitor at that moment); the active stage reads its live child. */
-	model?: string;
-	usage?: UsageStats;
-	elapsedMs?: number;
-}
 
 export function isRunActiveStatus(status: RunStatus): boolean {
 	return status === "queued" || status === "running" || status === "interrupting";
@@ -88,43 +74,17 @@ export interface RunView {
 	endedAt?: number;
 	/** Why this generation reused retained context, shown in the widget/status. */
 	continuationKind?: ContinuationKind;
-	/** When set, this is an internal managed-workflow step. */
-	groupId?: string;
-	/** Human-readable role within a workflow, e.g. "final review" or "final documentation sync". */
-	relationLabel?: string;
-	/** Stable owning run whose row represents the whole managed workflow. */
-	parentRunId?: number;
-	/** This stable top-level row currently owns a multi-stage managed workflow.
-	 * Its elapsed time is workflow-wide; active child rows own stage telemetry. */
-	managedWorkflow?: boolean;
-	/** Live-only stage timeline retained on the parent while completed internal
-	 * child rows leave the monitor. */
-	workflowStages?: WorkflowStage[];
 }
 
-/** Optional metadata for documenter/reviewer/fix children of a stable parent run. */
+/** Extra metadata for a run whose row must carry isolation or resume context. */
 export interface RunChainMeta {
-	groupId?: string;
-	relationLabel?: string;
-	parentRunId?: number;
 	isolation?: IsolationMode;
 	worktreeId?: string;
 	continuationKind?: ContinuationKind;
 	/** Initial wait reason; defaults to "process-slot" (a fresh dispatch enters
-	 * the process queue). Workflow-internal children pass "starting" because
-	 * they spawn immediately and never wait for a slot. */
+	 * the process queue). Children spawned outside the queue pass "starting"
+	 * because they never wait for a slot. */
 	waitReason?: RunWaitReason;
-}
-
-/** Ephemeral activity of the parent pi model while its agent loop runs: the
- * live model/thinking ref and a one-line "what is it doing now". Not a run —
- * no id, usage, or chain machinery; the view disappears when the loop settles. */
-export interface MainActivity {
-	model?: string;
-	thinking?: string;
-	activity?: string;
-	/** Epoch ms when the current agent loop started. */
-	activeSince: number;
 }
 
 // ---------------------------------------------------------------------------
@@ -494,71 +454,6 @@ export class MonitorStore {
 	private runs: RunView[] = [];
 	private nextId = 1;
 	private subscribers = new Set<() => void>();
-	private mainModel?: string;
-	private mainThinking?: string;
-	private mainActivity?: string;
-	private mainActiveSince?: number;
-
-	// --- parent pi model activity ------------------------------------------
-	// Fed by the parent session's extension events (agent loop, streaming,
-	// tool executions); rendered as the widget's first line. Change-guarded so
-	// per-token streaming deltas do not flood subscribers.
-
-	setMainModel(model?: string): void {
-		if (!model || this.mainModel === model) return;
-		this.mainModel = model;
-		this.notify();
-	}
-
-	setMainThinking(thinking?: string): void {
-		if (!thinking || this.mainThinking === thinking) return;
-		this.mainThinking = thinking;
-		this.notify();
-	}
-
-	setMainActivity(text: string): void {
-		const activity = sanitizeActivityText(text) || undefined;
-		if (!activity || this.mainActivity === activity) return;
-		this.mainActivity = activity;
-		this.notify();
-	}
-
-	/** Record the main model starting a tool; the activity shows the tool's
-	 * most telling argument, same vocabulary as subagent rows. */
-	recordMainToolStart(toolName: string, activity: string): void {
-		const safeToolName = sanitizeActivityText(toolName) || "tool";
-		this.setMainActivity(activity || safeToolName);
-	}
-
-	/** Record a failed main-model tool; successful completions keep their last
-	 * activity until the next model event supplies a better description. */
-	recordMainToolEnd(toolName: string, isError: boolean): void {
-		if (isError) this.setMainActivity(`✗ ${sanitizeActivityText(toolName) || "tool"} failed`);
-	}
-
-	/** Track the parent agent loop: started at agent_start, cleared when the
-	 * loop settles (agent_end / agent_settled). */
-	setMainAgentActive(active: boolean): void {
-		if ((this.mainActiveSince !== undefined) === active) return;
-		this.mainActiveSince = active ? Date.now() : undefined;
-		this.mainActivity = undefined;
-		this.notify();
-	}
-
-	/** Live view of the parent model while its agent loop runs; undefined when idle. */
-	getMainActivity(): MainActivity | undefined {
-		if (this.mainActiveSince === undefined) return undefined;
-		return {
-			...(this.mainModel ? { model: this.mainModel } : {}),
-			...(this.mainThinking ? { thinking: this.mainThinking } : {}),
-			...(this.mainActivity ? { activity: this.mainActivity } : {}),
-			activeSince: this.mainActiveSince,
-		};
-	}
-
-	isMainAgentActive(): boolean {
-		return this.mainActiveSince !== undefined;
-	}
 
 	beginTurn(): void {
 		// Clear finished runs from a previous turn, but keep active and parked
@@ -608,9 +503,6 @@ export class MonitorStore {
 			waitReason: meta?.waitReason ?? "process-slot",
 			usage: emptyUsage(),
 			elapsedMs: 0,
-			...(meta?.groupId ? { groupId: meta.groupId } : {}),
-			...(meta?.relationLabel ? { relationLabel: meta.relationLabel } : {}),
-			...(meta?.parentRunId !== undefined ? { parentRunId: meta.parentRunId } : {}),
 			...(meta?.isolation ? { isolation: meta.isolation, integrationStatus: meta.isolation === "worktree" ? "pending" : undefined, ...(meta.worktreeId ? { worktreeId: meta.worktreeId } : {}) } : {}),
 			...(meta?.continuationKind ? { continuationKind: meta.continuationKind } : {}),
 		});
@@ -646,27 +538,6 @@ export class MonitorStore {
 		const run = this.find(id);
 		if (!run || run.status !== "queued" || run.waitReason === waitReason) return;
 		run.waitReason = waitReason;
-		this.notify();
-	}
-
-	/** Switch a stable top-level row from one model run to workflow ownership.
-	 * The original role remains for identity; child rows show stage telemetry. */
-	setManagedWorkflow(id: number, active: boolean): void {
-		const run = this.find(id);
-		if (!run) return;
-		run.managedWorkflow = active || undefined;
-		if (!active) run.workflowStages = undefined;
-		this.notify();
-	}
-
-	/** Replace the live workflow projection atomically so renderers never observe
-	 * a half-updated fix/re-review plan. */
-	setWorkflowStages(id: number, stages: readonly WorkflowStage[]): void {
-		const run = this.find(id);
-		if (!run) return;
-		run.workflowStages = stages.length > 0
-			? stages.map((stage) => ({ ...stage }))
-			: undefined;
 		this.notify();
 	}
 
@@ -806,8 +677,6 @@ export class MonitorStore {
 		run.waitReason = "process-slot";
 		run.usage = emptyUsage();
 		run.activity = undefined;
-		run.managedWorkflow = undefined;
-		run.workflowStages = undefined;
 		run.activeSince = undefined;
 		run.endedAt = undefined;
 		run.elapsedMs = Math.max(run.elapsedMs, meta?.elapsedMs ?? 0);
@@ -825,10 +694,6 @@ export class MonitorStore {
 	 * finishRun calls from the old session remain safe no-ops. */
 	clear(): void {
 		this.runs = [];
-		this.mainModel = undefined;
-		this.mainThinking = undefined;
-		this.mainActivity = undefined;
-		this.mainActiveSince = undefined;
 		this.notify();
 	}
 
@@ -854,14 +719,13 @@ export class MonitorStore {
 
 	summarize(run: RunView): string {
 		const usage = formatUsageCompact(run.usage);
-		const parts = [run.managedWorkflow ? `${run.agent} workflow` : run.agent];
+		const parts = [run.agent];
 		const continuation = continuationLabel(run.continuationKind);
 		if (continuation) parts.push(continuation);
-		if (run.relationLabel) parts.push(run.relationLabel);
-		if (!run.managedWorkflow && run.model) parts.push(run.model);
-		if (!run.managedWorkflow && run.thinking) parts.push(`thinking ${run.thinking}`);
+		if (run.model) parts.push(run.model);
+		if (run.thinking) parts.push(`thinking ${run.thinking}`);
 		if (run.isolation === "worktree") parts.push(`worktree ${run.integrationStatus ?? "active"}`);
-		if (!run.managedWorkflow && usage) parts.push(usage);
+		if (usage) parts.push(usage);
 		const elapsed = formatElapsed(run);
 		if (elapsed) parts.push(elapsed);
 		return parts.join(" · ");

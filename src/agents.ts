@@ -94,8 +94,8 @@ export function resolveAgentTools(
 export function isWriteCapableAgent(
 	agent: Pick<AgentConfig, "name" | "tools">,
 ): boolean {
-	if (agent.name === "explorer" || agent.name === "reviewer") return false;
-	if (agent.name === "worker") return true;
+	if (agent.name === "explorer") return false;
+	if (agent.name === "executor") return true;
 	if (!agent.tools) return true;
 	return agent.tools.includes("edit") || agent.tools.includes("write");
 }

@@ -38,7 +38,7 @@ beforeEach(() => {
 	testDir = mkdtempSync(join(tmpdir(), "pi-subagents-control-"));
 	process.env.PI_CODING_AGENT_DIR = testDir;
 	writeFileSync(join(testDir, "pi-subagents.json"), JSON.stringify({
-		enabledAgents: ["worker"],
+		enabledAgents: ["executor"],
 		knownAgents: [...BUILTIN_AGENT_NAMES],
 		announcedFeatures: ["cleanerDefaulted", "documenterDefaulted"],
 	}), "utf8");
@@ -94,7 +94,7 @@ send({ type: "message_end", message: { role: "assistant", content: [{ type: "tex
 			"utf8",
 		);
 		const { stub, subagent, control } = registerWithScript(script);
-		await execute(subagent, { agent: "worker", task: "Initial objective" });
+		await execute(subagent, { agent: "executor", task: "Initial objective" });
 		const runId = monitor.getRuns()[0]?.id;
 		await waitFor(() => stub.messages.length === 1);
 		expect(stub.messages[0].message.content).toContain("first completion");
@@ -128,58 +128,11 @@ send({ type: "message_end", message: { role: "assistant", content: [{ type: "tex
 		expect(existsSync(retainedDir)).toBe(false);
 	});
 
-	it("stops during the managed gate and publishes its partial instead of the old writer", async () => {
-		writeFileSync(join(testDir, "pi-subagents.json"), JSON.stringify({
-			enabledAgents: ["worker", "documenter", "reviewer"],
-			knownAgents: [...BUILTIN_AGENT_NAMES],
-			announcedFeatures: ["cleanerDefaulted", "documenterDefaulted"],
-		}), "utf8");
-		const script = join(testDir, "unused-doc-stop.mjs");
-		writeFileSync(script, "", "utf8");
-		const result = (agent: string, task: string, text: string, extra: Record<string, unknown> = {}): any => ({
-			agent,
-			task,
-			exitCode: 0,
-			messages: [{ role: "assistant", content: [{ type: "text", text }], stopReason: "stop" }],
-			stderr: "",
-			usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, cost: 0, contextTokens: 0, turns: 1 },
-			...extra,
-		});
-		let reviewerStarted = false;
-		vi.spyOn(spawn, "runSingleAgentWithMainFallback").mockImplementation(async (options: any) => {
-			options.onLive?.({ kind: "status", status: "running" });
-			if (options.agentName === "worker") {
-				options.control?.markSettled();
-				return result("worker", options.task, "OLD WRITER OUTPUT");
-			}
-			reviewerStarted = true;
-			await new Promise<void>((resolveAborted) => {
-				if (options.signal.aborted) resolveAborted();
-				else options.signal.addEventListener("abort", () => resolveAborted(), { once: true });
-			});
-			return result("reviewer", options.task, "CURRENT REVIEWER PARTIAL", {
-				exitCode: 1,
-				stopReason: "aborted",
-				errorMessage: "stopped",
-			});
-		});
-
-		const { stub, subagent, stop } = registerWithScript(script);
-		const dispatched = await execute(subagent, { agent: "worker", task: "Stop in the gate" });
-		const runId = dispatched.details.results[0].runId;
-		await waitFor(() => reviewerStarted);
-		await execute(stop, { id: String(runId) });
-
-		expect(stub.messages).toHaveLength(1);
-		expect(stub.messages[0].message.content).toContain("CURRENT REVIEWER PARTIAL");
-		expect(stub.messages[0].message.content).not.toContain("OLD WRITER OUTPUT");
-	});
-
 	it("destructive stop retires a settled thread's retained session and invalidates its resume claim", async () => {
 		const sessionDir = mkdtempSync(join(testDir, "settled-session-"));
 		writeFileSync(join(sessionDir, "retained.txt"), "retained context", "utf8");
 		vi.spyOn(spawn, "runSingleAgentWithMainFallback").mockImplementation(async (options: any) => ({
-			agent: "worker",
+			agent: "executor",
 			task: options.task,
 			exitCode: 0,
 			messages: [{ role: "assistant", content: [{ type: "text", text: "SETTLED OUTPUT" }], stopReason: "stop" }],
@@ -189,7 +142,7 @@ send({ type: "message_end", message: { role: "assistant", content: [{ type: "tex
 			sessionDir,
 		}) as any);
 		const { subagent, control, stop } = registerWithScript(join(testDir, "unused-stop-child.mjs"));
-		await execute(subagent, { agent: "worker", task: "Settle then destroy" });
+		await execute(subagent, { agent: "executor", task: "Settle then destroy" });
 		const runId = monitor.getRuns()[0]?.id;
 		await waitFor(() => monitor.findRun(runId!) === undefined);
 		expect(existsSync(sessionDir)).toBe(true);
@@ -210,7 +163,7 @@ describe("queued controls and stale generations", () => {
 	it("stops a queued resumed generation without publishing the completed generation's result", async () => {
 		writeFileSync(join(testDir, "pi-subagents.json"), JSON.stringify({
 			maxConcurrency: 1,
-			enabledAgents: ["worker"],
+			enabledAgents: ["executor"],
 			knownAgents: [...BUILTIN_AGENT_NAMES],
 			announcedFeatures: ["cleanerDefaulted", "documenterDefaulted"],
 		}), "utf8");
@@ -219,7 +172,7 @@ describe("queued controls and stale generations", () => {
 		vi.spyOn(spawn, "runSingleAgentWithMainFallback").mockImplementation(async (options: any) => {
 			if (options.task === "Completed objective") {
 				return {
-					agent: "worker",
+					agent: "executor",
 					task: options.task,
 					exitCode: 0,
 					messages: [{ role: "assistant", content: [{ type: "text", text: "OLD COMPLETED OUTPUT" }], stopReason: "stop" }],
@@ -236,7 +189,7 @@ describe("queued controls and stale generations", () => {
 					else options.signal.addEventListener("abort", () => resolveBlocked(), { once: true });
 				});
 				return {
-					agent: "worker",
+					agent: "executor",
 					task: options.task,
 					exitCode: 1,
 					messages: [],
@@ -251,12 +204,12 @@ describe("queued controls and stale generations", () => {
 		const script = join(testDir, "unused-queued-resume.mjs");
 		writeFileSync(script, "", "utf8");
 		const { stub, subagent, control, stop } = registerWithScript(script);
-		const completed = await execute(subagent, { agent: "worker", task: "Completed objective" });
+		const completed = await execute(subagent, { agent: "executor", task: "Completed objective" });
 		const runId = completed.details.results[0].runId;
 		await waitFor(() => stub.messages.length === 1);
 		stub.messages.length = 0;
 
-		const occupying = await execute(subagent, { agent: "worker", task: "Occupy the only slot" });
+		const occupying = await execute(subagent, { agent: "executor", task: "Occupy the only slot" });
 		const occupyingId = occupying.details.results[0].runId;
 		await waitFor(() => monitor.findRun(occupyingId)?.status === "running");
 		const resumed = await execute(control, {
@@ -290,7 +243,7 @@ describe("queued controls and stale generations", () => {
 		const sessionDir = mkdtempSync(join(testDir, "resume-race-session-"));
 		writeFileSync(join(sessionDir, "now_resume-race.jsonl"), "", "utf8");
 		const runSpy = vi.spyOn(spawn, "runSingleAgentWithMainFallback").mockResolvedValue({
-			agent: "worker",
+			agent: "executor",
 			task: "race",
 			exitCode: 0,
 			messages: [{ role: "assistant", content: [{ type: "text", text: "done" }], stopReason: "stop" }],
@@ -302,7 +255,7 @@ describe("queued controls and stale generations", () => {
 		const script = join(testDir, "unused-race.mjs");
 		writeFileSync(script, "", "utf8");
 		const { subagent, control } = registerWithScript(script);
-		const dispatched = await execute(subagent, { agent: "worker", task: "race" });
+		const dispatched = await execute(subagent, { agent: "executor", task: "race" });
 		const runId = dispatched.details.results[0].runId;
 		await captured[0](controllers[0].signal, controllers[0]);
 
@@ -334,7 +287,7 @@ describe("queued controls and stale generations", () => {
 			.mockImplementationOnce(async (options: any) => {
 				staleLive = options.onLive;
 				return {
-					agent: "worker",
+					agent: "executor",
 					task: "first",
 					exitCode: 0,
 					messages: [{ role: "assistant", content: [{ type: "text", text: "first" }], stopReason: "stop" }],
@@ -345,7 +298,7 @@ describe("queued controls and stale generations", () => {
 				} as any;
 			})
 			.mockResolvedValueOnce({
-				agent: "worker",
+				agent: "executor",
 				task: "second",
 				exitCode: 0,
 				messages: [{ role: "assistant", content: [{ type: "text", text: "second" }], stopReason: "stop" }],
@@ -357,7 +310,7 @@ describe("queued controls and stale generations", () => {
 		const script = join(testDir, "unused.mjs");
 		writeFileSync(script, "", "utf8");
 		const { subagent, control } = registerWithScript(script);
-		await execute(subagent, { agent: "worker", task: "first" });
+		await execute(subagent, { agent: "executor", task: "first" });
 		const runId = monitor.getRuns()[0]?.id;
 		await captured[0](controllers[0].signal, controllers[0]);
 		await execute(control, { action: "resume", id: runId, objective: "second" });

@@ -154,14 +154,6 @@ export function modelLevelTakeoverNote(result: SingleResult, opts?: { runId?: nu
 	return `The sub-agent could not complete this task: ${cause}${retry}.${recovery}`;
 }
 
-/** Instruction appended whenever a failing gate verdict is delivered: the
- * findings return to the main agent, which owns the fix decision — the runtime
- * never auto-fixes. Stating it at this exact decision point keeps the main
- * agent from relaying the findings to the user and stopping. */
-export function reviewFailFollowUpNote(): string {
-	return "This gate failed and the findings are yours to resolve now: fix them inline or dispatch a worker briefed with these fix instructions, then re-verify the change. Ask the user only before a genuinely destructive or scope-changing fix; do not deliver while a finding stands.";
-}
-
 /** Resolve a run-id request to actual ids: an exact numeric match always wins
  * (so "1" never fans out to 10, 11, …); only when no exact match exists does a
  * prefix match run, as a convenience for partial ids. Keeps single-digit lookups

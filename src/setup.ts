@@ -40,11 +40,7 @@ import { promptSelectMany, promptSelectOne } from "./ui.ts";
 /** Short, selection-friendly descriptions for the built-in agents. */
 const MODULE_HINTS: Record<string, string> = {
 	explorer: "read-only codebase recon (fast, read-only tools)",
-	worker: "implement / fix / refactor / test (full tools)",
-	cleaner: "apply proven cleanup and deduplicate code (full tools)",
-	documenter: "sync diff or whole-codebase comments/docs (docs write)",
-	synthesizer: "merge fan-out results/long sources into one brief (read-only)",
-	reviewer: "read-only audits and pre-commit gates",
+	executor: "implement / fix / clean up / docs sync / merge results (full tools)",
 };
 
 function moduleLabel(name: string): string {
@@ -254,7 +250,6 @@ async function runFullSetup(ctx: ExtensionCommandContext, configPath: string, ba
 		agentModels,
 		// Full setup returns every agent to capability-aware Auto thinking.
 		agentThinkingLevels: {},
-		notifyOnReviewPass: base.notifyOnReviewPass,
 		maxResultLines: base.maxResultLines,
 		agentScope: base.agentScope,
 		idleTimeoutSec: base.idleTimeoutSec,

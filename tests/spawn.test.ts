@@ -17,7 +17,6 @@ import {
 	RESULT_ARTIFACT_MAX_AGE_MS,
 	RESULT_ARTIFACT_MAX_FILES_PER_PROJECT,
 	RESULT_LINE_MAX,
-	reviewVerdict,
 	sweepProjectResultArtifacts,
 	truncateResultOutput,
 	writeChildRetryPolicyExtension,
@@ -75,25 +74,6 @@ describe("getFinalOutput", () => {
 	});
 	it("returns empty string when there is no assistant text", () => {
 		expect(getFinalOutput([{ role: "user", content: [] } as any])).toBe("");
-	});
-});
-
-describe("reviewVerdict", () => {
-	it("parses the reviewer prompt's machine-readable verdict lines", () => {
-		expect(reviewVerdict("## Verdict\nAPPROVE\nVERDICT: REVIEW_PASS")).toBe("pass");
-		expect(reviewVerdict("## Verdict\nREQUEST_CHANGES\nVERDICT: REVIEW_FAIL")).toBe("fail");
-		expect(reviewVerdict("\n\tVERDICT: review_pass\n")).toBe("pass");
-	});
-
-	it("only the last standalone VERDICT line counts", () => {
-		// Discussion that merely mentions the tokens must not be misclassified.
-		expect(reviewVerdict("Use VERDICT: REVIEW_PASS for approval...\n## Verdict\nREQUEST_CHANGES\nVERDICT: REVIEW_FAIL")).toBe("fail");
-		expect(reviewVerdict("VERDICT: REVIEW_FAIL is the bad one\nVERDICT: REVIEW_PASS")).toBe("pass");
-		expect(reviewVerdict("inline VERDICT: REVIEW_PASS not on its own line")).toBeUndefined();
-	});
-
-	it("returns undefined without a verdict marker", () => {
-		expect(reviewVerdict("## Verdict\nAPPROVE")).toBeUndefined();
 	});
 });
 

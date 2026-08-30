@@ -76,9 +76,6 @@ export interface ThreadRecord {
 	executionCwd: string;
 	thinkingLevel?: string;
 	isolation: IsolationMode;
-	/** Persisted only when the dispatch opted out of the automatic gate, so a
-	 * restored resume never surprises the caller with a full review. */
-	review?: "none";
 	state: "parked" | "completed" | "failed";
 	elapsedMs: number;
 	sessionId?: string;
@@ -171,7 +168,6 @@ function normalizeRecord(value: unknown): ThreadRecord | undefined {
 		executionCwd: typeof raw.executionCwd === "string" && raw.executionCwd ? raw.executionCwd : raw.cwd,
 		...(typeof raw.thinkingLevel === "string" && raw.thinkingLevel ? { thinkingLevel: raw.thinkingLevel } : {}),
 		isolation: raw.isolation,
-		...(raw.review === "none" ? { review: "none" as const } : {}),
 		state: raw.state,
 		elapsedMs: typeof raw.elapsedMs === "number" && Number.isFinite(raw.elapsedMs) ? Math.max(0, raw.elapsedMs) : 0,
 		...(typeof raw.sessionId === "string" && raw.sessionId ? { sessionId: raw.sessionId } : {}),
@@ -285,7 +281,6 @@ export function threadRecordFromThread(
 		executionCwd: thread.executionCwd,
 		...(thread.thinkingLevel ? { thinkingLevel: thread.thinkingLevel } : {}),
 		isolation: thread.isolation,
-		...(thread.review === "none" ? { review: "none" as const } : {}),
 		state,
 		elapsedMs: thread.elapsedMs,
 		...(thread.sessionId && thread.sessionDir ? { sessionId: thread.sessionId, sessionDir: thread.sessionDir } : {}),

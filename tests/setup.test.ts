@@ -146,7 +146,7 @@ describe("configured-agent flow", () => {
 	it("returns to the agent picker after a model pick so another agent can be set", async () => {
 		const dir = mkdtempSync(join(tmpdir(), "pi-subagents-setup-loop-"));
 		const configPath = join(dir, "pi-subagents.json");
-		writeFileSync(configPath, JSON.stringify({ enabledAgents: ["explorer", "worker"] }), "utf8");
+		writeFileSync(configPath, JSON.stringify({ enabledAgents: ["explorer", "executor"] }), "utf8");
 		const haiku = {
 			provider: "anthropic",
 			id: "haiku",
@@ -186,7 +186,7 @@ describe("configured-agent flow", () => {
 				} else if (screen.includes('Model for "explorer"?')) {
 					component.handleInput("down");
 					component.handleInput("enter");
-				} else if (screen.includes('Model for "worker"?')) {
+				} else if (screen.includes('Model for "executor"?')) {
 					component.handleInput("down");
 					component.handleInput("down");
 					component.handleInput("enter");
@@ -202,7 +202,7 @@ describe("configured-agent flow", () => {
 			const saved = JSON.parse(readFileSync(configPath, "utf8"));
 			expect(saved.agentModels).toEqual({
 				explorer: "anthropic/haiku",
-				worker: "anthropic/sonnet",
+				executor: "anthropic/sonnet",
 			});
 		} finally {
 			rmSync(dir, { recursive: true, force: true });
@@ -215,9 +215,9 @@ describe("setup back navigation", () => {
 		const dir = mkdtempSync(join(tmpdir(), "pi-subagents-setup-back-stack-"));
 		const configPath = join(dir, "pi-subagents.json");
 		const original = existingConfig({
-			enabledAgents: ["explorer", "documenter"],
-			agentModels: { documenter: "deepseek/deepseek-v4-flash" },
-			agentThinkingLevels: { explorer: "high", documenter: "max" },
+			enabledAgents: ["explorer", "executor"],
+			agentModels: { executor: "deepseek/deepseek-v4-flash" },
+			agentThinkingLevels: { explorer: "high", executor: "max" },
 		});
 		writeFileSync(configPath, JSON.stringify(original), "utf8");
 		const model = {
@@ -361,7 +361,7 @@ describe("settings preservation", () => {
 			select: vi.fn(async (_title: string, options: string[]) =>
 				options.find((option) => option.startsWith("Enable"))),
 			custom: pickerDriver((component) => {
-				// Worker is the second built-in row: toggle it on and confirm.
+				// Executor is the second built-in row: toggle it on and confirm.
 				component.handleInput("down");
 				component.handleInput(" ");
 				component.handleInput("enter");
@@ -370,7 +370,7 @@ describe("settings preservation", () => {
 		try {
 			await runSetup(ctx, configPath);
 			const saved = JSON.parse(readFileSync(configPath, "utf8"));
-			expect(saved.enabledAgents).toContain("worker");
+			expect(saved.enabledAgents).toContain("executor");
 			expect(saved.agentModels.documenter).toBe("deepseek/deepseek-v4-flash");
 			expect(saved.agentThinkingLevels.documenter).toBe("max");
 		} finally {
@@ -380,14 +380,16 @@ describe("settings preservation", () => {
 });
 
 describe("enable/disable flow", () => {
-	it("newly enabling cleaner inherits the explorer model and thinking", async () => {
+	it("newly enabling executor inherits the explorer model and thinking", async () => {
 		const dir = mkdtempSync(join(tmpdir(), "pi-subagents-setup-enable-"));
 		const configPath = join(dir, "pi-subagents.json");
 			writeFileSync(
 				configPath,
 				JSON.stringify({
-					enabledAgents: ["explorer", "worker", "reviewer"],
-					knownAgents: [...BUILTIN_AGENT_NAMES],
+					// Both roles are already known, so loadConfig must not auto-adopt
+					// executor: the wizard is what toggles it on here.
+					enabledAgents: ["explorer"],
+					knownAgents: ["explorer", "executor"],
 					agentModels: { explorer: "anthropic/haiku" },
 					agentThinkingLevels: { explorer: "low" },
 				}),
@@ -398,8 +400,7 @@ describe("enable/disable flow", () => {
 				select: vi.fn(async (_title: string, options: string[]) =>
 					options.find((option) => option.startsWith("Enable"))),
 				custom: pickerDriver((component) => {
-					// Move to cleaner (third row) and toggle it on, then confirm.
-					component.handleInput("down");
+					// Move to executor (second row) and toggle it on, then confirm.
 					component.handleInput("down");
 					component.handleInput(" ");
 					component.handleInput("enter");
@@ -408,49 +409,12 @@ describe("enable/disable flow", () => {
 			try {
 				await runSetup(ctx, configPath);
 				const saved = JSON.parse(readFileSync(configPath, "utf8"));
-				expect(saved.enabledAgents).toEqual(["explorer", "worker", "reviewer", "cleaner"]);
-				expect(saved.agentModels).toEqual({ explorer: "anthropic/haiku", cleaner: "anthropic/haiku" });
-				expect(saved.agentThinkingLevels).toEqual({ explorer: "low", cleaner: "low" });
+				expect(saved.enabledAgents).toEqual(["explorer", "executor"]);
+				expect(saved.agentModels).toEqual({ explorer: "anthropic/haiku", executor: "anthropic/haiku" });
+				expect(saved.agentThinkingLevels).toEqual({ explorer: "low", executor: "low" });
 			} finally {
 				rmSync(dir, { recursive: true, force: true });
 			}
-		});
-
-	it("newly enabling documenter inherits the explorer model and thinking", async () => {
-		const dir = mkdtempSync(join(tmpdir(), "pi-subagents-setup-documenter-"));
-		const configPath = join(dir, "pi-subagents.json");
-			writeFileSync(
-				configPath,
-				JSON.stringify({
-					enabledAgents: ["explorer", "worker", "cleaner", "reviewer"],
-					knownAgents: [...BUILTIN_AGENT_NAMES],
-					agentModels: { explorer: "anthropic/haiku" },
-					agentThinkingLevels: { explorer: "low" },
-				}),
-				"utf8",
-			);
-		const ctx = setupContext(dir, {
-			notify: vi.fn(),
-			select: vi.fn(async (_title: string, options: string[]) =>
-				options.find((option) => option.startsWith("Enable"))),
-			custom: pickerDriver((component) => {
-				// Documenter is the fourth built-in row.
-				component.handleInput("down");
-				component.handleInput("down");
-				component.handleInput("down");
-				component.handleInput(" ");
-				component.handleInput("enter");
-			}),
-		});
-		try {
-			await runSetup(ctx, configPath);
-			const saved = JSON.parse(readFileSync(configPath, "utf8"));
-			expect(saved.enabledAgents).toContain("documenter");
-			expect(saved.agentModels.documenter).toBe("anthropic/haiku");
-			expect(saved.agentThinkingLevels.documenter).toBe("low");
-		} finally {
-			rmSync(dir, { recursive: true, force: true });
-		}
 	});
 });
 
@@ -475,7 +439,7 @@ describe("full setup flow", () => {
 		try {
 			await runSetup(ctx, configPath);
 			const config = JSON.parse(readFileSync(configPath, "utf8"));
-			expect(config.enabledAgents).toEqual(["explorer", "worker", "cleaner", "documenter", "synthesizer", "reviewer"]);
+			expect(config.enabledAgents).toEqual(["explorer", "executor"]);
 			expect(config.agentModels).toEqual({});
 			expect(config.agentThinkingLevels).toEqual({});
 			expect(config).not.toHaveProperty("agentBackupModels");
@@ -483,10 +447,9 @@ describe("full setup flow", () => {
 			expect(config).not.toHaveProperty("proactiveInjection");
 			// First run is pickers only — no plain select questions remain.
 			expect(selectTitles).toEqual([]);
-			expect(screens.some((screen) => screen.includes("cleaner — apply proven cleanup and deduplicate"))).toBe(true);
-			expect(screens.some((screen) => screen.includes("documenter — sync diff"))).toBe(true);
-			expect(screens.some((screen) => screen.includes("synthesizer — merge fan-out results"))).toBe(true);
-			for (const agent of ["explorer", "worker", "cleaner", "documenter", "synthesizer", "reviewer"]) {
+			expect(screens.some((screen) => screen.includes("explorer — read-only codebase recon"))).toBe(true);
+			expect(screens.some((screen) => screen.includes("executor — implement / fix / clean up"))).toBe(true);
+			for (const agent of ["explorer", "executor"]) {
 				expect(screens.some((screen) => screen.includes(`Model for "${agent}"?`))).toBe(true);
 			}
 			expect(screens.some((screen) => screen.includes("Primary/Backup"))).toBe(false);

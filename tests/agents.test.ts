@@ -35,96 +35,40 @@ afterEach(() => {
 });
 
 describe("shipped specialist agents", () => {
-	it("makes cleaner apply proven cuts while leaving audits and the gate to reviewer", () => {
-		const cleaner = loadBuiltinAgents().find((agent) => agent.name === "cleaner");
-		expect(cleaner).toBeDefined();
-		expect(cleaner).toMatchObject({
+	it("ships executor as the full-capability generalist", () => {
+		const executor = loadBuiltinAgents().find((agent) => agent.name === "executor");
+		expect(executor).toMatchObject({
 			thinking: "high",
 			source: "builtin",
 		});
-		expect(cleaner?.tools).toBeUndefined();
-		expect(cleaner?.description).toContain("edit-authorizing cleanup");
-		expect(cleaner?.systemPrompt).toContain("apply every safe, proven, in-scope cleanup end to end");
-		expect(cleaner?.systemPrompt).toContain("Finding no safe cut and making zero edits is valid");
-		expect(cleaner?.systemPrompt).toContain("without asking for approval item by item");
-		expect(cleaner?.systemPrompt).toContain("proactively extract the smallest stable shared");
-		expect(cleaner?.systemPrompt).toContain("Do not merely report a safe consolidation");
-		expect(cleaner?.systemPrompt).toContain("different domain boundaries");
-		expect(cleaner?.systemPrompt).toContain("Never inherit deletion proof from an `explorer` report");
-		expect(cleaner?.systemPrompt).not.toContain("Audit mode");
-		expect(cleaner?.systemPrompt).not.toContain("Apply mode");
-		expect(cleaner?.systemPrompt).toContain("directly affected by the cleanup");
-		expect(cleaner?.systemPrompt).toContain("Never commit, push, publish, tag, release, or bump");
-		expect(cleaner?.systemPrompt).toContain("deleting whole categories of complexity");
+		// No `tools` field => the child inherits the parent's complete active set.
+		expect(executor?.tools).toBeUndefined();
+		expect(executor?.description).toContain("implement, fix, refactor, test, clean up, sync docs, or merge fan-out results");
+		// Absorbed cleaner discipline: prove a cut before applying it.
+		expect(executor?.systemPrompt).toContain("a candidate is not a deletion");
+		expect(executor?.systemPrompt).toContain("repeat the decisive searches yourself");
+		expect(executor?.systemPrompt).toContain("Finding no safe cut and making zero edits is valid");
+		expect(executor?.systemPrompt).toContain("keep a candidate when a real consumer exists");
+		// Absorbed documenter boundary: docs follow behavior, never the reverse.
+		expect(executor?.systemPrompt).toContain("Never change runtime behavior to make documentation true");
+		// Absorbed synthesizer workflow: attributed, deduplicated merging of named inputs.
+		expect(executor?.systemPrompt).toContain("read every input fully before writing");
+		expect(executor?.systemPrompt).toContain("report surviving conflicts side by side");
 	});
 
-	it("gives cleaner a scope contract with the uncommitted diff as its default", () => {
-		const cleaner = loadBuiltinAgents().find((agent) => agent.name === "cleaner");
-		// Two dispatch shapes: cleanup of what was just written, and cleanup of a
-		// caller-named target — committed history or a subtree.
-		expect(cleaner?.systemPrompt).toContain("your scope is the uncommitted work");
-		expect(cleaner?.systemPrompt).toContain("a Git range");
-		expect(cleaner?.systemPrompt).toContain("a directory or path list is that subtree");
-		// A clean tree plus a vague brief must not become a repository-wide sweep.
-		expect(cleaner?.systemPrompt).toContain("Roaming the whole repository uninvited is not a safe default");
-		// The load-bearing rule: narrowing where edits land must never narrow the
-		// search that proves a cut safe, or a scoped cleanup deletes a live caller.
-		expect(cleaner?.systemPrompt).toContain("Scope bounds your edits, never your evidence");
+	it("gives executor a scope contract keyed to the brief", () => {
+		const executor = loadBuiltinAgents().find((agent) => agent.name === "executor");
+		expect(executor?.systemPrompt).toContain("the task brief is your source of truth");
+		expect(executor?.systemPrompt).toContain("limit edits to the request plus required validation");
+		expect(executor?.systemPrompt).toContain("smallest coherent root-cause change");
 	});
 
 	it("keeps release ownership out of implementation children", () => {
-		const worker = loadBuiltinAgents().find((agent) => agent.name === "worker");
-		expect(worker?.systemPrompt).toContain("Never commit, push, publish, tag, release, or bump");
-		expect(worker?.systemPrompt).toContain("parent workflow owns the independent review gate");
-		expect(worker?.systemPrompt).toContain("directly affected by your change");
-		expect(worker?.systemPrompt).toContain("deletes complexity rather than rearranges it");
-	});
-
-	it("ships documenter as a low-cost write-capable drift-sync specialist", () => {
-		const documenter = loadBuiltinAgents().find((agent) => agent.name === "documenter");
-		expect(documenter).toMatchObject({
-			thinking: "low",
-			source: "builtin",
-		});
-		expect(documenter?.tools).toEqual(["read", "grep", "find", "ls", "bash", "edit", "write"]);
-		expect(documenter?.description).toContain("explicitly requested or drift-driven");
-		expect(documenter?.systemPrompt).toContain("Post-change diff sync");
-		expect(documenter?.systemPrompt).toContain("Standalone documentation maintenance");
-		expect(documenter?.systemPrompt).toContain("never change runtime behavior");
-		expect(documenter?.systemPrompt).toContain("Never commit, push, publish, tag, or release");
-		expect(documenter?.systemPrompt).toContain("zero edits is valid");
-		expect(documenter?.systemPrompt).toContain("delivers directly after you");
-		expect(documenter?.systemPrompt).toContain("no fresh reviewer runs");
-	});
-
-	it("requires gate fix instructions and hands direct-gate findings back to the caller", () => {
-		const reviewer = loadBuiltinAgents().find((agent) => agent.name === "reviewer");
-		expect(reviewer?.systemPrompt).toContain("concrete fix instruction");
-		expect(reviewer?.systemPrompt).toContain("how to verify the fix");
-		expect(reviewer?.systemPrompt).toContain("Scale scrutiny to the change");
-		expect(reviewer?.systemPrompt).toContain("Complete finding set in ONE pass");
-		expect(reviewer?.systemPrompt).toContain("never ration findings across rounds");
-		expect(reviewer?.systemPrompt).toContain("Fix stage (runtime-granted)");
-		expect(reviewer?.systemPrompt).toContain("a fix stage never emits a verdict");
-		const worker = loadBuiltinAgents().find((agent) => agent.name === "worker");
-		expect(worker?.systemPrompt).toContain("reviewer findings");
-		expect(worker?.systemPrompt).toContain("push back in your report");
-		expect(worker?.systemPrompt).toContain("A deviation without reasoning will be re-opened");
-	});
-
-	it("keeps reviewer advisory reports separate from gate verdicts", () => {
-		const reviewer = loadBuiltinAgents().find((agent) => agent.name === "reviewer");
-		expect(reviewer?.description).toContain("generic audits");
-		expect(reviewer?.systemPrompt).toContain("Advisory review");
-		expect(reviewer?.systemPrompt).toContain("do **not** emit `VERDICT: REVIEW_*`");
-		expect(reviewer?.systemPrompt).toContain("Gate review");
-		expect(reviewer?.systemPrompt).toContain("Use `VERDICT: REVIEW_FAIL` when any gate finding remains");
-		expect(reviewer?.systemPrompt).toContain("continues into your write-enabled fix stage");
-		expect(reviewer?.systemPrompt).toContain("Documentation drift is an ordinary finding");
-		expect(reviewer?.systemPrompt).not.toContain("DOCUMENTATION:");
-		expect(reviewer?.systemPrompt).toContain("code judo");
-		expect(reviewer?.systemPrompt).toContain("Do not approve merely because behavior seems correct");
-		expect(reviewer?.systemPrompt).not.toMatch(/\bBash\b/u);
+		const executor = loadBuiltinAgents().find((agent) => agent.name === "executor");
+		expect(executor?.systemPrompt).toContain("Never commit, push, publish, tag, release, or bump");
+		expect(executor?.systemPrompt).toContain("the caller owns every release action");
+		expect(executor?.systemPrompt).toContain("directly affects");
+		expect(executor?.systemPrompt).toContain("deletes complexity");
 	});
 
 	it("requires result-only handoffs without recovered tool noise", () => {
@@ -187,20 +131,16 @@ describe("parent tool inheritance", () => {
 		],
 		["neither", ["read", "edit", "write", "web_search", "query_docs"], []],
 	] as const)("keeps restricted built-ins while inheriting the parent %s shell and plugins", (_label, activeTools, expectedShells) => {
-		const builtins = loadBuiltinAgents().filter((agent) =>
-			["explorer", "documenter", "reviewer"].includes(agent.name)
-		);
-		expect(builtins).toHaveLength(3);
+		const builtins = loadBuiltinAgents().filter((agent) => agent.name === "explorer");
+		expect(builtins).toHaveLength(1);
 		for (const agent of builtins) {
 			const resolved = resolveAgentTools(agent, [...activeTools, "subagent", "subagent_control"]);
 			expect(resolved.tools?.filter((tool) => tool === "bash" || tool === "powershell")).toEqual(expectedShells);
 			expect(resolved.tools).toEqual(expect.arrayContaining(["web_search", "query_docs"]));
 			expect(resolved.tools).not.toContain("subagent");
 			expect(resolved.tools).not.toContain("subagent_control");
-			if (agent.name !== "documenter") {
-				expect(resolved.tools).not.toContain("edit");
-				expect(resolved.tools).not.toContain("write");
-			}
+			expect(resolved.tools).not.toContain("edit");
+			expect(resolved.tools).not.toContain("write");
 		}
 	});
 
@@ -218,13 +158,11 @@ describe("parent tool inheritance", () => {
 
 	it("gives roles without an allowlist the complete active set except recursive controls", () => {
 		const builtins = loadBuiltinAgents();
-		for (const name of ["worker", "cleaner"]) {
-			const agent = builtins.find((candidate) => candidate.name === name)!;
-			expect(agent.tools).toBeUndefined();
-			expect(resolveAgentTools(agent, ["read", "powershell", "edit", "write", "web_search", "subagent_stop"]).tools)
-				.toEqual(["read", "powershell", "edit", "write", "web_search"]);
-			expect(agent.tools).toBeUndefined();
-		}
+		const agent = builtins.find((candidate) => candidate.name === "executor")!;
+		expect(agent.tools).toBeUndefined();
+		expect(resolveAgentTools(agent, ["read", "powershell", "edit", "write", "web_search", "subagent_stop"]).tools)
+			.toEqual(["read", "powershell", "edit", "write", "web_search"]);
+		expect(agent.tools).toBeUndefined();
 	});
 });
 
@@ -233,7 +171,10 @@ describe("agent write capability", () => {
 		expect(isWriteCapableAgent({ name: "custom", tools: ["read", "write"] })).toBe(true);
 		expect(isWriteCapableAgent({ name: "custom" })).toBe(true);
 		expect(isWriteCapableAgent({ name: "custom", tools: ["read", "grep"] })).toBe(false);
-		expect(isWriteCapableAgent({ name: "reviewer", tools: ["write"] })).toBe(false);
+		// Built-in classifications survive user overrides of the same name.
+		expect(isWriteCapableAgent({ name: "executor" })).toBe(true);
+		expect(isWriteCapableAgent({ name: "executor", tools: ["read", "grep"] })).toBe(true);
+		expect(isWriteCapableAgent({ name: "explorer", tools: ["write"] })).toBe(false);
 		expect(isWriteCapableAgent({ name: "explorer" })).toBe(false);
 	});
 });
@@ -318,19 +259,16 @@ describe("discoverAgents", () => {
 	});
 
 	it("defaults parallel write-capable dispatches to worktree isolation", () => {
-		// Built-in writer roles default to a detached worktree in parallel mode.
-		for (const writer of ["worker", "cleaner", "documenter"]) {
-			expect(defaultIsolationMode("parallel", writer)).toBe("worktree");
-		}
+		// The built-in writer role defaults to a detached worktree in parallel mode.
+		expect(defaultIsolationMode("parallel", "executor")).toBe("worktree");
 		// Read-only roles and single dispatches stay on the caller's checkout.
 		expect(defaultIsolationMode("parallel", "explorer")).toBe("shared");
-		expect(defaultIsolationMode("parallel", "reviewer")).toBe("shared");
-		expect(defaultIsolationMode("single", "worker")).toBe("shared");
+		expect(defaultIsolationMode("single", "executor")).toBe("shared");
 		// A custom write-capable agent joins the worktree default when the
 		// execute path passes the catalog verdict; explicit requests win.
 		expect(defaultIsolationMode("parallel", "custom-writer", undefined, true)).toBe("worktree");
 		expect(defaultIsolationMode("parallel", "custom-reader", undefined, false)).toBe("shared");
-		expect(defaultIsolationMode("parallel", "worker", "shared")).toBe("shared");
+		expect(defaultIsolationMode("parallel", "executor", "shared")).toBe("shared");
 		expect(defaultIsolationMode("single", "explorer", "worktree")).toBe("worktree");
 	});
 

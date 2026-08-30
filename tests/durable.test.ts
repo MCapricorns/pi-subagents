@@ -120,26 +120,6 @@ describe("thread manifest", () => {
 		expect(record.worktree).toMatchObject({ state: "active", head: "deadbeef" });
 		expect(record.worktree!.checkpoint).toMatchObject({ baseHead: "a", commit: "b" });
 		expect(record.resultSummary).toMatchObject({ failed: false, output: "final answer" });
-		// The default gate mode is not persisted; only an opt-out survives.
-		expect(record.review).toBeUndefined();
-		expect(threadRecordFromThread({ ...thread, review: "none" }, "parked", undefined, 5_000).review).toBe("none");
-	});
-
-	it("round-trips a review opt-out and drops any other review value", async () => {
-		const root = mkdtempSync(join(tmpdir(), "pi-subagents-durable-review-"));
-		roots.push(root);
-		const configPath = join(root, "pi-subagents.json");
-		writeFileSync(getThreadsManifestPath(configPath), JSON.stringify({
-			version: 1,
-			records: [
-				makeRecord({ review: "none" }),
-				makeRecord({ runId: 2, review: "gate" as unknown as ThreadRecord["review"] }),
-			],
-		}), "utf8");
-		const records = await readThreadRecords(configPath);
-		expect(records.find((record) => record.runId === 1)!.review).toBe("none");
-		// "gate" is the default and never persisted; unknown values normalize away.
-		expect(records.find((record) => record.runId === 2)!.review).toBeUndefined();
 	});
 
 	it("rebuilds a displayable result from a persisted summary", () => {

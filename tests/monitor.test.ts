@@ -59,11 +59,9 @@ describe("MonitorStore", () => {
 		expect(store.findRun(id)!.waitReason).toBeUndefined();
 	});
 
-	it("workflow-internal children are marked as starting, never slot-waiting", () => {
+	it("a run that is already spawning is marked as starting, never slot-waiting", () => {
 		const store = new MonitorStore();
-		const id = store.addRun("reviewer", "Gate the diff", undefined, undefined, {
-			parentRunId: 1,
-			relationLabel: "review",
+		const id = store.addRun("explorer", "Map the codebase", undefined, undefined, {
 			waitReason: "starting",
 		});
 		expect(store.findRun(id)!.waitReason).toBe("starting");
@@ -147,31 +145,6 @@ describe("MonitorStore", () => {
 		expect(run.integrationStatus).toBe("pending");
 	});
 
-	it("marks stable workflow ownership without relabeling it as a child model stage", () => {
-		const store = new MonitorStore();
-		const id = store.addRun("worker", "Implement the change", "openai/gpt-worker", "max");
-		store.setUsage(id, { input: 10, output: 5, cacheRead: 0, cacheWrite: 0, cost: 0.5, contextTokens: 0, turns: 1 });
-		store.setManagedWorkflow(id, true);
-		const run = store.findRun(id)!;
-		expect(run.managedWorkflow).toBe(true);
-		expect(run.agent).toBe("worker");
-		expect(store.summarize(run)).toBe("worker workflow");
-		const stages = [
-			{ agent: "worker", relation: "implement", status: "done" as const },
-			{ agent: "reviewer", relation: "review", status: "active" as const },
-		];
-		store.setWorkflowStages(id, stages);
-		expect(run.workflowStages).toEqual(stages);
-		stages[0].relation = "mutated";
-		expect(run.workflowStages).not.toBe(stages);
-		expect(run.workflowStages?.[0].relation).toBe("implement");
-
-		store.restartRun(id, "reviewer", "Resume review", "xai/grok-reviewer", "xhigh");
-		expect(run.managedWorkflow).toBeUndefined();
-		expect(run.workflowStages).toBeUndefined();
-		expect(store.summarize(run)).toContain("reviewer · xai/grok-reviewer · thinking xhigh");
-	});
-
 	it("setModel records the main handoff and failed selection", () => {
 		const store = new MonitorStore();
 		const id = store.addRun("worker", "Implement the change", "anthropic/primary");
@@ -198,19 +171,6 @@ describe("MonitorStore", () => {
 		expect(removed?.id).toBe(id);
 		expect(store.findRun(id)).toBeUndefined();
 		expect(store.removeRun(id)).toBeUndefined();
-	});
-
-	it("addRun carries chain metadata (groupId, relationLabel, parentRunId)", () => {
-		const store = new MonitorStore();
-		const id = store.addRun("worker", "Fix the findings", undefined, undefined, {
-			groupId: "fix-3",
-			relationLabel: "final review",
-			parentRunId: 3,
-		});
-		const run = store.findRun(id);
-		expect(run?.groupId).toBe("fix-3");
-		expect(run?.relationLabel).toBe("final review");
-		expect(run?.parentRunId).toBe(3);
 	});
 });
 
@@ -288,10 +248,10 @@ describe("formatTaskSummary", () => {
 			"explorer: trace how the batching pipeline drains and how completion messages are grouped, then report src/completion.ts",
 		);
 		const b = formatTaskSummary(
-			"explorer: trace how the batching pipeline drains and how completion messages are grouped, then report src/workflow.ts",
+			"explorer: trace how the batching pipeline drains and how completion messages are grouped, then report src/worktree.ts",
 		);
 		expect(a).toBe("src/completion.ts");
-		expect(b).toBe("src/workflow.ts");
+		expect(b).toBe("src/worktree.ts");
 	});
 
 	it("keeps the tail of an over-long single fragment", () => {
@@ -323,52 +283,6 @@ describe("formatUsageCompact", () => {
 		expect(usageCostPart(usage)).toBe("$0.0500");
 		expect(formatUsageTokens(undefined)).toBeUndefined();
 		expect(usageCostPart({ ...usage, cost: 0 })).toBeUndefined();
-	});
-});
-
-describe("main model activity", () => {
-	it("tracks the parent agent loop and clears the view when it settles", () => {
-		const store = new MonitorStore();
-		expect(store.getMainActivity()).toBeUndefined();
-		store.setMainModel("openai/gpt-5");
-		store.setMainThinking("max");
-		store.setMainAgentActive(true);
-		store.setMainActivity("edit src/index.ts");
-		const view = store.getMainActivity();
-		expect(view).toMatchObject({ model: "openai/gpt-5", thinking: "max", activity: "edit src/index.ts" });
-		expect(view!.activeSince).toBeTypeOf("number");
-		store.setMainAgentActive(false);
-		expect(store.getMainActivity()).toBeUndefined();
-		expect(store.isMainAgentActive()).toBe(false);
-	});
-
-	it("dedupes streaming deltas so subscribers are not flooded", () => {
-		const store = new MonitorStore();
-		const notify = vi.fn();
-		store.subscribe(notify);
-		store.setMainActivity("responding");
-		store.setMainActivity("responding");
-		expect(notify).toHaveBeenCalledTimes(1);
-	});
-
-	it("reuses the tool activity vocabulary and flags failed tools", () => {
-		const store = new MonitorStore();
-		store.setMainAgentActive(true);
-		store.recordMainToolStart("read", "read src/index.ts");
-		expect(store.getMainActivity()?.activity).toBe("read src/index.ts");
-		store.recordMainToolEnd("read", false);
-		expect(store.getMainActivity()?.activity).toBe("read src/index.ts");
-		store.recordMainToolEnd("bash", true);
-		expect(store.getMainActivity()?.activity).toBe("✗ bash failed");
-	});
-
-	it("clear() resets main-model state with the runs", () => {
-		const store = new MonitorStore();
-		store.setMainAgentActive(true);
-		store.setMainModel("openai/gpt-5");
-		store.clear();
-		expect(store.getMainActivity()).toBeUndefined();
-		expect(store.isMainAgentActive()).toBe(false);
 	});
 });
 
@@ -426,18 +340,6 @@ describe("MonitorStore.subscribe", () => {
 		store.setUsage(id, { input: 1200, output: 300, cacheRead: 0, cacheWrite: 0, cost: 0, contextTokens: 0, turns: 2 });
 		expect(store.summarize(run)).toContain("thinking high");
 		expect(store.summarize(run)).toContain("↑1.2k");
-	});
-
-	it("records chain metadata and surfaces the relationLabel in summarize", () => {
-		const store = new MonitorStore();
-		store.addRun("worker", "Fix the bug", undefined, undefined, {
-			groupId: "fix-1",
-			relationLabel: "final review",
-		});
-		const run = store.getRuns()[0];
-		expect(run.groupId).toBe("fix-1");
-		expect(run.relationLabel).toBe("final review");
-		expect(store.summarize(run)).toContain("final review");
 	});
 });
 

@@ -1,10 +1,9 @@
 /**
  * Stable logical-thread generation lifecycle for background sub-agents.
  *
- * Dispatch owns workflow policy, the live stage projection, and internal role
- * briefs; this module owns one
+ * Dispatch owns tool policy and role briefs; this module owns one
  * stable parent generation end to end: managed-repository lane use,
- * worktree setup/finalization after downstream review, queue/process ownership,
+ * worktree setup/finalization, queue/process ownership,
  * retained-session resume, and guarded one-time terminal publication.
  */
 
@@ -19,7 +18,7 @@ import {
 	resolveAgentTools,
 	type AgentConfig,
 } from "./agents.ts";
-import { completionTriggersTurn, type CompletionMessageItem } from "./completion.ts";
+import { type CompletionMessageItem } from "./completion.ts";
 import {
 	DEFAULT_THINKING_LEVEL,
 	loadConfig,
@@ -43,18 +42,8 @@ import {
 	failedStartResult,
 	formatCompletionBlock,
 	modelLevelTakeoverNote,
-	reviewFailFollowUpNote,
 	queuedResult,
 } from "./format.ts";
-import {
-	canStartManagedWorkflow,
-	formatManagedWorkflowSummary,
-	getManagedWorkflowPlan,
-	workflowAgentAvailability,
-	type ManagedWorkflowOutcome,
-	type ManagedWorkflowPlan,
-	type ReviewMode,
-} from "./workflow.ts";
 import {
 	availableModelsInScope,
 	currentModelRef,
@@ -63,19 +52,17 @@ import {
 	resolveAgentModelRoute,
 	resolveThinkingLevel,
 } from "./models.ts";
-import { monitor, sumUsage } from "./monitor.ts";
+import { monitor } from "./monitor.ts";
 import { persistRecoveryRecords, recoveryRecordFromFinalization } from "./recovery.ts";
 import type { SubagentRuntime, SubagentThread, ThreadState } from "./runtime.ts";
 import { forkRetainedSession } from "./session-fork.ts";
 import {
 	buildResumePrompt,
 	getProjectRoot,
-	getResultOutput,
 	PROJECT_ROOTS_DIR_NAME,
 	RpcRunControl,
 	isFailedResult,
 	isModelLevelFailure,
-	reviewVerdict,
 	runSingleAgentWithMainFallback,
 	sessionExists,
 	sweepProjectResultArtifacts,
@@ -136,10 +123,10 @@ async function canonicalManagedRepositoryRoot(cwd: string): Promise<string> {
 
 /** Run one operation under the canonical original-repository lane.
  *
- * Shared managed generations use the abortable overload for their complete
- * writer/reviewer workflow. Isolated generations use the non-abortable overload
- * only for their final worktree apply, so model work remains parallel while the
- * original checkout mutation cannot race a shared writer or reviewer snapshot.
+ * Shared write-capable generations use the abortable overload for their whole
+ * run. Isolated generations use the non-abortable overload only for their
+ * final worktree apply, so model work remains parallel while the original
+ * checkout mutation cannot race a shared writer.
  */
 export async function runInManagedRepositoryLane<T>(
 	cwd: string,
@@ -285,8 +272,6 @@ export interface StartBackgroundOptions {
 	environment?: DispatchEnvironment;
 	seed?: SessionSeed;
 	resumeReservation?: ResumeReservation;
-	/** Gate intensity for this dispatch; a resume keeps the thread's mode. */
-	review?: ReviewMode;
 }
 
 export type StartBackgroundInternal = (
@@ -341,20 +326,6 @@ export function resolveDispatchModelRoute(
 	};
 }
 
-export interface ManagedWorkflowRequest extends DispatchEnvironment {
-	plan: ManagedWorkflowPlan;
-	initialResult: SingleResult;
-	groupId: string;
-	parentRunId: number;
-	executionCwd: string;
-	projectCwd: string;
-	isolation: IsolationMode;
-	/** Short identity of the isolated worktree shared by every workflow stage. */
-	worktreeId?: string;
-	signal: AbortSignal;
-	rememberLatest: (result: SingleResult) => void;
-}
-
 interface BackgroundDispatcherOptions {
 	runtime: SubagentRuntime;
 	/** Live dispatch environment; resolved lazily so control operations work
@@ -373,7 +344,6 @@ interface BackgroundDispatcherOptions {
 		mode: "single" | "parallel",
 		background?: boolean,
 	) => (results: SingleResult[]) => SubagentDetails;
-	runManagedWorkflow: (request: ManagedWorkflowRequest) => Promise<ManagedWorkflowOutcome>;
 }
 
 export function createBackgroundDispatcher(options: BackgroundDispatcherOptions): StartBackgroundInternal {
@@ -383,7 +353,6 @@ export function createBackgroundDispatcher(options: BackgroundDispatcherOptions)
 		finishRun,
 		makeLiveHandler,
 		makeDetails,
-		runManagedWorkflow,
 	} = options;
 
 	const startBackground: StartBackgroundInternal = async (
@@ -400,10 +369,6 @@ export function createBackgroundDispatcher(options: BackgroundDispatcherOptions)
 			seed,
 			resumeReservation,
 		} = startOptions;
-		// The dispatch-time gate choice is a thread property: resumes of a
-		// review-exempt task stay exempt instead of surprising the caller with a
-		// full gate after a reload.
-		const review: ReviewMode = startOptions.review ?? existingThread?.review ?? "gate";
 		if (!runtime.sessionActive) {
 			return failedStartResult(agentName, task, "Parent session shut down before this subagent generation could start.");
 		}
@@ -421,7 +386,7 @@ export function createBackgroundDispatcher(options: BackgroundDispatcherOptions)
 		const agent = resolveLiveAgentTools(discoveredAgent);
 		if (isolation === "worktree" && !isWorktreeCapableAgent(agent)) {
 			return {
-				...failedStartResult(agentName, task, `Agent "${agentName}" is read-only; worktree isolation is available only to write-capable agents such as worker, cleaner, or documenter.`),
+				...failedStartResult(agentName, task, `Agent "${agentName}" is read-only; worktree isolation is available only to write-capable agents such as executor.`),
 				isolation,
 			};
 		}
@@ -516,7 +481,6 @@ export function createBackgroundDispatcher(options: BackgroundDispatcherOptions)
 			thread.executionCwd = executionCwd;
 			thread.thinkingLevel = thinkingLevel;
 			thread.isolation = isolation;
-			thread.review = review;
 			thread.worktree = worktree;
 			thread.state = "queued";
 			thread.control = control;
@@ -540,7 +504,6 @@ export function createBackgroundDispatcher(options: BackgroundDispatcherOptions)
 				executionCwd,
 				thinkingLevel,
 				isolation,
-				review,
 				worktree,
 				state: "queued",
 				control,
@@ -561,9 +524,10 @@ export function createBackgroundDispatcher(options: BackgroundDispatcherOptions)
 		});
 
 		const onLive = makeLiveHandler(runId, generation);
-		const workflowAvailability = workflowAgentAvailability(runAgents);
-		const reserveManagedLane =
-			isolation === "shared" && canStartManagedWorkflow(agent, workflowAvailability);
+		// Shared write-capable runs serialize on the repository lane so their
+		// edits cannot race; the lane wait releases the process slot because it
+		// is write serialization, not pool pacing.
+		const reserveManagedLane = isolation === "shared" && isWriteCapableAgent(agent);
 		const runGeneration = async (backgroundSignal: AbortSignal, controller: AbortController): Promise<void> => {
 				if (runtime.threads.get(runId)?.generation !== generation) return;
 				// The generation body owns a process slot from here (a lane wait, if
@@ -660,82 +624,12 @@ export function createBackgroundDispatcher(options: BackgroundDispatcherOptions)
 				// exactly one aborted result.
 				if (thread.lifecycleOperation === "stop") return;
 
-				// A shutdown can win in the microtask gap after the top-level RPC
-				// settles. Do not launch an obsolete downstream gate or replace the
-				// stable top-level session with an aborted downstream attempt.
+				// A shutdown can win in the microtask gap after the child RPC
+				// settles. Never replace the stable top-level session with an
+				// aborted partial.
 				if (backgroundSignal.aborted || lifecycleInterrupted() || !runtime.sessionActive) return;
 
 				if (thread.retireOnSettle) runtime.retireThreadSession(thread);
-				let workflowOutcome: ManagedWorkflowOutcome | undefined;
-				const workflowPlan = getManagedWorkflowPlan(
-					result,
-					workflowAvailability,
-					review,
-					await producedWorkspaceChanges(thread),
-				);
-					if (workflowPlan && runtime.sessionActive) {
-						// The continuation is runtime-initiated (gate review,
-						// documentation sync): release this generation's
-						// concurrency slot so managed chains never starve manual
-						// dispatches. Cancellation and quiescence guarantees are
-						// unchanged — the task stays abortable and awaited.
-						runtime.backgroundQueue.suspend(controller);
-						thread.state = "running";
-						// The stable parent row now represents workflow ownership, not whichever
-						// model stage ran most recently. Internal rows own their exact role/model/
-						// thinking/timing telemetry and remain independently queryable.
-						monitor.setManagedWorkflow(runId, true);
-						monitor.setStatus(runId, "running");
-						monitor.setActivity(runId, "managed workflow running");
-					workflowOutcome = await runManagedWorkflow({
-						plan: workflowPlan,
-						initialResult: result,
-						groupId: `workflow-${runId}`,
-						parentRunId: runId,
-						executionCwd: thread.executionCwd,
-						projectCwd: originalCwd,
-						isolation,
-						...(worktree ? { worktreeId: worktreeGroupId(worktree) } : {}),
-						signal: backgroundSignal,
-						ctx: runCtx,
-						config: runConfig,
-						agents: runAgents,
-						rememberLatest: (latest) => {
-							if (runtime.threads.get(runId) !== thread || thread.generation !== generation) return;
-							thread.lastResult = latest;
-							// Retained control follows the newest child session, but the live parent
-							// row keeps the original top-level role/model/usage. The active internal
-							// row already owns the current stage's role and telemetry.
-							thread.agentName = latest.agent;
-							thread.task = latest.task;
-							thread.sessionId = latest.sessionId;
-							thread.sessionDir = latest.sessionDir;
-							runtime.retainSession(latest);
-							if (latest.sessionId && latest.sessionDir) {
-								persistThreadCheckpoint(runtime, thread, "parked");
-							}
-						},
-					});
-
-					// Park/stop/shutdown owns this generation once it cancels the queue
-					// signal. The newest internal partial is already on thread.lastResult;
-					// never replace it with the old top-level result or publish stale output.
-					if (backgroundSignal.aborted || lifecycleInterrupted() || !runtime.sessionActive) return;
-
-					const finalStep = workflowOutcome.steps[workflowOutcome.steps.length - 1]!;
-					result = {
-						...finalStep.result,
-						runId,
-						projectCwd: originalCwd,
-						isolation,
-					};
-					thread.lastResult = result;
-					thread.agentName = result.agent;
-					thread.task = result.task;
-					thread.sessionId = result.sessionId;
-					thread.sessionDir = result.sessionDir;
-					runtime.retainSession(result);
-				}
 				// Claim terminal settlement synchronously before the first slow await.
 				// Park therefore either wins while RPC is still active, or is rejected
 				// once settlement owns the generation. Destructive stop may supersede
@@ -749,89 +643,43 @@ export function createBackgroundDispatcher(options: BackgroundDispatcherOptions)
 					thread.lifecycleOperation === "settle" &&
 					!thread.retired;
 				try {
-					// For isolated writers this is deliberately after the managed reviewer
-					// and any needed documentation stage: every child sees the same worktree,
-					// then one lifecycle owner integrates the complete settled state exactly once.
-					await thread.finalizeIsolation(generation, result);
-					if (!ownsSettlement()) return;
-					if (workflowOutcome && isolation === "worktree") {
-						for (const step of workflowOutcome.steps) {
-							step.result.integrationStatus = result.integrationStatus;
-							step.result.integrationApplied = result.integrationApplied;
-							step.result.integrationError = result.integrationError;
-							step.result.integrationWorktreePath = result.integrationWorktreePath;
-							step.result.integrationPatchPath = result.integrationPatchPath;
-						}
-					}
+				// For isolated writers the apply runs only after the child settled,
+				// so this lifecycle owner integrates the complete settled state
+				// exactly once under the repository lane.
+				await thread.finalizeIsolation(generation, result);
+				if (!ownsSettlement()) return;
 
-					const failed = isFailedResult(result);
-					thread.state = failed ? "failed" : "completed";
-					// Stamp the terminal monitor state before projecting it. This gives every
-					// path a fixed endedAt even when the row is removed immediately.
-					monitor.setStatus(runId, failed ? "failed" : "done");
-					thread.elapsedMs = monitor.getElapsedMs(runId) ?? thread.elapsedMs;
-					// Persist before the sessionActive check: a shutdown that won the
-					// lifecycle race must still leave the settled record on disk.
-					persistThreadCheckpoint(runtime, thread, failed ? "failed" : "completed");
-					if (!runtime.sessionActive || !ownsSettlement()) return;
+				const failed = isFailedResult(result);
+				thread.state = failed ? "failed" : "completed";
+				// Stamp the terminal monitor state before projecting it. This gives every
+				// path a fixed endedAt even when the row is removed immediately.
+				monitor.setStatus(runId, failed ? "failed" : "done");
+				thread.elapsedMs = monitor.getElapsedMs(runId) ?? thread.elapsedMs;
+				// Persist before the sessionActive check: a shutdown that won the
+				// lifecycle race must still leave the settled record on disk.
+				persistThreadCheckpoint(runtime, thread, failed ? "failed" : "completed");
+				if (!runtime.sessionActive || !ownsSettlement()) return;
 
-					const modelLevel = failed && isModelLevelFailure(result);
-					const dispatchFailed = result.dispatchFailed === true;
-					const ownedController = thread.queueController;
-					if (runtime.runControllers.get(runId) === ownedController) runtime.runControllers.delete(runId);
-					thread.queueController = undefined;
-					finishRun(
-						runId,
-						failed ? "failed" : "done",
-						workflowOutcome || modelLevel || dispatchFailed ? { silent: true } : undefined,
-					);
-					runtime.registerRunResult(runId, result);
+				const modelLevel = failed && isModelLevelFailure(result);
+				const dispatchFailed = result.dispatchFailed === true;
+				const ownedController = thread.queueController;
+				if (runtime.runControllers.get(runId) === ownedController) runtime.runControllers.delete(runId);
+				thread.queueController = undefined;
+				finishRun(
+					runId,
+					failed ? "failed" : "done",
+					modelLevel || dispatchFailed ? { silent: true } : undefined,
+				);
+				runtime.registerRunResult(runId, result);
 
-					if (workflowOutcome) {
-						const lastStep = workflowOutcome.steps[workflowOutcome.steps.length - 1]!;
-						const finalVerdict = lastStep.result.agent === "reviewer"
-							? reviewVerdict(getResultOutput(lastStep.result))
-							: undefined;
-						// The delivery is the model's only view of the workflow. On success
-						// the writer's handoff is the actionable detail (overlaid with the
-						// parent's integration outcome); on failure the terminal result is.
-						const writerHandoff = !failed && finalVerdict === "pass"
-							? {
-								...workflowOutcome.steps[0]!.result,
-								runId: result.runId ?? workflowOutcome.steps[0]!.result.runId,
-								isolation: result.isolation,
-								integrationStatus: result.integrationStatus,
-								integrationApplied: result.integrationApplied,
-								integrationWorktreePath: result.integrationWorktreePath,
-								integrationPatchPath: result.integrationPatchPath,
-								integrationError: result.integrationError,
-							}
-							: result;
-						let block = `${formatManagedWorkflowSummary(workflowOutcome.steps, result)}\n\n${formatCompletionBlock(writerHandoff, runConfig.maxResultLines, { resultRoot: projectResultsRoot(runtime.configPath, result.projectCwd ?? originalCwd) })}`;
-						if (finalVerdict === "fail") {
-							block += `\n\n${reviewFailFollowUpNote()}`;
-						}
-						if (modelLevel) block += `\n\n${modelLevelTakeoverNote(result, { runId })}`;
-						runtime.sendCompletionGroup([{
-							agent: `managed workflow (${result.agent})`,
-							block,
-							triggerTurn: true,
-							usage: sumUsage(workflowOutcome.steps.map((step) => step.result.usage)),
-						}]);
-						runtime.completionBatcher.flush();
-						return;
-					}
-
-					const completion: CompletionMessageItem = {
-						agent: result.agent,
-						block: modelLevel
-							? `${formatCompletionBlock(result, runConfig.maxResultLines, { resultRoot: projectResultsRoot(runtime.configPath, result.projectCwd ?? originalCwd) })}\n\n${modelLevelTakeoverNote(result, { runId })}`
-							: result.agent === "reviewer" && reviewVerdict(getResultOutput(result)) === "fail"
-								? `${formatCompletionBlock(result, runConfig.maxResultLines, { resultRoot: projectResultsRoot(runtime.configPath, result.projectCwd ?? originalCwd) })}\n\n${reviewFailFollowUpNote()}`
-								: formatCompletionBlock(result, runConfig.maxResultLines, { resultRoot: projectResultsRoot(runtime.configPath, result.projectCwd ?? originalCwd) }),
-						triggerTurn: completionTriggersTurn(result, runConfig.notifyOnReviewPass),
-						usage: result.usage,
-					};
+				const completion: CompletionMessageItem = {
+					agent: result.agent,
+					block: modelLevel
+						? `${formatCompletionBlock(result, runConfig.maxResultLines, { resultRoot: projectResultsRoot(runtime.configPath, result.projectCwd ?? originalCwd) })}\n\n${modelLevelTakeoverNote(result, { runId })}`
+						: formatCompletionBlock(result, runConfig.maxResultLines, { resultRoot: projectResultsRoot(runtime.configPath, result.projectCwd ?? originalCwd) }),
+					triggerTurn: true,
+					usage: result.usage,
+				};
 					if (modelLevel) {
 						const detail = result.errorMessage?.trim() || "model unavailable or broken";
 						runCtx.ui.notify(`✗ ${result.agent} dispatch failed: ${detail} — task handed to the main window`, "error");
@@ -911,7 +759,7 @@ export function createBackgroundDispatcher(options: BackgroundDispatcherOptions)
 							isolation,
 							exitCode: 1,
 							stopReason: "error",
-							errorMessage: `Managed workflow dispatch failed: ${errorMessage}`,
+							errorMessage: `Subagent dispatch failed: ${errorMessage}`,
 							dispatchFailed: true,
 						}
 						: {
@@ -1299,21 +1147,6 @@ async function discardRestoredRecord(runtime: SubagentRuntime, record: ThreadRec
 	await removeThreadRecord(runtime.configPath, record.runId).catch(() => undefined);
 }
 
-/** Whether a settled generation left anything for a gate to review.
- *
- * Only an isolated worktree can answer: it starts from the integration base, so a
- * diff against that base is precisely this generation's own output. A shared
- * checkout is shared with the user and their editor, so nothing in it can be
- * attributed to one run, and undefined keeps the gate. Wrongly skipping a review
- * is the only failure here that costs correctness rather than a run, so an
- * undecidable case always pays for the run. */
-async function producedWorkspaceChanges(
-	thread: SubagentThread,
-): Promise<boolean | undefined> {
-	if (!thread.worktree) return undefined;
-	return thread.worktree.hasPendingChanges().catch(() => undefined);
-}
-
 /** Project-scoped <projectRoot>/results for a completion's artifacts. */
 export function projectResultsRoot(configPath: string, cwd: string | undefined): string {
 	return join(getProjectRoot(configPath, cwd), "results");
@@ -1334,7 +1167,6 @@ function createRestoredThread(
 		executionCwd: record.executionCwd,
 		...(record.thinkingLevel ? { thinkingLevel: record.thinkingLevel as ThinkingLevel } : {}),
 		isolation: record.isolation,
-		...(record.review ? { review: record.review } : {}),
 		worktree,
 		state,
 		control: new RpcRunControl(record.task, record.generation),

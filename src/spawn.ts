@@ -87,16 +87,6 @@ export function getFinalOutput(messages: Message[]): string {
 	return "";
 }
 
-/** Only the last standalone reviewer verdict line counts. */
-export function reviewVerdict(output: string): "pass" | "fail" | undefined {
-	const lines = output.split("\n");
-	for (let index = lines.length - 1; index >= 0; index--) {
-		const match = /^\s*VERDICT:\s*REVIEW_(PASS|FAIL)\s*$/i.exec(lines[index]);
-		if (match) return match[1].toUpperCase() === "PASS" ? "pass" : "fail";
-	}
-	return undefined;
-}
-
 export const RESULT_LINE_MAX = 200;
 
 export interface TruncatedOutput {

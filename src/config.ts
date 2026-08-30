@@ -13,7 +13,7 @@ import { dirname, join } from "node:path";
 import { getAgentDir, withFileMutationQueue } from "@earendil-works/pi-coding-agent";
 
 /** Full catalog of agents shipped with the package (selectable in /subagents-setup). */
-export const BUILTIN_AGENT_NAMES = ["explorer", "worker", "cleaner", "documenter", "synthesizer", "reviewer"] as const;
+export const BUILTIN_AGENT_NAMES = ["explorer", "executor"] as const;
 
 /** Agents enabled out of the box on a fresh install. */
 export const DEFAULT_ENABLED_AGENTS: readonly string[] = [...BUILTIN_AGENT_NAMES];
@@ -57,11 +57,6 @@ export interface SubagentsConfig {
 	/** Optional per-agent thinking preference. Runtime clamps it to the effective model's supported levels. */
 	agentThinkingLevels: Record<string, ThinkingLevel>;
 	/**
-	 * When a standalone review passes (REVIEW_PASS verdict), deliver it without
-	 * waking the main agent. Managed workflows always wake once at final delivery.
-	 */
-	notifyOnReviewPass: boolean;
-	/**
 	 * Max lines of a sub-agent result carried in the completion message. Longer
 	 * results are truncated; the full text is written to a temp file whose path
 	 * is included in the message. Default: 80.
@@ -82,7 +77,6 @@ export const DEFAULT_CONFIG: SubagentsConfig = {
 	knownAgents: [...BUILTIN_AGENT_NAMES],
 	agentModels: {},
 	agentThinkingLevels: {},
-	notifyOnReviewPass: false,
 	maxResultLines: DEFAULT_MAX_RESULT_LINES,
 	agentScope: "user",
 	idleTimeoutSec: DEFAULT_IDLE_TIMEOUT_SEC,
@@ -163,10 +157,6 @@ export function normalizeConfig(raw: unknown): SubagentsConfig {
 				config.agentThinkingLevels[key] = value as ThinkingLevel;
 			}
 		}
-	}
-
-	if (typeof raw.notifyOnReviewPass === "boolean") {
-		config.notifyOnReviewPass = raw.notifyOnReviewPass;
 	}
 
 	const maxResultLines = clampCount(raw.maxResultLines, MAX_RESULT_LINES_LIMIT);
