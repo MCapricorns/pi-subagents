@@ -299,6 +299,17 @@ export function runLabel(task: string): string {
 		: `${takeGraphemes(chars, RUN_LABEL_MAX - 1)}${TASK_SUMMARY_ELLIPSIS}`;
 }
 
+/** Narrow an already-extracted run label to a smaller budget, keeping its
+ * tail: runLabel tail-weights path fragments because the filename is the
+ * recognisable part, and a second squeeze must not trade that tail away.
+ * Grapheme-safe. */
+export function shrinkRunLabel(text: string, maxWidth: number): string {
+	if (maxWidth <= 0) return "";
+	if (visibleWidth(text) <= maxWidth) return text;
+	const chars = [...graphemeSegmenter.segment(text)].map((s) => s.segment);
+	return `${TASK_SUMMARY_ELLIPSIS}${tailGraphemes(chars, maxWidth - 1)}`;
+}
+
 function formatTokens(count: number): string {
 	if (count >= 1_000_000) return `${(count / 1_000_000).toFixed(1)}M`;
 	if (count >= 1_000) return `${(count / 1_000).toFixed(1)}k`;

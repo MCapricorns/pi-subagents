@@ -36,16 +36,22 @@ describe("formatActiveRunLines", () => {
 		store.setStatus(parked, "parked");
 
 		const lines = formatActiveRunLines(store.getRuns(), theme, 120, 3_600_000 + 3_725_000);
-		expect(lines).toHaveLength(1);
-		expect(lines[0]).toContain(`● #${running} worker  src/index.ts — edit src/index.ts`);
-		// Full provider/model/thinking ref — which provider served the run is
-		// exactly what a multi-provider session needs to see.
-		expect(lines[0]).toContain("openai/gpt-5-mini/high");
+		// Line 1 is what the run is; line 2 is what it is doing right now.
+		expect(lines).toHaveLength(2);
+		expect(lines[0]).toContain(`● #${running} worker  src/index.ts`);
+		expect(lines[0]).not.toContain("— edit src/index.ts");
+		// Full provider/model ref — which provider served the run is exactly
+		// what a multi-provider session needs to see; the thinking level is
+		// not part of the identity line.
+		expect(lines[0]).toContain("openai/gpt-5-mini");
+		expect(lines[0]).not.toContain("/high");
 		expect(lines[0]).toContain("↑1.2k ↓3.4k R91.0k W1.1k $0.0500");
 		// Elapsed carries seconds even at hour magnitude.
 		expect(lines[0].endsWith("1h02m05s")).toBe(true);
-		// Telemetry flows inline right after the content — no blank padding.
-		expect(visibleWidth(lines[0])).toBeLessThanOrEqual(120);
+		expect(lines[1]).toContain("↳ edit src/index.ts");
+		// The activity line hangs under the label column of line 1.
+		expect(lines[1].indexOf("↳")).toBe(lines[0].indexOf("src/index.ts"));
+		for (const line of lines) expect(visibleWidth(line)).toBeLessThanOrEqual(120);
 		expect(lines[0]).not.toContain(`#${done}`);
 		expect(lines[0]).not.toContain(`#${parked}`);
 	});
@@ -296,12 +302,15 @@ describe("formatActiveRunLines", () => {
 		const store = new MonitorStore();
 		for (let index = 0; index < 12; index++) {
 			const id = store.addRun("explorer", `Map src/module-${index}.ts`);
+			store.setStatus(id, "running");
 			store.setActivity(id, `grep pattern-${index}`);
 		}
 
 		const lines = formatActiveRunLines(store.getRuns(), theme, 120);
+		// Four two-line groups fill nine lines, a fifth shows its identity line
+		// only, and the marker accounts for the seven hidden runs.
 		expect(lines).toHaveLength(10);
-		expect(lines.at(-1)).toContain("+3 more");
+		expect(lines.at(-1)).toContain("+7 more");
 	});
 
 	it("shows the worktree group identity and integration state on the owning root", () => {
@@ -365,13 +374,16 @@ describe("formatActiveRunLines", () => {
 		expect(run.endedAt).toBeUndefined();
 
 		const lines = formatActiveRunLines(store.getRuns(), theme, 120, 63_000);
-		expect(lines).toHaveLength(1);
-		expect(lines[0]).toContain("Review the change — auto-fix chain running");
+		// The activity moves to the second line; line 1 stays what the run is.
+		expect(lines).toHaveLength(2);
+		expect(lines[0]).toContain("Review the change");
 		expect(lines[0]).toContain("1m01s");
+		expect(lines[0]).not.toContain("auto-fix chain running");
+		expect(lines[1]).toContain("↳ auto-fix chain running");
 		expect(lines[0]).not.toContain("done");
 	});
 
-	it("keeps a meaningful activity tail beside model/thinking within a moderate width", () => {
+	it("keeps a meaningful activity tail on the second line within a moderate width", () => {
 		const store = new MonitorStore();
 		const id = store.addRun(
 			"worker",
@@ -385,11 +397,14 @@ describe("formatActiveRunLines", () => {
 		store.findRun(id)!.activeSince = 1_000;
 
 		const lines = formatActiveRunLines(store.getRuns(), theme, 76, 62_000);
-		expect(lines).toHaveLength(1);
-		expect(visibleWidth(lines[0])).toBeLessThanOrEqual(76);
-		expect(lines[0]).toContain("/high");
+		expect(lines).toHaveLength(2);
+		for (const line of lines) expect(visibleWidth(line)).toBeLessThanOrEqual(76);
+		expect(lines[0]).not.toContain("/high");
 		expect(lines[0]).toContain("1m01s");
 		expect(lines[0]).toContain("file.ts");
+		// The activity keeps its distinguishing tail on the second line.
+		expect(lines[1]).toContain("↳");
+		expect(lines[1]).toContain("meaningful-file.ts");
 	});
 
 	it("keeps identity and elapsed on a very narrow primary line", () => {

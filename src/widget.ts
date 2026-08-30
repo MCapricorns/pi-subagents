@@ -5,15 +5,16 @@
  * - Aligned identity columns: `icon  #id  agent` pad to the widest displayed
  *   id and agent so every label starts at the same column; a resumed thread
  *   carries a dim `↻` inside the agent column.
- * - Multi-line rows flow inline: the telemetry (`provider/model/thinking`,
- *   token flow in the pi-footer vocabulary `↑in ↓out R/W cache`, cost, wait
- *   state, seconds-precision elapsed) follows the content after ` · ` instead
- *   of a right-aligned column — no blank padding across a multi-line chain.
+ * - A live run owns two lines. Line 1 is what it is: identity, task label,
+ *   then the telemetry flow (`provider/model`, token flow in the pi-footer
+ *   vocabulary `↑in ↓out R/W cache`, cost, wait state, seconds-precision
+ *   elapsed). Line 2 is what it is doing right now: the live activity, dim,
+ *   indented under the label column behind a `↳` marker.
  * - Telemetry drops leftmost-first under width pressure (badge, wait, usage,
  *   model); the elapsed survives every width.
- * - First line is the parent pi session itself: what the current model is
- *   doing right now while its agent loop runs (model/thinking, live activity,
- *   loop elapsed), fed by the session's own extension events.
+ * - First line of the widget is the parent pi session itself: what the current
+ *   model is doing right now while its agent loop runs (model/thinking, live
+ *   activity, loop elapsed), fed by the session's own extension events.
  * - A managed workflow renders as a tree chain under its parent line: one
  *   `├`/`└`-connected row per stage, each carrying its own model, token flow,
  *   and elapsed — settled stages from the snapshot frozen at settlement, the
@@ -33,6 +34,7 @@ import {
 	formatUsageTokens,
 	isRunActiveStatus,
 	monitor,
+	shrinkRunLabel,
 	statusIcon,
 	sumUsage,
 	usageCostPart,
@@ -52,8 +54,10 @@ const MAX_WIDGET_LINES = 10;
 const SEPARATOR = " · ";
 /** Column gap between the identity block and the run's label. */
 const IDENTITY_GAP = "  ";
-/** Splits "what this run is" from "what it is doing right now". */
+/** Splits "what this run is" from "what it is doing right now" on a stage row. */
 const ACTIVITY_SEPARATOR = " — ";
+/** Marker introducing the live-activity second line of a running row. */
+const ACTIVITY_MARKER = "↳ ";
 /** Columns kept for left content before right-tail parts are dropped. */
 const LEFT_MIN_CONTENT = 8;
 /** Minimum useful width for a live-activity fragment. */
@@ -151,7 +155,7 @@ function telemetryTailParts(run: RunView, now: number, usage: UsageStats = run.u
 	// exactly what a multi-provider session needs to see.
 	const modelPart = run.status === "queued" || run.managedWorkflow || !run.model
 		? undefined
-		: `${run.model}${run.thinking ? `/${run.thinking}` : ""}`;
+		: run.model;
 	const badge = run.isolation === "worktree" ? worktreeBadge(run) : undefined;
 	const wait = run.status === "queued" ? waitWord(run) : undefined;
 	// Drop order under pressure: badge, wait word, usage, model; elapsed
@@ -159,11 +163,12 @@ function telemetryTailParts(run: RunView, now: number, usage: UsageStats = run.u
 	return [badge, wait, usagePart(usage), modelPart, formatElapsed(run, now) || undefined];
 }
 
-/** One primary line per run. Left: identity  label — activity, where the
- * label stays plain and the live activity is dim. Telemetry flows inline
- * after ` · ` (worktree badge, token flow, cost, model/thinking, wait state,
- * elapsed). The activity outranks the label when space runs out; the identity
- * and elapsed survive every width. */
+/** Two lines for a live run. Line 1 is what the run is: identity, task label,
+ * then the telemetry flow (worktree badge, token flow, cost, provider/model,
+ * wait state, elapsed). Line 2 is what it is doing right now: the live
+ * activity, dim, indented under the label column behind a `↳` marker. The
+ * label takes the full content budget on line 1; the identity and the elapsed
+ * survive every width. */
 function primaryLine(
 	run: RunView,
 	theme: Theme,
@@ -171,8 +176,7 @@ function primaryLine(
 	now: number,
 	layout: ColumnLayout,
 	usage: UsageStats = run.usage,
-): string {
-	const dim = (text: string): string => theme.fg("dim", text);
+): string[] {
 	const identity = identitySegment(run, theme, layout);
 	const tailBudget = Math.max(0, width - visibleWidth(identity) - LEFT_MIN_CONTENT);
 	const tail = composeTail(telemetryTailParts(run, now, usage), tailBudget);
@@ -182,41 +186,32 @@ function primaryLine(
 	const label = run.parentRunId !== undefined
 		? [run.relationLabel, run.label].filter((part): part is string => Boolean(part)).join(SEPARATOR)
 		: run.label ?? formatTaskSummary(run.task, 48);
-	// The parent's own activity is a placeholder while a managed workflow runs;
-	// the timeline line below carries the live stage instead.
-	const activity = !run.managedWorkflow && (run.status === "running" || run.status === "interrupting")
-		? run.activity?.trim()
-		: undefined;
-
 	const contentBudget = width
 		- visibleWidth(identity)
 		- (tail ? visibleWidth(tail) + visibleWidth(SEPARATOR) : 0)
 		- visibleWidth(IDENTITY_GAP);
-	let content = "";
-	if (contentBudget > 0) {
-		const labelBudget = activity
-			? Math.min(visibleWidth(label), Math.max(12, Math.floor(contentBudget * 0.4)))
-			: contentBudget;
-		// The label is already fragment-extracted (runLabel); plain right
-		// truncation avoids stacking a second head…tail ellipsis on top of it.
-		const labelText = label
-			? visibleWidth(label) > labelBudget ? truncateToWidth(label, labelBudget, "…") : label
-			: "";
-		if (activity) {
-			const activityBudget = contentBudget
-				- visibleWidth(labelText)
-				- (labelText ? visibleWidth(ACTIVITY_SEPARATOR) : 0);
-			content = activityBudget >= ACTIVITY_MIN_WIDTH
-				? `${labelText}${labelText ? dim(ACTIVITY_SEPARATOR) : ""}${dim(formatTaskSummary(activity, activityBudget))}`
-				// Too narrow for both: the live activity is the stronger signal.
-				: dim(formatTaskSummary(activity, contentBudget));
-		} else {
-			content = labelText;
+	// The label is already fragment-extracted (runLabel); narrowing it keeps
+	// its tail so a second squeeze never trades away the recognisable
+	// filename, and no second head…tail ellipsis stacks on top of it.
+	const content = label && contentBudget > 0 ? shrinkRunLabel(label, contentBudget) : "";
+	const left = content ? `${identity}${IDENTITY_GAP}${content}` : identity;
+	const lines = [composeLine(left, tail, theme, width)];
+
+	// The parent's own activity is a placeholder while a managed workflow runs;
+	// the timeline chain below carries the live stage instead.
+	const activity = !run.managedWorkflow && (run.status === "running" || run.status === "interrupting")
+		? run.activity?.trim()
+		: undefined;
+	if (activity) {
+		const indent = visibleWidth(identity) + visibleWidth(IDENTITY_GAP);
+		const activityBudget = width - indent - visibleWidth(ACTIVITY_MARKER);
+		if (activityBudget >= ACTIVITY_MIN_WIDTH) {
+			lines.push(
+				`${" ".repeat(indent)}${theme.fg("dim", `${ACTIVITY_MARKER}${formatTaskSummary(activity, activityBudget)}`)}`,
+			);
 		}
 	}
-
-	const left = content ? `${identity}${IDENTITY_GAP}${content}` : identity;
-	return composeLine(left, tail, theme, width);
+	return lines;
 }
 
 function stageIcon(status: WorkflowStageStatus, theme: Theme): string {
@@ -329,20 +324,20 @@ function workflowStageLines(
 	return { lines, activeIndex };
 }
 
-/** Fit one workflow group into the remaining line budget: the primary line
- * always survives, and the stage window anchors on the live stage — settled
- * stages above the window collapse into one `… +N` marker, never the live
- * stage itself. */
+/** Fit one workflow group into the remaining line budget: the primary lines
+ * (identity line plus the live-activity line) always survive, and the stage
+ * window anchors on the live stage — settled stages above the window collapse
+ * into one `… +N` marker, never the live stage itself. */
 function fitGroupLines(
-	primary: string,
+	primary: readonly string[],
 	stages: readonly string[],
 	activeIndex: number,
 	remaining: number,
 	theme: Theme,
 ): string[] {
-	if (stages.length === 0 || stages.length + 1 <= remaining) return [primary, ...stages];
-	const slots = remaining - 1;
-	if (slots <= 0) return [primary];
+	if (primary.length > remaining) return primary.slice(0, Math.max(1, remaining));
+	if (stages.length === 0 || stages.length + primary.length <= remaining) return [...primary, ...stages];
+	const slots = remaining - primary.length;
 	// Reserve one line for an overflow marker so a cut is always announced.
 	const room = Math.max(1, slots - 1);
 	const anchor = activeIndex >= 0 ? activeIndex : 0;
@@ -354,12 +349,12 @@ function fitGroupLines(
 		...(start + room < stages.length ? [theme.fg("dim", `… +${stages.length - start - room}`)] : []),
 	];
 	while (parts.length > slots) parts.pop();
-	return [primary, ...parts];
+	return [...primary, ...parts];
 }
 
 /** Render active runs as compact per-run line groups: the parent model's own
- * line first, then one line per simple run, a tree chain per managed workflow
- * (parent line + one row per stage). All rows share one column layout. */
+ * line first, then one two-line group per simple run, a tree chain per managed
+ * workflow (parent line + one row per stage). All rows share one column layout. */
 export function formatActiveRunLines(
 	runs: readonly RunView[],
 	theme: Theme,
@@ -384,7 +379,7 @@ export function formatActiveRunLines(
 		idWidth: Math.max(...roots.map((root) => visibleWidth(`#${root.id}`)), 0),
 		agentWidth: Math.max(...roots.map((root) => visibleWidth(agentColumnText(root))), main ? visibleWidth("pi") : 0),
 	};
-	const groups: Array<{ lines: string[]; activeIndex: number }> = roots.map((root) => {
+	const groups: Array<{ primary: readonly string[]; stages: readonly string[]; activeIndex: number }> = roots.map((root) => {
 		const children = childrenOf.get(root.id) ?? [];
 		// Workflow-wide tokens/cost on the parent line: every stage snapshot plus
 		// the live child (whose snapshot is frozen only at settlement). Without
@@ -395,14 +390,15 @@ export function formatActiveRunLines(
 			const live = children.find((candidate) => candidate.usage.input || candidate.usage.output || candidate.usage.cost);
 			usage = sumUsage([...(settled.length > 0 ? settled : [root.usage]), ...(live ? [live.usage] : [])]);
 		}
-		const lines = [primaryLine(root, theme, width, now, layout, usage)];
+		const primary = primaryLine(root, theme, width, now, layout, usage);
 		let activeIndex = -1;
+		let stages: readonly string[] = [];
 		if (root.managedWorkflow && root.workflowStages && root.workflowStages.length > 0) {
 			const rendered = workflowStageLines(root.workflowStages, children, theme, width, now);
-			lines.push(...rendered.lines);
+			stages = rendered.lines;
 			activeIndex = rendered.activeIndex;
 		}
-		return { lines, activeIndex };
+		return { primary, stages, activeIndex };
 	});
 
 	const lines: string[] = [];
@@ -413,7 +409,7 @@ export function formatActiveRunLines(
 	for (const group of groups) {
 		const remaining = MAX_WIDGET_LINES - 1 - lines.length;
 		if (remaining <= 0) break;
-		lines.push(...fitGroupLines(group.lines[0]!, group.lines.slice(1), group.activeIndex, remaining, theme));
+		lines.push(...fitGroupLines(group.primary, group.stages, group.activeIndex, remaining, theme));
 		shownRoots++;
 	}
 	const hiddenRoots = roots.length - shownRoots;

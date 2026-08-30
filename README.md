@@ -236,7 +236,9 @@ chain) renders as a tree: the parent line carries the workflow-wide token/cost
 totals and total elapsed, and every stage gets its own `├`/`└`-connected row
 with its own model, token flow, and elapsed — settled stages keep the
 telemetry frozen at settlement, the live stage shows its child's model and
-current activity:
+current activity. A live run renders two lines: what it is — agent, task,
+token flow, cost, provider/model, elapsed — and, dim under the label column,
+what it is doing right now:
 
 ```text
 ●    pi        subagent Implement the login redirect fix · openai/gpt-5/max · 12m06s
@@ -245,7 +247,8 @@ current activity:
   ├ ! review · ↑0.9k ↓6.0k R38.0k W0.9k $0.3300 · openai/gpt-5 · 1m12s
   ├ ● review fix — edit src/auth.ts · ↑0.2k ↓3.0k R12.0k $0.1200 · openai/gpt-5/medium · 41s
   └ ○ re-review
-● #15 explorer  src/models.ts — grep fallback · ↑1.2k ↓8.4k R31.0k W1.1k $0.0900 · openai/gpt-5-mini/low · 3m07s
+● #15 explorer  src/models.ts · ↑1.2k ↓8.4k R31.0k W1.1k $0.0900 · openai/gpt-5-mini · 3m07s
+                ↳ grep fallback
 ○ #23 worker    src/config.ts · repo lane
 ○ #24 worker ↻  tests/config.test.ts · queued · 5m02s
 ```
