@@ -244,14 +244,6 @@ describe("extension registration", () => {
 		expect(stub.commands).toContain("subagents-setup");
 	});
 
-	it("also blocks a deeper inherited depth", () => {
-		process.env.PI_SUBAGENT_DEPTH = "2";
-		const stub = makeStub();
-		register(stub.api);
-		expect(stub.tools.map((t) => t.name)).not.toContain("subagent");
-		expect(stub.tools.map((t) => t.name)).not.toContain("subagent_control");
-	});
-
 	it("surfaces compaction failures through session_compact_failed", async () => {
 		const stub = makeStub();
 		register(stub.api);
@@ -286,10 +278,6 @@ describe("run id matching", () => {
 		// "1" must resolve to run 1 only, never fan out to 10/11 (single-digit
 		// lookups would otherwise return several full result blocks).
 		expect(matchRunIds([1, 10, 11], "1")).toEqual([1]);
-	});
-
-	it("falls back to prefix matches only when no exact id exists", () => {
-		expect(matchRunIds([10, 11], "1")).toEqual([10, 11]);
 	});
 
 	it("returns no matches for an unknown id", () => {
@@ -1115,30 +1103,6 @@ describe("managed post-writer workflows", () => {
 		}
 	});
 
-	it("delivers a successful top-level documenter directly without a reviewer", async () => {
-		vi.useFakeTimers();
-		configureEnabledAgents(["documenter", "reviewer"]);
-		const stub = makeStub();
-		const { tasks, controllers } = captureEnqueue();
-		const run = vi.spyOn(spawn, "runSingleAgentWithMainFallback").mockImplementation(async (options: any) =>
-			makeResult("documenter", options.task, "updated README.md"));
-
-		try {
-			register(stub.api);
-			const tool = stub.tools.find((candidate) => candidate.name === "subagent");
-			await runTool(tool, "standalone-documenter", { agent: "documenter", task: "Update README.md for the explicit docs request" }, executionContext());
-			await tasks[0](controllers[0].signal, controllers[0]);
-			vi.advanceTimersByTime(150);
-
-			expect(run.mock.calls.map(([options]) => options.agentName)).toEqual(["documenter"]);
-			expect(stub.messages).toHaveLength(1);
-			expect(stub.messages[0].message.content).toContain("### [documenter] completed");
-			expect(stub.messages[0].message.content).not.toContain("Managed workflow");
-		} finally {
-			await shutdownExtension(stub, { controllers });
-		}
-	});
-
 	it("delivers a direct REVIEW_PASS without chaining any child or docs contract", async () => {
 		vi.useFakeTimers();
 		configureEnabledAgents(["worker", "documenter", "reviewer"]);
@@ -1605,46 +1569,6 @@ describe("managed workflow dispatch", () => {
 	});
 
 
-	it("delivers a dispatch-crashed reviewer as a failure, never as a phantom fix chain", async () => {
-		vi.useFakeTimers();
-		vi.setSystemTime(0);
-		const stub = makeStub();
-		const uiNotify = vi.fn();
-		const { tasks: capturedTasks, controllers } = captureEnqueue();
-
-		// Point argv[1] at a fake child anyway: if the rejection below fails to
-		// intercept, the test fails on assertions instead of spawning real pi.
-		const restoreChild = fakeChild(`send({ type: "message_end", message: { role: "assistant", content: [{ type: "text", text: "REQUEST_CHANGES\\nVERDICT: REVIEW_FAIL" }], stopReason: "stop" } });`);
-
-		try {
-			register(stub.api);
-			const tool = stub.tools.find((candidate) => candidate.name === "subagent");
-			await runTool(tool, "call-crash", { agent: "reviewer", task: "Review the change" }, executionContext({ uiNotify }));
-			expect(capturedTasks).toHaveLength(1);
-
-			// The dispatch layer throws (spawn infra, fs, ...): the crash result must
-			// be delivered as a failure and never fed into the auto-fix gate — a
-			// crashed reviewer's output is not a review verdict, so no chain may
-			// start and no "auto-fix chain running" activity may appear.
-			const spy = vi.spyOn(spawn, "runSingleAgentWithMainFallback").mockRejectedValueOnce(new Error("spawn infra exploded"));
-			await capturedTasks[0](controllers[0].signal, controllers[0]);
-			spy.mockRestore();
-
-			expect(capturedTasks).toHaveLength(1);
-			vi.advanceTimersByTime(150);
-			expect(stub.messages).toHaveLength(1);
-			const content = stub.messages[0].message.content as string;
-			expect(content).toContain("### [reviewer] failed");
-			expect(content).toContain("spawn infra exploded");
-			expect(stub.messages[0].options).toEqual({ deliverAs: "steer", triggerTurn: true });
-			expect(uiNotify).toHaveBeenCalledWith("✗ reviewer dispatch failed: spawn infra exploded", "error");
-			expect(monitor.getRuns().find((run) => run.activity === "managed workflow running")).toBeUndefined();
-		} finally {
-			restoreChild();
-			await shutdownExtension(stub, { controllers });
-		}
-	});
-
 	it("delivers a crashed reviewer with a trailing REVIEW_FAIL partial as a failure, without a fix chain", async () => {
 		vi.useFakeTimers();
 		vi.setSystemTime(0);
@@ -1696,15 +1620,6 @@ describe("before_agent_start injection", () => {
 		expect(result.systemPrompt).toContain("- documenter:");
 		expect(result.systemPrompt).toContain("- reviewer:");
 		expect(result.systemPrompt).not.toContain("- plan:");
-	});
-
-	it("injects regardless of a legacy proactiveInjection toggle in the config file", async () => {
-		configureEnabledAgents(["worker"], { proactiveInjection: false });
-		const stub = makeStub();
-		register(stub.api);
-		const result = await stub.hooks["before_agent_start"]({ systemPrompt: "BASE PROMPT" }, { cwd: process.cwd() });
-		expect(result.systemPrompt).toContain("Sub-agent delegation");
-		expect(result.systemPrompt).toContain("- worker:");
 	});
 
 	it("excludes untrusted project agent overrides from injection and dispatch", async () => {

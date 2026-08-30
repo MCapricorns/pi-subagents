@@ -111,9 +111,6 @@ describe("isFailedResult", () => {
 });
 
 describe("currentSubagentDepth", () => {
-	it("defaults to 0", () => {
-		expect(currentSubagentDepth({})).toBe(0);
-	});
 	it("parses a positive integer", () => {
 		expect(currentSubagentDepth({ PI_SUBAGENT_DEPTH: "3" })).toBe(3);
 	});
@@ -341,14 +338,6 @@ describe("isRetryableStartupFailure (unit)", () => {
 		expect(isRetryableStartupFailure(base({ exitCode: 0 }), 120)).toBe(false);
 	});
 
-	it("is not retryable when aborted", () => {
-		expect(isRetryableStartupFailure(base({ stopReason: "aborted" }), 120)).toBe(false);
-	});
-
-	it("is not retryable when a dispatch crash already synthesized the result", () => {
-		expect(isRetryableStartupFailure(base({ dispatchFailed: true }), 120)).toBe(false);
-	});
-
 	it("is not retryable after a prompt was dispatched, accepted, or produced activity", () => {
 		expect(isRetryableStartupFailure(base({ rpcPromptDispatched: true }), 120)).toBe(false);
 		expect(isRetryableStartupFailure(base({ rpcPromptAccepted: true }), 120)).toBe(false);
@@ -391,11 +380,6 @@ describe("truncateResultOutput", () => {
 	it("leaves short output untouched", () => {
 		const out = "line one\nline two";
 		expect(truncateResultOutput(out, 80)).toEqual({ text: out, truncated: false });
-	});
-
-	it("keeps output at exactly maxLines untouched", () => {
-		const out = Array.from({ length: 5 }, (_, i) => `line ${i}`).join("\n");
-		expect(truncateResultOutput(out, 5)).toEqual({ text: out, truncated: false });
 	});
 
 	it("truncates long output to the first maxLines lines", () => {

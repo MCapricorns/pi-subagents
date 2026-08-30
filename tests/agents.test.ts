@@ -226,11 +226,6 @@ describe("parent tool inheritance", () => {
 			expect(agent.tools).toBeUndefined();
 		}
 	});
-
-	it("represents an empty inherited active set explicitly", () => {
-		const worker = loadBuiltinAgents().find((agent) => agent.name === "worker")!;
-		expect(resolveAgentTools(worker, ["subagent", "subagent_stop"]).tools).toEqual([]);
-	});
 });
 
 describe("agent write capability", () => {

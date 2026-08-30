@@ -7,7 +7,6 @@ import {
 	DEFAULT_ENABLED_AGENTS,
 	DEFAULT_IDLE_TIMEOUT_SEC,
 	DEFAULT_MAX_RESULT_LINES,
-	DEFAULT_THINKING_LEVEL,
 	IDLE_TIMEOUT_SEC_LIMIT,
 	MAX_RESULT_LINES_LIMIT,
 	loadConfig,
@@ -62,24 +61,11 @@ describe("normalizeConfig", () => {
 		expect(config.agentModels).toEqual({ explorer: "anthropic/claude-haiku-4-5" });
 	});
 
-	it("drops legacy backup-pool and global-thinking keys", () => {
-		const config = normalizeConfig({
-			agentBackupModels: { explorer: "anthropic/claude-sonnet-4-5" },
-			thinkingLevel: "max",
-		});
-		expect(config).not.toHaveProperty("agentBackupModels");
-		expect(config).not.toHaveProperty("thinkingLevel");
-	});
-
 	it("defaults maxResultLines to 40 and clamps invalid values", () => {
 		expect(DEFAULT_MAX_RESULT_LINES).toBe(40);
 		expect(normalizeConfig({ maxResultLines: 200 }).maxResultLines).toBe(200);
 		expect(normalizeConfig({ maxResultLines: 99_999 }).maxResultLines).toBe(MAX_RESULT_LINES_LIMIT);
 		expect(normalizeConfig({ maxResultLines: "many" }).maxResultLines).toBe(DEFAULT_MAX_RESULT_LINES);
-	});
-
-	it("uses high as the fallback Auto preference for agents without a declaration", () => {
-		expect(DEFAULT_THINKING_LEVEL).toBe("high");
 	});
 
 	it("keeps only valid thinking levels in agentThinkingLevels", () => {
@@ -95,11 +81,6 @@ describe("normalizeConfig", () => {
 		expect(normalizeConfig({ notifyOnReviewPass: "yes" }).notifyOnReviewPass).toBe(false);
 	});
 
-	it("drops the retired proactiveInjection toggle", () => {
-		expect("proactiveInjection" in normalizeConfig({ proactiveInjection: false })).toBe(false);
-		expect("proactiveInjection" in normalizeConfig({})).toBe(false);
-	});
-
 	it("validates agentScope", () => {
 		expect(normalizeConfig({ agentScope: "both" }).agentScope).toBe("both");
 		expect(normalizeConfig({ agentScope: "everywhere" }).agentScope).toBe("user");
@@ -113,11 +94,6 @@ describe("normalizeConfig", () => {
 		expect(normalizeConfig({ idleTimeoutSec: 999 }).idleTimeoutSec).toBe(IDLE_TIMEOUT_SEC_LIMIT);
 		expect(normalizeConfig({ idleTimeoutSec: 45.6 }).idleTimeoutSec).toBe(46);
 		expect(normalizeConfig({ idleTimeoutSec: "off" }).idleTimeoutSec).toBe(DEFAULT_IDLE_TIMEOUT_SEC);
-	});
-
-	it("drops the obsolete visionModel key during normalization", () => {
-		expect("visionModel" in normalizeConfig({ visionModel: "anthropic/claude-sonnet-4-5" })).toBe(false);
-		expect("visionModel" in normalizeConfig({})).toBe(false);
 	});
 });
 

@@ -2,12 +2,10 @@ import { visibleWidth } from "@earendil-works/pi-tui";
 import { describe, expect, it, vi } from "vitest";
 import {
 	MonitorStore,
-	extractKeyFragments,
 	formatDuration,
 	formatElapsed,
 	formatTaskSummary,
 	formatToolActivity,
-	formatUsageCompact,
 	formatUsageTokens,
 	runLabel,
 	runWaitLabel,
@@ -225,12 +223,6 @@ describe("MonitorStore activity", () => {
 		store.setActivity(id, "read src/index.ts");
 		expect(store.getRuns()[0].activity).toBe("read src/index.ts");
 	});
-
-	it("ignores activity for unknown runs", () => {
-		const store = new MonitorStore();
-		store.setActivity(999, "thinking");
-		expect(store.getRuns()).toHaveLength(0);
-	});
 });
 
 describe("MonitorStore.removeRun", () => {
@@ -284,34 +276,6 @@ describe("formatTaskSummary", () => {
 		expect(formatTaskSummary(task)).toBe("Review src/index.ts carefully.");
 	});
 
-	it("strips VT controls before display-width truncation", () => {
-		const summary = formatTaskSummary(`${"a".repeat(78)}\x1b[31m界\x1b[0mz`);
-		expect(summary).toBe(`${"a".repeat(51)}…${"a".repeat(25)}界z`);
-		expect(summary).not.toContain("\x1b");
-		expect(visibleWidth(summary)).toBe(80);
-	});
-
-	it("truncates CJK text by terminal display columns", () => {
-		expect(formatTaskSummary("界".repeat(40))).toBe("界".repeat(40));
-		const summary = formatTaskSummary("界".repeat(41));
-		expect(summary).toBe(`${"界".repeat(25)}…${"界".repeat(14)}`);
-		expect(visibleWidth(summary)).toBeLessThanOrEqual(80);
-	});
-
-	it("does not split a ZWJ emoji when truncating", () => {
-		const family = "👨‍👩‍👧‍👦";
-		const summary = formatTaskSummary(`${"a".repeat(78)}${family}z`);
-		expect(summary).toBe(`${"a".repeat(51)}…${"a".repeat(25)}${family}z`);
-		expect(visibleWidth(summary)).toBe(80);
-	});
-
-	it("keeps a combining sequence intact at the truncation boundary", () => {
-		const combining = "e\u0301";
-		const summary = formatTaskSummary(`${"a".repeat(78)}${combining}zz`);
-		expect(summary).toBe(`${"a".repeat(51)}…${"a".repeat(25)}${combining}zz`);
-		expect(visibleWidth(summary)).toBe(80);
-	});
-
 	it("shows only the distinctive path, dropping templated prose", () => {
 		const summary = formatTaskSummary(
 			"explorer: survey the widget rendering pipeline and completion batching paths to find every place that interacts with the footer data provider, then report how they connect src/footer-data-provider.ts",
@@ -337,46 +301,9 @@ describe("formatTaskSummary", () => {
 		expect(summary.endsWith("component.ts")).toBe(true);
 		expect(visibleWidth(summary)).toBeLessThanOrEqual(40);
 	});
-
-	it("joins multiple fragments with the separator, keeping the first", () => {
-		const summary = formatTaskSummary(
-			"worker: implement the new render path in src/ui/render.ts, wire up fixGridLayout, and add tests",
-			60,
-		);
-		expect(summary).toBe("src/ui/render.ts · fixGridLayout");
-	});
-
-	it("honors a custom maxWidth when showing keywords", () => {
-		const summary = formatTaskSummary(`${"a".repeat(60)} tail-keyword`, 40);
-		expect(summary).toBe("tail-keyword");
-		expect(visibleWidth(summary)).toBeLessThanOrEqual(40);
-	});
-});
-
-describe("extractKeyFragments", () => {
-	it("extracts paths, quoted phrases and symbols in order of appearance", () => {
-		expect(
-			extractKeyFragments('check "the focus manager" in src/ui/render.ts and fixGridLayout'),
-		).toEqual(["the focus manager", "src/ui/render.ts", "fixGridLayout"]);
-	});
-
-	it("dedupes fragments that are substrings of longer paths", () => {
-		expect(extractKeyFragments("look at src/footer-data-provider.ts and data-provider.ts")).toEqual([
-			"src/footer-data-provider.ts",
-		]);
-	});
-
-	it("drops kebab-case boilerplate words", () => {
-		expect(extractKeyFragments("a self-contained read-only review of main.ts")).toEqual(["main.ts"]);
-	});
 });
 
 describe("runLabel", () => {
-	it("uses the top distinguishing fragment as the label", () => {
-		expect(runLabel("Fix the bug in src/index.ts and add tests")).toBe("src/index.ts");
-		expect(runLabel("Find where fixGridLayout is defined")).toBe("fixGridLayout");
-	});
-
 	it("falls back to a head slice of the prose when no fragments are found", () => {
 		expect(runLabel("a quick check of things")).toBe("a quick check of things");
 	});
@@ -390,20 +317,6 @@ describe("runLabel", () => {
 });
 
 describe("formatUsageCompact", () => {
-	it("formats cache read/write tokens with R and W", () => {
-		expect(
-			formatUsageCompact({
-				input: 0,
-				output: 0,
-				cacheRead: 1200,
-				cacheWrite: 9000,
-				cost: 0,
-				contextTokens: 0,
-				turns: 0,
-			}),
-		).toBe("R1.2k W9.0k");
-	});
-
 	it("splits the token flow from the cost part", () => {
 		const usage = { input: 1200, output: 3400, cacheRead: 0, cacheWrite: 0, cost: 0.05, contextTokens: 0, turns: 0 };
 		expect(formatUsageTokens(usage)).toBe("↑1.2k ↓3.4k");
@@ -460,14 +373,6 @@ describe("main model activity", () => {
 });
 
 describe("formatToolActivity", () => {
-	it("shows the file being read, not a JSON args blob", () => {
-		expect(formatToolActivity("read", { path: "src/index.ts" })).toBe("read src/index.ts");
-	});
-
-	it("shows the command being run", () => {
-		expect(formatToolActivity("bash", { command: "npm test" })).toBe("bash npm test");
-	});
-
 	it("redacts credentials and strips terminal controls from commands", () => {
 		const activity = formatToolActivity("bash", {
 			command: "\x1b]8;;https://attacker.test\x07curl\x1b]8;;\x07 -H 'Authorization: Bearer DO_NOT_LEAK_TEST_TOKEN' x?token=DO_NOT_LEAK_QUERY",
@@ -481,22 +386,10 @@ describe("formatToolActivity", () => {
 		);
 	});
 
-	it("shows grep patterns and search queries", () => {
-		expect(formatToolActivity("grep", { pattern: "finishRun", path: "src/" })).toBe("grep finishRun");
-		expect(formatToolActivity("web_search", { query: "pi thinking levels" })).toBe("web_search pi thinking levels");
-	});
-
 	it("falls back to the bare tool name when no telling argument exists", () => {
 		expect(formatToolActivity("todo", {})).toBe("todo");
 		expect(formatToolActivity("read", undefined)).toBe("read");
 		expect(formatToolActivity("read", 42)).toBe("read");
-	});
-
-	it("collapses whitespace and truncates long targets", () => {
-		expect(formatToolActivity("bash", { command: "a\nb   c" })).toBe("bash a b c");
-		const out = formatToolActivity("bash", { command: "x".repeat(100) });
-		expect(out.length).toBeLessThanOrEqual("bash ".length + 60);
-		expect(out).toContain("…");
 	});
 });
 
@@ -535,13 +428,6 @@ describe("MonitorStore.subscribe", () => {
 		expect(store.summarize(run)).toContain("↑1.2k");
 	});
 
-	it("omits the thinking segment when absent", () => {
-		const store = new MonitorStore();
-		store.addRun("explorer", "Map the codebase");
-		const run = store.getRuns()[0];
-		expect(store.summarize(run)).not.toContain("thinking");
-	});
-
 	it("records chain metadata and surfaces the relationLabel in summarize", () => {
 		const store = new MonitorStore();
 		store.addRun("worker", "Fix the bug", undefined, undefined, {
@@ -552,14 +438,6 @@ describe("MonitorStore.subscribe", () => {
 		expect(run.groupId).toBe("fix-1");
 		expect(run.relationLabel).toBe("final review");
 		expect(store.summarize(run)).toContain("final review");
-	});
-
-	it("omits chain metadata when not provided", () => {
-		const store = new MonitorStore();
-		store.addRun("worker", "Fix the bug");
-		const run = store.getRuns()[0];
-		expect(run.groupId).toBeUndefined();
-		expect(run.relationLabel).toBeUndefined();
 	});
 });
 

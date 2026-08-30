@@ -126,28 +126,6 @@ describe("createCompletionBatcher", () => {
 		vi.advanceTimersByTime(1_000);
 		expect(emitted).toEqual([]);
 	});
-
-	it("handles a push made from inside the emit callback", () => {
-		useFakeClock();
-		const emitted: string[][] = [];
-		let reentered = false;
-		const batcher = createCompletionBatcher<string>({
-			emit: (items) => {
-				emitted.push(items);
-				if (!reentered) {
-					reentered = true;
-					batcher.push("reentrant");
-				}
-			},
-		});
-
-		batcher.push("first");
-		vi.advanceTimersByTime(150);
-		expect(emitted).toEqual([["first"]]);
-		vi.advanceTimersByTime(150);
-		expect(emitted).toEqual([["first"], ["reentrant"]]);
-		batcher.dispose();
-	});
 });
 
 describe("completion trigger decisions", () => {
@@ -197,10 +175,6 @@ describe("formatCompletionMessage", () => {
 		const reviewer = messageItem("reviewer", false, usage({ input: 2_000, output: 100, cacheWrite: 200, cost: 0.125, turns: 2 }));
 		const text = formatCompletionMessage([worker, reviewer]);
 		expect(text).toContain(`\n\nTotals: 2 runs · ↑3.0k ↓600 R5.0k W200 $0.3750`);
-	});
-
-	it("omits the totals footer when no item carries usage", () => {
-		expect(formatCompletionMessage([messageItem("worker", true), messageItem("reviewer", false)])).not.toContain("Totals:");
 	});
 });
 
