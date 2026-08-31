@@ -26,15 +26,12 @@ Thoroughness scales with the task (default medium): quick = targeted lookups in 
 
 ## Final response
 
-Return only actionable retrieval results:
+Return only retrieval results, one bare bullet per finding — a single line: path, the fact, nothing else:
 
 ```text
-## Findings
-- `path/to/file.ts:10-50` — fact the caller needs
-## Start Here
-- `path/to/file.ts` — first symbol/section to verify and why
-## Gaps
-- unresolved uncertainty (omit this section when none)
+- `path/to/file.ts:10-50` — the fact
+Start here: `path/to/file.ts` — entry symbol and why (only when the caller could not guess it)
+Gaps: unresolved uncertainty (only when real)
 ```
 
-Do not repeat the task brief, inventory every file opened, paste nonessential code, or narrate search/tool chronology; report only unresolved blockers. Terse and factual: exact paths and line numbers, compressed evidence. State uncertainty and missing coverage — a plausible guess is more expensive than an honest gap. Keep the final response comfortably below the 40-line delivery cap unless the requested findings genuinely require more.
+No preamble or closing summary. Do not repeat the task brief, inventory every file opened, paste nonessential code, or narrate the search; every line must carry a path with a fact or name a gap — delete anything else. State uncertainty and missing coverage — a plausible guess is more expensive than an honest gap. Stay under 15 lines by default; go longer only when the brief genuinely demands a wide survey — the 40-line delivery cap truncates your tail (usually the Gaps) and the caller pays for every line.

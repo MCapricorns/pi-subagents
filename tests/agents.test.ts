@@ -78,7 +78,8 @@ describe("shipped specialist agents", () => {
 			expect(agent.systemPrompt).toContain("40-line delivery cap");
 		}
 		const explorer = loadBuiltinAgents().find((agent) => agent.name === "explorer");
-		expect(explorer?.systemPrompt).toContain("## Findings");
+		expect(explorer?.systemPrompt).toContain("one bare bullet per finding");
+		expect(explorer?.systemPrompt).not.toContain("## Findings");
 		expect(explorer?.systemPrompt).not.toContain("## Files Retrieved");
 		expect(explorer?.systemPrompt).not.toContain("## Architecture");
 	});
