@@ -5,7 +5,7 @@ import { existsSync } from "node:fs";
 import { mkdir, readFile, rename, rm, writeFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import { stripVTControlCharacters } from "node:util";
-import type { WorktreeFinalization } from "./worktree.ts";
+import { removeWorktreeGroup, worktreeGroupDir, type WorktreeFinalization } from "./worktree.ts";
 
 export const RECOVERY_MANIFEST_FILE_NAME = "pi-subagents-recovery.json";
 const RECOVERY_MANIFEST_VERSION = 1;
@@ -14,6 +14,8 @@ export interface RecoveryRecord {
 	runId: number;
 	createdAt: number;
 	integrated: boolean;
+	/** Repository a cleanup retry can prune stale worktree metadata against. */
+	originalRoot?: string;
 	worktreePath?: string;
 	patchPath?: string;
 	error?: string;
@@ -37,6 +39,7 @@ function normalizeRecord(value: unknown): RecoveryRecord | undefined {
 		runId: raw.runId,
 		createdAt: raw.createdAt,
 		integrated: raw.integrated === true,
+		...(typeof raw.originalRoot === "string" && raw.originalRoot ? { originalRoot: raw.originalRoot } : {}),
 		...(typeof raw.worktreePath === "string" && raw.worktreePath ? { worktreePath: raw.worktreePath } : {}),
 		...(typeof raw.patchPath === "string" && raw.patchPath ? { patchPath: raw.patchPath } : {}),
 		...(typeof raw.error === "string" && raw.error ? { error: raw.error } : {}),
@@ -105,6 +108,7 @@ export function recoveryRecordFromFinalization(
 		runId,
 		createdAt: now,
 		integrated: finalization.integrated,
+		...(finalization.originalRoot ? { originalRoot: finalization.originalRoot } : {}),
 		...(finalization.worktreePath ? { worktreePath: finalization.worktreePath } : {}),
 		...(finalization.patchPath ? { patchPath: finalization.patchPath } : {}),
 		...(finalization.error ? { error: finalization.error } : {}),
@@ -112,7 +116,10 @@ export function recoveryRecordFromFinalization(
 }
 
 /** Show retained recovery paths on every later session start until the user
- * removes the artifacts. Stale records are pruned automatically. */
+ * removes the artifacts. Records whose changes already landed only need the
+ * worktree group deleted — the step whose failure retained them — so each
+ * session start retries that removal first and forgets records it completes.
+ * Stale records are pruned automatically. */
 export async function announceRecoveryRecords(
 	configPath: string,
 	ctx: {
@@ -123,6 +130,17 @@ export async function announceRecoveryRecords(
 	if (ctx.hasUI === false) return;
 	const records = await readRecoveryRecords(configPath);
 	if (records.length === 0) return;
+	for (const record of records) {
+		if (!record.integrated || !record.worktreePath) continue;
+		const groupDir = worktreeGroupDir(record.worktreePath);
+		if (!groupDir) continue;
+		if (!existsSync(record.worktreePath) && !(record.patchPath ? existsSync(record.patchPath) : false)) continue;
+		await removeWorktreeGroup({
+			originalRoot: record.originalRoot,
+			worktreePath: record.worktreePath,
+			tempDir: groupDir,
+		});
+	}
 	const live = records.filter((record) =>
 		(record.worktreePath ? existsSync(record.worktreePath) : false) ||
 		(record.patchPath ? existsSync(record.patchPath) : false),

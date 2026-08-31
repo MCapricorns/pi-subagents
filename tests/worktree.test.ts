@@ -13,6 +13,7 @@ import { join, relative, resolve } from "node:path";
 import { describe, expect, it, type TestContext } from "vitest";
 import {
 	createWorktreeIsolation,
+	removeWorktreeGroup,
 	resolveRepositoryRoot,
 	resolveWorktreeTarget,
 	runCommand,
@@ -347,5 +348,56 @@ describe.concurrent("Git worktree isolation lifecycle", { timeout: 30_000 }, () 
 		expect(existsSync(handle.cwd)).toBe(true);
 		const result = await handle.finalize();
 		expect(result.status).toBe("no_changes");
+	});
+
+	it("still integrates when Git cannot delete the worktree and Node finishes the cleanup", async (ctx) => {
+		const repo = createRepo();
+		trackDir(ctx, repo);
+		// Simulates Git for Windows giving up on a deep checkout ("Filename too
+		// long"): the removal failure must fall through to the filesystem
+		// deletion instead of retaining an already-integrated worktree.
+		let failRemoval = false;
+		const runner: CommandRunner = async (command, args, options) => {
+			if (failRemoval && command === "git" && args.includes("remove")) {
+				return {
+					code: 255,
+					stdout: Buffer.alloc(0),
+					stderr: Buffer.from("error: failed to delete 'worktree': Filename too long"),
+				};
+			}
+			return runCommand(command, args, options);
+		};
+		const handle = await createIsolation(ctx, repo, { runner });
+		writeFileSync(join(handle.worktreePath, "tracked.txt"), "worker edit\n", "utf8");
+
+		failRemoval = true;
+		expect(await handle.finalize()).toMatchObject({ status: "integrated", integrated: true });
+		expect(readFileSync(join(repo, "tracked.txt"), "utf8")).toBe("worker edit\n");
+		expect(existsSync(handle.tempDir)).toBe(false);
+		// The prune cleared the registration Git's failed removal left behind.
+		expect(git(repo, ["worktree", "list", "--porcelain"])).not.toContain("pi-subagent-worktree-");
+	});
+
+	it("removeWorktreeGroup deletes deep trees and prunes stale registrations", async (ctx) => {
+		const repo = createRepo();
+		trackDir(ctx, repo);
+		const base = mkdtempSync(join(tmpdir(), "pi-subagents-worktree-base-"));
+		trackDir(ctx, base);
+		const group = join(base, "pi-subagent-worktree-deep1");
+		const worktreePath = join(group, "worktree");
+		const deep = join(worktreePath, "target", "debug", ...Array.from({ length: 10 }, (_, i) => `very-long-directory-segment-${i}-aaaaaaaaaaaaaaaaaa`));
+		await mkdir(deep, { recursive: true });
+		writeFileSync(join(deep, "artifact.bin"), "x");
+
+		// A stale registration whose directory is already gone is what the prune
+		// step exists for; the group being removed itself is unregistered, so
+		// Git's removal fails and the filesystem deletion decides the outcome.
+		const stale = join(base, "pi-subagent-worktree-stale");
+		git(repo, ["worktree", "add", "--detach", stale, "HEAD"]);
+		rmSync(stale, { recursive: true, force: true });
+
+		expect(await removeWorktreeGroup({ originalRoot: repo, worktreePath, tempDir: group })).toBeUndefined();
+		expect(existsSync(group)).toBe(false);
+		expect(git(repo, ["worktree", "list", "--porcelain"])).not.toContain(stale);
 	});
 });

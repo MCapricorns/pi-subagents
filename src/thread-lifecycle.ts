@@ -927,6 +927,7 @@ export function installThreadLifecycle(thread: SubagentThread, deps: ThreadLifec
 				status: "retained",
 				integrated: false,
 				hadChanges: false,
+				originalRoot: candidate.originalRoot,
 				...(retainedPath ? { worktreePath: retainedPath } : {}),
 				...(existsSync(candidate.patchPath) ? { patchPath: candidate.patchPath } : {}),
 				error: `Discarding unused continuation failed: ${error instanceof Error ? error.message : String(error)}`,

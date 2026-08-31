@@ -127,7 +127,9 @@ main agent inspects the actual changes before calling anything done.
   as a lane wait, not as slot queueing, and its process slot is already released.
 - Setup and integration failures keep the useful patch and worktree, and record
   where they are in `~/.pi/agent/pi-subagents-recovery.json`. Every later session
-  start repeats that notice until you remove the artifacts.
+  start repeats that notice until you remove the artifacts. When the changes had
+  already been applied and only the cleanup failed, the next session start
+  removes the retained copy itself and clears the notice.
 
 ## Threads: resume, stop
 

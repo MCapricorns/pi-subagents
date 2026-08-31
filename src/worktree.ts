@@ -11,7 +11,7 @@
 import { spawn, type ChildProcess } from "node:child_process";
 import { existsSync } from "node:fs";
 import { copyFile, mkdir, mkdtemp, realpath, rm, stat, writeFile } from "node:fs/promises";
-import { isAbsolute, join, relative, resolve } from "node:path";
+import { basename, dirname, isAbsolute, join, relative, resolve } from "node:path";
 import { writeTempOwnerMarker } from "./temp-hygiene.ts";
 
 export type IsolationMode = "shared" | "worktree";
@@ -233,6 +233,8 @@ export interface WorktreeFinalization {
 	/** True once the patch was successfully applied to the original worktree. */
 	integrated: boolean;
 	hadChanges: boolean;
+	/** Repository a recovery path can prune stale worktree metadata against. */
+	originalRoot?: string;
 	worktreePath?: string;
 	patchPath?: string;
 	error?: string;
@@ -321,6 +323,63 @@ async function runGit(
 export function isPathInside(root: string, candidate: string): boolean {
 	const rel = relative(root, candidate);
 	return rel === "" || (!rel.startsWith("..") && !isAbsolute(rel));
+}
+
+/** The temp group directory backing a worktree path, when the path actually
+ * names our `<group>/worktree` layout. Recovery deletes only paths read back
+ * from the manifest through this guard. */
+export function worktreeGroupDir(worktreePath: string): string | undefined {
+	const group = dirname(worktreePath);
+	return basename(worktreePath) === "worktree" && basename(group).startsWith(WORKTREE_TEMP_DIR_PREFIX)
+		? group
+		: undefined;
+}
+
+/** Delete one isolated worktree group: Git's own removal keeps metadata
+ * authoritative, but Git on Windows cannot always delete deep checkouts
+ * ("Filename too long"), so the Node removal decides the outcome and the prune
+ * clears any stale registration left behind. Returns an error string when
+ * artifacts still exist afterwards. */
+export async function removeWorktreeGroup(
+	paths: { originalRoot?: string; tempDir: string; worktreePath: string },
+	runner: CommandRunner = runCommand,
+): Promise<string | undefined> {
+	let removeError: string | undefined;
+	if (paths.originalRoot && existsSync(paths.worktreePath)) {
+		// core.longpaths only exists in Git for Windows, and some POSIX builds
+		// reject unknown -c core keys, so the flag stays platform-gated.
+		const longPaths = process.platform === "win32" ? ["-c", "core.longpaths=true"] : [];
+		try {
+			await runGit(
+				runner,
+				paths.originalRoot,
+				[...longPaths, "worktree", "remove", "--force", paths.worktreePath],
+				`Removing isolated worktree ${paths.worktreePath}`,
+			);
+		} catch (error) {
+			removeError = error instanceof Error ? error.message : String(error);
+		}
+	}
+	try {
+		await rm(paths.tempDir, { recursive: true, force: true });
+	} catch (error) {
+		const rmError = error instanceof Error ? error.message : String(error);
+		return removeError
+			? `${removeError}; removing temporary directory failed: ${rmError}`
+			: `Removing temporary directory failed: ${rmError}`;
+	}
+	if (!paths.originalRoot) return undefined;
+	try {
+		await runGit(
+			runner,
+			paths.originalRoot,
+			["worktree", "prune"],
+			`Pruning Git worktree metadata for ${paths.originalRoot}`,
+		);
+	} catch (error) {
+		return error instanceof Error ? error.message : String(error);
+	}
+	return undefined;
 }
 
 interface RepositoryLocation {
@@ -588,6 +647,7 @@ class GitWorktreeIsolation implements WorktreeIsolation {
 			status: "retained",
 			integrated,
 			hadChanges,
+			originalRoot: this.originalRoot,
 			...(existsSync(this.worktreePath) ? { worktreePath: this.worktreePath } : {}),
 			...(patchWritten && existsSync(this.patchPath) ? { patchPath: this.patchPath } : {}),
 			error,
@@ -649,35 +709,11 @@ class GitWorktreeIsolation implements WorktreeIsolation {
 	}
 
 	/** Return an error string instead of throwing so applied work is never retried. */
-	private async removeAndPrune(): Promise<string | undefined> {
-		try {
-			await runGit(
-				this.runner,
-				this.originalRoot,
-				["worktree", "remove", "--force", this.worktreePath],
-				`Removing isolated worktree ${this.worktreePath}`,
-			);
-		} catch (error) {
-			return error instanceof Error ? error.message : String(error);
-		}
-		let pruneError: string | undefined;
-		try {
-			await runGit(
-				this.runner,
-				this.originalRoot,
-				["worktree", "prune"],
-				`Pruning Git worktree metadata for ${this.originalRoot}`,
-			);
-		} catch (error) {
-			pruneError = error instanceof Error ? error.message : String(error);
-		}
-		try {
-			await rm(this.tempDir, { recursive: true, force: true });
-		} catch (error) {
-			const rmError = error instanceof Error ? error.message : String(error);
-			return pruneError ? `${pruneError}; removing temporary directory failed: ${rmError}` : `Removing temporary directory failed: ${rmError}`;
-		}
-		return pruneError;
+	private removeAndPrune(): Promise<string | undefined> {
+		return removeWorktreeGroup(
+			{ originalRoot: this.originalRoot, worktreePath: this.worktreePath, tempDir: this.tempDir },
+			this.runner,
+		);
 	}
 }
 
