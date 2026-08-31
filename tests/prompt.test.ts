@@ -48,8 +48,9 @@ describe("buildDelegationDirective", () => {
 		expect(directive).toContain("Inline only trivial work");
 		expect(directive).toContain("default every non-trivial delegated task");
 		expect(directive).toContain("split a broad question into parallel explorers with disjoint scopes");
+		expect(directive).toContain("delegation saves search, not that read");
 		expect(directive).toContain("leads, never proof");
-		expect(directive).toContain("re-read load-bearing files before acting yourself");
+		expect(directive).toContain("re-read the cited line ranges before acting on them");
 		expect(directive).toContain("a child you brief re-verifies");
 
 		const withoutExplorer = buildDelegationDirective([agent("executor")]);
@@ -89,6 +90,7 @@ describe("buildDelegationDirective", () => {
 	it("keeps verification honest without any gate vocabulary", () => {
 		const directive = buildDelegationDirective(loadBuiltinAgents());
 		expect(directive).toContain("Never report an unrun check as passed");
+		expect(directive).toContain("inspect the actual diff before reporting completion");
 		expect(directive).toContain("Commit or push only when explicitly requested");
 		expect(directive).not.toContain("REVIEW_");
 		expect(directive).not.toContain("VERDICT");

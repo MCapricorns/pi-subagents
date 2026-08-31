@@ -53,7 +53,7 @@ directly when you want exact control.
 
 | Agent         | Access    | Best for                                                                                                                                                                                                   |
 | ------------- | --------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `explorer`    | Read-only | Broad search, unfamiliar-area mapping, symbol and dependency tracing. Returns a retrieval index — never proof.                                                                                              |
+| `explorer`    | Read-only | Broad search, unfamiliar-area mapping, symbol and dependency tracing. Returns a retrieval index — never proof. A single artifact the main agent must fully absorb (one issue, one spec) stays an inline read. |
 | `executor`    | Full      | The default route for any non-trivial, self-contained task: implementation, fixes, refactors, tests, evidence-first cleanup, docs/comment sync, or merging a fan-out's results into one brief — carried through verification and a result-only handoff. |
 
 Custom roles join them with a Markdown file (see [Custom agents](#custom-agents)).

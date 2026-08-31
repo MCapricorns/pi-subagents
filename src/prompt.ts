@@ -24,9 +24,10 @@ export function buildDelegationDirective(
 
 	const dispatchRules = [
 		`Delegate aggressively: child contexts are cheap, yours is scarce. Inline only trivial work — a lookup, a single focused edit, an answer already in context${hasExecutor ? "; default every non-trivial delegated task (implementation, fix, refactor, test, cleanup, docs sync, result merging) to `executor`" : ""}.`,
+		"A single artifact you must fully absorb yourself (one issue, one spec) is inline work — delegation saves search, not that read.",
 		...(hasExplorer
 			? [
-				"`explorer`: split a broad question into parallel explorers with disjoint scopes. Its findings are leads, never proof — re-read load-bearing files before acting yourself (a child you brief re-verifies).",
+				"`explorer`: split a broad question into parallel explorers with disjoint scopes. Its findings are leads, never proof — re-read the cited line ranges before acting on them (a child you brief re-verifies).",
 			]
 			: []),
 		...(hasExecutor
@@ -45,7 +46,7 @@ export function buildDelegationDirective(
 	];
 
 	const verificationRules = [
-		"Never report an unrun check as passed; surface unavailable checks and pre-existing failures, and inspect actual changes before reporting completion.",
+		"Never report an unrun check as passed; surface unavailable checks and pre-existing failures, and inspect the actual diff before reporting completion.",
 		"Commit or push only when explicitly requested and applicable checks pass.",
 	];
 

@@ -97,7 +97,7 @@ describe("shipped specialist agents", () => {
 		const explorer = loadBuiltinAgents().find((agent) => agent.name === "explorer");
 		expect(explorer?.tools).toEqual(["read", "grep", "find", "ls", "bash"]);
 		expect(explorer?.systemPrompt).toContain("retrieval lead");
-		expect(explorer?.systemPrompt).toContain("re-read load-bearing files");
+		expect(explorer?.systemPrompt).toContain("re-read the cited line ranges");
 		expect(explorer?.systemPrompt).toContain("plausible guess is more expensive");
 		expect(explorer?.systemPrompt).not.toMatch(/\bBash\b/u);
 	});
