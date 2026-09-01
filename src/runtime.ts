@@ -258,7 +258,7 @@ export function createRuntime(pi: ExtensionAPI, configPath: string): SubagentRun
 			// thread whose settlement finished during the wait above already
 			// wrote (or removed) its own record; the lastResult-derived state
 			// below matches it.
-			const settledIds: number[] = [];
+			const settled: Array<{ runId: number; cwd: string }> = [];
 			const records: ThreadRecord[] = [];
 			for (const thread of runtime.threads.values()) {
 				if (thread.retired) continue;
@@ -272,11 +272,11 @@ export function createRuntime(pi: ExtensionAPI, configPath: string): SubagentRun
 					state = "parked";
 				}
 				if (state === "parked") records.push(threadRecordFromThread(thread, state));
-				else settledIds.push(thread.id);
+				else settled.push({ runId: thread.id, cwd: thread.cwd });
 			}
 			await Promise.all([
 				...records.map((record) => upsertThreadRecord(runtime.configPath, record).catch(() => undefined)),
-				...settledIds.map((runId) => removeThreadRecord(runtime.configPath, runId).catch(() => undefined)),
+				...settled.map(({ runId, cwd }) => removeThreadRecord(runtime.configPath, runId, cwd).catch(() => undefined)),
 			]);
 			// Retained-failure recovery records are persisted by the finalization
 			// itself; shutdown only drops sessions no record claims anymore.

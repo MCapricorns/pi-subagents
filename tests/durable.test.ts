@@ -4,9 +4,10 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import {
+	getThreadsManifestPath,
+	migrateLegacyThreadsManifest,
 	PROJECT_ROOT_MAX_AGE_MS,
 	pruneStaleProjectRoots,
-	getThreadsManifestPath,
 	PARKED_RECORD_MAX_AGE_MS,
 	pruneThreadRecords,
 	readThreadRecords,
@@ -66,18 +67,60 @@ describe("thread manifest", () => {
 		expect(updated.createdAt).toBe(1_000);
 		expect(updated.task).toBe("renamed");
 
-		await removeThreadRecord(configPath, 1);
+		await removeThreadRecord(configPath, 1, "C:/repo");
 		expect(await readThreadRecords(configPath)).toHaveLength(1);
-		await removeThreadRecord(configPath, 2);
+		await removeThreadRecord(configPath, 2, "C:/repo");
 		expect(await readThreadRecords(configPath)).toEqual([]);
-		expect(existsSync(getThreadsManifestPath(configPath))).toBe(false);
+		expect(existsSync(getThreadsManifestPath(configPath, "C:/repo"))).toBe(false);
+	});
+
+	it("keeps different projects' records in separate manifests", async () => {
+		const root = mkdtempSync(join(tmpdir(), "pi-subagents-durable-multi-"));
+		roots.push(root);
+		const configPath = join(root, "pi-subagents.json");
+
+		await upsertThreadRecord(configPath, makeRecord());
+		await upsertThreadRecord(configPath, makeRecord({ runId: 2, cwd: "C:/other", executionCwd: "C:/other" }));
+		expect(await readThreadRecords(configPath).then((records) => records.map((record) => record.runId).sort()))
+			.toEqual([1, 2]);
+		expect(existsSync(getThreadsManifestPath(configPath, "C:/repo"))).toBe(true);
+		expect(existsSync(getThreadsManifestPath(configPath, "C:/other"))).toBe(true);
+
+		await removeThreadRecord(configPath, 1, "C:/repo");
+		expect(existsSync(getThreadsManifestPath(configPath, "C:/repo"))).toBe(false);
+		expect((await readThreadRecords(configPath)).map((record) => record.runId)).toEqual([2]);
+	});
+
+	it("folds the legacy global manifest into the project roots and removes it", async () => {
+		const root = mkdtempSync(join(tmpdir(), "pi-subagents-durable-legacy-"));
+		roots.push(root);
+		const configPath = join(root, "pi-subagents.json");
+		const legacyPath = join(root, THREADS_MANIFEST_FILE_NAME);
+		writeFileSync(legacyPath, JSON.stringify({
+			version: 1,
+			records: [
+				makeRecord(),
+				makeRecord({ runId: 2, cwd: "C:/other", executionCwd: "C:/other" }),
+				{ runId: 0, createdAt: 1, updatedAt: 1 },
+			],
+		}), "utf8");
+
+		await migrateLegacyThreadsManifest(configPath);
+
+		expect(existsSync(legacyPath)).toBe(false);
+		expect((await readThreadRecords(configPath)).map((record) => record.runId).sort()).toEqual([1, 2]);
+		// A second migration is a no-op once the legacy file is gone.
+		await upsertThreadRecord(configPath, makeRecord({ updatedAt: 3_000, task: "renamed" }));
+		const records = await readThreadRecords(configPath);
+		expect(records.find((record) => record.runId === 1)!.task).toBe("renamed");
 	});
 
 	it("rejects malformed records instead of restoring garbage", async () => {
 		const root = mkdtempSync(join(tmpdir(), "pi-subagents-durable-garbage-"));
 		roots.push(root);
 		const configPath = join(root, "pi-subagents.json");
-		writeFileSync(getThreadsManifestPath(configPath), JSON.stringify({
+		mkdirSync(getProjectRoot(configPath, "C:/repo"), { recursive: true });
+		writeFileSync(getThreadsManifestPath(configPath, "C:/repo"), JSON.stringify({
 			version: 1,
 			records: [
 				{ runId: 0, createdAt: 1, updatedAt: 1 },
@@ -190,8 +233,10 @@ describe("thread manifest", () => {
 		expect([...paths].sort()).toEqual(["C:/state/session-a", "C:/state/session-b", "C:/state/worktree-b"].sort());
 	});
 
-	it("places the manifest beside the config and project roots under the extension home", () => {
-		expect(getThreadsManifestPath("C:/agent/settings.json")).toBe(join("C:/agent", THREADS_MANIFEST_FILE_NAME));
+	it("stores each project's manifest inside its project root beside its artifacts", () => {
+		const configPath = "C:/agent/settings.json";
+		expect(getThreadsManifestPath(configPath, "C:/repo"))
+			.toBe(join(getProjectRoot(configPath, "C:/repo"), THREADS_MANIFEST_FILE_NAME));
 		expect(getProjectRoot("C:/agent/settings.json")).toBe(join("C:/agent", "ferris-pi-subagents", resultArtifactProjectKey(undefined)));
 	});
 });

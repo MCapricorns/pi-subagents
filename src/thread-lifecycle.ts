@@ -27,6 +27,7 @@ import {
 } from "./config.ts";
 import {
 	isCurrentBoot,
+	migrateLegacyThreadsManifest,
 	readThreadRecords,
 	referencedDurablePaths,
 	removeThreadRecord,
@@ -225,7 +226,7 @@ export function persistThreadCheckpoint(
 ): void {
 	const write = state === "parked"
 		? upsertThreadRecord(runtime.configPath, threadRecordFromThread(thread, state))
-		: removeThreadRecord(runtime.configPath, thread.id);
+		: removeThreadRecord(runtime.configPath, thread.id, thread.cwd);
 	void write.catch(() => undefined);
 }
 
@@ -1145,7 +1146,7 @@ async function discardRestoredRecord(runtime: SubagentRuntime, record: ThreadRec
 		const worktree = await restoreWorktreeIsolation(record.worktree).catch(() => undefined);
 		await worktree?.discard().catch(() => undefined);
 	}
-	await removeThreadRecord(runtime.configPath, record.runId).catch(() => undefined);
+	await removeThreadRecord(runtime.configPath, record.runId, record.cwd).catch(() => undefined);
 }
 
 /** Project-scoped <projectRoot>/results for a completion's artifacts. */
@@ -1273,6 +1274,9 @@ export async function restoreDurableThreads(runtime: SubagentRuntime): Promise<n
 export function bootstrapDurableState(runtime: SubagentRuntime): Promise<void> {
 	const restore = (async () => {
 		try {
+			// Records from a pre-per-project manifest must land in their project
+			// roots before restore reads anything.
+			await migrateLegacyThreadsManifest(runtime.configPath);
 			runtime.restoredRunIds = await restoreDurableThreads(runtime);
 		} catch {
 			/* restore is best-effort */

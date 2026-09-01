@@ -344,7 +344,7 @@ export function registerLookupTools(pi: ExtensionAPI, runtime: SubagentRuntime):
 				runtime.retireThreadSession(thread);
 				// The destructive retire removes the durable record with the session;
 				// an id never resurrects after subagent_stop.
-				await removeThreadRecord(runtime.configPath, runId).catch(() => undefined);
+				await removeThreadRecord(runtime.configPath, runId, thread.cwd).catch(() => undefined);
 				if (thread.lifecycleVersion === stopVersion && thread.lifecycleOperation === "stop") {
 					thread.lifecycleOperation = undefined;
 				}

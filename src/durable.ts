@@ -1,12 +1,13 @@
 /**
- * Durable thread state: a manifest next to the config that lets interrupted
- * (parked) sub-agent threads survive pi reloads and restarts, plus the durable
- * state root that keeps their retained sessions and isolated worktrees out of
- * the OS temp directory.
+ * Durable thread state: one manifest per project, inside that project's durable
+ * root beside its sessions and worktrees, letting interrupted (parked)
+ * sub-agent threads survive pi reloads and restarts. The durable state root
+ * also keeps their retained sessions and isolated worktrees out of the OS temp
+ * directory.
  *
  * Only parked threads are ever recorded: a thread that settles normally drops
- * its record, so the manifest file exists exactly while unfinished work needs
- * it and disappears on its own. Records are small path/state snapshots, never
+ * its record, so a manifest file exists exactly while unfinished work needs it
+ * and disappears on its own. Records are small path/state snapshots, never
  * full transcripts; the retained Pi session files and worktrees they point at
  * remain the actual context. Writes are atomic (tmp+rename) and serialized
  * through the same withFileMutationQueue as the recovery manifest.
@@ -108,7 +109,15 @@ interface ThreadsManifest {
 	records: ThreadRecord[];
 }
 
-export function getThreadsManifestPath(configPath: string): string {
+/** Each project's manifest lives inside its durable root, beside the sessions
+ * and worktrees its records point at. */
+export function getThreadsManifestPath(configPath: string, cwd: string): string {
+	return join(getProjectRoot(configPath, cwd), THREADS_MANIFEST_FILE_NAME);
+}
+
+/** Location of the pre-per-project global manifest; only read by the
+ * one-time migration that folds it into the project roots. */
+function getLegacyManifestPath(configPath: string): string {
 	return join(dirname(configPath), THREADS_MANIFEST_FILE_NAME);
 }
 
@@ -181,9 +190,9 @@ function normalizeRecord(value: unknown): ThreadRecord | undefined {
 	};
 }
 
-export async function readThreadRecords(configPath: string): Promise<ThreadRecord[]> {
+async function readManifestRecords(path: string): Promise<ThreadRecord[]> {
 	try {
-		const parsed = JSON.parse(await readFile(getThreadsManifestPath(configPath), "utf8")) as {
+		const parsed = JSON.parse(await readFile(path, "utf8")) as {
 			records?: unknown;
 		};
 		if (!Array.isArray(parsed.records)) return [];
@@ -196,8 +205,28 @@ export async function readThreadRecords(configPath: string): Promise<ThreadRecor
 	}
 }
 
-async function writeManifest(configPath: string, records: readonly ThreadRecord[]): Promise<void> {
-	const path = getThreadsManifestPath(configPath);
+/** Manifest paths of every project that has a durable root. */
+function projectManifestPaths(durableRoot: string): string[] {
+	try {
+		return readdirSync(durableRoot, { withFileTypes: true })
+			.filter((entry) => entry.isDirectory() && !entry.isSymbolicLink())
+			.map((entry) => join(durableRoot, entry.name, THREADS_MANIFEST_FILE_NAME));
+	} catch {
+		return [];
+	}
+}
+
+/** Every parked record across all projects, for restore and the state-root
+ * sweeps that must see references from anywhere. */
+export async function readThreadRecords(configPath: string): Promise<ThreadRecord[]> {
+	const manifests = await Promise.all(
+		projectManifestPaths(join(dirname(configPath), PROJECT_ROOTS_DIR_NAME))
+			.map((path) => readManifestRecords(path)),
+	);
+	return manifests.flat();
+}
+
+async function writeManifest(path: string, records: readonly ThreadRecord[]): Promise<void> {
 	if (records.length === 0) {
 		await rm(path, { force: true });
 		return;
@@ -217,26 +246,26 @@ async function writeManifest(configPath: string, records: readonly ThreadRecord[
 }
 
 export async function upsertThreadRecord(configPath: string, record: ThreadRecord): Promise<void> {
-	const path = getThreadsManifestPath(configPath);
+	const path = getThreadsManifestPath(configPath, record.cwd);
 	await withFileMutationQueue(path, async () => {
-		const records = await readThreadRecords(configPath);
+		const records = await readManifestRecords(path);
 		const index = records.findIndex((candidate) => candidate.runId === record.runId);
 		const merged: ThreadRecord = index === -1
 			? record
 			: { ...record, createdAt: records[index]!.createdAt };
 		if (index === -1) records.push(merged);
 		else records[index] = merged;
-		await writeManifest(configPath, records);
+		await writeManifest(path, records);
 	});
 }
 
-export async function removeThreadRecord(configPath: string, runId: number): Promise<void> {
-	const path = getThreadsManifestPath(configPath);
+export async function removeThreadRecord(configPath: string, runId: number, cwd: string): Promise<void> {
+	const path = getThreadsManifestPath(configPath, cwd);
 	await withFileMutationQueue(path, async () => {
-		const records = await readThreadRecords(configPath);
+		const records = await readManifestRecords(path);
 		const next = records.filter((record) => record.runId !== runId);
 		if (next.length === records.length) return;
-		await writeManifest(configPath, next);
+		await writeManifest(path, next);
 	});
 }
 
@@ -334,22 +363,65 @@ export async function pruneThreadRecords(
 	configPath: string,
 	now = Date.now(),
 ): Promise<void> {
-	const path = getThreadsManifestPath(configPath);
-	await withFileMutationQueue(path, async () => {
-		const records = await readThreadRecords(configPath);
-		if (records.length === 0) return;
-		let changed = false;
-		const kept: ThreadRecord[] = [];
-		for (const record of records) {
-			if (now - record.updatedAt <= PARKED_RECORD_MAX_AGE_MS) {
-				kept.push(record);
-				continue;
+	const durableRoot = join(dirname(configPath), PROJECT_ROOTS_DIR_NAME);
+	for (const path of projectManifestPaths(durableRoot)) {
+		await withFileMutationQueue(path, async () => {
+			const records = await readManifestRecords(path);
+			if (records.length === 0) return;
+			let changed = false;
+			const kept: ThreadRecord[] = [];
+			for (const record of records) {
+				if (now - record.updatedAt <= PARKED_RECORD_MAX_AGE_MS) {
+					kept.push(record);
+					continue;
+				}
+				changed = true;
+				await discardRecordArtifacts(record);
 			}
-			changed = true;
-			await discardRecordArtifacts(record);
-		}
-		if (changed) await writeManifest(configPath, kept);
-	});
+			if (changed) await writeManifest(path, kept);
+		});
+	}
+}
+
+/** One-time move of the pre-per-project global manifest beside the config into
+ * the project roots its records belong to, so an upgrade keeps parked work
+ * resumable and pi home is left without a manifest. Existing project records
+ * win over legacy ones; the legacy file is removed only after every group
+ * landed, and an unreadable file stays put for the next boot. */
+export async function migrateLegacyThreadsManifest(configPath: string): Promise<void> {
+	const legacyPath = getLegacyManifestPath(configPath);
+	let records: ThreadRecord[];
+	try {
+		const parsed = JSON.parse(await readFile(legacyPath, "utf8")) as { records?: unknown };
+		if (!Array.isArray(parsed.records)) return;
+		records = parsed.records.flatMap((record) => {
+			const normalized = normalizeRecord(record);
+			return normalized ? [normalized] : [];
+		});
+	} catch {
+		return;
+	}
+	const groups = new Map<string, ThreadRecord[]>();
+	for (const record of records) {
+		const path = getThreadsManifestPath(configPath, record.cwd);
+		const group = groups.get(path);
+		if (group) group.push(record);
+		else groups.set(path, [record]);
+	}
+	let migrated = true;
+	for (const [path, group] of groups) {
+		await withFileMutationQueue(path, async () => {
+			const existing = await readManifestRecords(path);
+			const merged = [...existing];
+			for (const record of group) {
+				if (!merged.some((candidate) => candidate.runId === record.runId)) merged.push(record);
+			}
+			await writeManifest(path, merged);
+		}).catch(() => {
+			migrated = false;
+		});
+	}
+	if (migrated) await rm(legacyPath, { force: true }).catch(() => undefined);
 }
 
 /** Paths a manifest still references; used by the state-root sweep so

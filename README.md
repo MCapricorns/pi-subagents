@@ -315,8 +315,8 @@ that removes it, so this directory does not grow without bound:
 | Path                                       | Holds                                                | Removed                                                          |
 | ------------------------------------------ | ---------------------------------------------------- | ---------------------------------------------------------------- |
 | `pi-subagents.json`                        | Your configuration                                   | Never — it is yours                                              |
-| `pi-subagents-threads.json`                | One record per interrupted thread                     | When the thread settles, or after 30 days                        |
 | `pi-subagents-recovery.json`               | Worktree integration and cleanup failures            | When the retained patch or worktree it points at is gone         |
+| `ferris-pi-subagents/<project>/pi-subagents-threads.json` | One record per interrupted thread     | When the thread settles, or after 30 days                        |
 | `ferris-pi-subagents/<project>/sessions/`  | Retained child sessions that a resume continues from | When the pi session that produced it ends, or its owner is gone  |
 | `ferris-pi-subagents/<project>/worktrees/` | Isolated checkouts for parallel writers              | On integration, or when its owning process is gone               |
 | `ferris-pi-subagents/<project>/results/`   | Full text of truncated results                       | After 7 days, or beyond 50 per project                           |
