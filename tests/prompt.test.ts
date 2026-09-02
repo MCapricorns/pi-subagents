@@ -42,11 +42,13 @@ describe("buildDelegationDirective", () => {
 		expect(multi).toContain("only genuinely dependent work waits for its prerequisite");
 	});
 
-	it("pushes delegation with an inline trivial-work boundary", () => {
+	it("gates delegation on independence and a compact return", () => {
 		const directive = buildDelegationDirective([agent("explorer"), agent("executor")]);
 		expect(directive).toContain("Delegate aggressively");
-		expect(directive).toContain("Inline only trivial work");
-		expect(directive).toContain("default every non-trivial delegated task");
+		expect(directive).toContain("proceed independently and return a compact result");
+		expect(directive).toContain("when both hold, default it to `executor`");
+		expect(directive).toContain("Keep inline what fails either test");
+		expect(directive).toContain("a child loses context between runs");
 		expect(directive).toContain("split a broad question into parallel explorers with disjoint scopes");
 		expect(directive).toContain("delegation saves search, not that read");
 		expect(directive).toContain("leads, never proof");

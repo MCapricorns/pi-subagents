@@ -43,16 +43,18 @@ describe("shipped specialist agents", () => {
 		});
 		// No `tools` field => the child inherits the parent's complete active set.
 		expect(executor?.tools).toBeUndefined();
-		expect(executor?.description).toContain("implement, fix, refactor, test, clean up, sync docs, or merge fan-out results");
+		expect(executor?.description).toContain("implement, fix, refactor, test, clean up, sync docs, merge fan-out results");
+		// Routing turns on a decidable property, not on the circular "it was delegated".
+		expect(executor?.description).toContain("changes the repository or condenses inputs");
 		// Absorbed cleaner discipline: prove a cut before applying it.
 		expect(executor?.systemPrompt).toContain("a candidate is not a deletion");
 		expect(executor?.systemPrompt).toContain("repeat the decisive searches yourself");
 		expect(executor?.systemPrompt).toContain("Finding no safe cut and making zero edits is valid");
-		expect(executor?.systemPrompt).toContain("keep a candidate when a real consumer exists");
+		expect(executor?.systemPrompt).toContain("Keep a candidate when a real consumer exists");
 		// Absorbed documenter boundary: docs follow behavior, never the reverse.
 		expect(executor?.systemPrompt).toContain("Never change runtime behavior to make documentation true");
 		// Absorbed synthesizer workflow: attributed, deduplicated merging of named inputs.
-		expect(executor?.systemPrompt).toContain("read every input fully before writing");
+		expect(executor?.systemPrompt).toContain("read every named input fully before writing");
 		expect(executor?.systemPrompt).toContain("report surviving conflicts side by side");
 	});
 

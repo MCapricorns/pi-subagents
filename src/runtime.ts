@@ -48,7 +48,10 @@ export interface SubagentThread {
 	cwd: string;
 	/** Actual child cwd (the equivalent path inside an isolated worktree). */
 	executionCwd: string;
+	/** Level actually used, after clamping to the effective model's capability. */
 	thinkingLevel?: ThinkingLevel;
+	/** Level the dispatch asked for, before clamping; replayed on every resume. */
+	requestedThinkingLevel?: ThinkingLevel;
 	isolation: IsolationMode;
 	worktree?: WorktreeIsolation;
 	state: ThreadState;

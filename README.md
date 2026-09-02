@@ -54,7 +54,7 @@ directly when you want exact control.
 | Agent         | Access    | Best for                                                                                                                                                                                                   |
 | ------------- | --------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `explorer`    | Read-only | Broad search, unfamiliar-area mapping, symbol and dependency tracing. Returns a retrieval index — never proof. A single artifact the main agent must fully absorb (one issue, one spec) stays an inline read. |
-| `executor`    | Full      | The default route for any non-trivial, self-contained task: implementation, fixes, refactors, tests, evidence-first cleanup, docs/comment sync, or merging a fan-out's results into one brief — carried through verification and a result-only handoff. |
+| `executor`    | Full      | A self-contained unit that changes the repository or condenses inputs: implementation, fixes, refactors, tests, evidence-first cleanup, docs/comment sync, or merging a fan-out's results into one brief — carried through verification and a result-only handoff. |
 
 Custom roles join them with a Markdown file (see [Custom agents](#custom-agents)).
 
@@ -85,6 +85,8 @@ subagent({
   tasks: [
     { agent: "explorer", task: "Trace model fallback from dispatch to completion." },
     { agent: "executor", task: "Add edge-case tests for config migration." },
+    // Optional per-call reasoning strength for a task that needs less of it
+    { agent: "executor", task: "Run the suite and report failures.", thinking: "low" },
   ],
 });
 ```
@@ -214,7 +216,11 @@ survive. Ordinary task failures do not trigger a handoff.
 
 Thinking defaults to **Auto**: the role's own preference, clamped to what the
 effective model supports. `/subagents-setup` → _Configure an agent_ also offers a
-manual strength, listing only the levels that model supports. There is no separate
+manual strength, listing only the levels that model supports. A dispatch can also
+ask for a strength per call with `thinking`, so a quick check and a deep refactor
+do not have to share one static level. Precedence: your manual
+`/subagents-setup` choice > the per-call `thinking` > the role's frontmatter >
+the default, and the winner is still clamped to the effective model. There is no separate
 vision mode — assign a multimodal model and name the image paths in the task.
 
 Every dispatch, resume, retry, and fallback snapshots the parent's

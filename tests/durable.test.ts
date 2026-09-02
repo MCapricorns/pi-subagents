@@ -165,6 +165,34 @@ describe("thread manifest", () => {
 		expect(record.resultSummary).toMatchObject({ failed: false, output: "final answer" });
 	});
 
+	it("keeps the requested thinking level distinct from the resolved one", async () => {
+		const root = mkdtempSync(join(tmpdir(), "pi-subagents-durable-thinking-"));
+		roots.push(root);
+		const configPath = join(root, "pi-subagents.json");
+		// The resolved level is clamped to the model that ran; a resume after a
+		// restart must replay the requested one instead.
+		const record = threadRecordFromThread(
+			{
+				id: 4,
+				generation: 1,
+				agentName: "executor",
+				task: "task text",
+				cwd: "C:/repo",
+				executionCwd: "C:/repo",
+				thinkingLevel: "low",
+				requestedThinkingLevel: "max",
+				isolation: "shared",
+				elapsedMs: 0,
+				control: { getChildPids: () => [] },
+			} as any,
+			"parked",
+		);
+		await upsertThreadRecord(configPath, record);
+		const [restored] = await readThreadRecords(configPath);
+		expect(restored!.thinkingLevel).toBe("low");
+		expect(restored!.requestedThinkingLevel).toBe("max");
+	});
+
 	it("rebuilds a displayable result from a persisted summary", () => {
 		const record = makeRecord({
 			state: "completed",

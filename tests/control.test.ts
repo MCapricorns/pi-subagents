@@ -156,6 +156,35 @@ send({ type: "message_end", message: { role: "assistant", content: [{ type: "tex
 		expect(existsSync(sessionDir)).toBe(false);
 		expect(resume.content[0].text).toContain("retired by subagent_stop");
 	});
+
+	it("re-runs a resumed thread at the strength its dispatch requested", async () => {
+		const levels: string[] = [];
+		vi.spyOn(spawn, "runSingleAgentWithMainFallback").mockImplementation(async (options: any) => {
+			levels.push(options.thinkingLevel);
+			return {
+				agent: "executor",
+				task: options.task,
+				exitCode: 0,
+				messages: [{ role: "assistant", content: [{ type: "text", text: "DONE" }], stopReason: "stop" }],
+				stderr: "",
+				usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, cost: 0, contextTokens: 0, turns: 1 },
+			} as any;
+		});
+		const { subagent, control } = registerWithScript(join(testDir, "unused-thinking-child.mjs"));
+		const dispatched = await execute(subagent, {
+			agent: "executor",
+			task: "Cheap objective",
+			thinking: "minimal",
+		});
+		const runId = dispatched.details.results[0].runId;
+		await waitFor(() => monitor.findRun(runId) === undefined);
+		expect(levels).toEqual(["minimal"]);
+
+		const resumed = await execute(control, { action: "resume", id: runId });
+		expect(resumed.content[0].text).toContain(`Resumed run #${runId}`);
+		await waitFor(() => levels.length === 2);
+		expect(levels[1]).toBe("minimal");
+	});
 });
 
 describe("queued controls and stale generations", () => {

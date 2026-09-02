@@ -12,7 +12,7 @@ import { Text } from "@earendil-works/pi-tui";
 import { join, resolve } from "node:path";
 import { Type } from "typebox";
 import { discoverAgents, isWriteCapableAgent, resolveAgentTools, type AgentConfig } from "./agents.ts";
-import { loadConfig } from "./config.ts";
+import { loadConfig, THINKING_LEVEL_VALUES, type ThinkingLevel } from "./config.ts";
 import { formatCompletionBlock, formatUsage, queuedResult } from "./format.ts";
 import {
 	formatTaskSummary,
@@ -54,6 +54,13 @@ const IsolationSchema = Type.Optional(
 	StringEnum(["shared", "worktree"] as const, { description: ISOLATION_DESCRIPTION }),
 );
 
+const ThinkingSchema = Type.Optional(
+	StringEnum(THINKING_LEVEL_VALUES, {
+		description:
+			"Optional reasoning strength for this task; omit to keep the agent's own level",
+	}),
+);
+
 const WaitSchema = Type.Optional(
 	Type.Boolean({
 		description:
@@ -69,6 +76,7 @@ const TaskItem = Type.Object({
 	}),
 	cwd: Type.Optional(Type.String({ description: "Working directory for the agent process" })),
 	isolation: IsolationSchema,
+	thinking: ThinkingSchema,
 });
 
 const SubagentParams = Type.Object({
@@ -79,6 +87,7 @@ const SubagentParams = Type.Object({
 	tasks: Type.Optional(Type.Array(TaskItem, { description: "Array of {agent, task} for parallel execution" })),
 	cwd: Type.Optional(Type.String({ description: "Working directory for the agent process (single mode)" })),
 	isolation: IsolationSchema,
+	thinking: ThinkingSchema,
 	wait: WaitSchema,
 });
 
@@ -405,6 +414,7 @@ export function registerSubagentTool(pi: ExtensionAPI, runtime: SubagentRuntime)
 							catalogAgent ? isWriteCapableAgent(catalogAgent) : undefined,
 							catalogAgent?.isolation,
 						),
+						{ thinking: item.thinking as ThinkingLevel | undefined },
 					));
 				}
 				const startedRuns = results.filter((result) => result.exitCode === -1);
@@ -466,6 +476,7 @@ export function registerSubagentTool(pi: ExtensionAPI, runtime: SubagentRuntime)
 					singleCatalogAgent ? isWriteCapableAgent(singleCatalogAgent) : undefined,
 					singleCatalogAgent?.isolation,
 				),
+				{ thinking: params.thinking as ThinkingLevel | undefined },
 			);
 			if (result.exitCode !== -1) {
 				throw new Error(getResultOutput(result));

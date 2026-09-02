@@ -3,7 +3,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { BackgroundTaskQueue, type BackgroundTask } from "../src/background.ts";
-import { BUILTIN_AGENT_NAMES } from "../src/config.ts";
+import { BUILTIN_AGENT_NAMES, DEFAULT_THINKING_LEVEL } from "../src/config.ts";
 import register, { matchRunIds } from "../src/index.ts";
 import { monitor } from "../src/monitor.ts";
 import { persistRecoveryRecords } from "../src/recovery.ts";
@@ -1017,6 +1017,102 @@ describe("selected agent model dispatch", () => {
 		expect(options.thinkingLevelForModel("openai/current")).toBe("off");
 		expect(runSpy.mock.calls[0][1]).toBe("openai/current");
 		controller.abort();
+	});
+});
+
+describe("per-call thinking strength", () => {
+	/** Dispatch once against a user agent whose frontmatter strength is under the
+	 * test's control, and return the spawn options of every started run. The
+	 * context reports no models, so nothing clamps the resolved level. */
+	async function dispatchThinking(options: {
+		params: Record<string, unknown>;
+		frontmatterThinking?: string;
+		config?: Record<string, unknown>;
+	}): Promise<any[]> {
+		if (!testAgentDir) throw new Error("test agent directory was not initialized");
+		const userAgents = join(testAgentDir, "agents");
+		mkdirSync(userAgents, { recursive: true });
+		writeFileSync(
+			join(userAgents, "scout.md"),
+			`---\nname: scout\ndescription: test role\ntools: read, grep\n${options.frontmatterThinking ? `thinking: ${options.frontmatterThinking}\n` : ""}---\nScout prompt.\n`,
+			"utf8",
+		);
+		configureEnabledAgents(["scout"], options.config ?? {});
+		const stub = makeStub();
+		const { tasks, controllers } = captureEnqueue();
+		// Collect per-dispatch so two dispatches in one test never share calls.
+		const spawnOptions: any[] = [];
+		vi.spyOn(spawn, "runSingleAgentWithMainFallback").mockImplementation(async (runOptions: any) => {
+			spawnOptions.push(runOptions);
+			return {
+				agent: "scout",
+				task: runOptions.task,
+				exitCode: 0,
+				messages: [],
+				stderr: "",
+				usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, cost: 0, contextTokens: 0, turns: 0 },
+			} as any;
+		});
+		try {
+			register(stub.api);
+			const tool = stub.tools.find((candidate) => candidate.name === "subagent");
+			await runTool(tool, "call-thinking", options.params, executionContext());
+			for (const [index, task] of tasks.entries()) {
+				await task(controllers[index]!.signal, controllers[index]!);
+			}
+			return spawnOptions;
+		} finally {
+			await shutdownExtension(stub, { controllers });
+		}
+	}
+
+	it("lets a manual /subagents-setup level outrank the per-call request", async () => {
+		const calls = await dispatchThinking({
+			config: { agentThinkingLevels: { scout: "medium" } },
+			frontmatterThinking: "low",
+			params: { agent: "scout", task: "weigh the options", thinking: "max" },
+		});
+		expect(calls.map((call) => call.thinkingLevel)).toEqual(["medium"]);
+	});
+
+	it("lets the per-call request outrank frontmatter and the built-in default", async () => {
+		const withFrontmatter = await dispatchThinking({
+			frontmatterThinking: "low",
+			params: { agent: "scout", task: "weigh the options", thinking: "max" },
+		});
+		expect(withFrontmatter.map((call) => call.thinkingLevel)).toEqual(["max"]);
+
+		const withoutFrontmatter = await dispatchThinking({
+			params: { agent: "scout", task: "weigh the options", thinking: "minimal" },
+		});
+		expect(withoutFrontmatter.map((call) => call.thinkingLevel)).toEqual(["minimal"]);
+	});
+
+	it("falls back to frontmatter, then the default, without a per-call request", async () => {
+		const declared = await dispatchThinking({
+			frontmatterThinking: "low",
+			params: { agent: "scout", task: "weigh the options" },
+		});
+		expect(declared.map((call) => call.thinkingLevel)).toEqual(["low"]);
+
+		const undeclared = await dispatchThinking({
+			params: { agent: "scout", task: "weigh the options" },
+		});
+		expect(undeclared.map((call) => call.thinkingLevel)).toEqual([DEFAULT_THINKING_LEVEL]);
+	});
+
+	it("gives each task in one parallel dispatch its own strength", async () => {
+		const calls = await dispatchThinking({
+			frontmatterThinking: "low",
+			params: {
+				tasks: [
+					{ agent: "scout", task: "cheap lookup", thinking: "minimal" },
+					{ agent: "scout", task: "hard analysis", thinking: "max" },
+					{ agent: "scout", task: "role default" },
+				],
+			},
+		});
+		expect(calls.map((call) => call.thinkingLevel)).toEqual(["minimal", "max", "low"]);
 	});
 });
 

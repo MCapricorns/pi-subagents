@@ -75,7 +75,10 @@ export interface ThreadRecord {
 	task: string;
 	cwd: string;
 	executionCwd: string;
+	/** Resolved (clamped) level of the last generation. */
 	thinkingLevel?: string;
+	/** Level the dispatch requested; a resume after a restart re-runs at it. */
+	requestedThinkingLevel?: string;
 	isolation: IsolationMode;
 	state: "parked" | "completed" | "failed";
 	elapsedMs: number;
@@ -176,6 +179,9 @@ function normalizeRecord(value: unknown): ThreadRecord | undefined {
 		cwd: raw.cwd,
 		executionCwd: typeof raw.executionCwd === "string" && raw.executionCwd ? raw.executionCwd : raw.cwd,
 		...(typeof raw.thinkingLevel === "string" && raw.thinkingLevel ? { thinkingLevel: raw.thinkingLevel } : {}),
+		...(typeof raw.requestedThinkingLevel === "string" && raw.requestedThinkingLevel
+			? { requestedThinkingLevel: raw.requestedThinkingLevel }
+			: {}),
 		isolation: raw.isolation,
 		state: raw.state,
 		elapsedMs: typeof raw.elapsedMs === "number" && Number.isFinite(raw.elapsedMs) ? Math.max(0, raw.elapsedMs) : 0,
@@ -309,6 +315,7 @@ export function threadRecordFromThread(
 		cwd: thread.cwd,
 		executionCwd: thread.executionCwd,
 		...(thread.thinkingLevel ? { thinkingLevel: thread.thinkingLevel } : {}),
+		...(thread.requestedThinkingLevel ? { requestedThinkingLevel: thread.requestedThinkingLevel } : {}),
 		isolation: thread.isolation,
 		state,
 		elapsedMs: thread.elapsedMs,
