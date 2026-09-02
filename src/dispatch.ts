@@ -6,7 +6,7 @@
  * completion ownership live in thread-lifecycle.ts.
  */
 
-import { StringEnum } from "@earendil-works/pi-ai";
+import { StringEnum, type Usage } from "@earendil-works/pi-ai";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { Text } from "@earendil-works/pi-tui";
 import { join, resolve } from "node:path";
@@ -19,6 +19,8 @@ import {
 	formatToolActivity,
 	monitor,
 	statusIcon,
+	statusLabel,
+	sumUsage,
 	type RunView,
 	type RunWaitReason,
 } from "./monitor.ts";
@@ -32,6 +34,7 @@ import {
 	type SingleResult,
 	type SubagentDetails,
 	type SubagentLiveEvent,
+	type UsageStats,
 } from "./spawn.ts";
 import {
 	createBackgroundDispatcher,
@@ -116,6 +119,31 @@ export function defaultIsolationMode(
 	return mode === "parallel" && writeCapable ? "worktree" : "shared";
 }
 
+/** Map the child's own usage tally onto pi's tool-result `Usage`, so sub-agent
+ * token spend lands in the parent's footer, /session, and RPC session totals
+ * instead of being invisible. Only the total cost is known here: a child
+ * reports one cost number, not a per-bucket split. */
+function toToolUsage(stats: UsageStats): Usage {
+	return {
+		input: stats.input,
+		output: stats.output,
+		cacheRead: stats.cacheRead,
+		cacheWrite: stats.cacheWrite,
+		totalTokens: stats.input + stats.output + stats.cacheRead + stats.cacheWrite,
+		cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: stats.cost },
+	};
+}
+
+/** Usage of the runs awaited in-turn. Omitted entirely in the background path:
+ * those children have not finished when the tool returns, so any number there
+ * would be a fabrication. */
+function toolUsage(runtime: SubagentRuntime, runIds: number[]): { usage?: Usage } {
+	const parts = runIds
+		.map((id) => runtime.settledRuns.get(id)?.usage)
+		.filter((usage): usage is UsageStats => usage !== undefined);
+	return parts.length > 0 ? { usage: toToolUsage(sumUsage(parts)) } : {};
+}
+
 /** In-turn wait behind dispatch `wait: true` — the escape hatch for one-shot
  * `pi -p` parents that exit at end of turn: hold the call until every run it
  * started settles, then hand back their result blocks. Interactive sessions
@@ -130,6 +158,7 @@ export async function awaitRunResults(
 	signal: AbortSignal | undefined,
 	maxResultLines: number,
 	fallbackCwd: string,
+	onProgress?: (text: string) => void,
 ): Promise<string> {
 	const waitForRun = (runId: number): Promise<{ result?: SingleResult; note?: string }> => {
 		const already = runtime.settledRuns.get(runId);
@@ -189,12 +218,38 @@ export async function awaitRunResults(
 			else signal?.addEventListener("abort", onAbort, { once: true });
 		});
 	};
-	const outcomes = await Promise.all(runIds.map(waitForRun));
-	return outcomes.map((outcome) =>
-		outcome.result
-			? formatCompletionBlock(outcome.result, maxResultLines, { resultRoot: projectResultsRoot(runtime.configPath, outcome.result.projectCwd ?? fallbackCwd) })
-			: (outcome.note ?? "(no outcome)"),
-	).join("\n\n");
+	// One shared subscription drives the progress line: each waiter already
+	// subscribes for its own settlement, and the tool card wants a single
+	// rolled-up line rather than one per run.
+	let lastProgress: string | undefined;
+	const emitProgress = onProgress
+		? (): void => {
+			const parts = runIds.map((id) => {
+				const settled = runtime.settledRuns.get(id);
+				if (settled) return `#${id} ${isFailedResult(settled) ? "failed" : "done"}`;
+				const live = monitor.findRun(id);
+				return live ? `#${id} ${statusLabel(live.status)}` : `#${id} …`;
+			});
+			const text = `Waiting in-turn on ${runIds.length} run${runIds.length === 1 ? "" : "s"} · ${parts.join(", ")}`;
+			// The monitor notifies on every usage and activity change; this line
+			// names only statuses, so most notifications leave it identical.
+			if (text === lastProgress) return;
+			lastProgress = text;
+			onProgress(text);
+		}
+		: undefined;
+	const progressUnsub = emitProgress ? monitor.subscribe(emitProgress) : undefined;
+	emitProgress?.();
+	try {
+		const outcomes = await Promise.all(runIds.map(waitForRun));
+		return outcomes.map((outcome) =>
+			outcome.result
+				? formatCompletionBlock(outcome.result, maxResultLines, { resultRoot: projectResultsRoot(runtime.configPath, outcome.result.projectCwd ?? fallbackCwd) })
+				: (outcome.note ?? "(no outcome)"),
+		).join("\n\n");
+	} finally {
+		progressUnsub?.();
+	}
 }
 
 export function registerSubagentTool(pi: ExtensionAPI, runtime: SubagentRuntime): void {
@@ -332,7 +387,13 @@ export function registerSubagentTool(pi: ExtensionAPI, runtime: SubagentRuntime)
 			"Dispatch isolated background agents for recon, implementation, cleanup, docs sync, or result merging; never blocks your turn, and completions wake you automatically.",
 		parameters: SubagentParams,
 
-		async execute(_toolCallId, params, signal, _onUpdate, ctx) {
+		async execute(_toolCallId, params, signal, onUpdate, ctx) {
+			// `wait: true` holds this call for minutes and would otherwise show a
+			// blank card; the background path returns at once and has nothing to
+			// stream. Frames carry the final details shape because renderResult
+			// falls back to "(no output)" without it.
+			const makeProgress = (details: SubagentDetails): ((text: string) => void) | undefined =>
+				onUpdate ? (text: string): void => onUpdate({ content: [{ type: "text", text }], details }) : undefined;
 			// Run ids are allocated below; restore raises the allocator above every
 			// id a durable record still owns, so a dispatch racing it could hand a
 			// fresh run the id of a parked thread and overwrite its record.
@@ -438,7 +499,7 @@ export function registerSubagentTool(pi: ExtensionAPI, runtime: SubagentRuntime)
 					const startedIds = startedRuns
 						.map((result) => result.runId)
 						.filter((id): id is number => id !== undefined);
-					const blocks = await awaitRunResults(runtime, startedIds, signal, config.maxResultLines, ctx.cwd);
+					const blocks = await awaitRunResults(runtime, startedIds, signal, config.maxResultLines, ctx.cwd, makeProgress(makeDetails("parallel", true)(results)));
 					const text = [
 						`Started ${started} subagent${started === 1 ? "" : "s"} (${startedRefs.join(", ")}) and waited in-turn.`,
 						...(failureLines.length > 0
@@ -450,6 +511,7 @@ export function registerSubagentTool(pi: ExtensionAPI, runtime: SubagentRuntime)
 					return {
 						content: [{ type: "text", text }],
 						details: makeDetails("parallel", true)(results),
+						...toolUsage(runtime, startedIds),
 					};
 				}
 				const text = [
@@ -483,10 +545,11 @@ export function registerSubagentTool(pi: ExtensionAPI, runtime: SubagentRuntime)
 			}
 			const runRef = result.runId === undefined ? result.agent : `#${result.runId} ${result.agent}`;
 			if (params.wait && result.runId !== undefined) {
-				const blocks = await awaitRunResults(runtime, [result.runId], signal, config.maxResultLines, ctx.cwd);
+				const blocks = await awaitRunResults(runtime, [result.runId], signal, config.maxResultLines, ctx.cwd, makeProgress(makeDetails("single", true)([result])));
 				return {
 					content: [{ type: "text", text: `Started ${runRef} and waited in-turn.\n\n${blocks}` }],
 					details: makeDetails("single", true)([result]),
+					...toolUsage(runtime, [result.runId]),
 				};
 			}
 			return {
