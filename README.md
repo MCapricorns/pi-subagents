@@ -183,7 +183,7 @@ two lines: what it is — agent, task, token flow, cost, provider/model, elapsed
 and, dim under the label column, what it is doing right now:
 
 ```text
-● #12 executor  src/cache.ts · wt:a91f3c · ↑5.2k ↓41.0k R210.0k W6.1k $1.9400 · 12m06s
+● #12 executor  src/cache.ts · worktree:a91f3c · ↑5.2k ↓41.0k R210.0k W6.1k $1.9400 · 12m06s
   ↳ edit src/auth.ts
 ● #15 explorer  src/models.ts · ↑1.2k ↓8.4k R31.0k W1.1k $0.0900 · openai/gpt-5-mini · 3m07s
                 ↳ grep fallback
@@ -199,12 +199,35 @@ carries a dim `↻` in its agent column with its cumulative time. The widget is
 capped at ten lines: when many runs are live, extra runs collapse into a
 `… +N more` marker so the editor keeps its space.
 
+The widget is the detailed surface, but it only pays off while you are looking
+at it. A one-line roll-up in the always-visible footer answers "is anything
+still working?" without opening the widget or asking:
+
+```text
+subagents 2 running · 1 repo lane · 3 done
+```
+
+It is count-only, keeps the same wait vocabulary as the widget, disappears when
+nothing is active, and works in RPC hosts as well as the TUI.
+
 Completions resume the main agent on their own, with a compact block of at most 40
 lines by default; longer output lands unchanged in a Markdown artifact whose path
-comes with the message. Roles write result-only handoffs — outcome, paths,
+comes with the message, stated as how much was actually cut (`40 of 137 lines
+shown`) and conditioned on the shown lines being insufficient, so the same
+content does not enter the main context twice. Roles write result-only handoffs — outcome, paths,
 verification, unresolved blockers — and the main agent is told to add its
 conclusion rather than restate what you already read. A failed run adds its
 failed-tool diagnostics.
+
+Delivery is held while a context compaction is in flight and released once it
+settles — on failure and abort too — so a result a child spent minutes producing
+is never swallowed by the summary that replaces the history.
+
+A `wait: true` dispatch streams its progress onto the tool card while it waits,
+and reports the awaited children's token spend as the tool call's own usage, so
+sub-agent cost lands in the footer, `/session`, and RPC session totals. A
+background dispatch returns before its children finish, so it reports no usage
+rather than a fabricated number.
 
 ## Models, thinking, and tools
 
