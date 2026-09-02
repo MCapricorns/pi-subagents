@@ -10,6 +10,34 @@ A managed engineering team for [pi](https://github.com/earendil-works/pi): two
 focused sub-agents, durable threads, and Git worktree
 isolation. You install it once and your main agent delegates on its own.
 
+## What's new
+
+**4.2.13** — this page now leads with current changes and keeps the 4.2 line
+in [CHANGELOG.md](./CHANGELOG.md).
+
+**4.2.12**
+
+- The executor confirms a named defect on current code before it edits.
+- Footer settled counts stay honest, and only while a sibling is still live.
+- Merging to `main` publishes npm and opens a matching GitHub Release.
+
+## Contents
+
+- [Why](#why)
+- [Install](#install)
+- [The team](#the-team)
+- [Dispatching work](#dispatching-work)
+- [Parallel edits](#parallel-edits)
+- [Threads: resume, stop](#threads-resume-stop)
+- [Live status and results](#live-status-and-results)
+- [Models, thinking, and tools](#models-thinking-and-tools)
+- [Configuration](#configuration)
+- [Custom agents](#custom-agents)
+- [Storage and cleanup](#storage-and-cleanup)
+- [Development](#development)
+- [Changelog](#changelog)
+- [Release](#release)
+
 ## Why
 
 Delegation is supposed to remove coordination work. Most sub-agent launchers stop
@@ -374,23 +402,29 @@ There are no bundled runtime dependencies; pi and TypeBox are peers. The source 
 split by responsibility: dispatch policy, thread lifecycle, RPC
 transport, worktree integration, completion delivery, tools, and TUI status.
 
+## Changelog
+
+The 4.2 line lives in [CHANGELOG.md](./CHANGELOG.md). Latest published
+version is **4.2.13**.
+
+| Version | What changed |
+| ------- | ------------ |
+| 4.2.13  | README navigation, What's new, and this changelog. |
+| 4.2.12  | Confirm-before-fix; honest footer counts; `main` publishes npm + GitHub Release. |
+| 4.2.8   | Footer roll-up; wait-path token usage; hold completions across compaction. |
+| 4.2.7   | Sharper executor routing; per-dispatch `thinking`. |
+| 4.2.5   | Per-project threads manifest. |
+| 4.2.4   | One-line explorer findings; recovery cleanup retry. |
+| 4.2.2   | Single-artifact reads stay inline. |
+| 4.2.1   | Prune retired roles from upgraded configs. |
+| 4.2.0   | Team is `explorer` + `executor`; two-line live widget. |
+
 ## Release
 
 Merging to `main` publishes `@ferris1225/pi-subagents` when `package.json`
 carries a version npm does not have yet, then opens a matching GitHub Release.
-Do not `npm publish` from a laptop.
-
-One-time setup — pick one:
-
-1. **Trusted publisher (preferred):** on the
-   [npm package page](https://www.npmjs.com/package/@ferris1225/pi-subagents)
-   add a GitHub Actions trusted publisher for `MCapricorns/pi-subagents` with
-   workflow filename `publish.yml` (no path, environment left blank).
-2. **Token:** create an npm automation token and store it as the repository
-   Actions secret `NPM_TOKEN`.
-
-If the first run fails because neither is configured, add the publisher or
-secret and re-run the **Publish** workflow from the Actions tab.
+Do not `npm publish` from a laptop. The workflow is
+`.github/workflows/publish.yml` (npm trusted publisher or `NPM_TOKEN`).
 
 ## License
 
