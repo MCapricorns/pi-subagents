@@ -5,7 +5,7 @@
  */
 
 import type { AgentConfig } from "./agents.ts";
-import { formatTaskSummary } from "./monitor.ts";
+import { runLabel, shrinkRunLabel } from "./monitor.ts";
 import { emptyUsage } from "./rpc-run.ts";
 import {
 	getResultOutput,
@@ -79,6 +79,10 @@ export interface CompletionFormatOptions {
 	resultRoot?: string;
 }
 
+/** Display width of the task-derived label folded into the completion heading:
+ * tight enough to stay a hint rather than a second copy of the task. */
+const COMPLETION_LABEL_MAX = 24;
+
 export function formatCompletionBlock(
 	result: SingleResult,
 	maxResultLines: number,
@@ -89,14 +93,22 @@ export function formatCompletionBlock(
 	const status = failed ? "failed" : "completed";
 	const usage = formatUsage(result.usage);
 	const output = getResultOutput(result);
-	const { text, truncated } = truncateResultOutput(output, maxResultLines);const fallbackNote = result.modelFallbackFrom
+	const { text, truncated } = truncateResultOutput(output, maxResultLines);
+	const fallbackNote = result.modelFallbackFrom
 		? ` (selected model ${result.modelFallbackFrom} failed → main ${result.model ?? "dynamic default"})`
 		: "";
 	const startupRetryNote = result.startupRetries
 		? ` (recovered after ${result.startupRetries} startup retr${result.startupRetries === 1 ? "y" : "ies"} — concurrent pi startup race)`
 		: "";
 	const runNote = result.runId !== undefined ? ` · run #${result.runId}` : "";
-	const lines = [`### [${result.agent}] ${status}${usage ? ` (${usage})` : ""}${fallbackNote}${startupRetryNote}${runNote}`, "", `Task: ${formatTaskSummary(result.task, 80, false)}`, ""];
+	// A short task-derived label, not the task itself: the parent authored the
+	// task and still has it in context, but a wide fan-out of same-agent runs
+	// needs more than a run id to tell completions apart.
+	const label = shrinkRunLabel(runLabel(result.task), COMPLETION_LABEL_MAX);
+	const lines = [
+		`### [${result.agent}${label ? `·${label}` : ""}] ${status}${usage ? ` (${usage})` : ""}${fallbackNote}${startupRetryNote}${runNote}`,
+		"",
+	];
 	if (result.isolation === "worktree") {
 		const isolation =
 			result.integrationStatus === "integrated"
@@ -130,7 +142,11 @@ export function formatCompletionBlock(
 		const artifact = options.resultRoot
 			? writeResultArtifact(output, result.agent, options.resultRoot)
 			: "(result root unavailable)";
-		lines.push("", `(output truncated to ${maxResultLines} lines; full result: ${artifact})`);
+		// State the loss (shown vs total) and condition the read: handing the
+		// parent both a summary and a full-text entrance invites the same content
+		// into its context twice.
+		const totalLines = output.split("\n").length;
+		lines.push("", `(${maxResultLines} of ${totalLines} lines shown; full result ${artifact} — read only if these are insufficient)`);
 	}
 	return lines.join("\n");
 }

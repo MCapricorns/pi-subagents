@@ -40,7 +40,7 @@ export function buildDelegationDirective(
 	];
 
 	const handoffRules = [
-		"Dispatch never blocks or ends your turn — keep working; each completion resumes you automatically. Never sleep or poll for it.",
+		"Dispatch never blocks or ends your turn — keep working, but only on what the children are not: never re-read a scope you just delegated. Each completion resumes you automatically; never sleep or poll for it.",
 		"Results are already shown; add only your conclusion or next action, never a restatement.",
 		"Never declare the overall task done while a dispatched run is still active.",
 	];
