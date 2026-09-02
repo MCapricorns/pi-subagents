@@ -2,7 +2,7 @@
 
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { existsSync } from "node:fs";
-import { loadConfig, saveConfig } from "./config.ts";
+import { FIRST_RUN_SETUP_HINT, loadConfig, saveConfig } from "./config.ts";
 import { availableModelsInScope, filterUnavailableModelOverrides } from "./models.ts";
 import { announceRecoveryRecords } from "./recovery.ts";
 import type { SubagentRuntime } from "./runtime.ts";
@@ -39,13 +39,20 @@ async function migrateUnavailableAgentModels(
 export function registerAnnouncements(pi: ExtensionAPI, runtime: SubagentRuntime): void {
 	pi.on("session_start", async (_event, ctx) => {
 		if (!existsSync(runtime.configPath)) {
-			ctx.ui.notify(
-				"pi-subagents: no configuration yet — run /subagents-setup to pick agents, models, and thinking strengths. Defaults (all built-in agents on the main model) apply until then.",
-				"info",
-			);
+			ctx.ui.notify(`pi-subagents: ${FIRST_RUN_SETUP_HINT}`, "info");
 		}
 		await announceRecoveryRecords(runtime.configPath, ctx);
 		await migrateUnavailableAgentModels(ctx, runtime);
+		try {
+			const config = await loadConfig(runtime.configPath);
+			if (config.pendingSetupNotice) {
+				ctx.ui.notify(`pi-subagents: ${config.pendingSetupNotice}`, "info");
+				const { pendingSetupNotice: _cleared, ...rest } = config;
+				await saveConfig(rest, runtime.configPath);
+			}
+		} catch {
+			/* notice is non-fatal */
+		}
 		// Restore starts at extension load and session_start fires right behind
 		// it, so without this the notice reports whatever the race left behind.
 		await runtime.durableRestore;

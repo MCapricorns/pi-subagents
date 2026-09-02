@@ -20,8 +20,8 @@ import {
 } from "./agents.ts";
 import { type CompletionMessageItem } from "./completion.ts";
 import {
-	DEFAULT_THINKING_LEVEL,
 	loadConfig,
+	roleThinkingLevel,
 	type SubagentsConfig,
 	type ThinkingLevel,
 } from "./config.ts";
@@ -265,11 +265,8 @@ export interface ResumeReservation {
 }
 
 /** The dispatcher's full internal entry point; the public tool surface only
- * uses the first four parameters plus the per-call `thinking` request. */
+ * uses the first four parameters. */
 export interface StartBackgroundOptions {
-	/** Reasoning strength this dispatch asked for; the user's manual
-	 * `/subagents-setup` choice still outranks it (see resolveDispatchModelRoute). */
-	thinking?: ThinkingLevel;
 	/** Resume path only: the thread whose retained context continues. */
 	existingThread?: SubagentThread;
 	appendedObjectiveOnResume?: boolean;
@@ -307,7 +304,6 @@ export function resolveDispatchModelRoute(
 	agent: AgentConfig,
 	config: SubagentsConfig,
 	ctx: ExtensionContext,
-	requestedThinking?: ThinkingLevel,
 ): DispatchModelRoute {
 	const availableModels = availableModelsInScope(ctx);
 	const mainRef = currentModelRef(ctx);
@@ -316,11 +312,10 @@ export function resolveDispatchModelRoute(
 		mainRef,
 		availableRefs: availableModels.map(modelRef),
 	});
-	// agentThinkingLevels only holds a level the user picked by hand in
-	// /subagents-setup (missing = Auto), so that deliberate setting outranks the
-	// dispatching model's per-call guess, which in turn outranks frontmatter.
+	// A `/subagents-setup` override wins; otherwise the role default. No
+	// per-call or frontmatter thinking.
 	const preferred =
-		config.agentThinkingLevels[agent.name] ?? requestedThinking ?? agent.thinking ?? DEFAULT_THINKING_LEVEL;
+		config.agentThinkingLevels[agent.name] ?? roleThinkingLevel(agent.name);
 	const thinkingLevelForModel = (ref?: string): ThinkingLevel => {
 		const model = ref === mainRef && ctx.model
 			? ctx.model
@@ -372,7 +367,6 @@ export function createBackgroundDispatcher(options: BackgroundDispatcherOptions)
 		startOptions: StartBackgroundOptions = {},
 	): Promise<SingleResult> => {
 		const {
-			thinking,
 			existingThread,
 			appendedObjectiveOnResume = false,
 			environment,
@@ -396,7 +390,7 @@ export function createBackgroundDispatcher(options: BackgroundDispatcherOptions)
 		const agent = resolveLiveAgentTools(discoveredAgent);
 		if (isolation === "worktree" && !isWorktreeCapableAgent(agent)) {
 			return {
-				...failedStartResult(agentName, task, `Agent "${agentName}" is read-only; worktree isolation is available only to write-capable agents such as executor.`),
+				...failedStartResult(agentName, task, `Agent "${agentName}" is read-only; worktree isolation is available only to write-capable agents such as artisan.`),
 				isolation,
 			};
 		}
@@ -431,8 +425,7 @@ export function createBackgroundDispatcher(options: BackgroundDispatcherOptions)
 		const worktreeGroup = worktree ? worktreeGroupId(worktree) : undefined;
 		// A resume re-runs at the strength its dispatch asked for, so the retained
 		// request survives generations (and, via the durable record, restarts).
-		const requestedThinking = thinking ?? existingThread?.requestedThinkingLevel;
-		const resolvedRoute = resolveDispatchModelRoute(agent, runConfig, runCtx, requestedThinking);
+		const resolvedRoute = resolveDispatchModelRoute(agent, runConfig, runCtx);
 		// Isolation is a persistent system-level invariant, not a one-shot task
 		// prefix: resumes and main-model
 		// handoffs all keep the same worktree boundary.
@@ -493,7 +486,6 @@ export function createBackgroundDispatcher(options: BackgroundDispatcherOptions)
 			thread.cwd = originalCwd;
 			thread.executionCwd = executionCwd;
 			thread.thinkingLevel = thinkingLevel;
-			thread.requestedThinkingLevel = requestedThinking;
 			thread.isolation = isolation;
 			thread.worktree = worktree;
 			thread.state = "queued";
@@ -517,7 +509,6 @@ export function createBackgroundDispatcher(options: BackgroundDispatcherOptions)
 				cwd: originalCwd,
 				executionCwd,
 				thinkingLevel,
-				requestedThinkingLevel: requestedThinking,
 				isolation,
 				worktree,
 				state: "queued",
@@ -557,7 +548,7 @@ export function createBackgroundDispatcher(options: BackgroundDispatcherOptions)
 				let activeIdleTimeoutMs = runConfig.idleTimeoutSec * 1000;
 				try {
 					const startConfig = await loadConfig(runtime.configPath);
-					const resolvedStart = resolveDispatchModelRoute(agent, startConfig, runCtx, requestedThinking);
+					const resolvedStart = resolveDispatchModelRoute(agent, startConfig, runCtx);
 					activeRoute = isolation === "worktree"
 						? { ...resolvedStart, agent: withWorktreeSystemPrompt(resolvedStart.agent) }
 						: resolvedStart;
@@ -1182,9 +1173,6 @@ function createRestoredThread(
 		cwd: record.cwd,
 		executionCwd: record.executionCwd,
 		...(record.thinkingLevel ? { thinkingLevel: record.thinkingLevel as ThinkingLevel } : {}),
-		...(record.requestedThinkingLevel
-			? { requestedThinkingLevel: record.requestedThinkingLevel as ThinkingLevel }
-			: {}),
 		isolation: record.isolation,
 		worktree,
 		state,

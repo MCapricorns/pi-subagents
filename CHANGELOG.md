@@ -4,6 +4,21 @@ Published versions of `@ferris1225/pi-subagents`. Unpublished numbers
 (`4.2.3`, `4.2.6`, `4.2.9`–`4.2.11`) never shipped on npm; their changes
 landed in the next published release.
 
+## 4.3.0
+
+- Built-in team is `scout`, `artisan`, and `steward`. All three stay enabled.
+- `explorer` / `executor` configs rename in place (models and thinking
+  overrides follow). `steward` is adopted. That migration is deleted in the
+  next major.
+- Artisan owns implement / fix / refactor / test. Steward owns cleanup, docs
+  sync, and merge — dispatched only when that work exists.
+- Thinking is a role default (scout low, artisan high, steward medium) that
+  `/subagents-setup` can override. Per-call `thinking` and agent-file
+  `thinking` are gone. There is no Auto row.
+- First session and first-run setup explain each role and ask for a model.
+- Unit tests cover catalog migration, role prompts, dispatch routing, and
+  honest footer / truncation notes.
+
 ## 4.2.13
 
 - README: table of contents, a What's new lead-in, and a pointer at this

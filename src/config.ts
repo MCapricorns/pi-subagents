@@ -13,14 +13,27 @@ import { dirname, join } from "node:path";
 import { getAgentDir, withFileMutationQueue } from "@earendil-works/pi-coding-agent";
 
 /** Full catalog of agents shipped with the package (selectable in /subagents-setup). */
-export const BUILTIN_AGENT_NAMES = ["explorer", "executor"] as const;
+export const BUILTIN_AGENT_NAMES = ["scout", "artisan", "steward"] as const;
+
+/** Every shipped role stays enabled. The setup wizard and load-time adopt both
+ * force the full team on so a stale allow-list cannot hide scout, artisan, or
+ * steward. */
+export const REQUIRED_ENABLED_AGENTS = [...BUILTIN_AGENT_NAMES] as const;
 
 /** Built-in agent names this package no longer ships. Loading an older config
  * prunes them from every record so the setup wizard, dispatch catalog, and
  * model-routing table never surface dead roles. Custom names stay untouched —
  * except one that reuses a removed built-in name, which this cleanup cannot
  * distinguish and deliberately treats as retired. */
-export const REMOVED_BUILTIN_AGENT_NAMES = ["worker", "cleaner", "documenter", "synthesizer", "reviewer"] as const;
+export const REMOVED_BUILTIN_AGENT_NAMES = [
+	"worker",
+	"cleaner",
+	"documenter",
+	"synthesizer",
+	"reviewer",
+	"explorer",
+	"executor",
+] as const;
 
 /** Agents enabled out of the box on a fresh install. */
 export const DEFAULT_ENABLED_AGENTS: readonly string[] = [...BUILTIN_AGENT_NAMES];
@@ -31,7 +44,49 @@ export type AgentScope = (typeof AGENT_SCOPE_VALUES)[number];
 /** Thinking levels accepted by pi's `--thinking` option. */
 export const THINKING_LEVEL_VALUES = ["off", "minimal", "low", "medium", "high", "xhigh", "max"] as const;
 export type ThinkingLevel = (typeof THINKING_LEVEL_VALUES)[number];
-export const DEFAULT_THINKING_LEVEL: ThinkingLevel = "high";
+export const DEFAULT_THINKING_LEVEL: ThinkingLevel = "medium";
+
+/** Role-owned default reasoning strength. A `/subagents-setup` override wins;
+ * there is no per-call or frontmatter thinking. */
+export function roleThinkingLevel(agentName: string): ThinkingLevel {
+	switch (agentName) {
+		case "scout":
+			return "low";
+		case "artisan":
+			return "high";
+		case "steward":
+			return "medium";
+		default:
+			return DEFAULT_THINKING_LEVEL;
+	}
+}
+
+/** Short responsibility line shown next to each built-in in setup lists. */
+export interface AgentProfile {
+	/** A few words for picker rows. */
+	summary: string;
+	/** What this role owns, for first-run copy and the configure step. */
+	remark: string;
+}
+
+export const AGENT_PROFILES: Record<(typeof BUILTIN_AGENT_NAMES)[number], AgentProfile> = {
+	scout: {
+		summary: "read-only recon",
+		remark: "Maps unfamiliar code. Returns exact paths and leads — never proof. Broad search, symbols, dependencies.",
+	},
+	artisan: {
+		summary: "implement / fix",
+		remark: "Writes the change. One deliverable: implement, fix, refactor, or test. Confirms a named defect before editing.",
+	},
+	steward: {
+		summary: "tidy when needed",
+		remark: "Use only when that work exists: evidence-first cleanup, docs/comment sync, or merging fan-out results.",
+	},
+};
+
+export function agentProfile(name: string): AgentProfile | undefined {
+	return (AGENT_PROFILES as Record<string, AgentProfile | undefined>)[name];
+}
 
 /** How many lines of a sub-agent result the completion message may carry.
  * Default: 40 — wide fan-outs multiply completion blocks, so deliveries stay
@@ -61,7 +116,8 @@ export interface SubagentsConfig {
 	knownAgents: string[];
 	/** Per-agent model override, keyed by agent name, as "provider/model-id". */
 	agentModels: Record<string, string>;
-	/** Optional per-agent thinking preference. Runtime clamps it to the effective model's supported levels. */
+	/** Optional per-agent thinking override from `/subagents-setup`. Missing =
+	 * the role default from `roleThinkingLevel`. */
 	agentThinkingLevels: Record<string, ThinkingLevel>;
 	/**
 	 * Max lines of a sub-agent result carried in the completion message. Longer
@@ -77,6 +133,8 @@ export interface SubagentsConfig {
 	 * off to the current main model. 0 disables the idle watchdog. Default: 90.
 	 */
 	idleTimeoutSec: number;
+	/** One-shot session notice after a catalog migration; announcements clears it. */
+	pendingSetupNotice?: string;
 }
 
 export const DEFAULT_CONFIG: SubagentsConfig = {
@@ -88,6 +146,15 @@ export const DEFAULT_CONFIG: SubagentsConfig = {
 	agentScope: "user",
 	idleTimeoutSec: DEFAULT_IDLE_TIMEOUT_SEC,
 };
+
+export const FIRST_RUN_SETUP_HINT =
+	"Run /subagents-setup: pick a model for scout, artisan, and steward. " +
+	"scout maps code (leads, not proof). artisan implements, fixes, refactors, or tests. " +
+	"steward tidies or merges only when that work exists. All three stay on. " +
+	"Each role has a thinking default you can change in setup.";
+
+export const TEAM_SETUP_NOTICE =
+	"The team is now scout, artisan, and steward. Run /subagents-setup to pick a model for each; thinking has a role default you can change there.";
 
 export function getConfigPath(agentDir: string = getAgentDir()): string {
 	return join(agentDir, CONFIG_FILE_NAME);
@@ -178,6 +245,10 @@ export function normalizeConfig(raw: unknown): SubagentsConfig {
 		config.idleTimeoutSec = Math.max(0, Math.min(IDLE_TIMEOUT_SEC_LIMIT, Math.round(raw.idleTimeoutSec)));
 	}
 
+	if (typeof raw.pendingSetupNotice === "string" && raw.pendingSetupNotice.trim()) {
+		config.pendingSetupNotice = raw.pendingSetupNotice.trim();
+	}
+
 	return config;
 }
 
@@ -188,6 +259,23 @@ function defaultConfig(): SubagentsConfig {
 		agentModels: {},
 		agentThinkingLevels: {},
 	};
+}
+
+export function withRequiredAgents(enabled: readonly string[]): string[] {
+	const next = [...enabled];
+	for (const name of REQUIRED_ENABLED_AGENTS) {
+		if (!next.includes(name)) next.push(name);
+	}
+	return next;
+}
+
+function forceRequiredAgents(config: SubagentsConfig): SubagentsConfig {
+	const enabledAgents = withRequiredAgents(config.enabledAgents);
+	const knownAgents = [...config.knownAgents];
+	for (const name of REQUIRED_ENABLED_AGENTS) {
+		if (!knownAgents.includes(name)) knownAgents.push(name);
+	}
+	return { ...config, enabledAgents, knownAgents };
 }
 
 /**
@@ -215,38 +303,82 @@ function pruneRemovedBuiltins(config: SubagentsConfig): SubagentsConfig {
 
 /**
  * A shipped agent the config has never recorded is new in this release; the
- * stale allow-list must not keep it dark. Enable it and adopt explorer's
- * configured model and thinking level, so an upgrade surfaces the new role on
- * the fast light-task lane instead of silently spending the main model.
+ * stale allow-list must not keep it dark. Enable it. Model and thinking stay
+ * unset so the role default and current main model apply until setup.
  */
-function adoptNewBuiltins(config: SubagentsConfig): SubagentsConfig {
+function adoptNewBuiltins(config: SubagentsConfig): { config: SubagentsConfig; fresh: string[] } {
 	const known = new Set(config.knownAgents);
 	const fresh = BUILTIN_AGENT_NAMES.filter((name) => !known.has(name));
-	if (fresh.length === 0) return config;
-	const agentModels = { ...config.agentModels };
-	const agentThinkingLevels = { ...config.agentThinkingLevels };
-	for (const name of fresh) {
-		if (!agentModels[name] && config.agentModels.explorer) agentModels[name] = config.agentModels.explorer;
-		if (!agentThinkingLevels[name] && config.agentThinkingLevels.explorer) {
-			agentThinkingLevels[name] = config.agentThinkingLevels.explorer;
-		}
-	}
+	if (fresh.length === 0) return { config, fresh };
 	return {
-		...config,
-		enabledAgents: [...config.enabledAgents, ...fresh],
-		knownAgents: [...known, ...fresh],
-		agentModels,
-		agentThinkingLevels,
+		config: {
+			...config,
+			enabledAgents: [...config.enabledAgents, ...fresh],
+			knownAgents: [...known, ...fresh],
+		},
+		fresh,
 	};
 }
+
+// --- v4 → current catalog migration. Delete this block in the next major. ---
+
+const RENAMED_BUILTIN_AGENTS: Record<string, string> = {
+	explorer: "scout",
+	executor: "artisan",
+};
+
+function renameNameList(names: readonly string[]): { names: string[]; changed: boolean } {
+	let changed = false;
+	const out: string[] = [];
+	for (const name of names) {
+		const mapped = RENAMED_BUILTIN_AGENTS[name] ?? name;
+		if (mapped !== name) changed = true;
+		if (!out.includes(mapped)) out.push(mapped);
+	}
+	return { names: out, changed };
+}
+
+function renameKeyedRecord<T>(record: Record<string, T>): { record: Record<string, T>; changed: boolean } {
+	let changed = false;
+	const out: Record<string, T> = {};
+	for (const [key, value] of Object.entries(record)) {
+		const mapped = RENAMED_BUILTIN_AGENTS[key] ?? key;
+		if (mapped !== key) changed = true;
+		if (!(mapped in out)) out[mapped] = value;
+	}
+	return { record: out, changed };
+}
+
+/** Map retired built-in names onto the current catalog and keep their models
+ * and thinking overrides. Isolated so the next major can delete it. */
+function migrateRetiredBuiltinNames(config: SubagentsConfig): { config: SubagentsConfig; changed: boolean } {
+	const enabled = renameNameList(config.enabledAgents);
+	const known = renameNameList(config.knownAgents);
+	const models = renameKeyedRecord(config.agentModels);
+	const thinking = renameKeyedRecord(config.agentThinkingLevels);
+	const changed = enabled.changed || known.changed || models.changed || thinking.changed;
+	if (!changed) return { config, changed: false };
+	return {
+		changed: true,
+		config: {
+			...config,
+			enabledAgents: enabled.names,
+			knownAgents: known.names,
+			agentModels: models.record,
+			agentThinkingLevels: thinking.record,
+		},
+	};
+}
+
+// --- end v4 catalog migration ---
 
 /**
  * Load config. A missing file is a normal state and yields the defaults (not an error).
  * A corrupt file also falls back to defaults rather than throwing, so startup never breaks.
  * A file from an older version (missing newer keys or holding extra keys) is
  * normalized and persisted back, so the on-disk config stays current. Built-in
- * agents the file has never seen are adopted: enabled with explorer's route.
- * Built-in roles this package retired are pruned from every record.
+ * agents the file has never seen are adopted. Retired built-in names are
+ * renamed or pruned. Artisan and steward stay enabled.
  */
 export async function loadConfig(configPath: string = getConfigPath()): Promise<SubagentsConfig> {
 	let text: string;
@@ -264,10 +396,12 @@ export async function loadConfig(configPath: string = getConfigPath()): Promise<
 		return defaultConfig();
 	}
 
-	// Adopt newly shipped roles first so the prune below works on the final
-	// catalog, then drop roles this package stopped shipping and persist the
-	// cleaned shape back to disk.
-	const config = pruneRemovedBuiltins(adoptNewBuiltins(normalizeConfig(parsed)));
+	const renamed = migrateRetiredBuiltinNames(normalizeConfig(parsed));
+	const adopted = adoptNewBuiltins(renamed.config);
+	let config = forceRequiredAgents(pruneRemovedBuiltins(adopted.config));
+	if ((renamed.changed || adopted.fresh.length > 0) && !config.pendingSetupNotice) {
+		config = { ...config, pendingSetupNotice: TEAM_SETUP_NOTICE };
+	}
 
 	// Schema upgrade: persist the normalized shape when the file gained fields
 	// (new version) or dropped invalid ones.
