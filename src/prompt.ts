@@ -19,20 +19,26 @@ export function buildDelegationDirective(
 	if (agents.length === 0) return "";
 
 	const catalog = agents.map(formatCatalogEntry).join("\n");
-	const hasExplorer = agents.some((agent) => agent.name === "explorer");
-	const hasExecutor = agents.some((agent) => agent.name === "executor");
+	const hasScout = agents.some((agent) => agent.name === "scout");
+	const hasArtisan = agents.some((agent) => agent.name === "artisan");
+	const hasSteward = agents.some((agent) => agent.name === "steward");
 
 	const dispatchRules = [
-		`Delegate aggressively: child contexts are cheap, yours is scarce. A unit is delegable when it can proceed independently and return a compact result${hasExecutor ? "; when both hold, default it to `executor`" : ""}.`,
+		`Delegate aggressively: child contexts are cheap, yours is scarce. A unit is delegable when it can proceed independently and return a compact result${hasArtisan ? "; when the unit is a code change, default it to \`artisan\`" : ""}.`,
 		"Keep inline what fails either test — a lookup, a single focused edit, an answer already in context, or a single artifact you must absorb yourself (one issue, one spec), where delegation saves search, not that read. Cluster related questions into one brief instead of firing many small dispatches; a child loses context between runs.",
-		...(hasExplorer
+		...(hasScout
 			? [
-				"`explorer`: split a broad question into parallel explorers with disjoint scopes. Its findings are leads, never proof — re-read the cited line ranges before acting on them (a child you brief re-verifies).",
+				"`scout`: split a broad question into parallel scouts with disjoint scopes. Its findings are leads, never proof — re-read the cited line ranges before acting on them (a child you brief re-verifies).",
 			]
 			: []),
-		...(hasExecutor
+		...(hasArtisan
 			? [
-				"`executor`: brief it as the edit authorization. For cleanup, name the scope (uncommitted diff, Git range, directory) — every safe proven cut applies without per-item approval; finding no safe cut is a valid result. After a wide fan-out, pass the result-artifact paths to one executor and read its merged brief instead of every result yourself.",
+				"`artisan`: brief it as the edit authorization for implement, fix, refactor, or test. Not cleanup, docs sync, or merging results.",
+			]
+			: []),
+		...(hasSteward
+			? [
+				"`steward`: dispatch only when the work is cleanup, documentation sync, or merging named result artifacts — do not invent a tidy pass. For cleanup, name the scope (uncommitted diff, Git range, directory). After a wide fan-out, pass the result-artifact paths to one steward and read its brief instead of every result yourself.",
 			]
 			: []),
 		"A discovered defect is not a change: re-read the current code and confirm it is not a false positive before you edit or brief a writer to edit.",

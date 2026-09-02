@@ -1,5 +1,5 @@
 /**
- * The `subagent` tool: dispatches the enabled agents (explorer, executor,
+ * The `subagent` tool: dispatches the enabled agents (scout, artisan, steward,
  * plus custom roles) as isolated pi
  * child processes, single or parallel. Owns the public dispatch contract and
  * per-run status tracking. Stable thread generations, final integration, and
@@ -12,7 +12,7 @@ import { Text } from "@earendil-works/pi-tui";
 import { join, resolve } from "node:path";
 import { Type } from "typebox";
 import { discoverAgents, isWriteCapableAgent, resolveAgentTools, type AgentConfig } from "./agents.ts";
-import { loadConfig, THINKING_LEVEL_VALUES, type ThinkingLevel } from "./config.ts";
+import { loadConfig } from "./config.ts";
 import { formatCompletionBlock, formatUsage, queuedResult } from "./format.ts";
 import {
 	formatTaskSummary,
@@ -51,17 +51,10 @@ export { isWorktreeCapableAgent, runInManagedRepositoryLane } from "./thread-lif
 const NON_BLANK_TASK_OPTIONS = { minLength: 1, pattern: "\\S" } as const;
 
 const ISOLATION_DESCRIPTION =
-	"Filesystem isolation: shared uses the caller's working tree; worktree creates a detached temporary Git worktree (write-capable agents, including executor, only)";
+	"Filesystem isolation: shared uses the caller's working tree; worktree creates a detached temporary Git worktree (write-capable agents, including artisan and steward, only)";
 
 const IsolationSchema = Type.Optional(
 	StringEnum(["shared", "worktree"] as const, { description: ISOLATION_DESCRIPTION }),
-);
-
-const ThinkingSchema = Type.Optional(
-	StringEnum(THINKING_LEVEL_VALUES, {
-		description:
-			"Optional reasoning strength for this task; omit to keep the agent's own level",
-	}),
 );
 
 const WaitSchema = Type.Optional(
@@ -79,7 +72,6 @@ const TaskItem = Type.Object({
 	}),
 	cwd: Type.Optional(Type.String({ description: "Working directory for the agent process" })),
 	isolation: IsolationSchema,
-	thinking: ThinkingSchema,
 });
 
 const SubagentParams = Type.Object({
@@ -90,14 +82,13 @@ const SubagentParams = Type.Object({
 	tasks: Type.Optional(Type.Array(TaskItem, { description: "Array of {agent, task} for parallel execution" })),
 	cwd: Type.Optional(Type.String({ description: "Working directory for the agent process (single mode)" })),
 	isolation: IsolationSchema,
-	thinking: ThinkingSchema,
 	wait: WaitSchema,
 });
 
 /** Roles that default to worktree isolation in parallel dispatches even when
  * the live catalog cannot be consulted (render-only call sites). Custom
  * write-capable agents join them via isWriteCapableAgent on the execute path. */
-const WORKTREE_DEFAULT_AGENTS = new Set(["executor"]);
+const WORKTREE_DEFAULT_AGENTS = new Set(["artisan", "steward"]);
 
 /** Resolve the default isolation for a dispatch. Precedence: an explicit
  * per-call request, then the role's own frontmatter declaration (`worktree`
@@ -390,7 +381,7 @@ export function registerSubagentTool(pi: ExtensionAPI, runtime: SubagentRuntime)
 			"A configured child-model failure continues the retained session on the current main model.",
 		].join(" "),
 		promptSnippet:
-			"Dispatch isolated background agents for recon, implementation, cleanup, docs sync, or result merging; never blocks your turn, and completions wake you automatically.",
+			"Dispatch isolated background agents for recon or implementation, and for cleanup, docs sync, or result merging only when that work exists; never blocks your turn, and completions wake you automatically.",
 		parameters: SubagentParams,
 
 		async execute(_toolCallId, params, signal, onUpdate, ctx) {
@@ -481,7 +472,6 @@ export function registerSubagentTool(pi: ExtensionAPI, runtime: SubagentRuntime)
 							catalogAgent ? isWriteCapableAgent(catalogAgent) : undefined,
 							catalogAgent?.isolation,
 						),
-						{ thinking: item.thinking as ThinkingLevel | undefined },
 					));
 				}
 				const startedRuns = results.filter((result) => result.exitCode === -1);
@@ -544,7 +534,6 @@ export function registerSubagentTool(pi: ExtensionAPI, runtime: SubagentRuntime)
 					singleCatalogAgent ? isWriteCapableAgent(singleCatalogAgent) : undefined,
 					singleCatalogAgent?.isolation,
 				),
-				{ thinking: params.thinking as ThinkingLevel | undefined },
 			);
 			if (result.exitCode !== -1) {
 				throw new Error(getResultOutput(result));

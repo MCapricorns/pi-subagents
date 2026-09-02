@@ -6,20 +6,23 @@
 ![platform](https://img.shields.io/badge/platform-Windows%20%7C%20macOS%20%7C%20Linux-lightgrey)
 ![pi](https://img.shields.io/badge/pi-extension-orange)
 
-A managed engineering team for [pi](https://github.com/earendil-works/pi): two
+A managed engineering team for [pi](https://github.com/earendil-works/pi): three
 focused sub-agents, durable threads, and Git worktree
 isolation. You install it once and your main agent delegates on its own.
 
 ## What's new
 
+**4.3.0** — the team is `scout`, `artisan`, and `steward`. Existing
+`explorer`/`executor` configs migrate. Thinking is a role default you can
+change in `/subagents-setup` (no Auto, no per-call flag). All three roles
+start on. See [CHANGELOG.md](./CHANGELOG.md).
+
 **4.2.13** — this page now leads with current changes and keeps the 4.2 line
-in [CHANGELOG.md](./CHANGELOG.md).
+in the changelog.
 
 **4.2.12**
 
-- The executor confirms a named defect on current code before it edits.
-- Footer settled counts stay honest, and only while a sibling is still live.
-- Merging to `main` publishes npm and opens a matching GitHub Release.
+- Confirm-before-fix; honest footer counts; `main` publishes npm + GitHub Release.
 
 ## Contents
 
@@ -65,10 +68,10 @@ Requires **pi >= 0.84.4** and **Node.js >= 22.19.0**.
 pi install npm:@ferris1225/pi-subagents
 ```
 
-Open pi and run `/subagents-setup` to choose agents, models, and thinking
-strengths. A fresh install enables every agent on the current main model, and each
-session start points you at the wizard until a config file exists. Then just ask
-for work:
+Open pi and run `/subagents-setup`. The first session tells you how: pick a
+model for `scout`, `artisan`, and `steward` (all three stay on). Each row in
+the wizard names the role and what it owns. Thinking has a role default you
+can change there. Then just ask for work:
 
 ```text
 Map how authentication works, fix the refresh race, run the tests, and review the diff.
@@ -79,10 +82,11 @@ directly when you want exact control.
 
 ## The team
 
-| Agent         | Access    | Best for                                                                                                                                                                                                   |
-| ------------- | --------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `explorer`    | Read-only | Broad search, unfamiliar-area mapping, symbol and dependency tracing. Returns a retrieval index — never proof. A single artifact the main agent must fully absorb (one issue, one spec) stays an inline read. |
-| `executor`    | Full      | A self-contained unit that changes the repository or condenses inputs: implementation, fixes, refactors, tests, evidence-first cleanup, docs/comment sync, or merging a fan-out's results into one brief — carried through verification and a result-only handoff. |
+| Agent      | Access    | Best for                                                                                                                                                                                                   |
+| ---------- | --------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `scout`    | Read-only | Broad search, unfamiliar-area mapping, symbol and dependency tracing. Returns a retrieval index — never proof. A single artifact the main agent must fully absorb (one issue, one spec) stays an inline read. |
+| `artisan`  | Full      | One deliverable that changes the repository: implement, fix, refactor, or test — confirmed on current code, then verified, then a result-only handoff.                                                      |
+| `steward`  | Full      | Use only when that work exists: evidence-first cleanup, docs/comment sync, or merging a fan-out's result artifacts into one brief.                                                                          |
 
 Custom roles join them with a Markdown file (see [Custom agents](#custom-agents)).
 
@@ -91,14 +95,15 @@ memory of your conversation, so the brief is its only input. A good brief carrie
 the goal, exact paths, constraints, and expected output — which is what the
 injected delegation guidance produces when the main agent dispatches for you.
 A named defect is not yet a change: confirm it on current code before fixing
-or briefing a fix. The executor re-reads before it edits.
+or briefing a fix. The artisan re-reads before it edits. Steward is
+dispatched only when cleanup, docs sync, or a merge is actually needed.
 
 ```text
 You
  └─ pi main agent
-     ├─ explorer ─── parallel recon, retrieval leads only
-     └─ executor ─── one deliverable per child: implement, fix, clean up,
-                     sync docs, or merge fan-out results → verify → deliver
+     ├─ scout    ─── parallel recon, retrieval leads only
+     ├─ artisan  ─── implement, fix, refactor, or test → verify → deliver
+     └─ steward  ─── cleanup, docs sync, or merge fan-out results (when needed)
 ```
 
 ## Dispatching work
@@ -106,17 +111,16 @@ You
 ```ts
 // One task
 subagent({
-  agent: "executor",
+  agent: "artisan",
   task: "Fix the cache invalidation bug in src/cache, add regression tests, run the checks.",
 });
 
 // Parallel: as many genuinely independent units as the work has
 subagent({
   tasks: [
-    { agent: "explorer", task: "Trace model fallback from dispatch to completion." },
-    { agent: "executor", task: "Add edge-case tests for config migration." },
-    // Optional per-call reasoning strength for a task that needs less of it
-    { agent: "executor", task: "Run the suite and report failures.", thinking: "low" },
+    { agent: "scout", task: "Trace model fallback from dispatch to completion." },
+    { agent: "artisan", task: "Add edge-case tests for config migration." },
+    { agent: "steward", task: "Merge the result artifacts under results/ into one brief." },
   ],
 });
 ```
@@ -140,8 +144,8 @@ main agent inspects the actual changes before calling anything done.
 
 ## Parallel edits
 
-- Single tasks use your checkout. Every parallel write-capable agent (`executor`
-  and custom writers) defaults to a detached Git worktree, so
+- Single tasks use your checkout. Every parallel write-capable agent (`artisan`,
+  `steward`, and custom writers) defaults to a detached Git worktree, so
   parallel writers run at the same time. Worktree mode needs a committed `HEAD`,
   and read-only agents reject it.
 - A role file can pin its own default with `isolation: worktree` or
@@ -213,12 +217,12 @@ two lines: what it is — agent, task, token flow, cost, provider/model, elapsed
 and, dim under the label column, what it is doing right now:
 
 ```text
-● #12 executor  src/cache.ts · worktree:a91f3c · ↑5.2k ↓41.0k R210.0k W6.1k $1.9400 · 12m06s
+● #12 artisan  src/cache.ts · worktree:a91f3c · ↑5.2k ↓41.0k R210.0k W6.1k $1.9400 · 12m06s
   ↳ edit src/auth.ts
-● #15 explorer  src/models.ts · ↑1.2k ↓8.4k R31.0k W1.1k $0.0900 · openai/gpt-5-mini · 3m07s
+● #15 scout    src/models.ts · ↑1.2k ↓8.4k R31.0k W1.1k $0.0900 · openai/gpt-5-mini · 3m07s
                 ↳ grep fallback
-○ #23 executor  src/config.ts · repo lane
-○ #24 executor ↻  tests/config.test.ts · queued · 5m02s
+○ #23 artisan  src/config.ts · repo lane
+○ #24 artisan ↻  tests/config.test.ts · queued · 5m02s
 ```
 
 Telemetry drops leftmost-first when a row runs out of width (badge, wait
@@ -270,14 +274,13 @@ is missing, rate-limited, or fails at the provider level, the **same retained
 session** continues on the main model, so finished searches, reads, and edits
 survive. Ordinary task failures do not trigger a handoff.
 
-Thinking defaults to **Auto**: the role's own preference, clamped to what the
-effective model supports. `/subagents-setup` → _Configure an agent_ also offers a
-manual strength, listing only the levels that model supports. A dispatch can also
-ask for a strength per call with `thinking`, so a quick check and a deep refactor
-do not have to share one static level. Precedence: your manual
-`/subagents-setup` choice > the per-call `thinking` > the role's frontmatter >
-the default, and the winner is still clamped to the effective model. There is no separate
-vision mode — assign a multimodal model and name the image paths in the task.
+Thinking is a **role default** — scout `low`, artisan `high`, steward
+`medium` — clamped to what the effective model supports. `/subagents-setup` →
+_Configure an agent_ lists only the levels that model supports, with the role
+default marked. There is no Auto choice, no per-dispatch `thinking` flag, and
+no `thinking` field in agent Markdown. Precedence: your setup override > the
+role default, then the model clamp. There is no separate vision mode — assign
+a multimodal model and name the image paths in the task.
 
 Every dispatch, resume, retry, and fallback snapshots the parent's
 currently active tools. A role with no explicit list inherits the full set. An
@@ -297,16 +300,17 @@ child cannot run.
 
 ## Configuration
 
-`/subagents-setup` stays one level deep: enabled agents, plus a model and thinking
-strength per agent. Everything else is config-file only, stored at
+`/subagents-setup` stays one level deep: the team (all three stay on), plus a
+model and optional thinking override per agent. First run explains each role
+before you pick models. Everything else is config-file only, stored at
 `~/.pi/agent/pi-subagents.json` (following `PI_CODING_AGENT_DIR`):
 
 ```json
 {
-  "enabledAgents": ["explorer", "executor"],
-  "knownAgents": ["explorer", "executor"],
-  "agentModels": { "explorer": "anthropic/claude-haiku-4-5" },
-  "agentThinkingLevels": { "executor": "high" },
+  "enabledAgents": ["scout", "artisan", "steward"],
+  "knownAgents": ["scout", "artisan", "steward"],
+  "agentModels": { "scout": "anthropic/claude-haiku-4-5" },
+  "agentThinkingLevels": { "artisan": "high" },
   "maxResultLines": 40,
   "agentScope": "user",
   "idleTimeoutSec": 90
@@ -318,7 +322,7 @@ strength per agent. Everything else is config-file only, stored at
 | `enabledAgents`       | Agents available for discovery and delegation. `[]` disables all.                 |
 | `knownAgents`         | Built-ins this config has seen; automatic bookkeeping — never edit it.            |
 | `agentModels`         | Optional `provider/model-id` per agent; missing = current main model.             |
-| `agentThinkingLevels` | Optional manual level per agent; missing = Auto.                                  |
+| `agentThinkingLevels` | Optional setup override per agent; missing = the role default.                    |
 | `maxResultLines`      | Lines kept in a completion message before the artifact takes over. Default `40`.  |
 | `agentScope`          | Discover `user`, `project`, or `both` agent directories. Default `user`.          |
 | `idleTimeoutSec`      | Seconds without child RPC output before termination; `0` disables. Default `90`.  |
@@ -327,20 +331,22 @@ The delegation directive is always injected; there is no toggle. Invalid values
 fall back safely, and stale keys — including the former `proactiveInjection`,
 `maxConcurrency`, `maxFixRounds`, and `notifyOnReviewPass` knobs — are dropped
 automatically. Built-in roles a newer package no longer ships (such as the
-retired `worker`/`cleaner`/`documenter`/`synthesizer`/`reviewer` set) are pruned
+retired `worker`/`cleaner`/`documenter`/`synthesizer`/`reviewer` set, and the
+renamed `explorer`/`executor` names after they have been mapped) are pruned
 from `enabledAgents`, `knownAgents`, and the model/thinking tables at first
 load, so the setup wizard never mixes old and new roles; custom agents are
-untouched. At session
+untouched. A 4.2 config that still says `explorer`/`executor` is rewritten to
+`scout`/`artisan` and gains `steward`; their model and thinking overrides move
+with the names. That rename lives in `src/config.ts` and will be deleted in
+the next major. At session
 start, model overrides pi no longer reports are removed with a one-time notice. If
 pi's own session compaction fails mid-thread, a notice surfaces the error and the
 automatic retry instead of failing quietly.
 
 Agents shipped by a newer package version turn themselves on at the next
-session: a built-in the config has never seen is adopted into `enabledAgents`
-and follows explorer's configured model and thinking level — the fast lane
-these light roles need — while an agent you disabled stays disabled
-(`knownAgents` is what tells the two cases apart). Enabling a role in
-`/subagents-setup` adopts the same explorer route.
+session. Scout, artisan, and steward stay enabled even if a stale allow-list
+left one off. A one-shot notice then points at `/subagents-setup` so you can
+pick a model for each.
 
 ## Custom agents
 
@@ -352,17 +358,15 @@ Built-ins ship with the package. Add or replace them with Markdown files:
 
 ```yaml
 ---
-name: explorer
+name: scout
 description: Fast read-only codebase reconnaissance
-thinking: low
 isolation: shared
 tools: read, bash
 ---
 …additional system prompt…
 ```
 
-`description` is the routing line the main model reads, and `thinking` is the
-role's Auto preference, which a wizard choice overrides. `isolation` pins the
+`description` is the routing line the main model reads. `isolation` pins the
 role's default boundary as described under [Parallel edits](#parallel-edits).
 Models come only from `/subagents-setup`; an agent file cannot pin one. An
 explicit `tools` list is the capability boundary, and omitting it inherits the
@@ -398,17 +402,19 @@ npm install
 npm run check
 ```
 
-There are no bundled runtime dependencies; pi and TypeBox are peers. The source is
+`npm run check` is `tsc --noEmit` plus the unit tests (`npm test`). There are
+no bundled runtime dependencies; pi and TypeBox are peers. The source is
 split by responsibility: dispatch policy, thread lifecycle, RPC
 transport, worktree integration, completion delivery, tools, and TUI status.
 
 ## Changelog
 
-The 4.2 line lives in [CHANGELOG.md](./CHANGELOG.md). Latest published
-version is **4.2.13**.
+The 4.3 line lives in [CHANGELOG.md](./CHANGELOG.md). Latest published
+version is **4.3.0**.
 
 | Version | What changed |
 | ------- | ------------ |
+| 4.3.0   | Team is `scout` + `artisan` + `steward`; role thinking defaults; config migrate. |
 | 4.2.13  | README navigation, What's new, and this changelog. |
 | 4.2.12  | Confirm-before-fix; honest footer counts; `main` publishes npm + GitHub Release. |
 | 4.2.8   | Footer roll-up; wait-path token usage; hold completions across compaction. |

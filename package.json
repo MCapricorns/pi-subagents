@@ -1,7 +1,7 @@
 {
   "name": "@ferris1225/pi-subagents",
-  "version": "4.2.13",
-  "description": "A managed sub-agent team for pi: explorer and executor roles, durable threads, model fallback, and Git worktree isolation.",
+  "version": "4.3.0",
+  "description": "A managed sub-agent team for pi: scout, artisan, and steward roles, durable threads, model fallback, and Git worktree isolation.",
   "type": "module",
   "license": "MIT",
   "repository": {
@@ -37,7 +37,8 @@
     ]
   },
   "scripts": {
-    "check": "tsc --noEmit",
+    "check": "tsc --noEmit && npm test",
+    "test": "node --experimental-transform-types --test test/*.test.ts",
     "prepack": "npm run check"
   },
   "peerDependencies": {

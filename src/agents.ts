@@ -15,7 +15,7 @@ import { type Dirent, existsSync, readdirSync, readFileSync, statSync } from "no
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { CONFIG_DIR_NAME, getAgentDir, parseFrontmatter } from "@earendil-works/pi-coding-agent";
-import { THINKING_LEVEL_VALUES, type AgentScope, type ThinkingLevel } from "./config.ts";
+import { type AgentScope } from "./config.ts";
 import type { IsolationMode } from "./worktree.ts";
 
 export type AgentSource = "builtin" | "user" | "project";
@@ -26,8 +26,6 @@ export interface AgentConfig {
 	tools?: string[];
 	/** Model ref this run was routed to; filled in by dispatch, never declared by the agent file. */
 	model?: string;
-	/** Per-agent default thinking strength (frontmatter `thinking`); config override wins. */
-	thinking?: ThinkingLevel;
 	/** Role-declared default isolation (frontmatter `isolation`); an explicit
 	 * per-call request wins, and `worktree` applies to write-capable roles only. */
 	isolation?: IsolationMode;
@@ -94,8 +92,8 @@ export function resolveAgentTools(
 export function isWriteCapableAgent(
 	agent: Pick<AgentConfig, "name" | "tools">,
 ): boolean {
-	if (agent.name === "explorer") return false;
-	if (agent.name === "executor") return true;
+	if (agent.name === "scout") return false;
+	if (agent.name === "artisan" || agent.name === "steward") return true;
 	if (!agent.tools) return true;
 	return agent.tools.includes("edit") || agent.tools.includes("write");
 }
@@ -145,10 +143,6 @@ function loadAgentsFromDir(dir: string, source: AgentSource): AgentConfig[] {
 			?.split(",")
 			.map((t) => t.trim())
 			.filter(Boolean);
-		const rawThinking = str(frontmatter.thinking)?.trim();
-		const thinking = (THINKING_LEVEL_VALUES as readonly string[]).includes(rawThinking ?? "")
-			? (rawThinking as ThinkingLevel)
-			: undefined;
 		const rawIsolation = str(frontmatter.isolation)?.trim();
 		const isolation = rawIsolation === "worktree" || rawIsolation === "shared"
 			? (rawIsolation as IsolationMode)
@@ -158,7 +152,6 @@ function loadAgentsFromDir(dir: string, source: AgentSource): AgentConfig[] {
 			name,
 			description,
 			tools: tools && tools.length > 0 ? tools : undefined,
-			...(thinking ? { thinking } : {}),
 			...(isolation ? { isolation } : {}),
 			systemPrompt: body,
 			source,
