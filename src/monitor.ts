@@ -242,7 +242,7 @@ export const RUN_LABEL_MAX = 32;
  * distinguishing fragment so concurrent same-agent runs are told apart by WHAT
  * they do, not just their run id. A file/directory path outranks other
  * fragment kinds (a kebab-case word like "edge-case" never beats
- * "tests/config.test.ts"); a long path keeps its tail (the filename is the
+ * "src/config.ts"); a long path keeps its tail (the filename is the
  * recognisable part); a task with no recognizable fragment falls back to a
  * head slice of its prose. Grapheme-safe.
  */
