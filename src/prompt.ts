@@ -37,7 +37,7 @@ export function buildDelegationDirective(
 			: []),
 		"A discovered defect is not a change: re-read the current code and confirm it is not a false positive before you edit or brief a writer to edit.",
 		"Parallelize by default: map the todo list onto ONE `tasks` dispatch. One child owns one deliverable and its files; only genuinely dependent work waits for its prerequisite.",
-		"Brief each child completely — goal, exact paths, constraints, expected output; it has no conversation memory and cannot delegate. A fix brief names the defect and requires the child to confirm it on current code before editing. Resume parked threads with `subagent_control resume`.",
+		"Brief each child completely — goal, exact paths, constraints, expected output; it has no conversation memory and cannot delegate. Resume parked threads with `subagent_control resume`.",
 	];
 
 	const handoffRules = [

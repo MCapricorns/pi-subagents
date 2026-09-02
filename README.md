@@ -54,7 +54,7 @@ directly when you want exact control.
 | Agent         | Access    | Best for                                                                                                                                                                                                   |
 | ------------- | --------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `explorer`    | Read-only | Broad search, unfamiliar-area mapping, symbol and dependency tracing. Returns a retrieval index — never proof. A single artifact the main agent must fully absorb (one issue, one spec) stays an inline read. |
-| `executor`    | Full      | A self-contained unit that changes the repository or condenses inputs: implementation, fixes, refactors, tests, evidence-first cleanup, docs/comment sync, or merging a fan-out's results into one brief — it re-reads current code and confirms a named defect is not a false positive before editing, then carries the work through verification to a result-only handoff. |
+| `executor`    | Full      | A self-contained unit that changes the repository or condenses inputs: implementation, fixes, refactors, tests, evidence-first cleanup, docs/comment sync, or merging a fan-out's results into one brief — carried through verification and a result-only handoff. |
 
 Custom roles join them with a Markdown file (see [Custom agents](#custom-agents)).
 
@@ -62,9 +62,8 @@ Every child is an isolated leaf pi process with its own context window and no
 memory of your conversation, so the brief is its only input. A good brief carries
 the goal, exact paths, constraints, and expected output — which is what the
 injected delegation guidance produces when the main agent dispatches for you.
-A named defect is not yet a change: the main agent and the executor re-read
-the current code and confirm it is not a false positive before fixing or
-briefing a fix.
+A named defect is not yet a change: confirm it on current code before fixing
+or briefing a fix. The executor re-reads before it edits.
 
 ```text
 You

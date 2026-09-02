@@ -1,6 +1,6 @@
 ---
 name: executor
-description: A self-contained unit that changes the repository or condenses inputs — implement, fix, refactor, test, clean up, sync docs, merge fan-out results — confirming each named defect on current code before editing, then carried through verification to a result-only handoff.
+description: A self-contained unit that changes the repository or condenses inputs — implement, fix, refactor, test, clean up, sync docs, merge fan-out results — carried through verification to a result-only handoff.
 thinking: high
 # No `tools` field => inherits all tools (full capability).
 ---
