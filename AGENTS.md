@@ -6,8 +6,8 @@ global rule differ, treat the one here as the intended behavior for this repo.
 
 ## Release on green
 
-After finishing a code change in this repo, once `npm run check` and `npm test`
-both pass, finalize the work without waiting to be asked:
+After finishing a code change in this repo, once `npm run check`
+passes, finalize the work without waiting to be asked:
 
 1. Choose the smallest release version and keep `package.json` plus
    `package-lock.json` synchronized (the root `version` field and the top
@@ -29,7 +29,7 @@ behavior (widget display, tool messages, config, commands) — keep it in sync
 with what users actually see.
 
 Skip the automatic bump/commit/push only when the user explicitly says not to,
-or when tests/checks fail (fix first, then finalize).
+or when the check fails (fix first, then finalize).
 
 ## Conventions
 

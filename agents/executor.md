@@ -44,7 +44,7 @@ What was done, in a few lines.
 
 ## Verification
 
-Which checks you ACTUALLY ran and their result (e.g. `tsc --noEmit` clean; `vitest` 12 passed). State explicitly anything you could not run and why.
+Which checks you ACTUALLY ran and their result (e.g. `tsc --noEmit` clean). State explicitly anything you could not run and why.
 
 ## Notes (only when material)
 

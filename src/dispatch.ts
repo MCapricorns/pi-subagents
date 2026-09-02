@@ -258,16 +258,22 @@ export function registerSubagentTool(pi: ExtensionAPI, runtime: SubagentRuntime)
 	// refreshes the fallback context, config, and agent catalog it resolves.
 	const environmentRef: { current: DispatchEnvironment | undefined } = { current: undefined };
 
-	// Finished runs leave the active monitor immediately. Their final findings
-	// are sent as a custom message that starts a follow-up turn.
+	// Terminal rows stay in the monitor until the next beginTurn so the footer
+	// can count them beside siblings that are still live. The widget ignores
+	// them. A second finishRun for the same endedAt is a no-op; a resume
+	// clears endedAt, so the next settlement notifies again.
+	const publishedEndedAt = new Map<number, number>();
 	const finishRun = (
 		runId: number,
 		status: "done" | "failed",
 		opts?: { silent?: boolean },
 	): void => {
+		const run = monitor.findRun(runId);
+		if (!run) return;
 		monitor.setStatus(runId, status); // stamps endedAt for the elapsed time
-		const run = monitor.removeRun(runId);
-		if (!run) return; // already finished — stay idempotent
+		const endedAt = monitor.findRun(runId)?.endedAt;
+		if (endedAt !== undefined && publishedEndedAt.get(runId) === endedAt) return;
+		if (endedAt !== undefined) publishedEndedAt.set(runId, endedAt);
 		if (opts?.silent || !runtime.sessionActive) return;
 		const icon = status === "done" ? "✓" : "✗";
 		environmentRef.current?.ctx.ui.notify(`${icon} #${run.id} ${monitor.summarize(run)}`, status === "done" ? "info" : "error");

@@ -4,8 +4,9 @@
  *
  * The store notifies wait/status consumers on every mutation. Each run carries
  * timing information plus a concise activity string ("thinking",
- * "read src/index.ts", ...). Runs are removed after publication; tool results
- * and the finished-run registry are the durable user-facing records.
+ * "read src/index.ts", ...). Settled rows stay until the next beginTurn so the
+ * footer can count them beside live siblings; the widget ignores them. Tool
+ * results are the durable user-facing record.
  */
 
 import { stripVTControlCharacters } from "node:util";

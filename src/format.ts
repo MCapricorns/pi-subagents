@@ -8,6 +8,7 @@ import type { AgentConfig } from "./agents.ts";
 import { runLabel, shrinkRunLabel } from "./monitor.ts";
 import { emptyUsage } from "./rpc-run.ts";
 import {
+	RESULT_LINE_MAX,
 	getResultOutput,
 	isFailedResult,
 	truncateResultOutput,
@@ -93,7 +94,7 @@ export function formatCompletionBlock(
 	const status = failed ? "failed" : "completed";
 	const usage = formatUsage(result.usage);
 	const output = getResultOutput(result);
-	const { text, truncated } = truncateResultOutput(output, maxResultLines);
+	const { text, truncated, shownLines, totalLines, widthClipped } = truncateResultOutput(output, maxResultLines);
 	const fallbackNote = result.modelFallbackFrom
 		? ` (selected model ${result.modelFallbackFrom} failed → main ${result.model ?? "dynamic default"})`
 		: "";
@@ -142,11 +143,12 @@ export function formatCompletionBlock(
 		const artifact = options.resultRoot
 			? writeResultArtifact(output, result.agent, options.resultRoot)
 			: "(result root unavailable)";
-		// State the loss (shown vs total) and condition the read: handing the
-		// parent both a summary and a full-text entrance invites the same content
-		// into its context twice.
-		const totalLines = output.split("\n").length;
-		lines.push("", `(${maxResultLines} of ${totalLines} lines shown; full result ${artifact} — read only if these are insufficient)`);
+		// State the real loss and condition the read: handing the parent both a
+		// summary and a full-text entrance invites the same content twice.
+		const lineLoss = shownLines < totalLines ? `${shownLines} of ${totalLines} lines shown` : `${shownLines} line${shownLines === 1 ? "" : "s"} shown`;
+		const widthLoss = widthClipped ? `clipped to ${RESULT_LINE_MAX} characters` : undefined;
+		const loss = widthLoss ? `${lineLoss}, ${widthLoss}` : lineLoss;
+		lines.push("", `(${loss}; full result ${artifact} — read only if these are insufficient)`);
 	}
 	return lines.join("\n");
 }

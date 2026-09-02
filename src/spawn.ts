@@ -92,17 +92,22 @@ export const RESULT_LINE_MAX = 200;
 export interface TruncatedOutput {
 	text: string;
 	truncated: boolean;
+	shownLines: number;
+	totalLines: number;
+	widthClipped: boolean;
 }
 
 export function truncateResultOutput(output: string, maxLines: number): TruncatedOutput {
 	const lines = output.split("\n");
-	if (lines.length <= maxLines && lines.every((line) => line.length <= RESULT_LINE_MAX)) {
-		return { text: output, truncated: false };
+	const totalLines = lines.length;
+	const widthClipped = lines.some((line) => line.length > RESULT_LINE_MAX);
+	if (totalLines <= maxLines && !widthClipped) {
+		return { text: output, truncated: false, shownLines: totalLines, totalLines, widthClipped: false };
 	}
 	const kept = lines.slice(0, maxLines).map((line) =>
 		line.length > RESULT_LINE_MAX ? `${line.slice(0, RESULT_LINE_MAX)}…` : line,
 	);
-	return { text: kept.join("\n"), truncated: true };
+	return { text: kept.join("\n"), truncated: true, shownLines: kept.length, totalLines, widthClipped };
 }
 
 export const RESULT_ARTIFACT_MAX_AGE_MS = 7 * 24 * 60 * 60 * 1_000;

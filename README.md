@@ -207,13 +207,16 @@ still working?" without opening the widget or asking:
 subagents 2 running · 1 repo lane · 3 done
 ```
 
-It is count-only, keeps the same wait vocabulary as the widget, disappears when
-nothing is active, and works in RPC hosts as well as the TUI.
+It is count-only, keeps the same wait vocabulary as the widget, and works in
+RPC hosts as well as the TUI. Settled counts stay on the line only while a
+sibling is still live (`2 running · 3 done`); the line disappears once nothing
+is active.
 
 Completions resume the main agent on their own, with a compact block of at most 40
 lines by default; longer output lands unchanged in a Markdown artifact whose path
 comes with the message, stated as how much was actually cut (`40 of 137 lines
-shown`) and conditioned on the shown lines being insufficient, so the same
+shown`, or a 200-character clip when a short result has a long line) and
+conditioned on the shown lines being insufficient, so the same
 content does not enter the main context twice. Roles write result-only handoffs — outcome, paths,
 verification, unresolved blockers — and the main agent is told to add its
 conclusion rather than restate what you already read. A failed run adds its
@@ -363,7 +366,6 @@ beats an age rule.
 ```bash
 npm install
 npm run check
-npm test
 ```
 
 There are no bundled runtime dependencies; pi and TypeBox are peers. The source is

@@ -27,10 +27,11 @@ const SEGMENT_ORDER = ["running", "interrupting", "starting", "queued", "repo la
 
 type StatusContext = Pick<ExtensionContext, "hasUI" | "ui">;
 
-/** One-line roll-up of the runs worth reporting — active ones plus the runs
- * that settled during this turn — or undefined when there is nothing to say
- * and the status entry should disappear instead of showing zeros. */
+/** One-line roll-up of live runs plus anything that settled during this turn.
+ * Returns undefined when nothing is still active — a done-only leftover must
+ * not keep the footer up after the last sibling finishes. */
 export function formatRunStatusLine(runs: readonly RunView[]): string | undefined {
+	if (!runs.some((run) => isRunActiveStatus(run.status))) return undefined;
 	const counts = new Map<string, number>();
 	for (const run of runs) {
 		const word = run.status === "queued"

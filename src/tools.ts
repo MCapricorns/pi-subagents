@@ -340,7 +340,7 @@ export function registerLookupTools(pi: ExtensionAPI, runtime: SubagentRuntime):
 				}
 				monitor.setStatus(runId, "failed");
 				if (stoppedResult) completionResults.push(stoppedResult);
-				monitor.removeRun(runId);
+				// Leave the terminal row for the footer; beginTurn sweeps it.
 				runtime.retireThreadSession(thread);
 				// The destructive retire removes the durable record with the session;
 				// an id never resurrects after subagent_stop.
