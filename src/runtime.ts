@@ -131,6 +131,12 @@ export interface SubagentRuntime {
 
 export function createRuntime(pi: ExtensionAPI, configPath: string): SubagentRuntime {
 	const backgroundQueue = new BackgroundTaskQueue(resolveSubagentConcurrency());
+	// Compaction reads the whole history, summarizes it, and replaces it. A
+	// completion injected into that window can be swallowed by the summary,
+	// silently losing a result a child spent minutes producing — so delivery is
+	// held until compaction settles (either outcome) instead.
+	let compactionInFlight = false;
+	let heldCompletions: CompletionMessageItem[] = [];
 
 	const runtime: SubagentRuntime = {
 		configPath,
@@ -142,6 +148,10 @@ export function createRuntime(pi: ExtensionAPI, configPath: string): SubagentRun
 		restoredNotified: false,
 		sendCompletionGroup: (items) => {
 			if (!runtime.sessionActive || items.length === 0) return;
+			if (compactionInFlight) {
+				heldCompletions.push(...items);
+				return;
+			}
 			// A result arriving for one run does not mean sibling runs are done.
 			// Computing this at delivery (emit) time — not when the item was
 			// pushed — reflects the current monitor state, since finishing runs
@@ -242,6 +252,10 @@ export function createRuntime(pi: ExtensionAPI, configPath: string): SubagentRun
 			}
 			const preflights = [...runtime.preflightOperations];
 			runtime.completionBatcher.dispose();
+			// Held items are dropped exactly like the batcher's abandoned ones: the
+			// session is gone, so there is no window left to deliver them into.
+			heldCompletions = [];
+			compactionInFlight = false;
 			runtime.backgroundQueue.cancelAll();
 			// Await live RPC process-tree cleanup and continuation preflight rollback
 			// before persisting records or releasing ownership maps.
@@ -307,6 +321,25 @@ export function createRuntime(pi: ExtensionAPI, configPath: string): SubagentRun
 			monitor.clear();
 		},
 	};
+
+	// Hold delivery across compaction. `session_before_compact` opens the
+	// window; BOTH terminal events close it, because a failed or aborted
+	// compaction that never released would strand every held result forever.
+	pi.on("session_before_compact", () => {
+		compactionInFlight = true;
+	});
+	const releaseHeldCompletions = (): void => {
+		compactionInFlight = false;
+		if (heldCompletions.length === 0) return;
+		const items = heldCompletions;
+		heldCompletions = [];
+		// Re-enter the normal path now that the gate is open: the active-runs
+		// footer and the steer/nextTurn choice must reflect delivery time, not
+		// the moment the items were held.
+		runtime.sendCompletionGroup(items);
+	};
+	pi.on("session_compact", releaseHeldCompletions);
+	pi.on("session_compact_failed", releaseHeldCompletions);
 
 	runtime.completionBatcher = createCompletionBatcher<CompletionMessageItem>({
 		emit: runtime.sendCompletionGroup,
