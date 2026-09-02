@@ -9,7 +9,7 @@
  */
 
 import { spawn, type ChildProcess } from "node:child_process";
-import { existsSync } from "node:fs";
+import { existsSync, symlinkSync } from "node:fs";
 import { copyFile, mkdir, mkdtemp, realpath, rm, stat, writeFile } from "node:fs/promises";
 import { basename, dirname, isAbsolute, join, relative, resolve } from "node:path";
 import { writeTempOwnerMarker } from "./temp-hygiene.ts";
@@ -717,6 +717,36 @@ class GitWorktreeIsolation implements WorktreeIsolation {
 	}
 }
 
+/** Link the origin checkout's `node_modules` into a fresh worktree, because a
+ * worktree holds only tracked files and the verification commands a child is
+ * asked to run (`npm run check`, `npm test`) would otherwise fail on missing
+ * dependencies. A junction is used on Windows: unlike a directory symlink it
+ * needs neither administrator rights nor Developer Mode. The link is skipped
+ * unless Git ignores the directory, since Git descends into it and an unignored
+ * `node_modules` would enter the integration patch and be written back over the
+ * real dependency tree. Best effort — a worktree without the link is still
+ * usable, so failure must never abort isolation. */
+async function linkNodeModules(
+	runner: CommandRunner,
+	originalRoot: string,
+	worktreePath: string,
+): Promise<void> {
+	const target = join(originalRoot, "node_modules");
+	const link = join(worktreePath, "node_modules");
+	if (!existsSync(target) || existsSync(link)) return;
+	try {
+		const ignored = await runner("git", ["check-ignore", "-q", "--", "node_modules"], {
+			cwd: originalRoot,
+			timeoutMs: GIT_COMMAND_TIMEOUT_MS,
+			maxOutputBytes: GIT_OUTPUT_MAX_BYTES,
+		});
+		if (ignored.code !== 0) return;
+		symlinkSync(target, link, process.platform === "win32" ? "junction" : "dir");
+	} catch {
+		/* dependency linking is an optimization, never a setup requirement */
+	}
+}
+
 /**
  * Create a detached worktree at repository HEAD. The returned cwd mirrors the
  * caller's subdirectory inside that new worktree.
@@ -748,6 +778,7 @@ export async function createWorktreeIsolation(
 		// A requested subdirectory can be untracked/empty in the source worktree;
 		// recreate the directory so the child still starts at the equivalent path.
 		await mkdir(isolatedCwd, { recursive: true });
+		await linkNodeModules(runner, target.originalRoot, worktreePath);
 
 		let integrationBaseHead = target.head;
 		const checkpoint = options.seedCheckpoint;
