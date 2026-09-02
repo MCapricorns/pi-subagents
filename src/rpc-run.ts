@@ -8,7 +8,7 @@
  */
 
 import { spawn, type ChildProcess } from "node:child_process";
-import { existsSync, readdirSync, unlinkSync, rmdirSync } from "node:fs";
+import { existsSync, readdirSync } from "node:fs";
 import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { basename, join } from "node:path";
 import { StringDecoder } from "node:string_decoder";
@@ -364,6 +364,11 @@ export async function writeChildRetryPolicyExtension(
 	}
 }
 
+/** Hand the agent body to the child as a file rather than inline argv text.
+ * `--append-system-prompt` takes either, but a system prompt is unbounded — a
+ * custom agent can carry a whole spec — while Windows caps a command line at
+ * 32767 characters, so inlining turns a long agent into an opaque spawn failure.
+ * The file lives in the run's scratch dir and is removed when the attempt ends. */
 async function writePromptToTempFile(
 	scratchRoot: string,
 	agentName: string,
@@ -974,20 +979,9 @@ export async function runRpcAgentAttempt(options: RunRpcAttemptOptions): Promise
 		return result;
 	} finally {
 		if (attemptToken !== undefined) control?.detach(attemptToken);
-		if (tmpPromptPath) {
-			try {
-				unlinkSync(tmpPromptPath);
-			} catch {
-				/* ignore */
-			}
-		}
-		if (tmpPromptDir) {
-			try {
-				rmdirSync(tmpPromptDir);
-			} catch {
-				/* ignore */
-			}
-		}
+		// Recursive removal: the directory also holds the temp-hygiene owner marker,
+		// so an empty-directory removal always fails and leaks one dir per dispatch.
+		if (tmpPromptDir) await rm(tmpPromptDir, { recursive: true, force: true }).catch(() => undefined);
 		await rm(retryPolicy.dir, { recursive: true, force: true }).catch(() => undefined);
 	}
 }

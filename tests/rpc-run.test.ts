@@ -1,4 +1,4 @@
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
@@ -343,6 +343,49 @@ send({ type: "agent_settled" });`,
 		} finally {
 			process.argv[1] = previous;
 			rmSync(dir, { recursive: true, force: true });
+		}
+	});
+});
+
+describe("agent system prompt handover", () => {
+	it("passes the body as a readable file and leaves no scratch directory behind", async () => {
+		const dir = mkdtempSync(join(tmpdir(), "pi-subagents-prompt-handover-"));
+		const script = join(dir, "prompt-child.mjs");
+		const echoLog = join(dir, "prompt-echo.txt");
+		const body = "You are a fake agent.\nSecond line — non-ASCII em dash.";
+		// The child reports what it can actually read at the handed-over path, so a
+		// regression that inlines the body or points at a missing file fails here.
+		writeFileSync(
+			script,
+			fakeRpcScript({
+				setup: `const flag = process.argv.indexOf("--append-system-prompt");
+fs.writeFileSync(${JSON.stringify(echoLog)}, flag === -1 ? "MISSING_FLAG" : fs.readFileSync(process.argv[flag + 1], "utf8"));`,
+				onPrompt: `send({ type: "message_end", message: { role: "assistant", content: [{ type: "text", text: "ok" }], stopReason: "stop" } });`,
+			}),
+			"utf8",
+		);
+		const scratchRoot = scratchRootForTests();
+		const previous = process.argv[1];
+		process.argv[1] = script;
+		try {
+			const result = await runSingleAgent({
+				defaultCwd: process.cwd(),
+				sessionRoot: sessionRootForTests(),
+				scratchRoot,
+				agent: { ...agent, systemPrompt: body },
+				agentName: agent.name,
+				task: "go",
+				makeDetails: (results) => ({ mode: "single", results }),
+			});
+			expect(result.exitCode).toBe(0);
+			expect(readFileSync(echoLog, "utf8")).toBe(body);
+			// The scratch dir also holds a temp-hygiene owner marker, so a non-recursive
+			// removal silently leaks one directory per dispatch.
+			expect(readdirSync(scratchRoot).filter((entry) => entry.startsWith("pi-subagents-"))).toEqual([]);
+		} finally {
+			process.argv[1] = previous;
+			rmSync(dir, { recursive: true, force: true });
+			rmSync(scratchRoot, { recursive: true, force: true });
 		}
 	});
 });
