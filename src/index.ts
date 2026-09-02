@@ -29,6 +29,7 @@ import { buildDelegationDirective } from "./prompt.ts";
 import { createRuntime } from "./runtime.ts";
 import { runSetup } from "./setup.ts";
 import { currentSubagentDepth } from "./spawn.ts";
+import { clearActiveRunsStatus } from "./status.ts";
 import { bootstrapDurableState } from "./thread-lifecycle.ts";
 import { registerLookupTools } from "./tools.ts";
 import { clearActiveRunsWidget } from "./widget.ts";
@@ -62,6 +63,7 @@ export default function (pi: ExtensionAPI): void {
 	);
 
 	pi.on("session_shutdown", async (_event, ctx) => {
+		clearActiveRunsStatus(ctx);
 		clearActiveRunsWidget(ctx);
 		await runtime.shutdown();
 	});

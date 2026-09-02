@@ -1,4 +1,4 @@
-/** Session-start recovery, stale-config migration, and widget installation. */
+/** Session-start recovery, stale-config migration, and progress-surface installation. */
 
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { existsSync } from "node:fs";
@@ -6,6 +6,7 @@ import { loadConfig, saveConfig } from "./config.ts";
 import { availableModelsInScope, filterUnavailableModelOverrides } from "./models.ts";
 import { announceRecoveryRecords } from "./recovery.ts";
 import type { SubagentRuntime } from "./runtime.ts";
+import { installActiveRunsStatus } from "./status.ts";
 import { installActiveRunsWidget } from "./widget.ts";
 
 /**
@@ -56,6 +57,8 @@ export function registerAnnouncements(pi: ExtensionAPI, runtime: SubagentRuntime
 				"info",
 			);
 		}
+		// The footer status works in every UI host (TUI and RPC); the widget is TUI-only.
+		installActiveRunsStatus(ctx);
 		if (ctx.mode !== "tui") return;
 		installActiveRunsWidget(ctx);
 	});

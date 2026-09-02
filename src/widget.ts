@@ -64,8 +64,10 @@ function composeLine(left: string, tail: string, theme: Theme, width: number): s
 	return visibleWidth(line) <= width ? line : truncateToWidth(line, width, "…");
 }
 
-/** Short truthful wait word for a queued row, shown in the telemetry column. */
-function waitWord(run: Pick<RunView, "waitReason">): string {
+/** Short truthful wait word for a queued row — shown in the widget telemetry
+ * column and aggregated into the footer status line, so both surfaces name a
+ * wait the same way. */
+export function waitWord(run: Pick<RunView, "waitReason">): string {
 	switch (run.waitReason) {
 		case "repository-lane":
 			return "repo lane";
@@ -84,15 +86,15 @@ function worktreeBadge(run: RunView): string {
 	const id = run.worktreeId ?? "?";
 	switch (run.integrationStatus) {
 		case "finalizing":
-			return `wt:${id} applying`;
+			return `worktree:${id} applying`;
 		case "integrated":
-			return `wt:${id} applied`;
+			return `worktree:${id} applied`;
 		case "no_changes":
-			return `wt:${id} clean`;
+			return `worktree:${id} clean`;
 		case "retained":
-			return `wt:${id} retained`;
+			return `worktree:${id} retained`;
 		default:
-			return `wt:${id}`;
+			return `worktree:${id}`;
 	}
 }
 
