@@ -22,7 +22,9 @@ passes, finalize the work without waiting to be asked:
      user requests it; use major only for intentional breaking changes.
 2. Commit the change and the version bump together (one logical change per
    commit; `type(scope): imperative English`). Stage only paths from this task.
-3. Push to the current branch's upstream.
+3. Push to the current branch's upstream. A version that lands on `main` is
+   published by `.github/workflows/publish.yml` and tagged as a GitHub
+   Release — do not `npm publish` locally.
 
 Before the commit, update the README when the change affects user-visible
 behavior (widget display, tool messages, config, commands) — keep it in sync

@@ -374,6 +374,24 @@ There are no bundled runtime dependencies; pi and TypeBox are peers. The source 
 split by responsibility: dispatch policy, thread lifecycle, RPC
 transport, worktree integration, completion delivery, tools, and TUI status.
 
+## Release
+
+Merging to `main` publishes `@ferris1225/pi-subagents` when `package.json`
+carries a version npm does not have yet, then opens a matching GitHub Release.
+Do not `npm publish` from a laptop.
+
+One-time setup — pick one:
+
+1. **Trusted publisher (preferred):** on the
+   [npm package page](https://www.npmjs.com/package/@ferris1225/pi-subagents)
+   add a GitHub Actions trusted publisher for `MCapricorns/pi-subagents` with
+   workflow filename `publish.yml` (no path, environment left blank).
+2. **Token:** create an npm automation token and store it as the repository
+   Actions secret `NPM_TOKEN`.
+
+If the first run fails because neither is configured, add the publisher or
+secret and re-run the **Publish** workflow from the Actions tab.
+
 ## License
 
 MIT
