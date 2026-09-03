@@ -24,7 +24,8 @@ import {
 	type RunView,
 	type RunWaitReason,
 } from "./monitor.ts";
-import type { SubagentRuntime } from "./runtime.ts";
+import { formatPhaseLeaseReceipt } from "./prompt.ts";
+import type { SubagentRuntime, SubagentThread } from "./runtime.ts";
 import { persistThreadCheckpoint } from "./thread-lifecycle.ts";
 import {
 	getProjectRoot,
@@ -60,7 +61,7 @@ const IsolationSchema = Type.Optional(
 const WaitSchema = Type.Optional(
 	Type.Boolean({
 		description:
-			"Block until every run started by this call settles, then return their results in-turn (each result still arrives as a completion message too). Only for one-shot (pi -p) sessions or a next step that needs these results within this turn.",
+			"Block until every run started by this call settles, then return each result exactly once in this tool response. If the tool call is aborted, undelivered results fall back to completion messages. Intended for one-shot (pi -p) sessions or an immediate dependent step.",
 	}),
 );
 
@@ -68,7 +69,7 @@ const TaskItem = Type.Object({
 	agent: Type.String({ description: "Name of the agent to invoke" }),
 	task: Type.String({
 		...NON_BLANK_TASK_OPTIONS,
-		description: "Self-contained task to delegate (the agent has no memory of this conversation)",
+		description: "Substantial self-contained phase worth a fresh paid context (the agent has no memory of this conversation)",
 	}),
 	cwd: Type.Optional(Type.String({ description: "Working directory for the agent process" })),
 	isolation: IsolationSchema,
@@ -77,9 +78,9 @@ const TaskItem = Type.Object({
 const SubagentParams = Type.Object({
 	agent: Type.Optional(Type.String({ description: "Name of the agent to invoke (single mode)" })),
 	task: Type.Optional(
-		Type.String({ ...NON_BLANK_TASK_OPTIONS, description: "Self-contained task to delegate (single mode)" }),
+		Type.String({ ...NON_BLANK_TASK_OPTIONS, description: "Substantial self-contained phase worth a fresh paid context (single mode)" }),
 	),
-	tasks: Type.Optional(Type.Array(TaskItem, { description: "Array of {agent, task} for parallel execution" })),
+	tasks: Type.Optional(Type.Array(TaskItem, { description: "Independently justified, disjoint phases for parallel execution" })),
 	cwd: Type.Optional(Type.String({ description: "Working directory for the agent process (single mode)" })),
 	isolation: IsolationSchema,
 	wait: WaitSchema,
@@ -136,9 +137,8 @@ function toolUsage(runtime: SubagentRuntime, runIds: number[]): { usage?: Usage 
 }
 
 /** In-turn wait behind dispatch `wait: true` — the escape hatch for one-shot
- * `pi -p` parents that exit at end of turn: hold the call until every run it
- * started settles, then hand back their result blocks. Interactive sessions
- * never take this path; their results arrive as completion wake-ups. No
+ * `pi -p` parents that exit at end of turn or an immediate dependent step: hold
+ * the call until every run it started settles, then hand back result blocks. No
  * timer: a waiter resolves the moment its run's result registers (children
  * are bounded by the idle watchdog), an already-parked run answers
  * immediately with its resume handle, and the turn's abort signal remains the
@@ -327,11 +327,17 @@ export function registerSubagentTool(pi: ExtensionAPI, runtime: SubagentRuntime)
 		(mode: "single" | "parallel", background = false) =>
 		(results: SingleResult[]): SubagentDetails => ({ mode, results, background });
 
+	const phaseLeaseReceipt = (runIds: number[]): string =>
+		formatPhaseLeaseReceipt(
+			runIds
+				.map((runId) => runtime.threads.get(runId))
+				.filter((thread): thread is SubagentThread => thread !== undefined),
+		);
+
 	/** Pacing note appended to dispatch confirmations whenever runs are actually
 	 * waiting. Slot waits and repository-lane waits are stated separately with
 	 * the real capacity: a lane-serialized shared writer or a starting child
-	 * must never read as an exhausted pool, or the model stops dispatching while
-	 * slots are free. Empty when nothing is waiting. */
+	 * must never read as an exhausted pool. Empty when nothing is waiting. */
 	const queuePacingNote = (): string => {
 		const runs = monitor.getRuns();
 		const queuedWith = (reason: RunWaitReason): number =>
@@ -354,7 +360,7 @@ export function registerSubagentTool(pi: ExtensionAPI, runtime: SubagentRuntime)
 					(slotWaiting === 0 ? ` (${freeSlots} of ${capacity} slots free; parallel writers avoid the lane via worktree isolation)` : ""),
 			);
 		}
-		return ` Pacing: ${parts.join(" · ")}. Keep dispatching independent units.`;
+		return ` Pacing: ${parts.join(" · ")}.`;
 	};
 
 	const startBackground = createBackgroundDispatcher({
@@ -374,14 +380,7 @@ export function registerSubagentTool(pi: ExtensionAPI, runtime: SubagentRuntime)
 	pi.registerTool({
 		name: "subagent",
 		label: "Subagent",
-		description: [
-			"Dispatch enabled agents as isolated leaf Pi child processes: single {agent, task} or parallel {tasks: [...]}. Dispatching never blocks your turn — runs proceed in the background and each completion resumes you automatically; never poll or restate delivered results.",
-			"Put every genuinely independent unit in one `tasks` array: there is no per-call cap, and runs beyond the machine's free process slots simply wait and start as slots free.",
-			"Parallel write-capable agents default to a detached Git worktree so writers run concurrently; explicit `shared` keeps the caller's checkout and serializes same-repository writers. Worktree setup failure never silently falls back to shared.",
-			"A configured child-model failure continues the retained session on the current main model.",
-		].join(" "),
-		promptSnippet:
-			"Dispatch isolated background agents for recon or implementation, and for cleanup, docs sync, or result merging only when that work exists; never blocks your turn, and completions wake you automatically.",
+		description: "Start paid leaf runs for broad reconnaissance or substantial self-contained work. Each active normalized task+cwd owns its phase; exact duplicates are rejected. Batch scopes must be independent. wait:true returns results in-turn; otherwise completions wake main. Parallel writers default to detached Git worktrees; isolation:'shared' serializes same-repository writes.",
 		parameters: SubagentParams,
 
 		async execute(_toolCallId, params, signal, onUpdate, ctx) {
@@ -451,17 +450,16 @@ export function registerSubagentTool(pi: ExtensionAPI, runtime: SubagentRuntime)
 			}
 
 			// Sub-agents run detached from the foreground turn: the editor stays
-			// available and completion messages later wake the main agent. The turn is
-			// NOT terminated here — the model can keep dispatching independent units
-			// or do its own work, and the background queue paces how many child
-			// processes actually run at once, so no per-call task cap is enforced.
+			// available for disjoint orchestration while the launch receipt leases
+			// each delegated phase. The queue paces child processes without changing
+			// phase ownership or requiring a per-call task cap.
 			if (params.tasks && params.tasks.length > 0) {
-				const results: SingleResult[] = [];
-				// Preserve caller order (and deterministic completion batching) while
-				// preparing each isolated filesystem before its queue entry can start.
-				for (const item of params.tasks) {
+				// Admission is synchronous and ordered; slow worktree preparation belongs
+				// to the bounded queue. Promise.all preserves caller result order while no
+				// item waits for a sibling's filesystem setup.
+				const results = await Promise.all(params.tasks.map((item) => {
 					const catalogAgent = agents.find((candidate) => candidate.name === item.agent);
-					results.push(await startBackground(
+					return startBackground(
 						item.agent,
 						item.task,
 						item.cwd,
@@ -472,13 +470,14 @@ export function registerSubagentTool(pi: ExtensionAPI, runtime: SubagentRuntime)
 							catalogAgent ? isWriteCapableAgent(catalogAgent) : undefined,
 							catalogAgent?.isolation,
 						),
-					));
-				}
+						{ deliveryRoute: params.wait ? "await" : "background" },
+					);
+				}));
 				const startedRuns = results.filter((result) => result.exitCode === -1);
 				const started = startedRuns.length;
-				const startedRefs = startedRuns.map((result) =>
-					result.runId === undefined ? result.agent : `#${result.runId} ${result.agent}`,
-				);
+				const startedIds = startedRuns
+					.map((result) => result.runId)
+					.filter((id): id is number => id !== undefined);
 				const failureLines = results.flatMap((result, index) => {
 					if (result.exitCode === -1) return [];
 					const reason = getResultOutput(result).trim() || "unknown startup failure";
@@ -489,21 +488,15 @@ export function registerSubagentTool(pi: ExtensionAPI, runtime: SubagentRuntime)
 				if (started === 0) {
 					// Pi marks custom-tool failures only when execute throws; returning an
 					// `isError` property is still a successful AgentToolResult.
-					throw new Error(`No background subagents were started.\n${failureLines.join("\n")}`);
+					throw new Error(`No subagents started.\n${failureLines.join("\n")}`);
 				}
 				if (params.wait) {
-					const startedIds = startedRuns
-						.map((result) => result.runId)
-						.filter((id): id is number => id !== undefined);
 					const blocks = await awaitRunResults(runtime, startedIds, signal, config.maxResultLines, ctx.cwd, makeProgress(makeDetails("parallel", true)(results)));
-					const text = [
-						`Started ${started} subagent${started === 1 ? "" : "s"} (${startedRefs.join(", ")}) and waited in-turn.`,
-						...(failureLines.length > 0
-							? [`${failureLines.length} task${failureLines.length === 1 ? "" : "s"} failed before launch:`, ...failureLines]
-							: []),
-						"",
-						blocks,
-					].join("\n");
+					if (signal?.aborted) runtime.fallbackAwaitDelivery(startedIds);
+					else runtime.completeAwaitDelivery(startedIds);
+					const text = failureLines.length > 0
+						? `${blocks}\n\nLaunch failures:\n${failureLines.join("\n")}`
+						: blocks;
 					return {
 						content: [{ type: "text", text }],
 						details: makeDetails("parallel", true)(results),
@@ -511,10 +504,8 @@ export function registerSubagentTool(pi: ExtensionAPI, runtime: SubagentRuntime)
 					};
 				}
 				const text = [
-					`Started ${started} background subagent${started === 1 ? "" : "s"}: ${startedRefs.join(", ")}. They run in the background and never block you — dispatch more independent units now or keep working; each result resumes you automatically when you are idle.`,
-					...(failureLines.length > 0
-						? [`${failureLines.length} task${failureLines.length === 1 ? "" : "s"} failed before launch:`, ...failureLines]
-						: []),
+					phaseLeaseReceipt(startedIds),
+					...(failureLines.length > 0 ? ["Launch failures:", ...failureLines] : []),
 				].join("\n") + queuePacingNote();
 				return {
 					content: [{ type: "text", text }],
@@ -534,21 +525,26 @@ export function registerSubagentTool(pi: ExtensionAPI, runtime: SubagentRuntime)
 					singleCatalogAgent ? isWriteCapableAgent(singleCatalogAgent) : undefined,
 					singleCatalogAgent?.isolation,
 				),
+				{ deliveryRoute: params.wait ? "await" : "background" },
 			);
 			if (result.exitCode !== -1) {
 				throw new Error(getResultOutput(result));
 			}
-			const runRef = result.runId === undefined ? result.agent : `#${result.runId} ${result.agent}`;
 			if (params.wait && result.runId !== undefined) {
 				const blocks = await awaitRunResults(runtime, [result.runId], signal, config.maxResultLines, ctx.cwd, makeProgress(makeDetails("single", true)([result])));
+				if (signal?.aborted) runtime.fallbackAwaitDelivery([result.runId]);
+				else runtime.completeAwaitDelivery([result.runId]);
 				return {
-					content: [{ type: "text", text: `Started ${runRef} and waited in-turn.\n\n${blocks}` }],
+					content: [{ type: "text", text: blocks }],
 					details: makeDetails("single", true)([result]),
 					...toolUsage(runtime, [result.runId]),
 				};
 			}
 			return {
-				content: [{ type: "text", text: `Started ${runRef} in the background. It never blocks you — dispatch more independent units now or keep working; its result resumes you automatically when you are idle.${queuePacingNote()}` }],
+				content: [{
+					type: "text",
+					text: phaseLeaseReceipt(result.runId === undefined ? [] : [result.runId]) + queuePacingNote(),
+				}],
 				details: makeDetails("single", true)([result]),
 			};
 

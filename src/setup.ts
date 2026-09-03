@@ -15,14 +15,12 @@ import {
 	BUILTIN_AGENT_NAMES,
 	DEFAULT_CONFIG,
 	DEFAULT_ENABLED_AGENTS,
-	REQUIRED_ENABLED_AGENTS,
 	agentProfile,
 	errorMessage,
 	getConfigPath,
 	loadConfig,
 	roleThinkingLevel,
 	saveConfig,
-	withRequiredAgents,
 	type SubagentsConfig,
 	type ThinkingLevel,
 } from "./config.ts";
@@ -52,10 +50,9 @@ const THINKING_LEVEL_HINTS: Record<ThinkingLevel, string> = {
 function agentPickerItems(): Array<{ value: string; label: string; description: string }> {
 	return BUILTIN_AGENT_NAMES.map((name) => {
 		const profile = AGENT_PROFILES[name];
-		const required = (REQUIRED_ENABLED_AGENTS as readonly string[]).includes(name);
 		return {
 			value: name,
-			label: required ? `${name} (always on)` : name,
+			label: name,
 			description: `${profile.summary} — ${profile.remark}`,
 		};
 	});
@@ -82,20 +79,11 @@ async function pickEnabledAgents(
 	const picked = await promptSelectMany(
 		ctx,
 		"Which agents should run?",
-		"Each line is a role and its job. All three stay on. Space toggles • Enter confirms • Esc back",
+		"Each line is a role and its job. Space toggles • Enter confirms • Esc back",
 		agentPickerItems(),
 		current,
 	);
-	if (picked === undefined) return undefined;
-	const enabled = withRequiredAgents(picked);
-	const forced = REQUIRED_ENABLED_AGENTS.filter((name) => !picked.includes(name));
-	if (forced.length > 0) {
-		ctx.ui.notify(
-			`pi-subagents: ${forced.join(", ")} stay enabled — the shipped team stays on.`,
-			"info",
-		);
-	}
-	return enabled;
+	return picked;
 }
 
 async function pickConfiguredModel(
@@ -251,8 +239,7 @@ function applyThinkingChoice(
 async function introduceSetup(ctx: ExtensionCommandContext): Promise<boolean> {
 	const lines = BUILTIN_AGENT_NAMES.map((name) => {
 		const profile = AGENT_PROFILES[name];
-		const required = (REQUIRED_ENABLED_AGENTS as readonly string[]).includes(name) ? " · always on" : "";
-		return `${name} — ${profile.summary}${required}. ${profile.remark}`;
+		return `${name} — ${profile.summary}. ${profile.remark}`;
 	});
 	ctx.ui.notify(
 		`pi-subagents: ${lines.join(" ")} Pick a model for each role next. Thinking defaults per role (scout low, artisan high, steward medium); change it on a role when you want.`,
@@ -281,7 +268,6 @@ async function runFullSetup(ctx: ExtensionCommandContext, configPath: string, ba
 
 	const next: SubagentsConfig = {
 		enabledAgents: enabled,
-		knownAgents: [...BUILTIN_AGENT_NAMES],
 		agentModels,
 		agentThinkingLevels: keepAgentEntries(base.agentThinkingLevels, enabled),
 		maxResultLines: base.maxResultLines,
@@ -299,7 +285,7 @@ async function runFullSetup(ctx: ExtensionCommandContext, configPath: string, ba
 async function runMenu(ctx: ExtensionCommandContext, configPath: string, config: SubagentsConfig): Promise<void> {
 	while (true) {
 		const choice = await ctx.ui.select("pi-subagents settings", [
-			"Enable/disable agents — scout, artisan, and steward stay on",
+			"Enable/disable agents — choose which roles are available",
 			"Configure an agent — model and thinking, with its job on the row",
 			"Full re-setup — walk through the team and pick models again",
 		]);

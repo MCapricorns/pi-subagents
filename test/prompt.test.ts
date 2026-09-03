@@ -2,7 +2,11 @@ import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 import type { AgentConfig } from "../src/agents.ts";
 import { loadBuiltinAgents } from "../src/agents.ts";
-import { buildDelegationDirective } from "../src/prompt.ts";
+import {
+	buildDelegationDirective,
+	formatPhaseLeaseReceipt,
+	type PhaseLeaseSource,
+} from "../src/prompt.ts";
 
 function agent(name: string): AgentConfig {
 	return {
@@ -14,53 +18,64 @@ function agent(name: string): AgentConfig {
 	};
 }
 
+function lease(partial: Partial<PhaseLeaseSource> & Pick<PhaseLeaseSource, "id">): PhaseLeaseSource {
+	return {
+		agentName: "scout",
+		task: "Trace the routing flow across src modules",
+		cwd: process.cwd(),
+		state: "running",
+		...partial,
+	};
+}
+
 describe("buildDelegationDirective", () => {
-	it("returns empty string when there are no agents", () => {
+	it("omits the directive when no role or lease exists", () => {
 		assert.equal(buildDelegationDirective([]), "");
 	});
 
-	it("lists the catalog and keeps leaf-brief rules", () => {
-		const directive = buildDelegationDirective([agent("scout"), agent("artisan"), agent("steward")]);
-		assert.ok(directive.includes("- scout: scout description"));
-		assert.ok(directive.includes("- artisan: artisan description"));
-		assert.ok(directive.includes("- steward: steward description"));
-		assert.ok(directive.includes("isolated leaf Pi child processes"));
-		assert.ok(directive.includes("goal, exact paths, constraints, expected output"));
-		assert.ok(directive.includes("cannot delegate"));
-		assert.ok(directive.includes("subagent_control resume"));
-	});
-
-	it("keeps the default injected directive below the prompt budget", () => {
+	it("keeps routing cost-aware and phase-owned", () => {
 		const directive = buildDelegationDirective(loadBuiltinAgents());
-		assert.ok(directive.length < 3_200, `directive is ${directive.length} characters`);
+		assert.match(directive, /Each child starts a paid context/u);
+		assert.match(directive, /Cluster related reconnaissance into one scout brief/u);
+		assert.match(directive, /One owner per phase/u);
+		assert.match(directive, /main may inspect its result, citations, diff/u);
+		assert.doesNotMatch(directive, /Delegate aggressively|dispatch more|keep working/u);
+		assert.doesNotMatch(directive, /Active phase leases:/u);
 	});
 
-	it("routes code changes to artisan and tidy work to steward only when needed", () => {
-		const directive = buildDelegationDirective([agent("scout"), agent("artisan"), agent("steward")]);
-		assert.ok(directive.includes("when the unit is a code change, default it to `artisan`"));
-		assert.ok(directive.includes("split a broad question into parallel scouts"));
-		assert.ok(directive.includes("leads, never proof"));
-		assert.ok(directive.includes("brief it as the edit authorization for implement, fix, refactor, or test"));
-		assert.ok(directive.includes("dispatch only when the work is cleanup, documentation sync, or merging named result artifacts"));
-		assert.ok(directive.includes("do not invent a tidy pass"));
-		assert.ok(directive.includes("pass the result-artifact paths to one steward"));
-		assert.ok(!directive.includes("`explorer`"));
-		assert.ok(!directive.includes("`executor`"));
+	it("shows routing only for enabled roles", () => {
+		const directive = buildDelegationDirective([agent("artisan")]);
+		assert.match(directive, /`artisan`:/u);
+		assert.doesNotMatch(directive, /`scout`:|`steward`:/u);
 	});
 
-	it("omits a role's routing line when that role is disabled", () => {
-		const artisanOnly = buildDelegationDirective([agent("artisan")]);
-		assert.ok(!artisanOnly.includes("`scout`"));
-		assert.ok(!artisanOnly.includes("`steward`"));
-		assert.ok(artisanOnly.includes("`artisan`"));
+	it("renders only bounded active and settling leases", () => {
+		const directive = buildDelegationDirective(loadBuiltinAgents(), [
+			lease({ id: 11, task: "Map dispatch ownership" }),
+			lease({ id: 12, state: "completed" }),
+			lease({ id: 13, agentName: "artisan", state: "completed", lifecycleOperation: "settle", task: "Apply focused edit" }),
+			lease({ id: 14 }),
+			lease({ id: 15 }),
+			lease({ id: 16, state: "failed" }),
+		]);
+		assert.match(directive, /#11 broad reconnaissance \(scout, running\): Map dispatch ownership/u);
+		assert.match(directive, /#13 implementation and targeted checks \(artisan, settling\): Apply focused edit/u);
+		assert.match(directive, /2 more active leases omitted/u);
+		assert.doesNotMatch(directive, /#12|#14|#15|#16/u);
 	});
 
-	it("preserves non-blocking dispatch and honest verification", () => {
+	it("keeps launch receipts short and explicit", () => {
+		const receipt = formatPhaseLeaseReceipt([
+			lease({ id: 21, agentName: "artisan", task: "Implement duplicate rejection" }),
+		]);
+		assert.match(receipt, /^Active phase lease:/u);
+		assert.match(receipt, /#21 implementation and targeted checks/u);
+		assert.match(receipt, /Do not duplicate it/u);
+		assert.doesNotMatch(receipt, /never blocks|dispatch more|keep working/u);
+	});
+
+	it("stays within the prompt budget", () => {
 		const directive = buildDelegationDirective(loadBuiltinAgents());
-		assert.ok(directive.includes("Dispatch never blocks or ends your turn"));
-		assert.ok(directive.includes("Never report an unrun check as passed"));
-		assert.ok(!directive.includes("REVIEW_"));
-		assert.ok(!directive.includes("vision"));
-		assert.ok(!directive.includes("isolation"));
+		assert.ok(directive.length < 2_200, `directive is ${directive.length} characters`);
 	});
 });

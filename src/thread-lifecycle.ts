@@ -11,7 +11,7 @@ import type { ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { existsSync } from "node:fs";
 import { rm } from "node:fs/promises";
 import { realpath } from "node:fs/promises";
-import { join, resolve, dirname } from "node:path";
+import { join, resolve } from "node:path";
 import {
 	discoverAgents,
 	isWriteCapableAgent,
@@ -27,7 +27,6 @@ import {
 } from "./config.ts";
 import {
 	isCurrentBoot,
-	migrateLegacyThreadsManifest,
 	readThreadRecords,
 	referencedDurablePaths,
 	removeThreadRecord,
@@ -35,7 +34,7 @@ import {
 	pruneThreadRecords,
 	restoredResultFromSummary,
 	threadRecordFromThread,
-	ThreadRecord,
+	type ThreadRecord,
 	upsertThreadRecord,
 } from "./durable.ts";
 import {
@@ -54,13 +53,15 @@ import {
 	resolveThinkingLevel,
 } from "./models.ts";
 import { monitor } from "./monitor.ts";
+import { findDuplicateActiveDispatch } from "./prompt.ts";
 import { persistRecoveryRecords, recoveryRecordFromFinalization } from "./recovery.ts";
+import { emptyUsage } from "./rpc-run.ts";
 import type { SubagentRuntime, SubagentThread, ThreadState } from "./runtime.ts";
 import { forkRetainedSession } from "./session-fork.ts";
 import {
 	buildResumePrompt,
 	getProjectRoot,
-	PROJECT_ROOTS_DIR_NAME,
+	getSubagentsRoot,
 	RpcRunControl,
 	isFailedResult,
 	isModelLevelFailure,
@@ -273,6 +274,8 @@ export interface StartBackgroundOptions {
 	environment?: DispatchEnvironment;
 	seed?: SessionSeed;
 	resumeReservation?: ResumeReservation;
+	/** Chosen by the tool call before the queue can start a fast child. */
+	deliveryRoute?: "background" | "await";
 }
 
 export type StartBackgroundInternal = (
@@ -372,6 +375,7 @@ export function createBackgroundDispatcher(options: BackgroundDispatcherOptions)
 			environment,
 			seed,
 			resumeReservation,
+			deliveryRoute = "background",
 		} = startOptions;
 		if (!runtime.sessionActive) {
 			return failedStartResult(agentName, task, "Parent session shut down before this subagent generation could start.");
@@ -396,33 +400,31 @@ export function createBackgroundDispatcher(options: BackgroundDispatcherOptions)
 		}
 
 		const originalCwd = resolve(cwd ?? runCtx.cwd);
+		if (!existingThread) {
+			const duplicate = findDuplicateActiveDispatch(runtime.threads.values(), task, originalCwd);
+			if (duplicate) {
+				return failedStartResult(
+					agentName,
+					task,
+					`Duplicate active dispatch matches run #${duplicate.id} (${duplicate.agentName}). Use that logical thread instead; resume #${duplicate.id} when it is eligible.`,
+				);
+			}
+		}
 		const projectRoot = getProjectRoot(runtime.configPath, originalCwd);
 		const sessionsRoot = join(projectRoot, "sessions");
 		const worktreesRoot = join(projectRoot, "worktrees");
 		const scratchRoot = join(projectRoot, "tmp");
 		const previousWorktree = existingThread?.worktree;
 		let worktree = seed?.worktree ?? previousWorktree;
-		if (isolation === "worktree") {
-			if (worktree && worktree.state !== "active") {
-				return {
-					...failedStartResult(agentName, task, `Run #${existingThread?.id ?? "?"} has no active continuation worktree.`),
-					isolation,
-					integrationStatus: worktree.state === "finalizing" ? "pending" : worktree.state,
-				};
-			}
-			if (!worktree) {
-				try {
-					worktree = await createWorktreeIsolation(originalCwd, { tempBaseDir: worktreesRoot });
-				} catch (error) {
-					return {
-						...failedStartResult(agentName, task, error instanceof Error ? error.message : String(error)),
-						isolation,
-					};
-				}
-			}
+		if (isolation === "worktree" && worktree && worktree.state !== "active") {
+			return {
+				...failedStartResult(agentName, task, `Run #${existingThread?.id ?? "?"} has no active continuation worktree.`),
+				isolation,
+				integrationStatus: worktree.state === "finalizing" ? "pending" : worktree.state,
+			};
 		}
-		const executionCwd = worktree?.cwd ?? originalCwd;
-		const worktreeGroup = worktree ? worktreeGroupId(worktree) : undefined;
+		let executionCwd = worktree?.cwd ?? originalCwd;
+		let worktreeGroup = worktree ? worktreeGroupId(worktree) : undefined;
 		// A resume re-runs at the strength its dispatch asked for, so the retained
 		// request survives generations (and, via the durable record, restarts).
 		const resolvedRoute = resolveDispatchModelRoute(agent, runConfig, runCtx);
@@ -440,6 +442,7 @@ export function createBackgroundDispatcher(options: BackgroundDispatcherOptions)
 			isolation,
 			...(worktreeGroup ? { worktreeId: worktreeGroup } : {}),
 		});
+		runtime.claimRunDelivery(runId, deliveryRoute);
 		const generation = (existingThread?.generation ?? 0) + 1;
 		const pending: SingleResult = {
 			...queuedResult(route.agent, task, thinkingLevel),
@@ -523,11 +526,12 @@ export function createBackgroundDispatcher(options: BackgroundDispatcherOptions)
 			};
 			runtime.threads.set(runId, thread);
 		}
-		installThreadLifecycle(thread, {
+		const installCurrentLifecycle = (): void => installThreadLifecycle(thread, {
 			runtime,
 			runCtx,
 			startBackground: (...args) => startBackground(...args),
 		});
+		if (isolation === "shared" || worktree) installCurrentLifecycle();
 
 		const onLive = makeLiveHandler(runId, generation);
 		// Shared write-capable runs serialize on the repository lane so their
@@ -536,6 +540,20 @@ export function createBackgroundDispatcher(options: BackgroundDispatcherOptions)
 		const reserveManagedLane = isolation === "shared" && isWriteCapableAgent(agent);
 		const runGeneration = async (backgroundSignal: AbortSignal, controller: AbortController): Promise<void> => {
 				if (runtime.threads.get(runId)?.generation !== generation) return;
+				if (isolation === "worktree" && !worktree) {
+					const prepared = await createWorktreeIsolation(originalCwd, { tempBaseDir: worktreesRoot });
+					if (runtime.threads.get(runId)?.generation !== generation || backgroundSignal.aborted) {
+						await prepared.discard().catch(() => undefined);
+						return;
+					}
+					worktree = prepared;
+					executionCwd = prepared.cwd;
+					worktreeGroup = worktreeGroupId(prepared);
+					thread.worktree = prepared;
+					thread.executionCwd = executionCwd;
+					monitor.setIsolation(runId, "worktree", "pending", worktreeGroup);
+					installCurrentLifecycle();
+				}
 				// The generation body owns a process slot from here (a lane wait, if
 				// any, was granted above). Recording the transition synchronously keeps
 				// every "queued" surface truthful: only runs still pending in the pool
@@ -649,10 +667,10 @@ export function createBackgroundDispatcher(options: BackgroundDispatcherOptions)
 					thread.lifecycleOperation === "settle" &&
 					!thread.retired;
 				try {
-				// For isolated writers the apply runs only after the child settled,
-				// so this lifecycle owner integrates the complete settled state
-				// exactly once under the repository lane.
-				await thread.finalizeIsolation(generation, result);
+					// The child process has exited. Isolated Git finalization remains
+					// lifecycle-owned and awaited, but no longer consumes a process slot.
+					if (isolation === "worktree") runtime.backgroundQueue.suspend(controller);
+					await thread.finalizeIsolation(generation, result);
 				if (!ownsSettlement()) return;
 
 				const failed = isFailedResult(result);
@@ -683,41 +701,33 @@ export function createBackgroundDispatcher(options: BackgroundDispatcherOptions)
 					block: modelLevel
 						? `${formatCompletionBlock(result, runConfig.maxResultLines, { resultRoot: projectResultsRoot(runtime.configPath, result.projectCwd ?? originalCwd) })}\n\n${modelLevelTakeoverNote(result, { runId })}`
 						: formatCompletionBlock(result, runConfig.maxResultLines, { resultRoot: projectResultsRoot(runtime.configPath, result.projectCwd ?? originalCwd) }),
-					triggerTurn: true,
 					usage: result.usage,
 				};
-					if (modelLevel) {
-						const detail = result.errorMessage?.trim() || "model unavailable or broken";
-						runCtx.ui.notify(`✗ ${result.agent} dispatch failed: ${detail} — task handed to the main window`, "error");
-					} else if (dispatchFailed) {
-						runCtx.ui.notify(`✗ ${result.agent} dispatch failed: ${result.errorMessage ?? "dispatch crashed"}`, "error");
-					}
-					if (failed) {
-						runtime.sendCompletionGroup([completion]);
-						runtime.completionBatcher.flush();
-					} else {
-						runtime.completionBatcher.push(completion);
-					}
+				if (modelLevel) {
+					const detail = result.errorMessage?.trim() || "model unavailable or broken";
+					runCtx.ui.notify(`✗ ${result.agent} dispatch failed: ${detail} — task handed to the main window`, "error");
+				} else if (dispatchFailed) {
+					runCtx.ui.notify(`✗ ${result.agent} dispatch failed: ${result.errorMessage ?? "dispatch crashed"}`, "error");
+				}
+				runtime.publishRunCompletion(runId, completion, failed);
 				} finally {
 					if (ownsSettlement()) thread.lifecycleOperation = undefined;
 				}
 			};
 		const queuedGeneration = reserveManagedLane
 			? async (backgroundSignal: AbortSignal, controller: AbortController): Promise<void> => {
-					// This task may spend its whole life waiting for the repository
-					// lane (every shared write-capable generation serializes on it).
-					// Holding a process slot while only waiting let a batch of shared
-					// writers park the entire pool and starve independent read-only
-					// dispatches that could have started immediately, so the slot is
-					// released up front; the lane itself still serializes same-repo
-					// writers, and abort/quiesce guarantees are unchanged.
+					// Waiting for repository serialization must not consume a process
+					// slot. Once the lane is granted, reacquire through the same FIFO
+					// scheduler before any child process can spawn.
 					runtime.backgroundQueue.suspend(controller);
-					// A lane wait is write serialization, not slot pacing: the model
-					// must never read it as an exhausted pool.
 					monitor.setWaitReason(runId, "repository-lane");
 					await runInManagedRepositoryLane(
 						originalCwd,
-						() => runGeneration(backgroundSignal, controller),
+						async () => {
+							monitor.setWaitReason(runId, "process-slot");
+							if (!(await runtime.backgroundQueue.acquire(controller))) return;
+							await runGeneration(backgroundSignal, controller);
+						},
 						backgroundSignal,
 					);
 				}
@@ -776,6 +786,7 @@ export function createBackgroundDispatcher(options: BackgroundDispatcherOptions)
 						};
 					thread.lastResult = crashed;
 					runtime.retainSession(crashed);
+					if (isolation === "worktree" && thread.worktree) runtime.backgroundQueue.suspend(thread.queueController);
 					await thread.finalizeIsolation(generation, crashed);
 					if (!ownsSettlement()) return;
 					thread.state = "failed";
@@ -789,15 +800,11 @@ export function createBackgroundDispatcher(options: BackgroundDispatcherOptions)
 					if (!runtime.sessionActive || !ownsSettlement()) return;
 					try {
 						runCtx.ui.notify(`✗ ${crashed.agent} dispatch failed: ${crashed.errorMessage}`, "error");
-						runtime.sendCompletionGroup([
-							{
-								agent: crashed.agent,
-								block: formatCompletionBlock(crashed, runConfig.maxResultLines, { resultRoot: projectResultsRoot(runtime.configPath, crashed.projectCwd ?? originalCwd) }),
-								triggerTurn: true,
-								usage: crashed.usage,
-							},
-						]);
-						runtime.completionBatcher.flush();
+						runtime.publishRunCompletion(runId, {
+							agent: crashed.agent,
+							block: formatCompletionBlock(crashed, runConfig.maxResultLines, { resultRoot: projectResultsRoot(runtime.configPath, crashed.projectCwd ?? originalCwd) }),
+							usage: crashed.usage,
+						}, true);
 					} catch {
 						/* a second delivery failure must not throw through the queue */
 					}
@@ -977,6 +984,9 @@ export function installThreadLifecycle(thread: SubagentThread, deps: ThreadLifec
 			return failedStartResult(thread.agentName, thread.task, "resume objective must be non-blank when provided.");
 		}
 		if (thread.retired) return failedStartResult(thread.agentName, thread.task, `Run #${runId} was retired by subagent_stop.`);
+		if (thread.resumeUnavailableReason) {
+			return failedStartResult(thread.agentName, thread.task, thread.resumeUnavailableReason);
+		}
 		if (thread.lifecycleOperation) {
 			return failedStartResult(thread.agentName, thread.task, `Run #${runId} is already resuming.`);
 		}
@@ -1237,16 +1247,53 @@ export async function restoreDurableThreads(runtime: SubagentRuntime): Promise<n
 		const worktree = record.worktree
 			? await restoreWorktreeIsolation(record.worktree).catch(() => undefined)
 			: undefined;
-		// A worktree thread whose isolated filesystem is gone cannot continue its
-		// isolation invariant; surface it as failed instead of pretending.
-		const state: ThreadState = worktree
-			? "parked"
-			: record.isolation === "worktree" && record.worktree
-				? "failed"
-				: "parked";
-		const thread = createRestoredThread(runtime, record, worktree, state);
+		const restorationFailed = record.isolation === "worktree" && record.worktree !== undefined && !worktree;
+		const thread = createRestoredThread(runtime, record, worktree, restorationFailed ? "failed" : "parked");
 		runtime.threads.set(record.runId, thread);
 		runtime.sessionDirs.add(record.sessionDir!);
+		if (restorationFailed) {
+			const reason = `Run #${record.runId}'s recorded worktree could not be restored; isolated edits may be unavailable. The retained session and durable record were kept, but this thread cannot be resumed.`;
+			thread.resumeUnavailableReason = reason;
+			thread.restorationRecord = record;
+			const previous = restoredResultFromSummary(record);
+			const failed: SingleResult = {
+				agent: record.agentName,
+				task: record.task,
+				exitCode: 1,
+				messages: previous?.messages ?? [],
+				stderr: reason,
+				usage: previous?.usage ?? emptyUsage(),
+				model: previous?.model,
+				thinking: previous?.thinking,
+				stopReason: "error",
+				errorMessage: reason,
+				dispatchFailed: true,
+				sessionId: record.sessionId,
+				sessionDir: record.sessionDir,
+				projectCwd: record.cwd,
+				runId: record.runId,
+				isolation: "worktree",
+				integrationStatus: "retained",
+			};
+			thread.lastResult = failed;
+			runtime.registerRunResult(record.runId, failed);
+			monitor.restoreRun({
+				id: record.runId,
+				agent: record.agentName,
+				task: record.task,
+				status: "failed",
+				elapsedMs: record.elapsedMs,
+				isolation: "worktree",
+				integrationStatus: "retained",
+			});
+			runtime.claimRunDelivery(record.runId, "background");
+			runtime.publishRunCompletion(record.runId, {
+				agent: record.agentName,
+				block: `### Subagent restoration failed: #${record.runId} ${record.agentName}\n\n${reason}`,
+				usage: failed.usage,
+			}, true);
+			continue;
+		}
 		monitor.restoreRun({
 			id: record.runId,
 			agent: record.agentName,
@@ -1268,9 +1315,9 @@ export async function restoreDurableThreads(runtime: SubagentRuntime): Promise<n
 	return restoredIds;
 }
 
-/** Load-time durable bootstrap: restore threads, age out expired records, and
+/** Session-start durable bootstrap: restore threads, age out expired records, and
  * sweep leaked temp/state directories. Every stage is best-effort so a broken
- * manifest never blocks extension registration.
+ * manifest never blocks the session.
  *
  * Restore is published on the runtime as `durableRestore` before this returns,
  * so callers that must see restored threads await that pass alone and never the
@@ -1279,9 +1326,6 @@ export async function restoreDurableThreads(runtime: SubagentRuntime): Promise<n
 export function bootstrapDurableState(runtime: SubagentRuntime): Promise<void> {
 	const restore = (async () => {
 		try {
-			// Records from a pre-per-project manifest must land in their project
-			// roots before restore reads anything.
-			await migrateLegacyThreadsManifest(runtime.configPath);
 			runtime.restoredRunIds = await restoreDurableThreads(runtime);
 		} catch {
 			/* restore is best-effort */
@@ -1295,7 +1339,7 @@ export function bootstrapDurableState(runtime: SubagentRuntime): Promise<void> {
 		} catch {
 			/* retention is best-effort */
 		}
-		const projectRoots = join(dirname(runtime.configPath), PROJECT_ROOTS_DIR_NAME);
+		const projectRoots = getSubagentsRoot(runtime.configPath);
 		try {
 			sweepProjectTempDirs(projectRoots);
 		} catch {

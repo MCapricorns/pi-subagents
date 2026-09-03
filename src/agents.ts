@@ -39,7 +39,7 @@ const SHELL_TOOL_NAMES = new Set(["bash", "powershell"]);
  * Only used to break a tie when the parent has both enabled — a parent running a
  * single shell is followed as configured, whatever it is. */
 const NATIVE_SHELL_TOOL = process.platform === "win32" ? "powershell" : "bash";
-const PI_BUILTIN_TOOL_NAMES = new Set(["read", "bash", "powershell", "edit", "write", "grep", "find", "ls"]);
+const READ_ONLY_TOOL_NAMES = new Set(["read", "grep", "find", "ls"]);
 export const SUBAGENT_TOOL_NAMES = [
 	"subagent",
 	"subagent_control",
@@ -48,21 +48,26 @@ export const SUBAGENT_TOOL_NAMES = [
 const SUBAGENT_TOOL_NAME_SET = new Set<string>(SUBAGENT_TOOL_NAMES);
 
 /** Resolve every child against the parent's live tool selection. Roles without
- * an allowlist inherit the complete active set. Explicit lists keep only their
- * declared Pi built-ins, adapt an existing shell slot, and gain active extension/
- * SDK tools. pi-subagents controls are always removed so children stay leaves.
+ * an allowlist inherit the complete active set. Explicit lists are strict: they
+ * keep only declared tools that are active in the parent, with shell adaptation.
+ * Active extension/SDK tools are never added implicitly. pi-subagents controls
+ * are always removed so children stay leaves.
  *
  * A declared shell is one slot, so it resolves to one shell: the parent's, and
  * the host-native one when the parent runs both. A child never inherits a shell
- * the parent does not have — Pi's `--tools` allowlist overrides the child's own
- * `defaultTools` setting, so naming a shell the user disabled would hand it a
- * terminal they deliberately turned off. */
+ * the parent does not have. */
 export function resolveAgentTools(
 	agent: AgentConfig,
 	activeToolNames: readonly string[],
 ): AgentConfig {
 	const active = [...new Set(activeToolNames)].filter((tool) => !SUBAGENT_TOOL_NAME_SET.has(tool));
-	if (!agent.tools) return { ...agent, tools: active };
+	if (!agent.tools) {
+		return { ...agent, tools: agent.name === "scout" ? active.filter((tool) => READ_ONLY_TOOL_NAMES.has(tool)) : active };
+	}
+	const declaredTools = agent.name === "scout"
+		? agent.tools.filter((tool) => READ_ONLY_TOOL_NAMES.has(tool))
+		: agent.tools;
+	const activeSet = new Set(active);
 
 	const parentShellTools = active.filter((tool) => SHELL_TOOL_NAMES.has(tool));
 	const activeShellTools = parentShellTools.length > 1 && parentShellTools.includes(NATIVE_SHELL_TOOL)
@@ -70,32 +75,30 @@ export function resolveAgentTools(
 		: parentShellTools;
 	const tools: string[] = [];
 	let shellAdapted = false;
-	for (const tool of agent.tools) {
+	for (const tool of declaredTools) {
+		if (SUBAGENT_TOOL_NAME_SET.has(tool)) continue;
 		if (SHELL_TOOL_NAMES.has(tool)) {
 			if (!shellAdapted) tools.push(...activeShellTools);
 			shellAdapted = true;
-		} else if (PI_BUILTIN_TOOL_NAMES.has(tool) && !tools.includes(tool)) {
+		} else if (activeSet.has(tool) && !tools.includes(tool)) {
 			tools.push(tool);
 		}
-	}
-	for (const tool of active) {
-		if (PI_BUILTIN_TOOL_NAMES.has(tool) || tools.includes(tool)) continue;
-		tools.push(tool);
 	}
 	return { ...agent, tools };
 }
 
 /** Filesystem-write capability used by worktree admission and repository-lane
- * safety. Built-in read-only role names remain read-only even when overridden;
- * an omitted tool list inherits the parent's active set, so it counts as
- * write-capable unless the parent itself is read-only. */
+ * safety. Scout is a hard read-only boundary even with a project override.
+ * Omitted allowlists inherit arbitrary active tools and are therefore mutable.
+ * For explicit allowlists, only the canonical retrieval tools are proven
+ * read-only; shells and unknown custom tools are conservatively mutable. */
 export function isWriteCapableAgent(
 	agent: Pick<AgentConfig, "name" | "tools">,
 ): boolean {
 	if (agent.name === "scout") return false;
 	if (agent.name === "artisan" || agent.name === "steward") return true;
 	if (!agent.tools) return true;
-	return agent.tools.includes("edit") || agent.tools.includes("write");
+	return agent.tools.some((tool) => !READ_ONLY_TOOL_NAMES.has(tool));
 }
 
 const here = dirname(fileURLToPath(import.meta.url));

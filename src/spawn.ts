@@ -115,16 +115,18 @@ export const RESULT_ARTIFACT_MAX_FILES_PER_PROJECT = 50;
 // Explicit current prefix plus the strict timestamp/token convention used by 1.1.0.
 const RESULT_ARTIFACT_NAME = /^(?:pi-subagent-\d{13,}-[0-9a-f]{12}|\d{13,}-[a-z0-9]{6})-[\w.-]+\.md$/;
 
-/** Name of the single per-extension root under the pi home directory that
- * holds every project-scoped artifact (sessions, worktrees, result excerpts).
- * Nothing long-lived is written to the OS temp directory. */
+/** Name of the single internal-state root under the pi agent directory. */
 export const PROJECT_ROOTS_DIR_NAME = "ferris-pi-subagents";
+
+export function getSubagentsRoot(configPath: string): string {
+	return join(dirname(configPath), PROJECT_ROOTS_DIR_NAME);
+}
 
 /** Per-project directory that groups every durable artifact of one checkout:
  * `<pi home>/ferris-pi-subagents/<project-slug-hash>/{sessions,worktrees,results}`.
  * Callers join the kind-specific subdirectory themselves. */
 export function getProjectRoot(configPath: string, cwd?: string): string {
-	return join(dirname(configPath), PROJECT_ROOTS_DIR_NAME, resultArtifactProjectKey(cwd));
+	return join(getSubagentsRoot(configPath), resultArtifactProjectKey(cwd));
 }
 
 interface ResultArtifactRetentionOptions {

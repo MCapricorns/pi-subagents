@@ -1,21 +1,16 @@
-/** Session-start recovery, stale-config migration, and progress-surface installation. */
+/** Session-start recovery, stale-model cleanup, and progress-surface installation. */
 
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { existsSync } from "node:fs";
 import { FIRST_RUN_SETUP_HINT, loadConfig, saveConfig } from "./config.ts";
 import { availableModelsInScope, filterUnavailableModelOverrides } from "./models.ts";
-import { announceRecoveryRecords } from "./recovery.ts";
+import { announceRecoveryRecords, relocateRecoveryManifest } from "./recovery.ts";
 import type { SubagentRuntime } from "./runtime.ts";
 import { installActiveRunsStatus } from "./status.ts";
 import { installActiveRunsWidget } from "./widget.ts";
 
-/**
- * One-time-per-stale-override migration: keep agent model selections Pi still
- * reports as available, drop the rest back to dynamic main-model routing, and
- * tell the user what was removed. Saving the cleaned config is what makes it
- * one-time — the dropped refs no longer exist to re-trigger the notice.
- */
-async function migrateUnavailableAgentModels(
+/** Drop unavailable model overrides back to dynamic main-model routing. */
+async function removeUnavailableAgentModels(
 	ctx: { ui: { notify: (message: string, kind: "info" | "warning" | "error") => void } } & Parameters<typeof availableModelsInScope>[0],
 	runtime: SubagentRuntime,
 ): Promise<void> {
@@ -32,7 +27,7 @@ async function migrateUnavailableAgentModels(
 			"warning",
 		);
 	} catch {
-		/* migration failures are non-fatal */
+		/* stale-model cleanup is non-fatal */
 	}
 }
 
@@ -41,20 +36,11 @@ export function registerAnnouncements(pi: ExtensionAPI, runtime: SubagentRuntime
 		if (!existsSync(runtime.configPath)) {
 			ctx.ui.notify(`pi-subagents: ${FIRST_RUN_SETUP_HINT}`, "info");
 		}
+		await relocateRecoveryManifest(runtime.configPath);
 		await announceRecoveryRecords(runtime.configPath, ctx);
-		await migrateUnavailableAgentModels(ctx, runtime);
-		try {
-			const config = await loadConfig(runtime.configPath);
-			if (config.pendingSetupNotice) {
-				ctx.ui.notify(`pi-subagents: ${config.pendingSetupNotice}`, "info");
-				const { pendingSetupNotice: _cleared, ...rest } = config;
-				await saveConfig(rest, runtime.configPath);
-			}
-		} catch {
-			/* notice is non-fatal */
-		}
-		// Restore starts at extension load and session_start fires right behind
-		// it, so without this the notice reports whatever the race left behind.
+		await removeUnavailableAgentModels(ctx, runtime);
+		// Bootstrap also runs on session_start; wait so this notice sees restored
+		// threads instead of racing an empty list.
 		await runtime.durableRestore;
 		if (!runtime.restoredNotified && runtime.restoredRunIds.length > 0) {
 			runtime.restoredNotified = true;

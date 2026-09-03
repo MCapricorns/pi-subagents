@@ -12,7 +12,6 @@ import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-a
 import { rmSync } from "node:fs";
 import { resolveSubagentConcurrency, BackgroundTaskQueue } from "./background.ts";
 import {
-	completionGroupTriggersTurn,
 	createCompletionBatcher,
 	formatActiveRunsFooter,
 	formatCompletionMessage,
@@ -54,6 +53,10 @@ export interface SubagentThread {
 	requestedThinkingLevel?: ThinkingLevel;
 	isolation: IsolationMode;
 	worktree?: WorktreeIsolation;
+	/** Durable restoration failure that permanently blocks continuation. */
+	resumeUnavailableReason?: string;
+	/** Original durable evidence retained when its worktree handle is unavailable. */
+	restorationRecord?: ThreadRecord;
 	state: ThreadState;
 	control: RpcRunControl;
 	queueController?: AbortController;
@@ -104,9 +107,17 @@ export interface SubagentRuntime {
 	 * one-time session-start notice. */
 	restoredRunIds: number[];
 	restoredNotified: boolean;
-	/** Deliver a batch of completion messages to the main window, waking it only
-	 * when the batch needs a turn. */
+	/** Deliver a batch of completion messages as a waking follow-up. */
 	sendCompletionGroup: (items: CompletionMessageItem[]) => void;
+	/** Claim the sole delivery route before a generation can settle. */
+	claimRunDelivery: (runId: number, route: "background" | "await") => void;
+	/** Publish a terminal completion through its claimed route. Immediate failures
+	 * flush older successful batches first. */
+	publishRunCompletion: (runId: number, item: CompletionMessageItem, immediate: boolean) => void;
+	/** Mark awaited results as returned in the tool response. */
+	completeAwaitDelivery: (runIds: readonly number[]) => void;
+	/** Transfer aborted awaited calls back to completion delivery. */
+	fallbackAwaitDelivery: (runIds: readonly number[]) => void;
 	completionBatcher: CompletionBatcher<CompletionMessageItem>;
 	/** Abort controllers per active run, so subagent_stop can cancel a run in-turn. */
 	runControllers: Map<number, AbortController>;
@@ -138,6 +149,11 @@ export function createRuntime(pi: ExtensionAPI, configPath: string): SubagentRun
 	let compactionInFlight = false;
 	let heldCompletions: CompletionMessageItem[] = [];
 
+	const runDeliveries = new Map<number, {
+		route: "background" | "await";
+		completion?: CompletionMessageItem;
+		immediate: boolean;
+	}>();
 	const runtime: SubagentRuntime = {
 		configPath,
 		backgroundQueue,
@@ -148,6 +164,9 @@ export function createRuntime(pi: ExtensionAPI, configPath: string): SubagentRun
 		restoredNotified: false,
 		sendCompletionGroup: (items) => {
 			if (!runtime.sessionActive || items.length === 0) return;
+			// Direct (immediate-failure/stop) delivery must follow successes already
+			// held by the debounce batcher. A batcher's own emit sees an empty batch.
+			runtime.completionBatcher?.flush();
 			if (compactionInFlight) {
 				heldCompletions.push(...items);
 				return;
@@ -170,18 +189,41 @@ export function createRuntime(pi: ExtensionAPI, configPath: string): SubagentRun
 				content: formatCompletionMessage(items) + formatActiveRunsFooter(active),
 				display: true,
 			};
-			if (completionGroupTriggersTurn(items)) {
-				// steer: the result is injected after the current tool call even mid-turn,
-				// or starts a new turn when idle. followUp would sit in the queue until the
-				// whole turn ends — a main agent waiting for the result (sleep/poll) would
-				// never see it delivered, which is exactly the "returned but never woken"
-				// failure mode.
-				pi.sendMessage(message, { deliverAs: "steer", triggerTurn: true });
+			// Follow-ups never interrupt an active parent lane. triggerTurn wakes an
+			// idle parent immediately, while a streaming parent receives the result
+			// only after its current tool/assistant lane settles.
+			pi.sendMessage(message, { deliverAs: "followUp", triggerTurn: true });
+		},
+		claimRunDelivery: (runId, route) => {
+			runDeliveries.set(runId, { route, immediate: false });
+		},
+		publishRunCompletion: (runId, item, immediate) => {
+			const delivery = runDeliveries.get(runId) ?? { route: "background" as const, immediate: false };
+			delivery.completion = item;
+			delivery.immediate = immediate;
+			runDeliveries.set(runId, delivery);
+			if (delivery.route === "await") return;
+			runDeliveries.delete(runId);
+			if (immediate) {
+				runtime.sendCompletionGroup([item]);
 			} else {
-				// No-wake delivery: nextTurn rides along with the next user turn and can
-				// never start a continuation by itself. followUp would auto-continue
-				// whenever pi is already streaming, defeating the opt-out.
-				pi.sendMessage(message, { deliverAs: "nextTurn" });
+				runtime.completionBatcher.push(item);
+			}
+		},
+		completeAwaitDelivery: (runIds) => {
+			for (const runId of runIds) {
+				const delivery = runDeliveries.get(runId);
+				if (delivery?.route === "await") runDeliveries.delete(runId);
+			}
+		},
+		fallbackAwaitDelivery: (runIds) => {
+			for (const runId of runIds) {
+				const delivery = runDeliveries.get(runId);
+				if (!delivery || delivery.route !== "await") continue;
+				delivery.route = "background";
+				if (delivery.completion) {
+					runtime.publishRunCompletion(runId, delivery.completion, delivery.immediate);
+				}
 			}
 		},
 		completionBatcher: undefined as unknown as CompletionBatcher<CompletionMessageItem>,
@@ -279,6 +321,18 @@ export function createRuntime(pi: ExtensionAPI, configPath: string): SubagentRun
 			const records: ThreadRecord[] = [];
 			for (const thread of runtime.threads.values()) {
 				if (thread.retired) continue;
+				if (thread.resumeUnavailableReason) {
+					// Restoration failures retain their durable evidence and session until
+					// an explicit destructive stop retires them.
+					if (thread.restorationRecord) {
+						records.push({
+							...thread.restorationRecord,
+							updatedAt: Date.now(),
+							elapsedMs: thread.elapsedMs,
+						});
+					}
+					continue;
+				}
 				const previous = previousStates.get(thread.id) ?? thread.state;
 				let state: "parked" | "completed" | "failed";
 				if (previous === "completed" || previous === "failed") {
@@ -313,6 +367,7 @@ export function createRuntime(pi: ExtensionAPI, configPath: string): SubagentRun
 			runtime.settledRuns.clear();
 			runtime.settledListeners.clear();
 			runtime.runControllers.clear();
+			runDeliveries.clear();
 			// sessionDirs entries still referenced by records stay owned by the
 			// manifest; the next process re-registers them at restore.
 			runtime.sessionDirs.clear();
@@ -329,13 +384,15 @@ export function createRuntime(pi: ExtensionAPI, configPath: string): SubagentRun
 		compactionInFlight = true;
 	});
 	const releaseHeldCompletions = (): void => {
+		// Drain the debounce while the compaction gate is still closed so newer
+		// pending successes append after completions already held by that gate.
+		runtime.completionBatcher.flush();
 		compactionInFlight = false;
 		if (heldCompletions.length === 0) return;
 		const items = heldCompletions;
 		heldCompletions = [];
-		// Re-enter the normal path now that the gate is open: the active-runs
-		// footer and the steer/nextTurn choice must reflect delivery time, not
-		// the moment the items were held.
+		// Re-enter the normal path now that the gate is open so the active-runs
+		// footer reflects delivery time, not the moment the items were held.
 		runtime.sendCompletionGroup(items);
 	};
 	pi.on("session_compact", releaseHeldCompletions);

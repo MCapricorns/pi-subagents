@@ -397,6 +397,40 @@ interface RpcResponse {
 	data?: unknown;
 }
 
+interface RpcSessionUsage {
+	input: number;
+	output: number;
+	cacheRead: number;
+	cacheWrite: number;
+	cost: number;
+	contextTokens: number;
+}
+
+function sessionUsage(data: unknown): RpcSessionUsage | undefined {
+	if (!data || typeof data !== "object") return undefined;
+	const value = data as { tokens?: Record<string, unknown>; cost?: unknown; contextUsage?: { tokens?: unknown } };
+	if (!value.tokens || typeof value.tokens !== "object") return undefined;
+	const number = (candidate: unknown): number =>
+		typeof candidate === "number" && Number.isFinite(candidate) ? candidate : 0;
+	return {
+		input: number(value.tokens.input),
+		output: number(value.tokens.output),
+		cacheRead: number(value.tokens.cacheRead),
+		cacheWrite: number(value.tokens.cacheWrite),
+		cost: number(value.cost),
+		contextTokens: number(value.contextUsage?.tokens),
+	};
+}
+
+function applySessionUsageDelta(result: RpcSingleResult, before: RpcSessionUsage, after: RpcSessionUsage): void {
+	result.usage.input = Math.max(0, after.input - before.input);
+	result.usage.output = Math.max(0, after.output - before.output);
+	result.usage.cacheRead = Math.max(0, after.cacheRead - before.cacheRead);
+	result.usage.cacheWrite = Math.max(0, after.cacheWrite - before.cacheWrite);
+	result.usage.cost = Math.max(0, after.cost - before.cost);
+	result.usage.contextTokens = after.contextTokens;
+}
+
 class RpcCommandRejectedError extends Error {
 	constructor(message: string) {
 		super(message);
@@ -523,6 +557,8 @@ export async function runRpcAgentAttempt(options: RunRpcAttemptOptions): Promise
 	let abortSettlement: Deferred<void> | undefined;
 	let droppedQueuedCount = 0;
 	let initialPromptResolved = false;
+	let usageBaseline: RpcSessionUsage | undefined;
+	let usageSettlementStarted = false;
 	const initialPrompt = deferred<{ accepted: boolean; error?: Error }>();
 	const pendingRequests = new Map<string, PendingRequest>();
 	const outcome = deferred<void>();
@@ -633,6 +669,23 @@ export async function runRpcAgentAttempt(options: RunRpcAttemptOptions): Promise
 			}
 			return response;
 		});
+	};
+
+	const settleRunWithUsage = async (): Promise<void> => {
+		if (usageSettlementStarted) return;
+		usageSettlementStarted = true;
+		try {
+			if (usageBaseline) {
+				const response = await send({ type: "get_session_stats" });
+				const finalUsage = sessionUsage(response.data);
+				if (finalUsage) applySessionUsageDelta(result, usageBaseline, finalUsage);
+				if (finalUsage) emit({ kind: "usage", usage: { ...result.usage }, model: result.model });
+			}
+		} catch {
+			/* message events remain the generation-safe accounting fallback */
+		} finally {
+			settleRun();
+		}
 	};
 
 	const waitForAbortSettlement = (): Deferred<void> => {
@@ -846,7 +899,7 @@ export async function runRpcAgentAttempt(options: RunRpcAttemptOptions): Promise
 				stable.resolve();
 				return;
 			}
-			settleRun();
+			void settleRunWithUsage();
 		}
 	};
 
@@ -951,6 +1004,11 @@ export async function runRpcAgentAttempt(options: RunRpcAttemptOptions): Promise
 			};
 			try {
 				await send({ type: "get_state" }, readyTimeoutMs);
+				try {
+					usageBaseline = sessionUsage((await send({ type: "get_session_stats" })).data);
+				} catch {
+					/* older or degraded RPC children fall back to message usage */
+				}
 			} catch (error) {
 				const handshakeError = error instanceof Error ? error : new Error(String(error));
 				if (!control?.isStopRequested()) {

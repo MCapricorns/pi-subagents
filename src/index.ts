@@ -78,24 +78,21 @@ export default function (pi: ExtensionAPI): void {
 		},
 	});
 
+	pi.on("session_start", async () => {
+		await bootstrapDurableState(runtime);
+	});
 	registerAnnouncements(pi, runtime);
 
-	// Durable bootstrap: restore parked threads from the manifest so a reload or
-	// restart keeps status and resume working, then age out old records and sweep
-	// leaked temp/state directories. Registration never blocks on it and every
-	// stage is best-effort; the restore pass is published as runtime.durableRestore
-	// so the tools and the session-start notice wait for it instead of racing it.
-	void bootstrapDurableState(runtime);
-
-	// Proactive dispatch: inject the delegation directive into the parent system prompt.
+	// Inject the routing contract plus bounded live phase leases into each parent turn.
 	pi.on("before_agent_start", async (event, ctx) => {
+		await runtime.durableRestore;
 		const config = await loadConfig(configPath);
 		const { agents } = discoverAgents(ctx.cwd, {
 			scope: config.agentScope,
 			enabledNames: config.enabledAgents,
 			projectTrusted: ctx.isProjectTrusted?.() === true,
 		});
-		const directive = buildDelegationDirective(agents);
+		const directive = buildDelegationDirective(agents, runtime.threads.values());
 		if (!directive) return undefined;
 		return { systemPrompt: `${event.systemPrompt}\n${directive}` };
 	});

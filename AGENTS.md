@@ -33,6 +33,12 @@ with what users actually see.
 Skip the automatic bump/commit/push only when the user explicitly says not to,
 or when the check fails (fix first, then finalize).
 
+## Leaf subagent exception
+
+A leaf subagent never bumps versions, commits, pushes, publishes, tags, or releases.
+The parent main agent owns those actions after integrating the child's work and
+running the final gate. This exception overrides **Release on green** for leaves.
+
 ## Conventions
 
 - Commits: `type(scope): imperative English`; types

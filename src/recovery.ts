@@ -5,6 +5,7 @@ import { existsSync } from "node:fs";
 import { mkdir, readFile, rename, rm, writeFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import { stripVTControlCharacters } from "node:util";
+import { getSubagentsRoot } from "./spawn.ts";
 import { removeWorktreeGroup, worktreeGroupDir, type WorktreeFinalization } from "./worktree.ts";
 
 export const RECOVERY_MANIFEST_FILE_NAME = "pi-subagents-recovery.json";
@@ -27,7 +28,7 @@ interface RecoveryManifest {
 }
 
 export function getRecoveryManifestPath(configPath: string): string {
-	return join(dirname(configPath), RECOVERY_MANIFEST_FILE_NAME);
+	return join(getSubagentsRoot(configPath), RECOVERY_MANIFEST_FILE_NAME);
 }
 
 function normalizeRecord(value: unknown): RecoveryRecord | undefined {
@@ -46,19 +47,43 @@ function normalizeRecord(value: unknown): RecoveryRecord | undefined {
 	};
 }
 
-export async function readRecoveryRecords(configPath: string): Promise<RecoveryRecord[]> {
+interface RecoveryManifestRead {
+	valid: boolean;
+	records: RecoveryRecord[];
+}
+
+async function readManifest(path: string): Promise<RecoveryManifestRead> {
 	try {
-		const parsed = JSON.parse(await readFile(getRecoveryManifestPath(configPath), "utf8")) as {
-			records?: unknown;
+		const parsed = JSON.parse(await readFile(path, "utf8")) as { records?: unknown };
+		if (!Array.isArray(parsed.records)) return { valid: false, records: [] };
+		return {
+			valid: true,
+			records: parsed.records.flatMap((record) => {
+				const normalized = normalizeRecord(record);
+				return normalized ? [normalized] : [];
+			}),
 		};
-		if (!Array.isArray(parsed.records)) return [];
-		return parsed.records.flatMap((record) => {
-			const normalized = normalizeRecord(record);
-			return normalized ? [normalized] : [];
-		});
 	} catch {
-		return [];
+		return { valid: false, records: [] };
 	}
+}
+
+export async function readRecoveryRecords(configPath: string): Promise<RecoveryRecord[]> {
+	return (await readManifest(getRecoveryManifestPath(configPath))).records;
+}
+
+/** Move the previous agent-root manifest into the internal-state root without
+ * dropping retained artifact pointers. Invalid legacy files stay untouched. */
+export async function relocateRecoveryManifest(configPath: string): Promise<void> {
+	const legacyPath = join(dirname(configPath), RECOVERY_MANIFEST_FILE_NAME);
+	const currentPath = getRecoveryManifestPath(configPath);
+	if (legacyPath === currentPath || !existsSync(legacyPath)) return;
+	await withFileMutationQueue(legacyPath, async () => {
+		const legacy = await readManifest(legacyPath);
+		if (!legacy.valid) return;
+		await persistRecoveryRecords(configPath, legacy.records);
+		await rm(legacyPath, { force: true });
+	});
 }
 
 function recoveryKey(record: RecoveryRecord): string {

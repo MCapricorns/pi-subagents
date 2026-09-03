@@ -46,14 +46,7 @@ export function registerLookupTools(pi: ExtensionAPI, runtime: SubagentRuntime):
 	pi.registerTool({
 		name: "subagent_control",
 		label: "Subagent Control",
-		description: [
-			"Resume an existing sub-agent thread by stable run id: a parked, completed, or failed retained thread restarts with the same run id and cumulative active time.",
-			"Omit objective to continue the current goal, or provide one to append it to retained context and make it the displayed goal. Threads parked or interrupted by a shutdown/reload are restorable; use subagent_stop for destructive cancellation.",
-		].join(" "),
-		promptSnippet: "Resume a parked or settled subagent thread with its retained context.",
-		promptGuidelines: [
-			"Resume keeps the run id and retained context; use subagent_stop only for destructive cancellation, which retires that thread's session.",
-		],
+		description: "Resume a parked or settled child thread by run id, reusing its retained session when available. An optional objective is appended to its current goal.",
 		parameters: SubagentControlParams,
 
 		async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
@@ -91,10 +84,8 @@ export function registerLookupTools(pi: ExtensionAPI, runtime: SubagentRuntime):
 						const mode = objective
 							? `appended objective: ${currentObjective}`
 							: `continuing current objective: ${currentObjective}`;
-						const context = hadRetainedSession
-							? "the same retained session and prior context are preserved"
-							: "no prior child session existed, so only the logical run and objective are continued";
-						return { content: [{ type: "text", text: `Resumed run #${thread.id}, ${mode}; ${context}, and cumulative active time is preserved. It runs in the background — keep working; the result resumes you automatically.` }], details: {} };
+						const context = hadRetainedSession ? "retained context reused" : "no prior child context";
+						return { content: [{ type: "text", text: `Resumed run #${thread.id}: ${mode}; ${context}.` }], details: {} };
 					}
 				}
 			} catch (error) {
@@ -125,14 +116,7 @@ export function registerLookupTools(pi: ExtensionAPI, runtime: SubagentRuntime):
 	pi.registerTool({
 		name: "subagent_stop",
 		label: "Subagent Stop",
-		description: [
-			"Destructively stop a sub-agent thread: terminate active work, deliver its aborted partial result, and retire any retained session so it cannot be resumed.",
-			"Pass id (run id or prefix) to stop one active, parked, or completed thread; all: true stops every active run.",
-		].join(" "),
-		promptSnippet: "Stop a running background subagent (id from dispatch output; or all: true).",
-		promptGuidelines: [
-			"Stop a run when its task is obsolete, stuck, or superseded — do not leave it burning tokens. It then reports as failed with 'aborted' plus its partial output.",
-		],
+		description: "Stop and retire one child thread by run id/prefix, or every active thread with all: true.",
 		parameters: SubagentStopParams,
 
 		async execute(_toolCallId, params, _signal, _onUpdate, ctx) {

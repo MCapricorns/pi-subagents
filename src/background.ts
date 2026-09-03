@@ -14,6 +14,7 @@ import { cpus } from "node:os";
 export type BackgroundTask = (signal: AbortSignal, controller: AbortController) => Promise<void>;
 
 interface PendingTask {
+	kind: "task";
 	task: BackgroundTask;
 	controller: AbortController;
 	complete: () => void;
@@ -29,6 +30,14 @@ interface PendingTask {
 	onError?: (error: unknown) => void | Promise<void>;
 }
 
+interface PendingAcquire {
+	kind: "acquire";
+	controller: AbortController;
+	resolve: (acquired: boolean) => void;
+}
+
+type PendingEntry = PendingTask | PendingAcquire;
+
 /** How many sub-agent processes may run at once, derived from the host instead
  * of being fixed: children wait on model I/O far more than on CPU, so the pool
  * scales with cores while the bounds keep tiny machines usable and huge ones
@@ -40,7 +49,7 @@ export function resolveSubagentConcurrency(cpuCount: number = cpus().length): nu
 
 export class BackgroundTaskQueue {
 	private concurrency: number;
-	private readonly pending: PendingTask[] = [];
+	private readonly pending: PendingEntry[] = [];
 	private readonly active = new Set<AbortController>();
 	/** Active tasks that no longer count toward the concurrency limit. They keep
 	 * every other guarantee: abortable, awaited by waitForTask/waitForIdle. */
@@ -67,7 +76,7 @@ export class BackgroundTaskQueue {
 			return controller;
 		}
 
-		this.pending.push({ task, controller, complete, onCancelled, onError });
+		this.pending.push({ kind: "task", task, controller, complete, onCancelled, onError });
 		this.drain();
 		return controller;
 	}
@@ -88,7 +97,7 @@ export class BackgroundTaskQueue {
 
 	/** Tasks still waiting for a free slot (never started). */
 	get pendingCount(): number {
-		return this.pending.length;
+		return this.pending.filter((entry) => entry.kind === "task").length;
 	}
 
 	/** Tasks currently holding a slot. Suspended tasks (lane waits, managed
@@ -114,6 +123,19 @@ export class BackgroundTaskQueue {
 		this.drain();
 	}
 
+	/** Reacquire a released process slot before a suspended task starts another
+	 * child process. Reacquisitions share FIFO order with not-yet-started tasks,
+	 * so lane waiters cannot bypass work already queued for the pool. */
+	acquire(controller: AbortController | undefined): Promise<boolean> {
+		if (!controller || this.stopped || controller.signal.aborted) return Promise.resolve(false);
+		if (this.active.has(controller)) return Promise.resolve(true);
+		if (!this.suspended.has(controller)) return Promise.resolve(false);
+		return new Promise<boolean>((resolve) => {
+			this.pending.push({ kind: "acquire", controller, resolve });
+			this.drain();
+		});
+	}
+
 	/** Cancel one queued/running task. Queued entries are removed immediately;
 	 * active entries resolve waitForTask only after their body and error handler
 	 * have quiesced and the concurrency slot has been released. */
@@ -123,8 +145,13 @@ export class BackgroundTaskQueue {
 		const index = this.pending.findIndex((entry) => entry.controller === controller);
 		if (index !== -1) {
 			const [entry] = this.pending.splice(index, 1);
-			this.runCancelled(entry.onCancelled);
-			entry.complete();
+			if (entry.kind === "task") {
+				this.runCancelled(entry.onCancelled);
+				entry.complete();
+			} else {
+				this.suspended.delete(controller);
+				entry.resolve(false);
+			}
 			this.drain();
 			this.resolveIdleWaiters();
 		}
@@ -143,8 +170,13 @@ export class BackgroundTaskQueue {
 
 		for (const entry of this.pending.splice(0)) {
 			entry.controller.abort();
-			this.runCancelled(entry.onCancelled);
-			entry.complete();
+			if (entry.kind === "task") {
+				this.runCancelled(entry.onCancelled);
+				entry.complete();
+			} else {
+				this.suspended.delete(entry.controller);
+				entry.resolve(false);
+			}
 		}
 		for (const controller of this.active) controller.abort();
 		for (const controller of this.suspended) controller.abort();
@@ -170,8 +202,23 @@ export class BackgroundTaskQueue {
 				return;
 			}
 			if (entry.controller.signal.aborted) {
-				this.runCancelled(entry.onCancelled);
-				entry.complete();
+				if (entry.kind === "task") {
+					this.runCancelled(entry.onCancelled);
+					entry.complete();
+				} else {
+					this.suspended.delete(entry.controller);
+					entry.resolve(false);
+				}
+				continue;
+			}
+
+			if (entry.kind === "acquire") {
+				if (!this.suspended.delete(entry.controller)) {
+					entry.resolve(false);
+					continue;
+				}
+				this.active.add(entry.controller);
+				entry.resolve(true);
 				continue;
 			}
 

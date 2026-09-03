@@ -20,7 +20,7 @@ import { uptime } from "node:os";
 import { dirname, join } from "node:path";
 import type { UsageStats } from "./rpc-run.ts";
 import type { SubagentThread } from "./runtime.ts";
-import { getResultOutput, isFailedResult, getProjectRoot, PROJECT_ROOTS_DIR_NAME, type SingleResult } from "./spawn.ts";
+import { getResultOutput, isFailedResult, getProjectRoot, getSubagentsRoot, type SingleResult } from "./spawn.ts";
 import {
 	isPathInside,
 	restoreWorktreeIsolation,
@@ -34,7 +34,7 @@ export const THREADS_MANIFEST_FILE_NAME = "pi-subagents-threads.json";
 const THREADS_MANIFEST_VERSION = 1;
 
 /** Project directories whose newest file has not been touched for this long
- * are deleted wholesale on load, so per-project sessions/worktrees/results
+ * are deleted wholesale at session start, so per-project sessions/worktrees/results
  * can never accumulate forever. Parked threads' manifest references always
  * win over the age rule. */
 export const PROJECT_ROOT_MAX_AGE_MS = 3 * 24 * 60 * 60 * 1_000;
@@ -116,12 +116,6 @@ interface ThreadsManifest {
  * and worktrees its records point at. */
 export function getThreadsManifestPath(configPath: string, cwd: string): string {
 	return join(getProjectRoot(configPath, cwd), THREADS_MANIFEST_FILE_NAME);
-}
-
-/** Location of the pre-per-project global manifest; only read by the
- * one-time migration that folds it into the project roots. */
-function getLegacyManifestPath(configPath: string): string {
-	return join(dirname(configPath), THREADS_MANIFEST_FILE_NAME);
 }
 
 function normalizeUsage(value: unknown): UsageStats {
@@ -226,7 +220,7 @@ function projectManifestPaths(durableRoot: string): string[] {
  * sweeps that must see references from anywhere. */
 export async function readThreadRecords(configPath: string): Promise<ThreadRecord[]> {
 	const manifests = await Promise.all(
-		projectManifestPaths(join(dirname(configPath), PROJECT_ROOTS_DIR_NAME))
+		projectManifestPaths(getSubagentsRoot(configPath))
 			.map((path) => readManifestRecords(path)),
 	);
 	return manifests.flat();
@@ -365,12 +359,12 @@ async function discardRecordArtifacts(record: ThreadRecord): Promise<void> {
 }
 
 /** Drop records past their retention age along with their artifacts. Runs at
- * extension load; the fixed age honors the no-config-knobs policy. */
+ * session start; the fixed age honors the no-config-knobs policy. */
 export async function pruneThreadRecords(
 	configPath: string,
 	now = Date.now(),
 ): Promise<void> {
-	const durableRoot = join(dirname(configPath), PROJECT_ROOTS_DIR_NAME);
+	const durableRoot = getSubagentsRoot(configPath);
 	for (const path of projectManifestPaths(durableRoot)) {
 		await withFileMutationQueue(path, async () => {
 			const records = await readManifestRecords(path);
@@ -388,47 +382,6 @@ export async function pruneThreadRecords(
 			if (changed) await writeManifest(path, kept);
 		});
 	}
-}
-
-/** One-time move of the pre-per-project global manifest beside the config into
- * the project roots its records belong to, so an upgrade keeps parked work
- * resumable and pi home is left without a manifest. Existing project records
- * win over legacy ones; the legacy file is removed only after every group
- * landed, and an unreadable file stays put for the next boot. */
-export async function migrateLegacyThreadsManifest(configPath: string): Promise<void> {
-	const legacyPath = getLegacyManifestPath(configPath);
-	let records: ThreadRecord[];
-	try {
-		const parsed = JSON.parse(await readFile(legacyPath, "utf8")) as { records?: unknown };
-		if (!Array.isArray(parsed.records)) return;
-		records = parsed.records.flatMap((record) => {
-			const normalized = normalizeRecord(record);
-			return normalized ? [normalized] : [];
-		});
-	} catch {
-		return;
-	}
-	const groups = new Map<string, ThreadRecord[]>();
-	for (const record of records) {
-		const path = getThreadsManifestPath(configPath, record.cwd);
-		const group = groups.get(path);
-		if (group) group.push(record);
-		else groups.set(path, [record]);
-	}
-	let migrated = true;
-	for (const [path, group] of groups) {
-		await withFileMutationQueue(path, async () => {
-			const existing = await readManifestRecords(path);
-			const merged = [...existing];
-			for (const record of group) {
-				if (!merged.some((candidate) => candidate.runId === record.runId)) merged.push(record);
-			}
-			await writeManifest(path, merged);
-		}).catch(() => {
-			migrated = false;
-		});
-	}
-	if (migrated) await rm(legacyPath, { force: true }).catch(() => undefined);
 }
 
 /** Paths a manifest still references; used by the state-root sweep so
@@ -490,7 +443,7 @@ export async function pruneStaleProjectRoots(configPath: string, options: { now?
 	const now = options.now ?? Date.now();
 	const records = await readThreadRecords(configPath).catch(() => [] as ThreadRecord[]);
 	const referenced = referencedDurablePaths(records);
-	const root = join(dirname(configPath), PROJECT_ROOTS_DIR_NAME);
+	const root = getSubagentsRoot(configPath);
 	let projects: Dirent[];
 	try {
 		projects = readdirSync(root, { withFileTypes: true });

@@ -8,25 +8,18 @@ import {
 	DEFAULT_ENABLED_AGENTS,
 	DEFAULT_IDLE_TIMEOUT_SEC,
 	DEFAULT_MAX_RESULT_LINES,
-	FIRST_RUN_SETUP_HINT,
 	IDLE_TIMEOUT_SEC_LIMIT,
 	MAX_RESULT_LINES_LIMIT,
-	REQUIRED_ENABLED_AGENTS,
-	TEAM_SETUP_NOTICE,
 	loadConfig,
 	normalizeConfig,
 	roleThinkingLevel,
 	saveConfig,
-	withRequiredAgents,
 } from "../src/config.ts";
 
 describe("catalog", () => {
-	it("ships three built-ins and keeps all of them on", () => {
+	it("ships three built-ins and enables them by default", () => {
 		assert.deepEqual(BUILTIN_AGENT_NAMES, ["scout", "artisan", "steward"]);
 		assert.deepEqual(DEFAULT_ENABLED_AGENTS, [...BUILTIN_AGENT_NAMES]);
-		assert.deepEqual(REQUIRED_ENABLED_AGENTS, [...BUILTIN_AGENT_NAMES]);
-		assert.deepEqual(withRequiredAgents([]), ["scout", "artisan", "steward"]);
-		assert.deepEqual(withRequiredAgents(["scout"]), ["scout", "artisan", "steward"]);
 	});
 
 	it("assigns a role thinking default and leaves custom names on medium", () => {
@@ -41,30 +34,9 @@ describe("normalizeConfig", () => {
 	it("enables the full team on a fresh install", () => {
 		const config = normalizeConfig(undefined);
 		assert.deepEqual(config.enabledAgents, [...DEFAULT_ENABLED_AGENTS]);
-		assert.deepEqual(config.knownAgents, [...BUILTIN_AGENT_NAMES]);
 		assert.equal(config.agentScope, "user");
 		assert.deepEqual(config.agentModels, {});
 		assert.deepEqual(config.agentThinkingLevels, {});
-	});
-
-	it("seeds knownAgents from enabledAgents and keeps explicit entries", () => {
-		const config = normalizeConfig({ enabledAgents: ["artisan"], knownAgents: ["scout", 42, "artisan"] });
-		assert.deepEqual(config.enabledAgents, ["artisan"]);
-		assert.deepEqual(config.knownAgents, ["scout", "artisan"]);
-		assert.deepEqual(normalizeConfig({}).knownAgents, [...BUILTIN_AGENT_NAMES]);
-	});
-
-	it("drops the removed tuning keys instead of honoring them", () => {
-		const config = normalizeConfig({
-			maxConcurrency: 9,
-			maxFixRounds: 0,
-			announcedFeatures: ["x"],
-			notifyOnReviewPass: true,
-		});
-		assert.ok(!("maxConcurrency" in config));
-		assert.ok(!("maxFixRounds" in config));
-		assert.ok(!("announcedFeatures" in config));
-		assert.ok(!("notifyOnReviewPass" in config));
 	});
 
 	it("keeps valid enabledAgents and drops non-strings", () => {
@@ -74,8 +46,9 @@ describe("normalizeConfig", () => {
 		assert.deepEqual(config.enabledAgents, ["scout", "artisan"]);
 	});
 
-	it("honors an explicitly empty enabledAgents array before load-time force", () => {
-		assert.deepEqual(normalizeConfig({ enabledAgents: [] }).enabledAgents, []);
+	it("honors an explicitly empty enabledAgents array", () => {
+		const config = normalizeConfig({ enabledAgents: [] });
+		assert.deepEqual(config.enabledAgents, []);
 	});
 
 	it("keeps only valid provider/model references in agentModels", () => {
@@ -115,7 +88,7 @@ describe("normalizeConfig", () => {
 	});
 });
 
-describe("loadConfig migration", () => {
+describe("loadConfig", () => {
 	it("returns defaults when the file is missing", async () => {
 		const dir = mkdtempSync(join(tmpdir(), "pi-subagents-test-"));
 		const config = await loadConfig(join(dir, "does-not-exist.json"));
@@ -131,65 +104,30 @@ describe("loadConfig migration", () => {
 		assert.equal(config.agentScope, "user");
 	});
 
-	it("renames explorer/executor, adopts steward, and keeps their model and thinking", async () => {
-		const dir = mkdtempSync(join(tmpdir(), "pi-subagents-test-"));
-		const path = join(dir, "pi-subagents.json");
-		writeFileSync(path, JSON.stringify({
-			enabledAgents: ["explorer", "executor", "worker"],
-			knownAgents: ["explorer", "executor", "worker"],
-			agentModels: {
-				explorer: "anthropic/claude-haiku-4-5",
-				executor: "anthropic/claude-sonnet-4-5",
-			},
-			agentThinkingLevels: { explorer: "low", executor: "high" },
-			maxConcurrency: 12,
-		}), "utf8");
-
-		const config = await loadConfig(path);
-		assert.deepEqual(config.enabledAgents, ["scout", "artisan", "steward"]);
-		assert.deepEqual([...config.knownAgents].sort(), ["artisan", "scout", "steward"]);
-		assert.deepEqual(config.agentModels, {
-			scout: "anthropic/claude-haiku-4-5",
-			artisan: "anthropic/claude-sonnet-4-5",
-		});
-		assert.deepEqual(config.agentThinkingLevels, { scout: "low", artisan: "high" });
-		assert.equal(config.pendingSetupNotice, TEAM_SETUP_NOTICE);
-		assert.ok(FIRST_RUN_SETUP_HINT.includes("/subagents-setup"));
-
-		const saved = JSON.parse(readFileSync(path, "utf8")) as Record<string, unknown>;
-		assert.deepEqual(saved.enabledAgents, ["scout", "artisan", "steward"]);
-		assert.deepEqual(saved.agentModels, {
-			scout: "anthropic/claude-haiku-4-5",
-			artisan: "anthropic/claude-sonnet-4-5",
-		});
-		assert.ok(!("explorer" in (saved.agentModels as object)));
-		assert.ok(!("executor" in (saved.agentModels as object)));
-		assert.ok(!("maxConcurrency" in saved));
-	});
-
-	it("forces a disabled scout back on and does not copy scout's model onto steward", async () => {
+	it("persists the canonical supported fields without unknown keys", async () => {
 		const dir = mkdtempSync(join(tmpdir(), "pi-subagents-test-"));
 		const path = join(dir, "pi-subagents.json");
 		writeFileSync(path, JSON.stringify({
 			enabledAgents: ["artisan"],
-			knownAgents: ["scout", "artisan"],
-			agentModels: { scout: "anthropic/claude-haiku-4-5" },
+			agentModels: { artisan: "anthropic/primary" },
+			agentThinkingLevels: { artisan: "high" },
+			unknownKey: true,
 		}), "utf8");
 
 		const config = await loadConfig(path);
-		assert.ok(config.enabledAgents.includes("scout"));
-		assert.ok(config.enabledAgents.includes("artisan"));
-		assert.ok(config.enabledAgents.includes("steward"));
-		assert.equal(config.agentModels.steward, undefined);
-		assert.equal(config.agentModels.scout, "anthropic/claude-haiku-4-5");
+		assert.deepEqual(config.enabledAgents, ["artisan"]);
+		assert.equal(config.agentModels.artisan, "anthropic/primary");
+		assert.equal(config.agentThinkingLevels.artisan, "high");
+
+		const saved = JSON.parse(readFileSync(path, "utf8")) as Record<string, unknown>;
+		assert.ok(!("unknownKey" in saved));
 	});
 
-	it("round-trips selected models and thinking preferences under the new names", async () => {
+	it("round-trips selected models and thinking preferences", async () => {
 		const dir = mkdtempSync(join(tmpdir(), "pi-subagents-test-"));
 		const path = join(dir, "pi-subagents.json");
 		const config = normalizeConfig({
 			enabledAgents: [...BUILTIN_AGENT_NAMES],
-			knownAgents: [...BUILTIN_AGENT_NAMES],
 			agentModels: { artisan: "anthropic/primary" },
 			agentThinkingLevels: { artisan: "high" },
 		});

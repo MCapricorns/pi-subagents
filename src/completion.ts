@@ -98,7 +98,6 @@ export function createCompletionBatcher<T>(options: CompletionBatcherOptions<T>)
 export interface CompletionMessageItem {
 	agent: string;
 	block: string;
-	triggerTurn: boolean;
 	/** Final usage of the underlying run (or chain); aggregated into the group totals. */
 	usage?: UsageStats;
 }
@@ -113,11 +112,6 @@ export function formatCompletionMessage(items: readonly CompletionMessageItem[])
 	const totals = withUsage.length > 0 ? formatUsageCompact(sumUsage(withUsage.map((item) => item.usage!))) : "";
 	const footer = totals ? `\n\nTotals: ${items.length} runs · ${totals}` : "";
 	return `### Subagents completed (${items.length}): ${agents}\n\n${items.map((item) => item.block).join("\n\n")}${footer}`;
-}
-
-/** A grouped completion wakes the main agent when any member requires a turn. */
-export function completionGroupTriggersTurn(items: readonly CompletionMessageItem[]): boolean {
-	return items.some((item) => item.triggerTurn);
 }
 
 /** Minimal shape of an active run, for the "others still running" footer. Kept

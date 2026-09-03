@@ -4,6 +4,25 @@ Published versions of `@ferris1225/pi-subagents`. Unpublished numbers
 (`4.2.3`, `4.2.6`, `4.2.9`–`4.2.11`) never shipped on npm; their changes
 landed in the next published release.
 
+## 4.3.1
+
+- Make phase ownership explicit and reject an exact active duplicate by normalized
+  task plus resolved working directory, regardless of agent name.
+- Route each result exactly once: `wait: true` owns in-turn delivery, background
+  completions use follow-up wakeups, and immediate failures flush earlier successes.
+- Move worktree preparation under the bounded queue, release child-process slots
+  before Git finalization, and report repository-lane versus process-slot waits
+  accurately.
+- Keep missing restored worktrees failed, retained, and non-resumable; compute RPC
+  usage from generation-safe session-stat deltas.
+- Store the worktree recovery manifest under `ferris-pi-subagents/`, relocating
+  an existing agent-root manifest without losing retained artifact pointers.
+- Enforce a strict read-only scout tool set and strict declared-tool intersection.
+  Unknown custom tools remain conservatively write-capable for isolation.
+- Honor `enabledAgents`, including `[]`, without auto-enabling roles. Remove the
+  completed role/config migration bridge and shorten role prompts, tool metadata,
+  launch receipts, and handoffs.
+
 ## 4.3.0
 
 - Built-in team is `scout`, `artisan`, and `steward`. All three stay enabled.
