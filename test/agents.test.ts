@@ -6,6 +6,18 @@ import {
 	resolveAgentTools,
 } from "../src/agents.ts";
 
+const SCOUT_READ_ONLY_TOOLS = [
+	"read",
+	"grep",
+	"find",
+	"ls",
+	"anchor_grep",
+	"web_search",
+	"fetch_content",
+	"resolve-library-id",
+	"query-docs",
+] as const;
+
 describe("loadBuiltinAgents", () => {
 	it("ships scout, artisan, and steward without frontmatter thinking", () => {
 		const agents = loadBuiltinAgents();
@@ -19,9 +31,10 @@ describe("loadBuiltinAgents", () => {
 	it("keeps scout read-only and retrieval-only", () => {
 		const scout = loadBuiltinAgents().find((agent) => agent.name === "scout");
 		assert.ok(scout);
-		assert.deepEqual(scout.tools, ["read", "grep", "find", "ls"]);
+		assert.deepEqual(scout.tools, SCOUT_READ_ONLY_TOOLS);
 		assert.ok(scout.systemPrompt.includes("retrieval lead"));
 		assert.ok(scout.systemPrompt.includes("Stay read-only"));
+		assert.ok(scout.systemPrompt.includes("untrusted data"));
 		assert.ok(scout.systemPrompt.includes("broad reconnaissance phase"));
 		assert.ok(scout.systemPrompt.includes("Atomic lookups and known locations stay with main"));
 		assert.ok(scout.systemPrompt.includes("Cluster related questions"));
@@ -66,9 +79,17 @@ describe("resolveAgentTools", () => {
 	it("enforces the scout read-only boundary", () => {
 		const scout = loadBuiltinAgents().find((agent) => agent.name === "scout");
 		assert.ok(scout);
-		const resolved = resolveAgentTools(scout, ["read", "bash", "edit", "write", "web_search", "subagent"]);
-		assert.deepEqual(resolved.tools, ["read"]);
-		assert.deepEqual(resolveAgentTools({ ...scout, tools: undefined }, ["read", "edit", "custom_mutator"]).tools, ["read"]);
+		const resolved = resolveAgentTools(scout, [...SCOUT_READ_ONLY_TOOLS, "bash", "edit", "write", "subagent"]);
+		assert.deepEqual(resolved.tools, SCOUT_READ_ONLY_TOOLS);
+		const inherited = resolveAgentTools({ ...scout, tools: undefined }, [
+			"read",
+			"anchor_grep",
+			"web_search",
+			"query-docs",
+			"edit",
+			"custom_mutator",
+		]);
+		assert.deepEqual(inherited.tools, ["read", "anchor_grep", "web_search", "query-docs"]);
 	});
 
 	it("adapts a declared shell to the parent's active shell", () => {
@@ -85,6 +106,7 @@ describe("resolveAgentTools", () => {
 
 	it("treats unknown explicitly allowed tools as potentially write-capable", () => {
 		assert.equal(isWriteCapableAgent({ name: "reviewer", tools: ["read", "grep"] }), false);
+		assert.equal(isWriteCapableAgent({ name: "reviewer", tools: ["anchor_grep", "web_search", "query-docs"] }), false);
 		assert.equal(isWriteCapableAgent({ name: "reviewer", tools: ["read", "custom_repository_tool"] }), true);
 	});
 

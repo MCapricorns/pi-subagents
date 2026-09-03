@@ -4,6 +4,12 @@ Published versions of `@ferris1225/pi-subagents`. Unpublished numbers
 (`4.2.3`, `4.2.6`, `4.2.9`–`4.2.11`) never shipped on npm; their changes
 landed in the next published release.
 
+## 4.3.2
+
+- Let scout use active, known-safe retrieval plugins: `anchor_grep`, web content
+  tools, and Context7 documentation tools. Shells, mutation tools, and unknown
+  custom tools remain blocked.
+
 ## 4.3.1
 
 - Make phase ownership explicit and reject an exact active duplicate by normalized

@@ -39,7 +39,17 @@ const SHELL_TOOL_NAMES = new Set(["bash", "powershell"]);
  * Only used to break a tie when the parent has both enabled — a parent running a
  * single shell is followed as configured, whatever it is. */
 const NATIVE_SHELL_TOOL = process.platform === "win32" ? "powershell" : "bash";
-const READ_ONLY_TOOL_NAMES = new Set(["read", "grep", "find", "ls"]);
+const READ_ONLY_TOOL_NAMES = new Set([
+	"read",
+	"grep",
+	"find",
+	"ls",
+	"anchor_grep",
+	"web_search",
+	"fetch_content",
+	"resolve-library-id",
+	"query-docs",
+]);
 export const SUBAGENT_TOOL_NAMES = [
 	"subagent",
 	"subagent_control",

@@ -12,11 +12,10 @@ isolation. You install it once and your main agent delegates on its own.
 
 ## What's new
 
-**4.3.1** — phase ownership prevents duplicate paid work, completion delivery
-is exactly once, worktree setup obeys the bounded queue, and final integration
-releases its child-process slot. Scout now has a strict read-only tool boundary;
-`enabledAgents` is authoritative, including `[]`. Role prompts and launch receipts
-are shorter and cost-aware. See [CHANGELOG.md](./CHANGELOG.md).
+**4.3.2** — scout can use active, known-safe retrieval plugins including Hash
+Edit Pro search, web content, and Context7 documentation tools. Missing plugins
+are ignored; shells, mutation tools, and unknown custom tools remain blocked.
+See [CHANGELOG.md](./CHANGELOG.md).
 
 ## Contents
 
@@ -279,10 +278,13 @@ intersection, so active extension tools are available only when named. A declare
 shell slot follows the parent's active shell on non-scout roles.
 
 `scout` is a hard read-only boundary even when a project override omits or
-overstates its tool list. The shipped scout uses only `read`, `grep`, `find`, and
-`ls`; it receives no shell or unknown custom tool. Unknown tools declared by other
-roles are conservatively treated as write-capable when isolation is chosen. An
-empty resolved snapshot starts the child with `--no-tools`.
+overstates its tool list. Its known-safe set includes `read`, `grep`, `find`,
+`ls`, `anchor_grep`, `web_search`, `fetch_content`, `resolve-library-id`, and
+`query-docs`; tools not installed or active in Main are simply omitted. Scout
+receives no shell, local mutation tool, or unknown custom tool. Unknown tools
+declared by other roles are conservatively treated as write-capable when
+isolation is chosen. An empty resolved snapshot starts the child with
+`--no-tools`.
 
 ## Configuration
 
