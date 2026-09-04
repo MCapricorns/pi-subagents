@@ -78,7 +78,7 @@ export const AGENT_PROFILES: Record<(typeof BUILTIN_AGENT_NAMES)[number], AgentP
 	},
 	sentinel: {
 		summary: "adversarial review",
-		remark: "Challenges every cleaned pre-commit diff against matching skills; follows artisan's model with max thinking by default.",
+		remark: "Challenges every cleaned pre-commit diff with standalone evidence gates plus available matching skills; follows artisan's model with max thinking by default.",
 	},
 };
 

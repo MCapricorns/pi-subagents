@@ -12,10 +12,9 @@ once and your main agent delegates on its own.
 
 ## What's new
 
-**4.3.3** — adds the post-cleanup `sentinel`, a transactional all-in-one setup
-overlay, effective thinking in the live widget, and primary-source external research
-for scout. Role prompts now keep only essential fallback gates while detailed Ferris
-rules remain canonical in skills.
+**4.3.4** — makes Ferris skills optional enhancements instead of runtime
+requirements. Artisan, steward, and sentinel remain fully operational from their
+standalone role prompts when users have no Ferris skills installed.
 See [CHANGELOG.md](./CHANGELOG.md).
 
 ## Contents
@@ -84,13 +83,13 @@ directly when you want exact control.
 | `scout`    | Read-only   | Broad or unfamiliar code reconnaissance and external research. Returns compact file citations or source URLs as leads, not proof. |
 | `artisan`  | Full        | One substantial primary change—implementation, fix, refactor, test, or docs—through root cause, affected verification, and local hygiene. |
 | `steward`  | Full        | One final cleanup and cross-cutting docs/comment sync pass after a broad or multi-writer change. |
-| `sentinel` | Review-only | A post-cleanup adversarial review against matching Ferris skills; reports only evidence-backed defects and concrete test gaps. |
+| `sentinel` | Review-only | A post-cleanup adversarial review using standalone evidence gates plus any matching Ferris skills; reports only evidence-backed defects and concrete test gaps. |
 
-Role prompts carry the non-negotiable minimum even if skill matching misses:
-root-cause-first diagnosis, meaningful test evidence, bounded cleanup, and
-evidence-only review. Detailed language, platform, debugging, testing, and audit
-rules stay in the Ferris skills; artisan and sentinel load the matching skills,
-while steward always loads `ferris-audit`. This avoids duplicated, drifting prompts.
+Role prompts are standalone: they embed root-cause-first diagnosis, meaningful test
+evidence, bounded cleanup, and evidence-only review. Optional Ferris skills remain
+the canonical source of deeper language, platform, debugging, testing, and audit
+guidance. Artisan and sentinel load matching skills when available; steward uses
+`ferris-audit`; a missing skill never blocks a role or changes its ownership contract.
 
 Custom roles join them with a Markdown file (see [Custom agents](#custom-agents)).
 
@@ -139,10 +138,11 @@ tests, docs, comments, targeted checks, and local hygiene. Scout owns broad code
 mapping or external research and stays read-only.
 
 With the default team, every commit ends in one order: cleanup -> `sentinel`. A
-focused diff gets the `ferris-audit` pass inline; a broad or multi-writer diff
-gets one `steward` pass that attacks touched dead code, duplication, tangled
-conditionals, needless layers, and spaghetti growth without widening into a
-repo refactor. Sentinel then reviews the cleaned diff against matching skills.
+focused diff gets a bounded cleanup pass inline; a broad or multi-writer diff gets
+one `steward` pass that attacks touched dead code, duplication, tangled conditionals,
+needless layers, and spaghetti growth without widening into a repo refactor.
+Sentinel then reviews the cleaned diff with its standalone evidence gates plus any
+available matching skills.
 A review-driven edit repeats that sequence once; unresolved findings block the
 commit. Main inspects the final diff and runs the final gate.
 
@@ -316,8 +316,9 @@ search snippets, records material dates/versions, and marks uncertainty.
 
 `sentinel` has an explicit retrieval/documentation list plus a portable shell
 slot for Git inspection and the smallest proving check. It is pinned to `shared`
-so it sees the current uncommitted diff. Its concise prompt loads matching ferris
-skills, preserves their owners, and forbids mutation; that is a review contract,
+so it sees the current uncommitted diff. Its concise prompt uses matching available
+Ferris skills, preserves their owners, and forbids mutation; missing skills do not
+block review. This is a review contract,
 not a hard shell sandbox.
 
 ## Configuration

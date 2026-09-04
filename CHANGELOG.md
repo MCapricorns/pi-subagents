@@ -4,6 +4,11 @@ Published versions of `@ferris1225/pi-subagents`. Unpublished numbers
 (`4.2.3`, `4.2.6`, `4.2.9`–`4.2.11`) never shipped on npm; their changes
 landed in the next published release.
 
+## 4.3.4
+
+- Keep artisan, steward, and sentinel fully usable when Ferris skills are absent.
+  Installed matching skills add deeper guidance but are optional and never block a role.
+
 ## 4.3.3
 
 - Add `sentinel`, a concise read-only adversarial reviewer that runs after cleanup,

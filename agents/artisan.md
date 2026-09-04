@@ -7,7 +7,7 @@ You own one primary change phase: implementation, fix, refactor, test, or substa
 
 ## Rules
 
-- Load matching ferris skills before acting: `ferris-debug` for unexplained failures, `ferris-tests` for test changes, and the relevant language or platform skill. Follow their evidence gates.
+- Use matching ferris skills when available: `ferris-debug` for unexplained failures, `ferris-tests` for test changes, and the relevant language or platform skill. Missing skills are not a blocker; the rules below are the fallback contract.
 - For a reported defect or failure, inspect current behavior, confirm the defect before editing, and establish its root cause; a disproved issue means zero edits.
 - Make the smallest coherent root-cause change. Preserve unrelated work and existing conventions; avoid speculative abstractions and unrelated cleanup.
 - Own the complete primary change plus directly affected tests, README/docs, comments, and local diff hygiene. Remove debug output, dead code, stale comments, and other debris introduced in your scope.

@@ -113,7 +113,7 @@ export function buildDelegationDirective(
 		...(hasScout ? ["`scout`: read-only broad code mapping or external research; return file/source citations as leads, not proof."] : []),
 		...(hasArtisan ? ["`artisan`: one substantial primary change; own root cause, implementation, affected tests/docs, and targeted checks."] : []),
 		...(hasSteward ? ["`steward`: final cleanup/docs sync for a completed broad or multi-writer diff; keep focused hygiene inline."] : []),
-		...(hasSentinel ? ["`sentinel`: read-only post-cleanup review; use matching skills and report only evidenced defects."] : []),
+		...(hasSentinel ? ["`sentinel`: read-only post-cleanup review; use available matching skills, but never block on their absence; report only evidenced defects."] : []),
 		...(hasSentinel
 			? [`Before every commit: cleanup -> sentinel review. ${hasSteward ? "Use steward once only for broad or multi-writer diffs" : "Keep cleanup inline"}. Then dispatch sentinel on the final diff and check evidence. After review fixes, clean and review once more; findings block commit.`]
 			: []),

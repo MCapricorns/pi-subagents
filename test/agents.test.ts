@@ -89,6 +89,15 @@ describe("loadBuiltinAgents", () => {
 		assert.ok(sentinel.systemPrompt.length < 1_200, `sentinel prompt is ${sentinel.systemPrompt.length} characters`);
 	});
 
+	it("keeps skill-aware roles usable without external Ferris skills", () => {
+		const agents = loadBuiltinAgents();
+		for (const name of ["artisan", "steward", "sentinel"]) {
+			const agent = agents.find((candidate) => candidate.name === name);
+			assert.ok(agent);
+			assert.match(agent.systemPrompt, /Missing skills are not a blocker/u);
+		}
+	});
+
 	it("keeps shell guidance portable", () => {
 		const posixOnly = /`(?:cat|sed|awk|which|touch|rm|cp|mv)\b/u;
 		for (const agent of loadBuiltinAgents()) {
