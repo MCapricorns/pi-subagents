@@ -4,6 +4,18 @@ Published versions of `@ferris1225/pi-subagents`. Unpublished numbers
 (`4.2.3`, `4.2.6`, `4.2.9`–`4.2.11`) never shipped on npm; their changes
 landed in the next published release.
 
+## 4.3.5
+
+- Restore `/subagents-setup`'s nested menu flow, fuzzy model picker, and disabled
+  custom-role discovery.
+- Retire the built-in `sentinel` role and mandatory pre-commit review workflow.
+  Config normalization, loading, and saving now remove its enabled/known entries
+  and model/thinking overrides while preserving every other custom role.
+- Keep role prompts self-contained: direct diagnosis, test, and cleanup rules remain,
+  while external loading directives are removed.
+- Delegate substantial independent phases more proactively while capping the child-process
+  pool at six and retaining phase leases, duplicate-dispatch rejection, and single-route delivery.
+
 ## 4.3.4
 
 - Keep artisan, steward, and sentinel fully usable when Ferris skills are absent.

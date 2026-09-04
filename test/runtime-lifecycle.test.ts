@@ -4,7 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, it } from "node:test";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
-import { BackgroundTaskQueue } from "../src/background.ts";
+import { BackgroundTaskQueue, resolveSubagentConcurrency } from "../src/background.ts";
 import type { CompletionMessageItem } from "../src/completion.ts";
 import { readThreadRecords, upsertThreadRecord, type ThreadRecord } from "../src/durable.ts";
 import { monitor } from "../src/monitor.ts";
@@ -33,6 +33,16 @@ function fakePi(sent: Array<{ message: unknown; options: unknown }>): ExtensionA
 function completion(agent: string): CompletionMessageItem {
 	return { agent, block: `${agent} completed`, usage: emptyUsage() };
 }
+
+describe("resolveSubagentConcurrency", () => {
+	it("scales proactively without running more than six children", () => {
+		assert.equal(resolveSubagentConcurrency(1), 4);
+		assert.equal(resolveSubagentConcurrency(8), 4);
+		assert.equal(resolveSubagentConcurrency(10), 5);
+		assert.equal(resolveSubagentConcurrency(12), 6);
+		assert.equal(resolveSubagentConcurrency(128), 6);
+	});
+});
 
 describe("BackgroundTaskQueue slot ownership", () => {
 	it("makes a suspended lane waiter reacquire a slot before child work", async () => {

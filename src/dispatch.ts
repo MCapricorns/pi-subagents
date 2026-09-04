@@ -1,6 +1,6 @@
 /**
- * The `subagent` tool: dispatches enabled scout, artisan, steward, sentinel,
- * and custom roles as isolated pi child processes, single or parallel.
+ * The `subagent` tool: dispatches enabled built-in and custom roles as
+ * isolated pi child processes, single or parallel.
  * Owns the public dispatch contract and
  * per-run status tracking. Stable thread generations, final integration, and
  * completion ownership live in thread-lifecycle.ts.

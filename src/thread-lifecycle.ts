@@ -20,7 +20,6 @@ import {
 } from "./agents.ts";
 import { type CompletionMessageItem } from "./completion.ts";
 import {
-	configuredModelForAgent,
 	loadConfig,
 	roleThinkingLevel,
 	type SubagentsConfig,
@@ -242,9 +241,9 @@ export function withWorktreeSystemPrompt(agent: AgentConfig): AgentConfig {
 	};
 }
 
-/** Sentinel must inspect the caller's uncommitted diff, never a detached copy. */
+/** Only write-capable agents can run in an isolated worktree. */
 export function isWorktreeCapableAgent(agent: AgentConfig): boolean {
-	return agent.name !== "sentinel" && isWriteCapableAgent(agent);
+	return isWriteCapableAgent(agent);
 }
 
 export interface DispatchEnvironment {
@@ -313,7 +312,7 @@ export function resolveDispatchModelRoute(
 	const availableModels = availableModelsInScope(ctx);
 	const mainRef = currentModelRef(ctx);
 	const route = resolveAgentModelRoute({
-		selectedRef: configuredModelForAgent(config.agentModels, agent.name),
+		selectedRef: config.agentModels[agent.name],
 		mainRef,
 		availableRefs: availableModels.map(modelRef),
 	});

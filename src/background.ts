@@ -38,13 +38,10 @@ interface PendingAcquire {
 
 type PendingEntry = PendingTask | PendingAcquire;
 
-/** How many sub-agent processes may run at once, derived from the host instead
- * of being fixed: children wait on model I/O far more than on CPU, so the pool
- * scales with cores while the bounds keep tiny machines usable and huge ones
- * from fanning out into an API-rate-limit wall. Pacing only — the queue never
- * rejects work; a wider parallel `subagent` call simply waits for a slot. */
+/** Child-process concurrency scales with the host but stays within 4–6.
+ * The queue paces wider batches instead of rejecting independent work. */
 export function resolveSubagentConcurrency(cpuCount: number = cpus().length): number {
-	return Math.min(16, Math.max(4, Math.floor(cpuCount / 2)));
+	return Math.min(6, Math.max(4, Math.floor(cpuCount / 2)));
 }
 
 export class BackgroundTaskQueue {

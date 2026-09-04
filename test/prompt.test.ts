@@ -36,15 +36,16 @@ describe("buildDelegationDirective", () => {
 	it("keeps routing cost-aware and phase-owned", () => {
 		const directive = buildDelegationDirective(loadBuiltinAgents());
 		assert.match(directive, /Each child starts a paid context/u);
+		assert.match(directive, /proactively delegate substantial self-contained phases/u);
+		assert.match(directive, /at most six child processes/u);
 		assert.match(directive, /Cluster related reconnaissance into one scout brief/u);
 		assert.match(directive, /external research/u);
 		assert.match(directive, /primary change/u);
-		assert.match(directive, /Before every commit: cleanup -> sentinel review/u);
+		assert.doesNotMatch(directive, /sentinel|Before every commit/u);
 		assert.match(directive, /`wait: true` only when the result is the immediate dependency/u);
 		assert.match(directive, /Never sleep or poll/u);
-		assert.ok(directive.indexOf("cleanup -> sentinel review") < directive.indexOf("dispatch sentinel"));
 		assert.match(directive, /One owner per phase/u);
-		assert.match(directive, /main may inspect its result, citations, diff/u);
+		assert.match(directive, /never repeats delegated broad search, implementation, or cleanup/u);
 		assert.doesNotMatch(directive, /Delegate aggressively|dispatch more|keep working/u);
 		assert.doesNotMatch(directive, /Active phase leases:/u);
 	});
@@ -52,7 +53,7 @@ describe("buildDelegationDirective", () => {
 	it("shows routing only for enabled roles", () => {
 		const directive = buildDelegationDirective([agent("artisan")]);
 		assert.match(directive, /`artisan`:/u);
-		assert.doesNotMatch(directive, /`scout`:|`steward`:|`sentinel`:/u);
+		assert.doesNotMatch(directive, /`scout`:|`steward`:/u);
 	});
 
 	it("renders only bounded active and settling leases", () => {

@@ -6,15 +6,17 @@
 ![platform](https://img.shields.io/badge/platform-Windows%20%7C%20macOS%20%7C%20Linux-lightgrey)
 ![pi](https://img.shields.io/badge/pi-extension-orange)
 
-A managed engineering team for [pi](https://github.com/earendil-works/pi): four
+A managed engineering team for [pi](https://github.com/earendil-works/pi): three
 focused sub-agents, durable threads, and Git worktree isolation. You install it
 once and your main agent delegates on its own.
 
 ## What's new
 
-**4.3.4** — makes Ferris skills optional enhancements instead of runtime
-requirements. Artisan, steward, and sentinel remain fully operational from their
-standalone role prompts when users have no Ferris skills installed.
+**4.3.5** — restores the nested setup menus, returns to the three built-in roles,
+removes mandatory review/skill directives, and delegates independent phases more
+proactively with at most six child processes. Existing configs retain custom roles
+while dropping the retired `sentinel`.
+
 See [CHANGELOG.md](./CHANGELOG.md).
 
 ## Contents
@@ -41,8 +43,9 @@ at "spawn a child with a prompt" and leave the hard parts — when to delegate, 
 wide to fan out, what happens when a model dies, how results come
 back — with you. This extension owns them:
 
-- The main model gets a cost-aware routing contract and delegates only when a leaf
-  context saves more work than its handoff costs.
+- The main model gets a cost-aware routing contract and proactively delegates
+  substantial self-contained phases when a fresh context saves more work than its
+  handoff costs.
 - One active normalized task and working directory owns its phase, so an exact
   duplicate dispatch is rejected instead of paying twice.
 - Background completions wake the main model; `wait: true` returns the same result
@@ -63,11 +66,12 @@ Requires **pi >= 0.84.4** and **Node.js >= 22.19.0**.
 pi install npm:@ferris1225/pi-subagents
 ```
 
-Open pi and run `/subagents-setup`. One overlay shows every role's enabled state,
-model, and effective thinking level. Move through the grid, search models in place,
-then choose **Save & Exit** to write everything once; **Cancel** or `Esc` discards
-the draft. Fresh installs select all four, and an upgrade surfaces a new built-in
-once without re-enabling it after you deliberately turn it off. Then ask for work:
+Open pi and run `/subagents-setup`. The original menu flow lets you enable or
+disable roles, configure one role's model and thinking level, or run the full setup
+again. Each screen uses the usual arrow-key/Enter/Esc navigation, and model lists
+remain searchable. Fresh installs select all three. A newly shipped built-in is
+surfaced once without being re-enabled after you deliberately turn it off. Then ask
+for work:
 
 ```text
 Map how authentication works, fix the refresh race, run the tests, and review the diff.
@@ -78,18 +82,14 @@ directly when you want exact control.
 
 ## The team
 
-| Agent      | Access      | Owns |
-| ---------- | ----------- | ---- |
-| `scout`    | Read-only   | Broad or unfamiliar code reconnaissance and external research. Returns compact file citations or source URLs as leads, not proof. |
-| `artisan`  | Full        | One substantial primary change—implementation, fix, refactor, test, or docs—through root cause, affected verification, and local hygiene. |
-| `steward`  | Full        | One final cleanup and cross-cutting docs/comment sync pass after a broad or multi-writer change. |
-| `sentinel` | Review-only | A post-cleanup adversarial review using standalone evidence gates plus any matching Ferris skills; reports only evidence-backed defects and concrete test gaps. |
+| Agent     | Access    | Owns |
+| --------- | --------- | ---- |
+| `scout`   | Read-only | Broad or unfamiliar code reconnaissance and external research. Returns compact file citations or source URLs as leads, not proof. |
+| `artisan` | Full      | One substantial primary change—implementation, fix, refactor, test, or docs—through root cause, affected verification, and local hygiene. |
+| `steward` | Full      | One final cleanup and cross-cutting docs/comment sync pass after a broad or multi-writer change. |
 
-Role prompts are standalone: they embed root-cause-first diagnosis, meaningful test
-evidence, bounded cleanup, and evidence-only review. Optional Ferris skills remain
-the canonical source of deeper language, platform, debugging, testing, and audit
-guidance. Artisan and sentinel load matching skills when available; steward uses
-`ferris-audit`; a missing skill never blocks a role or changes its ownership contract.
+Role prompts are self-contained and directly embed root-cause-first diagnosis,
+meaningful test evidence, and bounded cleanup.
 
 Custom roles join them with a Markdown file (see [Custom agents](#custom-agents)).
 
@@ -116,11 +116,10 @@ subagent({
 });
 ```
 
-Breadth is the main agent's call, not a configured limit. There is no per-call
-task cap: put every genuinely independent unit in one `tasks` array. The runtime
-paces execution instead, running a pool of child processes that scales with the
-machine (half its cores, bounded to 4–16) and starting queued runs automatically
-as slots free.
+Breadth is the main agent's call, not a configured task cap: put every genuinely
+independent unit in one `tasks` array. The runtime paces execution instead, running
+half the machine's cores with a 4–6 child-process bound; wider batches queue and
+start automatically as slots free.
 
 An active run leases its normalized task and resolved working directory across
 agent names. Dispatching the same pair again is rejected and names the existing
@@ -133,26 +132,23 @@ starting its child — alongside the slot capacity. A run that waits for the wri
 lane releases its slot first, so serialized writers never starve new dispatches.
 
 One child owns one coherent phase. Dependent work starts only after its
-prerequisite delivers. Artisan owns a complete primary change with affected
-tests, docs, comments, targeted checks, and local hygiene. Scout owns broad code
-mapping or external research and stays read-only.
+prerequisite delivers. Main consumes the child's compact result and citations
+without repeating delegated reconnaissance, implementation, or cleanup. Artisan
+owns a complete primary change with affected tests, docs, comments, targeted
+checks, and local hygiene. Scout owns broad code mapping or external research and
+stays read-only.
 
-With the default team, every commit ends in one order: cleanup -> `sentinel`. A
-focused diff gets a bounded cleanup pass inline; a broad or multi-writer diff gets
+A focused diff gets a bounded cleanup pass inline. A broad or multi-writer diff gets
 one `steward` pass that attacks touched dead code, duplication, tangled conditionals,
-needless layers, and spaghetti growth without widening into a repo refactor.
-Sentinel then reviews the cleaned diff with its standalone evidence gates plus any
-available matching skills.
-A review-driven edit repeats that sequence once; unresolved findings block the
-commit. Main inspects the final diff and runs the final gate.
+needless layers, and spaghetti growth without widening into a repository refactor.
+Main inspects the integrated diff and runs the final gate.
 
 ## Parallel edits
 
 - Single tasks use your checkout. Every parallel write-capable agent (`artisan`,
   `steward`, and custom writers) defaults to a detached Git worktree, so
-  parallel writers run at the same time. Worktree mode needs a committed `HEAD`,
-  and scout/sentinel reject it. Sentinel stays shared so it sees the caller's
-  uncommitted diff.
+  parallel writers run at the same time. Worktree mode needs a committed `HEAD`;
+  read-only roles such as scout stay on the shared checkout.
 - A role file can pin its own default with `isolation: worktree` or
   `isolation: shared` in the frontmatter. Precedence is an explicit per-dispatch
   `isolation`, then the role's declaration, then the parallel write default.
@@ -279,17 +275,15 @@ rather than a fabricated number.
 ## Models, thinking, and tools
 
 Each agent runs on the current main model or one picked in `/subagents-setup`,
-which labels vision and text-only models. Without its own override, `sentinel`
-uses `artisan`'s configured model; if artisan also follows main, sentinel does
-too. If a selected model is missing, rate-limited, or fails at the provider level,
-the **same retained
+which labels vision and text-only models. If a selected model is missing,
+rate-limited, or fails at the provider level, the **same retained
 session** continues on the main model, so finished searches, reads, and edits
 survive. Ordinary task failures do not trigger a handoff.
 
-Thinking is a **role default** — scout `low`, artisan `high`, steward `medium`,
-sentinel `max` — clamped to what the effective model supports. The unified setup
-grid shows the effective level; changing the thinking cell cycles only supported
-levels, and returning to the role default clears the stored override. There is no
+Thinking is a **role default** — scout `low`, artisan `high`, steward `medium` —
+clamped to what the effective model supports. `/subagents-setup` →
+_Configure an agent_ lists only the levels that model supports and marks the role
+default; selecting it clears the stored override. There is no
 Auto choice, no per-dispatch `thinking` flag, and
 no `thinking` field in agent Markdown. Precedence: your setup override > the
 role default, then the model clamp. There is no separate vision mode — assign
@@ -314,25 +308,19 @@ For external research scout prefers official documentation, specifications, rele
 notes, and first-party repositories; it fetches decisive pages rather than citing
 search snippets, records material dates/versions, and marks uncertainty.
 
-`sentinel` has an explicit retrieval/documentation list plus a portable shell
-slot for Git inspection and the smallest proving check. It is pinned to `shared`
-so it sees the current uncommitted diff. Its concise prompt uses matching available
-Ferris skills, preserves their owners, and forbids mutation; missing skills do not
-block review. This is a review contract,
-not a hard shell sandbox.
-
 ## Configuration
 
-`/subagents-setup` opens one transactional overlay for every built-in and already
-configured custom role. Its grid edits enabled state, model, and thinking before
-**Save & Exit** persists the complete draft; **Cancel**/`Esc` writes nothing. Model
-selection remains inside the overlay and supports fuzzy search. Other settings live in
+`/subagents-setup` opens the original settings menu: enable or disable roles,
+configure one enabled role's model and thinking level, or walk through a full
+re-setup. `Esc` moves back through the menu stack, and model lists support fuzzy
+search. Built-in and previously configured custom roles remain available in the
+enable menu. Other settings live in
 `~/.pi/agent/pi-subagents.json` (following `PI_CODING_AGENT_DIR`):
 
 ```json
 {
-  "enabledAgents": ["scout", "artisan", "steward", "sentinel"],
-  "knownAgents": ["scout", "artisan", "steward", "sentinel"],
+  "enabledAgents": ["scout", "artisan", "steward"],
+  "knownAgents": ["scout", "artisan", "steward"],
   "agentModels": { "scout": "anthropic/claude-haiku-4-5" },
   "agentThinkingLevels": { "artisan": "high" },
   "maxResultLines": 40,
@@ -345,7 +333,7 @@ selection remains inside the overlay and supports fuzzy search. Other settings l
 | --------------------- | ------- |
 | `enabledAgents`       | Agents available for discovery and delegation. `[]` disables all. |
 | `knownAgents`         | Roles already surfaced by setup; retains disabled custom roles and tracks built-in adoption. |
-| `agentModels`         | Optional model per agent; missing means main, except sentinel inherits artisan's override. |
+| `agentModels`         | Optional model per agent; missing means the current main model. |
 | `agentThinkingLevels` | Optional setup override per agent; missing means the role default. |
 | `maxResultLines`      | Lines kept in a completion message before the artifact takes over. Default `40`. |
 | `agentScope`          | Discover `user`, `project`, or `both` agent directories. Default `user`. |
@@ -354,8 +342,10 @@ selection remains inside the overlay and supports fuzzy search. Other settings l
 When at least one role is enabled, the cost-aware delegation directive is injected
 automatically. `enabledAgents` is authoritative after catalog adoption: a newly
 shipped built-in is appended once, then `knownAgents` records that it was surfaced
-so a deliberate later disable remains disabled. Invalid known fields fall back
-safely, and unknown fields are dropped when canonical config is persisted.
+so a deliberate later disable remains disabled. On upgrade, the retired `sentinel`
+entry is removed from enabled and known agents plus model and thinking overrides;
+all other custom roles and known-agent entries remain intact. Invalid known fields
+fall back safely, and unknown fields are dropped when canonical config is persisted.
 
 At session start, model overrides that pi no longer reports are removed with a
 one-time notice. If pi's own session compaction fails mid-thread, a notice surfaces

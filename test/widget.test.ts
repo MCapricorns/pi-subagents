@@ -15,8 +15,8 @@ describe("formatActiveRunLines", () => {
 		const now = 10_000;
 		const run: RunView = {
 			id: 7,
-			agent: "sentinel",
-			task: "Review the staged diff",
+			agent: "artisan",
+			task: "Implement the config migration",
 			model: "openai/gpt-5.4",
 			thinking: "high",
 			status: "running",

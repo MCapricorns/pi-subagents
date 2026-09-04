@@ -19,9 +19,9 @@ const SCOUT_READ_ONLY_TOOLS = [
 ] as const;
 
 describe("loadBuiltinAgents", () => {
-	it("ships scout, artisan, steward, and sentinel without frontmatter thinking", () => {
+	it("ships scout, artisan, and steward without frontmatter thinking", () => {
 		const agents = loadBuiltinAgents();
-		assert.deepEqual(agents.map((agent) => agent.name).sort(), ["artisan", "scout", "sentinel", "steward"]);
+		assert.deepEqual(agents.map((agent) => agent.name).sort(), ["artisan", "scout", "steward"]);
 		for (const agent of agents) {
 			assert.equal(agent.model, undefined);
 			assert.ok(!("thinking" in agent));
@@ -51,8 +51,6 @@ describe("loadBuiltinAgents", () => {
 		assert.ok(isWriteCapableAgent(artisan));
 		assert.ok(artisan.systemPrompt.includes("confirm the defect before editing"));
 		assert.ok(artisan.systemPrompt.includes("root cause"));
-		assert.ok(artisan.systemPrompt.includes("ferris-debug"));
-		assert.ok(artisan.systemPrompt.includes("ferris-tests"));
 		assert.match(artisan.systemPrompt, /fail .*before.*pass/iu);
 		assert.ok(artisan.systemPrompt.includes("directly affected tests, README/docs, comments"));
 		assert.ok(artisan.systemPrompt.includes("local diff hygiene"));
@@ -68,34 +66,9 @@ describe("loadBuiltinAgents", () => {
 		assert.ok(steward.systemPrompt.includes("cross-cutting comments, README, examples, and user docs"));
 		assert.ok(steward.systemPrompt.includes("never repeat implementation or reconnaissance"));
 		assert.ok(steward.systemPrompt.includes("without changing product behavior"));
-		assert.ok(steward.systemPrompt.includes("ferris-audit"));
 		assert.ok(steward.systemPrompt.includes("dead or unreachable code"));
 		assert.ok(steward.systemPrompt.includes("tangled conditionals"));
 		assert.ok(!steward.systemPrompt.includes("Merging inputs"));
-	});
-
-	it("keeps sentinel adversarial, bounded, and aligned with ferris skills", () => {
-		const sentinel = loadBuiltinAgents().find((agent) => agent.name === "sentinel");
-		assert.ok(sentinel);
-		assert.equal(sentinel.isolation, "shared");
-		assert.ok(sentinel.tools?.includes("bash"));
-		assert.ok(sentinel.tools?.includes("query-docs"));
-		assert.ok(!sentinel.tools?.includes("edit"));
-		assert.ok(sentinel.systemPrompt.includes("matching ferris skills"));
-		assert.ok(sentinel.systemPrompt.includes("ferris-audit/steward"));
-		assert.ok(sentinel.systemPrompt.includes("implementation owner"));
-		assert.ok(sentinel.systemPrompt.includes("read-only"));
-		assert.ok(sentinel.systemPrompt.includes("No findings."));
-		assert.ok(sentinel.systemPrompt.length < 1_200, `sentinel prompt is ${sentinel.systemPrompt.length} characters`);
-	});
-
-	it("keeps skill-aware roles usable without external Ferris skills", () => {
-		const agents = loadBuiltinAgents();
-		for (const name of ["artisan", "steward", "sentinel"]) {
-			const agent = agents.find((candidate) => candidate.name === name);
-			assert.ok(agent);
-			assert.match(agent.systemPrompt, /Missing skills are not a blocker/u);
-		}
 	});
 
 	it("keeps shell guidance portable", () => {
