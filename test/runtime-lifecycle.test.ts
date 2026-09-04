@@ -4,13 +4,13 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, it } from "node:test";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
-import { BackgroundTaskQueue, resolveSubagentConcurrency } from "../src/background.ts";
-import type { CompletionMessageItem } from "../src/completion.ts";
-import { readThreadRecords, upsertThreadRecord, type ThreadRecord } from "../src/durable.ts";
-import { monitor } from "../src/monitor.ts";
-import { createRuntime } from "../src/runtime.ts";
-import { emptyUsage } from "../src/rpc-run.ts";
-import { restoreDurableThreads } from "../src/thread-lifecycle.ts";
+import { BackgroundTaskQueue, resolveSubagentConcurrency } from "../src/execution/background.ts";
+import type { CompletionMessageItem } from "../src/lifecycle/completion.ts";
+import { readThreadRecords, upsertThreadRecord, type ThreadRecord } from "../src/lifecycle/durable.ts";
+import { monitor } from "../src/presentation/monitor.ts";
+import { createRuntime } from "../src/lifecycle/runtime.ts";
+import { emptyUsage } from "../src/execution/rpc-control.ts";
+import { restoreDurableThreads } from "../src/lifecycle/thread-restore.ts";
 
 function deferred(): { promise: Promise<void>; resolve: () => void } {
 	let resolve!: () => void;

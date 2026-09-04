@@ -4,7 +4,7 @@ import {
 	isWriteCapableAgent,
 	loadBuiltinAgents,
 	resolveAgentTools,
-} from "../src/agents.ts";
+} from "../src/delegation/agents.ts";
 
 const SCOUT_READ_ONLY_TOOLS = [
 	"read",

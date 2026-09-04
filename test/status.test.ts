@@ -1,10 +1,10 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
-import { formatCompletionBlock } from "../src/format.ts";
-import { formatRunStatusLine } from "../src/status.ts";
-import { RESULT_LINE_MAX, truncateResultOutput } from "../src/spawn.ts";
-import { emptyUsage } from "../src/rpc-run.ts";
-import type { RunView } from "../src/monitor.ts";
+import { formatCompletionBlock } from "../src/presentation/format.ts";
+import { formatRunStatusLine } from "../src/presentation/status.ts";
+import { RESULT_LINE_MAX, truncateResultOutput } from "../src/execution/spawn.ts";
+import { emptyUsage } from "../src/execution/rpc-control.ts";
+import type { RunView } from "../src/presentation/monitor.ts";
 
 function run(partial: Partial<RunView> & Pick<RunView, "id" | "status">): RunView {
 	return {

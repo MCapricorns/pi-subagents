@@ -7,8 +7,8 @@
  * failure directly so it is never delayed.
  */
 
-import { formatUsageCompact, sumUsage, type RunWaitReason } from "./monitor.ts";
-import type { UsageStats } from "./rpc-run.ts";
+import { formatUsageCompact, sumUsage, type RunWaitReason } from "../presentation/monitor.ts";
+import type { UsageStats } from "../execution/rpc-control.ts";
 
 export interface CompletionBatchTimings {
 	debounceMs: number;

@@ -10,329 +10,62 @@
 import type { ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { existsSync } from "node:fs";
 import { rm } from "node:fs/promises";
-import { realpath } from "node:fs/promises";
 import { join, resolve } from "node:path";
 import {
 	discoverAgents,
 	isWriteCapableAgent,
 	resolveAgentTools,
 	type AgentConfig,
-} from "./agents.ts";
+} from "../delegation/agents.ts";
 import { type CompletionMessageItem } from "./completion.ts";
-import {
-	loadConfig,
-	roleThinkingLevel,
-	type SubagentsConfig,
-	type ThinkingLevel,
-} from "./config.ts";
-import {
-	isCurrentBoot,
-	readThreadRecords,
-	referencedDurablePaths,
-	removeThreadRecord,
-	pruneStaleProjectRoots,
-	pruneThreadRecords,
-	restoredResultFromSummary,
-	threadRecordFromThread,
-	type ThreadRecord,
-	upsertThreadRecord,
-} from "./durable.ts";
+import { loadConfig } from "../configuration/config.ts";
 import {
 	dispatchFailedResult,
 	failedStartResult,
 	formatCompletionBlock,
 	modelLevelTakeoverNote,
 	queuedResult,
-} from "./format.ts";
-import {
-	availableModelsInScope,
-	currentModelRef,
-	findModelByRef,
-	modelRef,
-	resolveAgentModelRoute,
-	resolveThinkingLevel,
-} from "./models.ts";
-import { monitor } from "./monitor.ts";
-import { findDuplicateActiveDispatch } from "./prompt.ts";
-import { persistRecoveryRecords, recoveryRecordFromFinalization } from "./recovery.ts";
-import { emptyUsage } from "./rpc-run.ts";
+} from "../presentation/format.ts";
+import { monitor } from "../presentation/monitor.ts";
+import { findDuplicateActiveDispatch } from "../delegation/prompt.ts";
+import { persistRecoveryRecords, recoveryRecordFromFinalization } from "../isolation/recovery.ts";
 import type { SubagentRuntime, SubagentThread, ThreadState } from "./runtime.ts";
-import { forkRetainedSession } from "./session-fork.ts";
+import { forkRetainedSession } from "../execution/session-fork.ts";
 import {
 	buildResumePrompt,
 	getProjectRoot,
-	getSubagentsRoot,
 	RpcRunControl,
 	isFailedResult,
 	isModelLevelFailure,
 	runSingleAgentWithMainFallback,
-	sessionExists,
-	sweepProjectResultArtifacts,
 	type SingleResult,
 	type SubagentDetails,
 	type SubagentLiveEvent,
-} from "./spawn.ts";
+} from "../execution/spawn.ts";
 import {
-	isProcessAlive,
-	killProcessTree,
-	sweepProjectDurableDirs,
-	sweepProjectTempDirs,
-} from "./temp-hygiene.ts";
+	beginRuntimePreflight,
+	isWorktreeCapableAgent,
+	ownsResumeReservation,
+	persistThreadCheckpoint,
+	projectResultsRoot,
+	quiesced,
+	resolveDispatchModelRoute,
+	runInManagedRepositoryLane,
+	withWorktreeSystemPrompt,
+	type DispatchEnvironment,
+	type ResumeReservation,
+	type SessionSeed,
+	type StartBackgroundInternal,
+	type StartBackgroundOptions,
+	type ThreadLifecycleDeps,
+} from "./thread-shared.ts";
 import {
 	createWorktreeIsolation,
-	isPathInside,
-	resolveRepositoryRoot,
-	restoreWorktreeIsolation,
 	worktreeGroupId,
 	type IsolationMode,
 	type WorktreeFinalization,
 	type WorktreeIsolation,
-} from "./worktree.ts";
-
-/** Control operations must never wait forever on a settling generation: the
- * queue task can legitimately spend minutes in worktree finalization (bounded
- * per-Git-command timeouts) or wait behind the managed repository lane. After
- * this deadline the control path owns the lifecycle synchronously and proceeds
- * while the stuck tail settles silently in the background. */
-export const CONTROL_QUIESCE_TIMEOUT_MS = 20_000;
-
-/** Resolve true when the promise settles, or false after the bounded deadline. */
-export function quiesced(promise: Promise<unknown>, timeoutMs: number = CONTROL_QUIESCE_TIMEOUT_MS): Promise<boolean> {
-	return Promise.race([
-		promise.then(() => true, () => true),
-		new Promise<boolean>((resolve) => {
-			const timer = setTimeout(() => resolve(false), timeoutMs);
-			if (typeof timer.unref === "function") timer.unref();
-		}),
-	]);
-}
-
-const managedRepositoryRootTails = new Map<string, Promise<void>>();
-
-async function canonicalManagedRepositoryRoot(cwd: string): Promise<string> {
-	try {
-		// Repository identity does not depend on HEAD: empty repositories must
-		// serialize root and nested cwd requests under the same lane too.
-		return await resolveRepositoryRoot(cwd);
-	} catch {
-		try {
-			return await realpath(resolve(cwd));
-		} catch {
-			return resolve(cwd);
-		}
-	}
-}
-
-/** Run one operation under the canonical original-repository lane.
- *
- * Shared write-capable generations use the abortable overload for their whole
- * run. Isolated generations use the non-abortable overload only for their
- * final worktree apply, so model work remains parallel while the original
- * checkout mutation cannot race a shared writer.
- */
-export async function runInManagedRepositoryLane<T>(
-	cwd: string,
-	task: () => Promise<T>,
-): Promise<T>;
-export async function runInManagedRepositoryLane<T>(
-	cwd: string,
-	task: () => Promise<T>,
-	signal: AbortSignal,
-): Promise<T | undefined>;
-export async function runInManagedRepositoryLane<T>(
-	cwd: string,
-	task: () => Promise<T>,
-	signal?: AbortSignal,
-): Promise<T | undefined> {
-	if (signal?.aborted) return undefined;
-	const root = await canonicalManagedRepositoryRoot(cwd);
-	const key = process.platform === "win32" ? root.toLowerCase() : root;
-	const previous = managedRepositoryRootTails.get(key) ?? Promise.resolve();
-	let release!: () => void;
-	const gate = new Promise<void>((resolveGate) => {
-		release = resolveGate;
-	});
-	const tail = previous.catch(() => undefined).then(() => gate);
-	managedRepositoryRootTails.set(key, tail);
-	let onAbort: (() => void) | undefined;
-	try {
-		if (signal) {
-			await Promise.race([
-				previous.catch(() => undefined),
-				new Promise<void>((resolveAborted) => {
-					if (signal.aborted) resolveAborted();
-					else {
-						onAbort = resolveAborted;
-						signal.addEventListener("abort", onAbort, { once: true });
-					}
-				}),
-			]);
-		} else {
-			await previous.catch(() => undefined);
-		}
-		if (signal?.aborted) return undefined;
-		return await task();
-	} finally {
-		if (signal && onAbort) signal.removeEventListener("abort", onAbort);
-		release();
-		// An aborted waiter may finish before the prior owner. Keep its chained
-		// tail installed until that owner also settles, otherwise a newcomer could
-		// observe an empty map and race the still-running workflow.
-		void tail.then(() => {
-			if (managedRepositoryRootTails.get(key) === tail) managedRepositoryRootTails.delete(key);
-		});
-	}
-}
-
-/** Track resume setup that has claimed a thread but has not yet enqueued
- * its next generation. Shutdown invalidates these claims and waits for cleanup. */
-export function beginRuntimePreflight(runtime: SubagentRuntime): () => void {
-	let resolvePreflight!: () => void;
-	const preflight = new Promise<void>((resolve) => {
-		resolvePreflight = resolve;
-	});
-	runtime.preflightOperations.add(preflight);
-	return () => {
-		runtime.preflightOperations.delete(preflight);
-		resolvePreflight();
-	};
-}
-
-/** Synchronous CAS used by lifecycle controls across their async preflight. */
-export function ownsResumeReservation(
-	runtime: SubagentRuntime,
-	thread: SubagentThread,
-	reservation: { version: number; generation: number; sessionId?: string; sessionDir?: string },
-): boolean {
-	return (
-		runtime.sessionActive &&
-		runtime.threads.get(thread.id) === thread &&
-		!thread.retired &&
-		thread.lifecycleOperation === "resume" &&
-		thread.lifecycleVersion === reservation.version &&
-		thread.generation === reservation.generation &&
-		thread.sessionId === reservation.sessionId &&
-		thread.sessionDir === reservation.sessionDir
-	);
-}
-
-/** Fire-and-forget durable checkpoint. Parked threads stay resumable across
- * reloads; a settled thread drops its record so the manifest only exists
- * while unfinished work needs it. The live session keeps working when the
- * manifest is unwritable; only cross-reload resume is degraded. */
-export function persistThreadCheckpoint(
-	runtime: SubagentRuntime,
-	thread: SubagentThread,
-	state: "parked" | "completed" | "failed",
-): void {
-	const write = state === "parked"
-		? upsertThreadRecord(runtime.configPath, threadRecordFromThread(thread, state))
-		: removeThreadRecord(runtime.configPath, thread.id, thread.cwd);
-	void write.catch(() => undefined);
-}
-
-const WORKTREE_ISOLATION_INSTRUCTIONS =
-	"You are running in a temporary detached Git worktree. Work only in the current cwd; do not create another worktree or manually copy/apply changes to the original checkout. The parent dispatcher will integrate your tracked, deleted, and untracked changes when this thread finally settles.";
-
-export function withWorktreeSystemPrompt(agent: AgentConfig): AgentConfig {
-	return {
-		...agent,
-		systemPrompt: `${agent.systemPrompt.trimEnd()}\n\n${WORKTREE_ISOLATION_INSTRUCTIONS}`.trim(),
-	};
-}
-
-/** Only write-capable agents can run in an isolated worktree. */
-export function isWorktreeCapableAgent(agent: AgentConfig): boolean {
-	return isWriteCapableAgent(agent);
-}
-
-export interface DispatchEnvironment {
-	ctx: ExtensionContext;
-	config: SubagentsConfig;
-	agents: AgentConfig[];
-}
-
-export interface SessionSeed {
-	sessionId?: string;
-	sessionDir?: string;
-	prompt?: string;
-	worktree?: WorktreeIsolation;
-}
-
-export interface ResumeReservation {
-	version: number;
-	generation: number;
-	sessionId?: string;
-	sessionDir?: string;
-}
-
-/** The dispatcher's full internal entry point; the public tool surface only
- * uses the first four parameters. */
-export interface StartBackgroundOptions {
-	/** Resume path only: the thread whose retained context continues. */
-	existingThread?: SubagentThread;
-	appendedObjectiveOnResume?: boolean;
-	environment?: DispatchEnvironment;
-	seed?: SessionSeed;
-	resumeReservation?: ResumeReservation;
-	/** Chosen by the tool call before the queue can start a fast child. */
-	deliveryRoute?: "background" | "await";
-}
-
-export type StartBackgroundInternal = (
-	agentName: string,
-	task: string,
-	cwd: string | undefined,
-	isolation?: IsolationMode,
-	options?: StartBackgroundOptions,
-) => Promise<SingleResult>;
-
-export interface ThreadLifecycleDeps {
-	runtime: SubagentRuntime;
-	/** Fallback context when a control caller supplies none; restored threads
-	 * install without one and rely on the per-call context. */
-	runCtx?: ExtensionContext;
-	/** Fresh dispatch passes the live dispatcher; restored threads resolve it
-	 * from the runtime at call time so they never pin a stale closure. */
-	startBackground: StartBackgroundInternal;
-}
-
-interface DispatchModelRoute {
-	agent: AgentConfig;
-	mainFallbackRef?: string;
-	thinkingLevel: ThinkingLevel;
-	thinkingLevelForModel: (ref?: string) => ThinkingLevel;
-}
-
-export function resolveDispatchModelRoute(
-	agent: AgentConfig,
-	config: SubagentsConfig,
-	ctx: ExtensionContext,
-): DispatchModelRoute {
-	const availableModels = availableModelsInScope(ctx);
-	const mainRef = currentModelRef(ctx);
-	const route = resolveAgentModelRoute({
-		selectedRef: config.agentModels[agent.name],
-		mainRef,
-		availableRefs: availableModels.map(modelRef),
-	});
-	// A `/subagents-setup` override wins; otherwise the role default. No
-	// per-call or frontmatter thinking.
-	const preferred =
-		config.agentThinkingLevels[agent.name] ?? roleThinkingLevel(agent.name);
-	const thinkingLevelForModel = (ref?: string): ThinkingLevel => {
-		const model = ref === mainRef && ctx.model
-			? ctx.model
-			: findModelByRef(availableModels, ref);
-		return resolveThinkingLevel(model, preferred);
-	};
-	return {
-		agent: { ...agent, model: route.primaryRef },
-		mainFallbackRef: route.mainFallbackRef,
-		thinkingLevel: thinkingLevelForModel(route.primaryRef),
-		thinkingLevelForModel,
-	};
-}
+} from "../isolation/worktree.ts";
 
 interface BackgroundDispatcherOptions {
 	runtime: SubagentRuntime;
@@ -972,10 +705,6 @@ export function installThreadLifecycle(thread: SubagentThread, deps: ThreadLifec
 		});
 	};
 
-	const persistElapsedTime = (): void => {
-		thread.elapsedMs = monitor.getElapsedMs(runId) ?? thread.elapsedMs;
-	};
-
 	thread.resume = async (objective?: string, resumeCtx?: ExtensionContext): Promise<SingleResult> => {
 		const requestedObjective = objective?.trim();
 		if (!runtime.sessionActive || runtime.threads.get(runId) !== thread) {
@@ -1149,226 +878,4 @@ export function installThreadLifecycle(thread: SubagentThread, deps: ThreadLifec
 			}
 		}
 	};
-}
-
-/** Dropped restored record: no session means no context to resume, so its
- * artifacts go away with the record. */
-async function discardRestoredRecord(runtime: SubagentRuntime, record: ThreadRecord): Promise<void> {
-	if (record.sessionDir) {
-		await rm(record.sessionDir, { recursive: true, force: true }).catch(() => undefined);
-		runtime.sessionDirs.delete(record.sessionDir);
-	}
-	if (record.worktree && (record.worktree.state === "active" || record.worktree.state === "retained")) {
-		const worktree = await restoreWorktreeIsolation(record.worktree).catch(() => undefined);
-		await worktree?.discard().catch(() => undefined);
-	}
-	await removeThreadRecord(runtime.configPath, record.runId, record.cwd).catch(() => undefined);
-}
-
-/** Project-scoped <projectRoot>/results for a completion's artifacts. */
-export function projectResultsRoot(configPath: string, cwd: string | undefined): string {
-	return join(getProjectRoot(configPath, cwd), "results");
-}
-
-function createRestoredThread(
-	runtime: SubagentRuntime,
-	record: ThreadRecord,
-	worktree: WorktreeIsolation | undefined,
-	state: ThreadState,
-): SubagentThread {
-	const thread: SubagentThread = {
-		id: record.runId,
-		generation: record.generation,
-		agentName: record.agentName,
-		task: record.task,
-		cwd: record.cwd,
-		executionCwd: record.executionCwd,
-		...(record.thinkingLevel ? { thinkingLevel: record.thinkingLevel as ThinkingLevel } : {}),
-		isolation: record.isolation,
-		worktree,
-		state,
-		control: new RpcRunControl(record.task, record.generation),
-		generationCompletion: Promise.resolve(),
-		lifecycleVersion: 0,
-		elapsedMs: record.elapsedMs,
-		sessionId: record.sessionId,
-		sessionDir: record.sessionDir,
-		lastResult: restoredResultFromSummary(record),
-		resume: async () => failedStartResult(record.agentName, record.task, "Thread resume was not initialized."),
-		finalizeIsolation: async () => undefined,
-	};
-	installThreadLifecycle(thread, {
-		runtime,
-		startBackground: (...args) => {
-			const dispatcher = runtime.dispatcher;
-			if (!dispatcher) {
-				return Promise.resolve(failedStartResult(
-					record.agentName,
-					record.task,
-					`Run #${record.runId} cannot continue: no dispatch context is available yet. Dispatch any subagent once, then retry.`,
-				));
-			}
-			return dispatcher(...args);
-		},
-	});
-	return thread;
-}
-
-/** Rebuild interrupted (parked) threads from the durable manifest after a
- * reload or restart. Orphaned children recorded by the previous process are
- * killed first; records whose retained session vanished — and settled records
- * left by older versions, which hold no work worth resuming — drop out with
- * their artifacts. Returns the restored run ids. */
-export async function restoreDurableThreads(runtime: SubagentRuntime): Promise<number[]> {
-	const records = await readThreadRecords(runtime.configPath);
-	const restoredIds: number[] = [];
-	for (const record of records) {
-		if (runtime.threads.has(record.runId) || monitor.findRun(record.runId)) continue;
-		if (record.state !== "parked") {
-			await discardRestoredRecord(runtime, record);
-			continue;
-		}
-		// A child orphaned by reload/crash may still hold the retained session.
-		// The on-disk session checkpoint is what survives; kill the writer — but
-		// only while the recorded pids are still ours. Across a reboot the same
-		// numbers belong to unrelated processes.
-		if (isCurrentBoot(record)) {
-			for (const pid of record.childPids) {
-				if (isProcessAlive(pid)) killProcessTree(pid);
-			}
-		}
-		const sessionValid =
-			record.sessionId !== undefined &&
-			record.sessionDir !== undefined &&
-			sessionExists(record.sessionDir, record.sessionId);
-		if (!sessionValid) {
-			await discardRestoredRecord(runtime, record);
-			continue;
-		}
-		const worktree = record.worktree
-			? await restoreWorktreeIsolation(record.worktree).catch(() => undefined)
-			: undefined;
-		const restorationFailed = record.isolation === "worktree" && record.worktree !== undefined && !worktree;
-		const thread = createRestoredThread(runtime, record, worktree, restorationFailed ? "failed" : "parked");
-		runtime.threads.set(record.runId, thread);
-		runtime.sessionDirs.add(record.sessionDir!);
-		if (restorationFailed) {
-			const reason = `Run #${record.runId}'s recorded worktree could not be restored; isolated edits may be unavailable. The retained session and durable record were kept, but this thread cannot be resumed.`;
-			thread.resumeUnavailableReason = reason;
-			thread.restorationRecord = record;
-			const previous = restoredResultFromSummary(record);
-			const failed: SingleResult = {
-				agent: record.agentName,
-				task: record.task,
-				exitCode: 1,
-				messages: previous?.messages ?? [],
-				stderr: reason,
-				usage: previous?.usage ?? emptyUsage(),
-				model: previous?.model,
-				thinking: previous?.thinking,
-				stopReason: "error",
-				errorMessage: reason,
-				dispatchFailed: true,
-				sessionId: record.sessionId,
-				sessionDir: record.sessionDir,
-				projectCwd: record.cwd,
-				runId: record.runId,
-				isolation: "worktree",
-				integrationStatus: "retained",
-			};
-			thread.lastResult = failed;
-			runtime.registerRunResult(record.runId, failed);
-			monitor.restoreRun({
-				id: record.runId,
-				agent: record.agentName,
-				task: record.task,
-				status: "failed",
-				elapsedMs: record.elapsedMs,
-				isolation: "worktree",
-				integrationStatus: "retained",
-			});
-			runtime.claimRunDelivery(record.runId, "background");
-			runtime.publishRunCompletion(record.runId, {
-				agent: record.agentName,
-				block: `### Subagent restoration failed: #${record.runId} ${record.agentName}\n\n${reason}`,
-				usage: failed.usage,
-			}, true);
-			continue;
-		}
-		monitor.restoreRun({
-			id: record.runId,
-			agent: record.agentName,
-			task: record.task,
-			status: "parked",
-			elapsedMs: record.elapsedMs,
-			isolation: record.isolation,
-			...(record.worktree
-				? {
-					integrationStatus: record.worktree.state === "active"
-						? ("pending" as const)
-						: record.worktree.state,
-					...(worktree ? { worktreeId: worktreeGroupId(worktree) } : {}),
-				}
-				: {}),
-		});
-		restoredIds.push(record.runId);
-	}
-	return restoredIds;
-}
-
-/** Session-start durable bootstrap: restore threads, age out expired records, and
- * sweep leaked temp/state directories. Every stage is best-effort so a broken
- * manifest never blocks the session.
- *
- * Restore is published on the runtime as `durableRestore` before this returns,
- * so callers that must see restored threads await that pass alone and never the
- * hygiene sweeps behind it. Hygiene still runs after restore: pruning decides
- * what to delete from the records restore has already claimed. */
-export function bootstrapDurableState(runtime: SubagentRuntime): Promise<void> {
-	const restore = (async () => {
-		try {
-			runtime.restoredRunIds = await restoreDurableThreads(runtime);
-		} catch {
-			/* restore is best-effort */
-		}
-	})();
-	runtime.durableRestore = restore;
-	return (async () => {
-		await restore;
-		try {
-			await pruneThreadRecords(runtime.configPath);
-		} catch {
-			/* retention is best-effort */
-		}
-		const projectRoots = getSubagentsRoot(runtime.configPath);
-		try {
-			sweepProjectTempDirs(projectRoots);
-		} catch {
-			/* temp hygiene is best-effort */
-		}
-		try {
-			// Sessions and worktrees outlive their process on purpose, so only
-			// ownership separates state a live pi still resumes from state a crash
-			// abandoned. Parked work is claimed by the manifest and always kept.
-			const records = await readThreadRecords(runtime.configPath);
-			const referenced = [...referencedDurablePaths(records)];
-			sweepProjectDurableDirs(projectRoots, {
-				keep: (path) => referenced.some((claimed) => isPathInside(path, claimed)),
-			});
-		} catch {
-			/* durable-state hygiene is best-effort */
-		}
-		try {
-			// Result excerpts are bounded on write, which never reaches a project
-			// that has stopped producing them.
-			sweepProjectResultArtifacts(projectRoots);
-		} catch {
-			/* result retention is best-effort */
-		}
-		try {
-			await pruneStaleProjectRoots(runtime.configPath);
-		} catch {
-			/* project-root hygiene is best-effort */
-		}
-	})();
 }

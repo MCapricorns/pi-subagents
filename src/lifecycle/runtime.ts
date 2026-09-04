@@ -10,7 +10,7 @@
 
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { rmSync } from "node:fs";
-import { resolveSubagentConcurrency, BackgroundTaskQueue } from "./background.ts";
+import { resolveSubagentConcurrency, BackgroundTaskQueue } from "../execution/background.ts";
 import {
 	createCompletionBatcher,
 	formatActiveRunsFooter,
@@ -18,13 +18,13 @@ import {
 	type CompletionBatcher,
 	type CompletionMessageItem,
 } from "./completion.ts";
-import { type ThinkingLevel } from "./config.ts";
+import { type ThinkingLevel } from "../configuration/config.ts";
 import { removeThreadRecord, threadRecordFromThread, upsertThreadRecord, type ThreadRecord } from "./durable.ts";
-import { isRunActiveStatus, monitor } from "./monitor.ts";
-import type { RpcRunControl } from "./rpc-run.ts";
-import type { StartBackgroundInternal } from "./thread-lifecycle.ts";
-import { isFailedResult, type SingleResult } from "./spawn.ts";
-import type { IsolationMode, WorktreeFinalization, WorktreeIsolation } from "./worktree.ts";
+import { isRunActiveStatus, monitor } from "../presentation/monitor.ts";
+import type { RpcRunControl } from "../execution/rpc-control.ts";
+import type { StartBackgroundInternal } from "./thread-shared.ts";
+import { isFailedResult, type SingleResult } from "../execution/spawn.ts";
+import type { IsolationMode, WorktreeFinalization, WorktreeIsolation } from "../isolation/worktree.ts";
 
 export type ThreadState =
 	| "queued"

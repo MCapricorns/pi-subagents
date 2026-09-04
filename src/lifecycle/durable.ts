@@ -18,9 +18,9 @@ import { existsSync, type Dirent, readdirSync, statSync } from "node:fs";
 import { mkdir, readFile, rename, rm, writeFile } from "node:fs/promises";
 import { uptime } from "node:os";
 import { dirname, join } from "node:path";
-import type { UsageStats } from "./rpc-run.ts";
+import type { UsageStats } from "../execution/rpc-control.ts";
 import type { SubagentThread } from "./runtime.ts";
-import { getResultOutput, isFailedResult, getProjectRoot, getSubagentsRoot, type SingleResult } from "./spawn.ts";
+import { getResultOutput, isFailedResult, getProjectRoot, getSubagentsRoot, type SingleResult } from "../execution/spawn.ts";
 import {
 	isPathInside,
 	restoreWorktreeIsolation,
@@ -28,7 +28,7 @@ import {
 	normalizeWorktreeSnapshot,
 	worktreeSnapshot,
 	type WorktreeSnapshot,
-} from "./worktree.ts";
+} from "../isolation/worktree.ts";
 
 export const THREADS_MANIFEST_FILE_NAME = "pi-subagents-threads.json";
 const THREADS_MANIFEST_VERSION = 1;

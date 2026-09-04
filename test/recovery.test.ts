@@ -10,7 +10,7 @@ import {
 	readRecoveryRecords,
 	relocateRecoveryManifest,
 	type RecoveryRecord,
-} from "../src/recovery.ts";
+} from "../src/isolation/recovery.ts";
 
 function record(runId: number, error: string): RecoveryRecord {
 	return {

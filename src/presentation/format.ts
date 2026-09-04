@@ -4,9 +4,9 @@
  * and run-id matching.
  */
 
-import type { AgentConfig } from "./agents.ts";
+import type { AgentConfig } from "../delegation/agents.ts";
 import { runLabel, shrinkRunLabel } from "./monitor.ts";
-import { emptyUsage } from "./rpc-run.ts";
+import { emptyUsage } from "../execution/rpc-control.ts";
 import {
 	RESULT_LINE_MAX,
 	getResultOutput,
@@ -15,7 +15,7 @@ import {
 	writeResultArtifact,
 	type SingleResult,
 	type UsageStats,
-} from "./spawn.ts";
+} from "../execution/spawn.ts";
 
 export function queuedResult(agent: AgentConfig, task: string, thinking?: string): SingleResult {
 	return {

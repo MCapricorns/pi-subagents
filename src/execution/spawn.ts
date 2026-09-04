@@ -13,25 +13,27 @@ import { type Dirent, mkdirSync, readdirSync, realpathSync, rmSync, statSync, wr
 import { mkdir, mkdtemp, rm } from "node:fs/promises";
 import { basename, dirname, join, resolve } from "node:path";
 import type { Message } from "@earendil-works/pi-ai";
-import type { AgentConfig } from "./agents.ts";
-import { DEFAULT_THINKING_LEVEL, type ThinkingLevel } from "./config.ts";
+import type { AgentConfig } from "../delegation/agents.ts";
+import { DEFAULT_THINKING_LEVEL, type ThinkingLevel } from "../configuration/config.ts";
+import {
+	emptyUsage,
+	RpcRunControl,
+	type RpcSingleResult,
+	type SubagentLiveEvent,
+	type UsageStats,
+} from "./rpc-control.ts";
 import {
 	currentSubagentDepth,
 	DEPTH_ENV_VAR,
-	emptyUsage,
 	extractToolErrorText,
 	getPiInvocation,
 	isRpcCommandTimeoutError,
-	RpcRunControl,
 	runRpcAgentAttempt,
 	sessionExists,
 	writeChildRetryPolicyExtension,
 	SUBAGENT_KILL_GRACE_MS,
-	type RpcSingleResult,
-	type SubagentLiveEvent,
-	type UsageStats,
 } from "./rpc-run.ts";
-import { writeTempOwnerMarker } from "./temp-hygiene.ts";
+import { writeTempOwnerMarker } from "../isolation/temp-hygiene.ts";
 
 export {
 	currentSubagentDepth,

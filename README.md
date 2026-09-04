@@ -13,9 +13,9 @@ once and your main agent delegates on its own.
 ## What's new
 
 **4.3.5** — restores the nested setup menus, returns to the three built-in roles,
-removes mandatory review/skill directives, and delegates independent phases more
-proactively with at most six child processes. Existing configs retain custom roles
-while dropping the retired `sentinel`.
+removes mandatory review/skill directives, delegates independent phases more proactively
+with at most six child processes, and uses a package-root entry so Pi shows the clean
+package name. Existing configs retain custom roles while dropping the retired `sentinel`.
 
 See [CHANGELOG.md](./CHANGELOG.md).
 
@@ -65,6 +65,8 @@ Requires **pi >= 0.84.4** and **Node.js >= 22.19.0**.
 ```bash
 pi install npm:@ferris1225/pi-subagents
 ```
+
+Pi's extension list shows `@ferris1225/pi-subagents` without an internal source-path suffix.
 
 Open pi and run `/subagents-setup`. The original menu flow lets you enable or
 disable roles, configure one role's model and thinking level, or run the full setup
@@ -408,8 +410,9 @@ npm run check
 
 `npm run check` is `tsc --noEmit` plus the unit tests (`npm test`). There are
 no bundled runtime dependencies; pi and TypeBox are peers. The source is
-split by responsibility: dispatch policy, thread lifecycle, RPC
-transport, worktree integration, completion delivery, tools, and TUI status.
+grouped by responsibility under `src/`: configuration, delegation, execution, isolation,
+lifecycle, and presentation. Thread restoration, shared lifecycle coordination, RPC control,
+and Git command execution live in focused modules rather than oversized catch-all files.
 
 ## Changelog
 

@@ -9,11 +9,10 @@
 import { StringEnum, type Usage } from "@earendil-works/pi-ai";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { Text } from "@earendil-works/pi-tui";
-import { join, resolve } from "node:path";
 import { Type } from "typebox";
-import { discoverAgents, resolveAgentTools, type AgentConfig } from "./agents.ts";
-import { loadConfig } from "./config.ts";
-import { formatCompletionBlock, formatUsage, queuedResult } from "./format.ts";
+import { discoverAgents } from "./agents.ts";
+import { loadConfig } from "../configuration/config.ts";
+import { formatCompletionBlock, formatUsage } from "../presentation/format.ts";
 import {
 	formatTaskSummary,
 	formatToolActivity,
@@ -21,32 +20,27 @@ import {
 	statusIcon,
 	statusLabel,
 	sumUsage,
-	type RunView,
 	type RunWaitReason,
-} from "./monitor.ts";
+} from "../presentation/monitor.ts";
 import { formatPhaseLeaseReceipt } from "./prompt.ts";
-import type { SubagentRuntime, SubagentThread } from "./runtime.ts";
-import { persistThreadCheckpoint } from "./thread-lifecycle.ts";
+import type { SubagentRuntime, SubagentThread } from "../lifecycle/runtime.ts";
+import { createBackgroundDispatcher } from "../lifecycle/thread-lifecycle.ts";
 import {
-	getProjectRoot,
 	getResultOutput,
 	isFailedResult,
-	runSingleAgentWithMainFallback,
 	type SingleResult,
 	type SubagentDetails,
 	type SubagentLiveEvent,
 	type UsageStats,
-} from "./spawn.ts";
+} from "../execution/spawn.ts";
 import {
-	createBackgroundDispatcher,
 	isWorktreeCapableAgent,
+	persistThreadCheckpoint,
 	projectResultsRoot,
-	resolveDispatchModelRoute,
 	runInManagedRepositoryLane,
-	withWorktreeSystemPrompt,
 	type DispatchEnvironment,
-} from "./thread-lifecycle.ts";
-import type { IsolationMode } from "./worktree.ts";
+} from "../lifecycle/thread-shared.ts";
+import type { IsolationMode } from "../isolation/worktree.ts";
 
 export { isWorktreeCapableAgent, runInManagedRepositoryLane };
 

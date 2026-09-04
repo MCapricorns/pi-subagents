@@ -15,8 +15,8 @@ import { type Dirent, existsSync, readdirSync, readFileSync, statSync } from "no
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { CONFIG_DIR_NAME, getAgentDir, parseFrontmatter } from "@earendil-works/pi-coding-agent";
-import { type AgentScope } from "./config.ts";
-import type { IsolationMode } from "./worktree.ts";
+import { type AgentScope } from "../configuration/config.ts";
+import type { IsolationMode } from "../isolation/worktree.ts";
 
 export type AgentSource = "builtin" | "user" | "project";
 
@@ -113,7 +113,7 @@ export function isWriteCapableAgent(
 
 const here = dirname(fileURLToPath(import.meta.url));
 /** <package>/agents — the agents shipped with this extension. */
-export const BUILTIN_AGENTS_DIR = join(here, "..", "agents");
+export const BUILTIN_AGENTS_DIR = join(here, "..", "..", "agents");
 
 /** Agents shipped with the package and surfaced by the setup overlay. */
 export function loadBuiltinAgents(): AgentConfig[] {

@@ -11,8 +11,8 @@ import {
 	type Component,
 	type TUI,
 } from "@earendil-works/pi-tui";
-import type { SubagentsConfig } from "../src/config.ts";
-import { runSetup } from "../src/setup.ts";
+import type { SubagentsConfig } from "../src/configuration/config.ts";
+import { runSetup } from "../src/configuration/setup.ts";
 
 const KEY = {
 	down: "\x1b[B",

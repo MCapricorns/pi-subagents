@@ -1,9 +1,9 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 import type { Theme } from "@earendil-works/pi-coding-agent";
-import type { RunView } from "../src/monitor.ts";
-import { emptyUsage } from "../src/rpc-run.ts";
-import { formatActiveRunLines } from "../src/widget.ts";
+import type { RunView } from "../src/presentation/monitor.ts";
+import { emptyUsage } from "../src/execution/rpc-control.ts";
+import { formatActiveRunLines } from "../src/presentation/widget.ts";
 
 const plainTheme = {
 	fg: (_color: string, text: string) => text,

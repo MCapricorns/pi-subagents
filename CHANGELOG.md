@@ -15,6 +15,9 @@ landed in the next published release.
   while external loading directives are removed.
 - Delegate substantial independent phases more proactively while capping the child-process
   pool at six and retaining phase leases, duplicate-dispatch rejection, and single-route delivery.
+- Move the extension assembly to package-root `index.ts`, group `src/` by responsibility,
+  and split thread restoration, shared lifecycle coordination, RPC control, and Git command
+  execution out of the largest modules. Pi now shows the package name without a `:src` suffix.
 
 ## 4.3.4
 

@@ -2,10 +2,10 @@
 
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { existsSync } from "node:fs";
-import { FIRST_RUN_SETUP_HINT, loadConfig, saveConfig } from "./config.ts";
-import { availableModelsInScope, filterUnavailableModelOverrides } from "./models.ts";
-import { announceRecoveryRecords, relocateRecoveryManifest } from "./recovery.ts";
-import type { SubagentRuntime } from "./runtime.ts";
+import { FIRST_RUN_SETUP_HINT, loadConfig, saveConfig } from "../configuration/config.ts";
+import { availableModelsInScope, filterUnavailableModelOverrides } from "../configuration/models.ts";
+import { announceRecoveryRecords, relocateRecoveryManifest } from "../isolation/recovery.ts";
+import type { SubagentRuntime } from "../lifecycle/runtime.ts";
 import { installActiveRunsStatus } from "./status.ts";
 import { installActiveRunsWidget } from "./widget.ts";
 

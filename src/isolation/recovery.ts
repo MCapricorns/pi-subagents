@@ -5,7 +5,7 @@ import { existsSync } from "node:fs";
 import { mkdir, readFile, rename, rm, writeFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import { stripVTControlCharacters } from "node:util";
-import { getSubagentsRoot } from "./spawn.ts";
+import { getSubagentsRoot } from "../execution/spawn.ts";
 import { removeWorktreeGroup, worktreeGroupDir, type WorktreeFinalization } from "./worktree.ts";
 
 export const RECOVERY_MANIFEST_FILE_NAME = "pi-subagents-recovery.json";

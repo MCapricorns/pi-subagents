@@ -12,8 +12,8 @@
 import { stripVTControlCharacters } from "node:util";
 import type { Theme } from "@earendil-works/pi-coding-agent";
 import { visibleWidth } from "@earendil-works/pi-tui";
-import { emptyUsage, type UsageStats } from "./rpc-run.ts";
-import type { IsolationMode, WorktreeFinalizationStatus } from "./worktree.ts";
+import { emptyUsage, type UsageStats } from "../execution/rpc-control.ts";
+import type { IsolationMode, WorktreeFinalizationStatus } from "../isolation/worktree.ts";
 
 // ---------------------------------------------------------------------------
 // Types

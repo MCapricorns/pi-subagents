@@ -29,7 +29,7 @@ import {
 	statusIcon,
 	type RunView,
 } from "./monitor.ts";
-import type { UsageStats } from "./rpc-run.ts";
+import type { UsageStats } from "../execution/rpc-control.ts";
 
 export const SUBAGENTS_WIDGET_ID = "pi-subagents";
 

@@ -25,6 +25,7 @@
     "dead-code"
   ],
   "files": [
+    "index.ts",
     "src",
     "agents",
     "README.md",
@@ -33,7 +34,7 @@
   ],
   "pi": {
     "extensions": [
-      "./src/index.ts"
+      "./index.ts"
     ]
   },
   "scripts": {

@@ -4,7 +4,7 @@ import { SessionManager } from "@earendil-works/pi-coding-agent";
 import { existsSync } from "node:fs";
 import { mkdir, mkdtemp, rm } from "node:fs/promises";
 import { join } from "node:path";
-import { writeTempOwnerMarker } from "./temp-hygiene.ts";
+import { writeTempOwnerMarker } from "../isolation/temp-hygiene.ts";
 
 export interface ForkedSession {
 	sessionDir: string;

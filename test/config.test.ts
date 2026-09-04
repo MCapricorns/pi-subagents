@@ -15,7 +15,7 @@ import {
 	roleThinkingLevel,
 	saveConfig,
 	type SubagentsConfig,
-} from "../src/config.ts";
+} from "../src/configuration/config.ts";
 
 describe("catalog", () => {
 	it("ships three built-ins and enables them by default", () => {

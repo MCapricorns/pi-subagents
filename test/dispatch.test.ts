@@ -1,11 +1,11 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
-import type { AgentConfig } from "../src/agents.ts";
-import type { SubagentsConfig } from "../src/config.ts";
-import { createRuntime, type SubagentThread } from "../src/runtime.ts";
-import { findDuplicateActiveDispatch, type PhaseLeaseSource } from "../src/prompt.ts";
-import { createBackgroundDispatcher } from "../src/thread-lifecycle.ts";
+import type { AgentConfig } from "../src/delegation/agents.ts";
+import type { SubagentsConfig } from "../src/configuration/config.ts";
+import { createRuntime, type SubagentThread } from "../src/lifecycle/runtime.ts";
+import { findDuplicateActiveDispatch, type PhaseLeaseSource } from "../src/delegation/prompt.ts";
+import { createBackgroundDispatcher } from "../src/lifecycle/thread-lifecycle.ts";
 
 function source(partial: Partial<PhaseLeaseSource> = {}): PhaseLeaseSource {
 	return {

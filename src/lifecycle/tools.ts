@@ -11,16 +11,16 @@ import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { Text } from "@earendil-works/pi-tui";
 import { existsSync } from "node:fs";
 import { Type } from "typebox";
-import { DEFAULT_MAX_RESULT_LINES, loadConfig } from "./config.ts";
+import { DEFAULT_MAX_RESULT_LINES, loadConfig } from "../configuration/config.ts";
 import { removeThreadRecord } from "./durable.ts";
-import { formatCompletionBlock, matchRunIds } from "./format.ts";
-import { emptyUsage } from "./rpc-run.ts";
-import { formatTaskSummary, monitor } from "./monitor.ts";
-import { persistRecoveryRecords, recoveryRecordFromFinalization } from "./recovery.ts";
+import { formatCompletionBlock, matchRunIds } from "../presentation/format.ts";
+import { emptyUsage } from "../execution/rpc-control.ts";
+import { formatTaskSummary, monitor } from "../presentation/monitor.ts";
+import { persistRecoveryRecords, recoveryRecordFromFinalization } from "../isolation/recovery.ts";
 import type { SubagentRuntime, SubagentThread } from "./runtime.ts";
-import { CONTROL_QUIESCE_TIMEOUT_MS, projectResultsRoot, quiesced } from "./thread-lifecycle.ts";
-import { getResultOutput, isFailedResult, type SingleResult } from "./spawn.ts";
-import type { WorktreeFinalization } from "./worktree.ts";
+import { CONTROL_QUIESCE_TIMEOUT_MS, projectResultsRoot, quiesced } from "./thread-shared.ts";
+import { getResultOutput, type SingleResult } from "../execution/spawn.ts";
+import type { WorktreeFinalization } from "../isolation/worktree.ts";
 
 function renderFirstLine(result: { content?: unknown }, label: string, theme: any): Text {
 	const parts = (result.content ?? []) as Array<{ type: string; text?: string }>;

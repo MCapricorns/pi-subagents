@@ -3,12 +3,12 @@
  *
  * Assembly point: builds the shared runtime and registers everything.
  * The heavy lifting lives in focused modules:
- *   - dispatch.ts         — tool contract, managed role policy, internal steps
- *   - thread-lifecycle.ts — stable generations, controls, final integration/delivery
- *   - tools.ts            — subagent_control / subagent_stop
- *   - announcements.ts — session-start recovery, notices, and widget install
- *   - widget.ts        — active-only TUI run status
- *   - runtime.ts       — shared per-session state
+ *   - delegation/    — role discovery, routing prompts, and tool contract
+ *   - configuration/ — persisted settings, model routes, and setup UI
+ *   - execution/     — process queue, RPC transport/control, and model handoff
+ *   - lifecycle/     — durable threads, restoration, controls, and delivery
+ *   - isolation/     — Git worktrees, recovery, and temporary-state hygiene
+ *   - presentation/  — announcements, formatting, monitor, status, and widget
  *
  * Also registers the `/subagents-setup` command and a `before_agent_start` hook
  * that injects a delegation directive into the parent system prompt so the main
@@ -20,19 +20,19 @@
 
 import { getAgentDir, type ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { Text } from "@earendil-works/pi-tui";
-import { discoverAgents } from "./agents.ts";
-import { registerAnnouncements } from "./announcements.ts";
-import { getConfigPath, loadConfig } from "./config.ts";
-import { registerSubagentTool } from "./dispatch.ts";
-import { matchRunIds } from "./format.ts";
-import { buildDelegationDirective } from "./prompt.ts";
-import { createRuntime } from "./runtime.ts";
-import { runSetup } from "./setup.ts";
-import { currentSubagentDepth } from "./spawn.ts";
-import { clearActiveRunsStatus } from "./status.ts";
-import { bootstrapDurableState } from "./thread-lifecycle.ts";
-import { registerLookupTools } from "./tools.ts";
-import { clearActiveRunsWidget } from "./widget.ts";
+import { getConfigPath, loadConfig } from "./src/configuration/config.ts";
+import { runSetup } from "./src/configuration/setup.ts";
+import { discoverAgents } from "./src/delegation/agents.ts";
+import { registerSubagentTool } from "./src/delegation/dispatch.ts";
+import { buildDelegationDirective } from "./src/delegation/prompt.ts";
+import { currentSubagentDepth } from "./src/execution/spawn.ts";
+import { createRuntime } from "./src/lifecycle/runtime.ts";
+import { bootstrapDurableState } from "./src/lifecycle/thread-restore.ts";
+import { registerLookupTools } from "./src/lifecycle/tools.ts";
+import { registerAnnouncements } from "./src/presentation/announcements.ts";
+import { matchRunIds } from "./src/presentation/format.ts";
+import { clearActiveRunsStatus } from "./src/presentation/status.ts";
+import { clearActiveRunsWidget } from "./src/presentation/widget.ts";
 
 export { matchRunIds };
 

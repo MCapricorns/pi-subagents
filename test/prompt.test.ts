@@ -1,12 +1,12 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
-import type { AgentConfig } from "../src/agents.ts";
-import { loadBuiltinAgents } from "../src/agents.ts";
+import type { AgentConfig } from "../src/delegation/agents.ts";
+import { loadBuiltinAgents } from "../src/delegation/agents.ts";
 import {
 	buildDelegationDirective,
 	formatPhaseLeaseReceipt,
 	type PhaseLeaseSource,
-} from "../src/prompt.ts";
+} from "../src/delegation/prompt.ts";
 
 function agent(name: string): AgentConfig {
 	return {
