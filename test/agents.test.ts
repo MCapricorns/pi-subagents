@@ -19,9 +19,9 @@ const SCOUT_READ_ONLY_TOOLS = [
 ] as const;
 
 describe("loadBuiltinAgents", () => {
-	it("ships scout, artisan, and steward without frontmatter thinking", () => {
+	it("ships scout, artisan, steward, and sentinel without frontmatter thinking", () => {
 		const agents = loadBuiltinAgents();
-		assert.deepEqual(agents.map((agent) => agent.name).sort(), ["artisan", "scout", "steward"]);
+		assert.deepEqual(agents.map((agent) => agent.name).sort(), ["artisan", "scout", "sentinel", "steward"]);
 		for (const agent of agents) {
 			assert.equal(agent.model, undefined);
 			assert.ok(!("thinking" in agent));
@@ -82,6 +82,28 @@ describe("loadBuiltinAgents", () => {
 		assert.ok(steward.systemPrompt.includes("nobody answers questions"));
 		assert.match(steward.systemPrompt, /narrowest checks that cover your own edits/u);
 		assert.match(steward.systemPrompt, /primary change's verification is not yours to repeat/u);
+	});
+
+	it("keeps sentinel a read-only fresh-context reviewer on the shared checkout", () => {
+		const sentinel = loadBuiltinAgents().find((agent) => agent.name === "sentinel");
+		assert.ok(sentinel);
+		assert.equal(sentinel.isolation, "shared");
+		assert.match(sentinel.description, /fresh-context review/iu);
+		assert.ok(sentinel.tools?.includes("bash"));
+		assert.ok(sentinel.tools?.includes("query-docs"));
+		assert.ok(!sentinel.tools?.includes("edit"));
+		assert.ok(!sentinel.tools?.includes("write"));
+		assert.ok(sentinel.systemPrompt.includes("no memory of how it was written"));
+		assert.ok(sentinel.systemPrompt.includes("nobody answers questions"));
+		assert.ok(sentinel.systemPrompt.includes("Work read-only"));
+		assert.ok(sentinel.systemPrompt.includes("smallest targeted check needed to prove a suspected defect"));
+		assert.match(sentinel.systemPrompt, /whether each test would fail without the change/u);
+		assert.ok(sentinel.systemPrompt.includes("Fixes belong to the implementation owner and cleanup to `steward`"));
+		assert.ok(sentinel.systemPrompt.includes("SEVERITY path:line"));
+		assert.ok(sentinel.systemPrompt.includes("No findings."));
+		assert.ok(sentinel.systemPrompt.includes("do not dispatch agents"));
+		assert.ok(!/ferris|Before every commit/u.test(sentinel.systemPrompt));
+		assert.ok(isWriteCapableAgent(sentinel), "a proving check takes the repository lane");
 	});
 
 	it("keeps shell guidance portable", () => {

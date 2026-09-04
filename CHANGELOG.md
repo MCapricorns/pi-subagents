@@ -4,6 +4,27 @@ Published versions of `@ferris1225/pi-subagents`. Unpublished numbers
 (`4.2.3`, `4.2.6`, `4.2.9`–`4.2.11`) never shipped on npm; their changes
 landed in the next published release.
 
+## 4.3.8
+
+- Restore `sentinel` as an optional fresh-context reviewer instead of the mandatory
+  pre-commit loop retired in 4.3.5. It reads a completed diff with no memory of how the
+  change was written, attacks behavior, trust boundaries, failure and cancellation paths,
+  concurrency, persistence, portability, and whether each test would fail without the
+  change, runs only the smallest check that proves a suspected defect, and returns
+  evidence-backed findings as `SEVERITY path:line — failure scenario; evidence; smallest
+  fix` or `No findings.`
+- Route sentinel by risk, not ritual: the delegation directive dispatches it after cleanup
+  and before commit only for diffs touching concurrency, trust boundaries,
+  persistence/compatibility, or failure/cancellation paths, or when checks cannot prove
+  the change, and treats a finding as evidence to route back to the owning thread via
+  `resume` or fix inline. Artisan keeps proving its own change; main keeps the final gate.
+- Sentinel runs on the current main model unless `/subagents-setup` picks one, defaults to
+  `high` thinking, stays on the shared checkout whose uncommitted diff it reviews (an
+  explicit `isolation: worktree` is rejected), and holds the repository lane while it
+  reviews.
+- Drop the 4.3.5 retirement filter: configs written by 4.3.5–4.3.7 adopt `sentinel` once
+  through the built-in adoption rule, and a deliberate disable in setup remains disabled.
+
 ## 4.3.7
 
 - Make `subagent_control steer` continue rather than reject a thread that is no longer

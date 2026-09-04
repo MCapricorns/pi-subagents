@@ -6,19 +6,18 @@
 ![platform](https://img.shields.io/badge/platform-Windows%20%7C%20macOS%20%7C%20Linux-lightgrey)
 ![pi](https://img.shields.io/badge/pi-extension-orange)
 
-A managed engineering team for [pi](https://github.com/earendil-works/pi): three
+A managed engineering team for [pi](https://github.com/earendil-works/pi): four
 focused sub-agents, durable threads, and Git worktree isolation. You install it
 once and your main agent delegates on its own.
 
 ## What's new
 
-**4.3.7** — never pay for the same phase twice: the delegation directive now carries a
-full brief contract and effort scaling, `steer` continues a settled or parked thread with
-its guidance instead of rejecting it, `subagent_control park` pauses a running thread at
-a stable checkpoint for a later resume, an exact re-run of a finished brief is rejected in
-favor of resuming its retained context, and resumed children re-read files the workspace
-may have changed underneath them. Role prompts start from the brief's evidence and stop
-at its done condition.
+**4.3.8** — `sentinel` is back as an optional fresh-context reviewer. It reads a
+completed diff with no memory of how it was written and returns only evidence-backed
+defects and test gaps; the main agent dispatches it for diffs that touch concurrency,
+trust boundaries, persistence, or failure paths, never as a fixed pre-commit ritual, and
+routes a finding back to the thread that owns the change. Configs written by
+4.3.5–4.3.7 adopt it once; a deliberate disable sticks.
 
 See [CHANGELOG.md](./CHANGELOG.md).
 
@@ -79,7 +78,7 @@ Pi's extension list shows `@ferris1225/pi-subagents` without an internal source-
 Open pi and run `/subagents-setup`. The original menu flow lets you enable or
 disable roles, configure one role's model and thinking level, or run the full setup
 again. Each screen uses the usual arrow-key/Enter/Esc navigation, and model lists
-remain searchable. Fresh installs select all three. A newly shipped built-in is
+remain searchable. Fresh installs select all four. A newly shipped built-in is
 surfaced once without being re-enabled after you deliberately turn it off. Then ask
 for work:
 
@@ -97,6 +96,7 @@ directly when you want exact control.
 | `scout`   | Read-only | Broad or unfamiliar code reconnaissance and external research. Returns compact file citations or source URLs as leads, not proof. |
 | `artisan` | Full      | One substantial primary change—implementation, fix, refactor, test, or docs—through root cause, affected verification, and local hygiene. |
 | `steward` | Full      | One final cleanup and cross-cutting docs/comment sync pass after a broad or multi-writer change. |
+| `sentinel` | Read-only + one proving check | One fresh-context review of a completed diff for risky changes. Returns only evidence-backed defects and test gaps, highest severity first, or `No findings.` |
 
 Role prompts are self-contained and directly embed root-cause-first diagnosis,
 meaningful test evidence, and bounded cleanup. Each role starts from the facts and
@@ -104,8 +104,10 @@ citations its brief already establishes instead of re-deriving them, answers the
 brief's question and stops, and — because nobody can answer a child's questions —
 resolves an ambiguity by naming the reading it took. Artisan stops and reports when
 the brief's premise turns out wrong rather than substituting a different change;
-steward runs only the checks that cover its own edits. Every role hands back a
-result-only report with each check as `command → result`.
+steward runs only the checks that cover its own edits; sentinel treats the brief's
+claims and the code as evidence to verify, runs only the smallest check that proves a
+suspected defect, and names the smallest fix instead of making it. Every role hands
+back a result-only report with each check as `command → result`.
 
 Custom roles join them with a Markdown file (see [Custom agents](#custom-agents)).
 
@@ -178,12 +180,26 @@ one `steward` pass that attacks touched dead code, duplication, tangled conditio
 needless layers, and spaghetti growth without widening into a repository refactor.
 Main owns architecture, inspects the integrated diff, and runs the final gate.
 
+Verification is layered rather than repeated. Artisan proves its own change while the
+files are still in its context — targeted checks, and a new test that fails before the
+fix — and main runs the final gate on the integrated diff. `sentinel` adds a third
+layer only when it pays: a fresh context with no memory of how the change was written
+reads the completed diff after cleanup and before commit, and only for diffs that touch
+concurrency, trust boundaries, persistence or compatibility, or failure and cancellation
+paths, or when the checks cannot prove the change. It is never a fixed pre-commit
+ritual. A finding is evidence, not an order: main routes it to the thread that owns
+the change with `subagent_control resume`, or fixes it inline when that is cheaper.
+
 ## Parallel edits
 
 - Single tasks use your checkout. Every parallel write-capable agent (`artisan`,
   `steward`, and custom writers) defaults to a detached Git worktree, so
   parallel writers run at the same time. Worktree mode needs a committed `HEAD`;
-  read-only roles such as scout stay on the shared checkout.
+  read-only roles such as scout stay on the shared checkout. `sentinel` always
+  reviews the shared checkout, because the uncommitted diff it inspects does not
+  exist in a detached worktree; an explicit `isolation: worktree` for it is
+  rejected. Its proving check makes it a shared-checkout lane holder, so it never
+  reviews a diff a shared writer is still changing.
 
 > **Security boundary:** worktree isolation isolates Git changes only; it is not a sandbox.
 Child tools, network access, and environment access retain the Pi process's privileges.
@@ -354,8 +370,8 @@ rate-limited, or fails at the provider level, the **same retained
 session** continues on the main model, so finished searches, reads, and edits
 survive. Ordinary task failures do not trigger a handoff.
 
-Thinking is a **role default** — scout `low`, artisan `high`, steward `medium` —
-clamped to what the effective model supports. `/subagents-setup` →
+Thinking is a **role default** — scout `low`, artisan `high`, steward `medium`,
+sentinel `high` — clamped to what the effective model supports. `/subagents-setup` →
 _Configure an agent_ lists only the levels that model supports and marks the role
 default; selecting it clears the stored override. There is no
 Auto choice, no per-dispatch `thinking` flag, and
@@ -373,7 +389,10 @@ shell slot follows the parent's active shell on non-scout roles.
 overstates its tool list. Its known-safe set includes `read`, `grep`, `find`,
 `ls`, `anchor_grep`, `web_search`, `fetch_content`, `resolve-library-id`, and
 `query-docs`; tools not installed or active in Main are simply omitted. Scout
-receives no shell, local mutation tool, or unknown custom tool. Unknown tools
+receives no shell, local mutation tool, or unknown custom tool. `sentinel` declares
+the same retrieval set plus one shell slot, which follows the parent's active shell
+and exists only for the smallest check that proves a suspected defect; it is an
+ordinary declared list, not a hard boundary like scout's. Unknown tools
 declared by other roles are conservatively treated as write-capable when
 isolation is chosen. An empty resolved snapshot starts the child with
 `--no-tools`.
@@ -393,8 +412,8 @@ enable menu. Other settings live in
 
 ```json
 {
-  "enabledAgents": ["scout", "artisan", "steward"],
-  "knownAgents": ["scout", "artisan", "steward"],
+  "enabledAgents": ["scout", "artisan", "steward", "sentinel"],
+  "knownAgents": ["scout", "artisan", "steward", "sentinel"],
   "agentModels": { "scout": "anthropic/claude-haiku-4-5" },
   "agentThinkingLevels": { "artisan": "high" },
   "maxResultLines": 40,
@@ -416,10 +435,11 @@ enable menu. Other settings live in
 When at least one role is enabled, the cost-aware delegation directive is injected
 automatically. `enabledAgents` is authoritative after catalog adoption: a newly
 shipped built-in is appended once, then `knownAgents` records that it was surfaced
-so a deliberate later disable remains disabled. On upgrade, the retired `sentinel`
-entry is removed from enabled and known agents plus model and thinking overrides;
-all other custom roles and known-agent entries remain intact. Invalid known fields
-fall back safely, and unknown fields are dropped when canonical config is persisted.
+so a deliberate later disable remains disabled. `sentinel` returns through that
+rule: a config written by 4.3.5–4.3.7, which removed it, enables it once on the next
+load; turn it off in `/subagents-setup` and it stays off. Custom roles and other
+known-agent entries remain intact. Invalid known fields fall back safely, and unknown
+fields are dropped when canonical config is persisted.
 
 At session start, model overrides that pi no longer reports are removed with a
 one-time notice. If pi's own session compaction fails mid-thread, a notice surfaces

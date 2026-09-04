@@ -1,8 +1,9 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
-import type { AgentConfig } from "../src/delegation/agents.ts";
+import { loadBuiltinAgents, type AgentConfig } from "../src/delegation/agents.ts";
 import type { SubagentsConfig } from "../src/configuration/config.ts";
+import { defaultIsolationMode, isWorktreeCapableAgent } from "../src/delegation/dispatch.ts";
 import { createRuntime, type SubagentThread } from "../src/lifecycle/runtime.ts";
 import { findDuplicateDispatch, type PhaseLeaseSource } from "../src/delegation/prompt.ts";
 import { buildAppendedObjectivePrompt, buildResumePrompt } from "../src/execution/spawn.ts";
@@ -51,6 +52,18 @@ function dispatcher(threads: PhaseLeaseSource[]) {
 	});
 	return { runtime, start };
 }
+
+describe("isolation policy", () => {
+	it("keeps sentinel on the shared checkout whose uncommitted diff it reviews", () => {
+		const sentinel = loadBuiltinAgents().find((agent) => agent.name === "sentinel");
+		assert.ok(sentinel);
+		assert.equal(isWorktreeCapableAgent(sentinel), false);
+		assert.equal(
+			defaultIsolationMode("parallel", sentinel.name, undefined, isWorktreeCapableAgent(sentinel), sentinel.isolation),
+			"shared",
+		);
+	});
+});
 
 describe("duplicate dispatch", () => {
 	it("matches normalized task and resolved cwd across agents without fuzzy matching", () => {

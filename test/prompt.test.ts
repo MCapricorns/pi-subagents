@@ -42,7 +42,11 @@ describe("buildDelegationDirective", () => {
 		assert.match(directive, /Scale effort to the question/u);
 		assert.match(directive, /one clustered scout brief \(repository and external research together\)/u);
 		assert.match(directive, /primary change/u);
-		assert.doesNotMatch(directive, /sentinel|Before every commit/u);
+		assert.match(directive, /`sentinel`: read-only fresh-context review of a completed diff/u);
+		assert.match(directive, /only when the diff touches concurrency, trust boundaries/u);
+		assert.match(directive, /never a commit ritual/u);
+		assert.match(directive, /route it to the owning thread via `resume` or fix it inline/u);
+		assert.doesNotMatch(directive, /Before every commit|findings block commit|review once more/u);
 		assert.match(directive, /`wait: true` only when the result is the immediate dependency/u);
 		assert.match(directive, /Never sleep or poll/u);
 		assert.match(directive, /One owner per phase/u);
@@ -84,7 +88,7 @@ describe("buildDelegationDirective", () => {
 	it("shows routing only for enabled roles", () => {
 		const directive = buildDelegationDirective([agent("artisan")]);
 		assert.match(directive, /`artisan`:/u);
-		assert.doesNotMatch(directive, /`scout`:|`steward`:/u);
+		assert.doesNotMatch(directive, /`scout`:|`steward`:|`sentinel`:/u);
 	});
 
 	it("renders only bounded active and settling leases", () => {
@@ -114,6 +118,6 @@ describe("buildDelegationDirective", () => {
 
 	it("stays within the prompt budget", () => {
 		const directive = buildDelegationDirective(loadBuiltinAgents());
-		assert.ok(directive.length < 3_200, `directive is ${directive.length} characters`);
+		assert.ok(directive.length < 3_600, `directive is ${directive.length} characters`);
 	});
 });

@@ -13,14 +13,11 @@ import { dirname, join } from "node:path";
 import { getAgentDir, withFileMutationQueue } from "@earendil-works/pi-coding-agent";
 
 /** Full catalog of agents shipped with the package (selectable in /subagents-setup). */
-export const BUILTIN_AGENT_NAMES = ["scout", "artisan", "steward"] as const;
+export const BUILTIN_AGENT_NAMES = ["scout", "artisan", "steward", "sentinel"] as const;
 
 // Historical catalog for configs written before built-in adoption tracking.
 // Keep this frozen so future built-ins are still recognized as new.
 const INITIAL_AGENT_NAMES = ["scout", "artisan", "steward"] as const;
-
-/** Names that used to be built in and must not survive as custom roles. */
-const RETIRED_AGENT_NAMES = new Set(["sentinel"]);
 
 /** Agents enabled out of the box on a fresh install. */
 export const DEFAULT_ENABLED_AGENTS: readonly string[] = [...BUILTIN_AGENT_NAMES];
@@ -40,6 +37,7 @@ export function roleThinkingLevel(agentName: string): ThinkingLevel {
 		case "scout":
 			return "low";
 		case "artisan":
+		case "sentinel":
 			return "high";
 		case "steward":
 			return "medium";
@@ -68,6 +66,10 @@ export const AGENT_PROFILES: Record<(typeof BUILTIN_AGENT_NAMES)[number], AgentP
 	steward: {
 		summary: "pre-commit finish",
 		remark: "Cleans a completed broad or multi-writer diff and synchronizes cross-cutting docs/comments without changing behavior.",
+	},
+	sentinel: {
+		summary: "fresh-context review",
+		remark: "Reviews a completed diff read-only with no memory of how it was written and reports only evidence-backed defects and test gaps; dispatched for risky diffs, never as a commit ritual.",
 	},
 };
 
@@ -132,7 +134,7 @@ export const DEFAULT_CONFIG: SubagentsConfig = {
 
 export const FIRST_RUN_SETUP_HINT =
 	"Run /subagents-setup to choose enabled roles, models, and thinking levels. " +
-	"Scout maps code or researches external sources, artisan owns the primary change, and steward cleans broad final diffs.";
+	"Scout maps code or researches external sources, artisan owns the primary change, steward cleans broad final diffs, and sentinel reviews risky diffs with fresh eyes.";
 
 export function getConfigPath(agentDir: string = getAgentDir()): string {
 	return join(agentDir, CONFIG_FILE_NAME);
@@ -169,10 +171,7 @@ export function normalizeConfig(raw: unknown): SubagentsConfig {
 
 	if (Array.isArray(raw.enabledAgents)) {
 		const names = raw.enabledAgents.filter(
-			(name): name is string =>
-				typeof name === "string" &&
-				name.trim().length > 0 &&
-				!RETIRED_AGENT_NAMES.has(name.trim()),
+			(name): name is string => typeof name === "string" && name.trim().length > 0,
 		);
 		// An explicitly empty array is honored; duplicates collapse.
 		config.enabledAgents = [...new Set(names.map((name) => name.trim()))];
@@ -180,10 +179,7 @@ export function normalizeConfig(raw: unknown): SubagentsConfig {
 
 	const rawKnownAgents = Array.isArray(raw.knownAgents) ? raw.knownAgents : INITIAL_AGENT_NAMES;
 	config.knownAgents = [...new Set(rawKnownAgents.filter(
-		(name): name is string =>
-			typeof name === "string" &&
-			name.trim().length > 0 &&
-			!RETIRED_AGENT_NAMES.has(name.trim()),
+		(name): name is string => typeof name === "string" && name.trim().length > 0,
 	).map((name) => name.trim()))];
 	for (const name of config.enabledAgents) {
 		if (!config.knownAgents.includes(name)) config.knownAgents.push(name);
@@ -192,7 +188,7 @@ export function normalizeConfig(raw: unknown): SubagentsConfig {
 	if (isRecord(raw.agentModels)) {
 		for (const [rawKey, value] of Object.entries(raw.agentModels)) {
 			const key = rawKey.trim();
-			if (key !== "" && !RETIRED_AGENT_NAMES.has(key) && isModelReference(value)) {
+			if (key !== "" && isModelReference(value)) {
 				config.agentModels[key] = value.trim();
 			}
 		}
@@ -203,7 +199,6 @@ export function normalizeConfig(raw: unknown): SubagentsConfig {
 			const key = rawKey.trim();
 			if (
 				key !== "" &&
-				!RETIRED_AGENT_NAMES.has(key) &&
 				typeof value === "string" &&
 				(THINKING_LEVEL_VALUES as readonly string[]).includes(value)
 			) {

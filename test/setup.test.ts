@@ -55,8 +55,8 @@ function model(id: string, reasoning = true): Model<Api> {
 
 function baseConfig(overrides: Partial<SubagentsConfig> = {}): SubagentsConfig {
 	return {
-		enabledAgents: ["scout", "artisan", "steward"],
-		knownAgents: ["scout", "artisan", "steward"],
+		enabledAgents: ["scout", "artisan", "steward", "sentinel"],
+		knownAgents: ["scout", "artisan", "steward", "sentinel"],
 		agentModels: {},
 		agentThinkingLevels: {},
 		maxResultLines: 40,
@@ -110,8 +110,8 @@ describe("runSetup menu", () => {
 
 	it("configures a custom role through the nested fuzzy model picker", async () => {
 		const path = writeConfig(baseConfig({
-			enabledAgents: ["scout", "artisan", "steward", "custom-worker"],
-			knownAgents: ["scout", "artisan", "steward", "custom-worker"],
+			enabledAgents: ["scout", "artisan", "steward", "sentinel", "custom-worker"],
+			knownAgents: ["scout", "artisan", "steward", "sentinel", "custom-worker"],
 			agentModels: { "custom-worker": "test/reasoning" },
 		}));
 		const reasoning = model("reasoning");
@@ -133,7 +133,7 @@ describe("runSetup menu", () => {
 					const component = renderComponent(factory, resolve);
 					customCall++;
 					if (customCall === 1) {
-						for (let index = 0; index < 3; index++) component.handleInput?.(KEY.down);
+						for (let index = 0; index < 4; index++) component.handleInput?.(KEY.down);
 						assert.match(component.render(120).join("\n"), /custom-worker \(custom\)/);
 						component.handleInput?.(KEY.enter);
 					} else if (customCall === 2) {
@@ -161,7 +161,7 @@ describe("runSetup menu", () => {
 
 	it("keeps disabled custom agents visible in the enable menu", async () => {
 		const path = writeConfig(baseConfig({
-			knownAgents: ["scout", "artisan", "steward", "dormant-custom"],
+			knownAgents: ["scout", "artisan", "steward", "sentinel", "dormant-custom"],
 		}));
 		const reasoning = model("reasoning");
 		let customDisplay = "";
@@ -177,7 +177,7 @@ describe("runSetup menu", () => {
 				custom: async (factory: PickerFactory) => new Promise((resolve) => {
 					const component = renderComponent(factory, resolve);
 					customDisplay = component.render(120).join("\n");
-					for (let index = 0; index < 3; index++) component.handleInput?.(KEY.down);
+					for (let index = 0; index < 4; index++) component.handleInput?.(KEY.down);
 					component.handleInput?.(" ");
 					component.handleInput?.(KEY.enter);
 				}),

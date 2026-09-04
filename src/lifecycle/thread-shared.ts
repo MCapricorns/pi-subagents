@@ -170,9 +170,10 @@ export function withWorktreeSystemPrompt(agent: AgentConfig): AgentConfig {
 	};
 }
 
-/** Only write-capable agents can run in an isolated worktree. */
+/** Only write-capable agents can run in an isolated worktree. Sentinel reviews
+ * the caller's uncommitted diff, which a detached worktree cannot contain. */
 export function isWorktreeCapableAgent(agent: AgentConfig): boolean {
-	return isWriteCapableAgent(agent);
+	return agent.name !== "sentinel" && isWriteCapableAgent(agent);
 }
 
 export interface DispatchEnvironment {
