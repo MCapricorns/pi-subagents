@@ -40,18 +40,23 @@ describe("buildDelegationDirective", () => {
 		assert.match(directive, /a half-done phase handed off pays twice/u);
 		assert.match(directive, /at most six child processes/u);
 		assert.match(directive, /Scale effort to the question/u);
+		assert.match(directive, /context-heavy decisions stay in main/u);
 		assert.match(directive, /one clustered scout brief \(repository and external research together\)/u);
 		assert.match(directive, /primary change/u);
 		assert.match(directive, /`sentinel`: read-only fresh-context review of a completed diff/u);
 		assert.match(directive, /only when the diff touches concurrency, trust boundaries/u);
 		assert.match(directive, /never a commit ritual/u);
-		assert.match(directive, /route it to the owning thread via `resume` or fix it inline/u);
+		assert.match(directive, /Route findings to the owner via `resume` or fix inline/u);
+		assert.match(directive, /stable `phaseId`.*exact writer `scope`/u);
+		assert.match(directive, /depends on handoff cost and full conversation context/u);
+		assert.match(directive, /never infer it as a natural-language safety claim/u);
+		assert.match(directive, /`subagent_risk` applies fixed changed-path rules without a model/u);
 		assert.doesNotMatch(directive, /Before every commit|findings block commit|review once more/u);
 		assert.match(directive, /`wait: true` only when the result is the immediate dependency/u);
 		assert.match(directive, /Never sleep or poll/u);
 		assert.match(directive, /One owner per phase/u);
 		assert.match(directive, /never repeats delegated broad search, implementation, or cleanup/u);
-		assert.match(directive, /Main owns routing, architecture, integration/u);
+		assert.match(directive, /Main owns routing, architecture, integration, the final gate, and release/u);
 		assert.match(directive, /For one high-stakes uncertainty.*at most two read-only scouts/u);
 		assert.match(directive, /distinct perspectives\/hypotheses/u);
 		assert.match(directive, /reconciles disagreements against cited evidence/u);
@@ -76,12 +81,14 @@ describe("buildDelegationDirective", () => {
 	it("routes follow-up work back to the same thread", () => {
 		const directive = buildDelegationDirective(loadBuiltinAgents());
 		assert.match(directive, /Same thread, never a second one/u);
-		assert.match(directive, /`subagent_control steer` sends new in-scope evidence to a running phase/u);
-		assert.match(directive, /a settled or parked thread continues with it/u);
-		assert.match(directive, /`resume` continues a parked or finished thread with an appended objective and its retained context/u);
-		assert.match(directive, /`park` pauses a running thread at a stable checkpoint/u);
-		assert.match(directive, /`subagent_stop` ends a phase the evidence made moot/u);
-		assert.match(directive, /An equivalent brief is rejected, not re-run/u);
+		assert.match(directive, /reuse its immutable `phaseId`/u);
+		assert.match(directive, /`subagent_control steer` sends new evidence to a running phase/u);
+		assert.match(directive, /`resume` continues parked\/finished context, retains prior scope/u);
+		assert.match(directive, /may add claims but never remove them/u);
+		assert.match(directive, /`park` pauses/u);
+		assert.match(directive, /`subagent_stop` retires/u);
+		assert.match(directive, /exact task\+cwd fallback/u);
+		assert.match(directive, /never fuzzy or embedding-based/u);
 		assert.match(directive, /read a truncated result's artifact only when the shown lines are insufficient/u);
 	});
 
@@ -106,14 +113,27 @@ describe("buildDelegationDirective", () => {
 		assert.doesNotMatch(directive, /#12|#14|#15|#16/u);
 	});
 
-	it("keeps launch receipts short and explicit", () => {
-		const receipt = formatPhaseLeaseReceipt([
-			lease({ id: 21, agentName: "artisan", task: "Implement duplicate rejection" }),
-		]);
-		assert.match(receipt, /^Active phase lease:/u);
-		assert.match(receipt, /#21 primary change/u);
-		assert.match(receipt, /Do not duplicate it/u);
-		assert.doesNotMatch(receipt, /never blocks|dispatch more|keep working/u);
+	it("keeps launch receipts short and limits independence claims to parallel batches", () => {
+		const sources = [lease({ id: 21, agentName: "artisan", task: "Implement duplicate rejection", phaseId: "duplicate-admission" })];
+		const single = formatPhaseLeaseReceipt(sources, { mode: "single" });
+		assert.match(single, /^Active phase lease:/u);
+		assert.match(single, /#21 primary change/u);
+		assert.match(single, /phase:duplicate-admission/u);
+		assert.doesNotMatch(single, /independence|scope admission/iu);
+		assert.match(
+			formatPhaseLeaseReceipt(sources, { mode: "parallel", declaredScopesComplete: true }),
+			/scope is conflict metadata, not permissions or a sandbox/u,
+		);
+		assert.doesNotMatch(
+			formatPhaseLeaseReceipt(sources, { mode: "parallel", declaredScopesComplete: true }),
+			/independence verified/iu,
+		);
+		assert.match(
+			formatPhaseLeaseReceipt([lease({ id: 22 })], { mode: "parallel", declaredScopesComplete: false }),
+			/Independence not verified/u,
+		);
+		assert.match(single, /Do not duplicate it/u);
+		assert.doesNotMatch(single, /never blocks|dispatch more|keep working/u);
 	});
 
 	it("stays within the prompt budget", () => {

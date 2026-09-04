@@ -9,6 +9,7 @@
  */
 
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
+import type { PhaseScope, PhaseScopeInput } from "../delegation/phase-scope.ts";
 import { rmSync } from "node:fs";
 import { resolveSubagentConcurrency, BackgroundTaskQueue } from "../execution/background.ts";
 import {
@@ -43,6 +44,12 @@ export interface SubagentThread {
 	generation: number;
 	agentName: string;
 	task: string;
+	phaseId?: string;
+	scope?: PhaseScope;
+	/** Monotonic continuation scope visible while resume preflight is in flight. */
+	admissionScope?: PhaseScope;
+	/** Capability snapshot used by declared-scope admission, including after restore. */
+	writeCapable?: boolean;
 	/** Caller-facing cwd in the original worktree. */
 	cwd: string;
 	/** Actual child cwd (the equivalent path inside an isolated worktree). */
@@ -77,7 +84,11 @@ export interface SubagentThread {
 	retireOnSettle?: boolean;
 	retired?: boolean;
 	/** Installed by dispatch so the control tool can restart the same logical id. */
-	resume: (objective?: string, ctx?: ExtensionContext) => Promise<SingleResult>;
+	resume: (
+		objective?: string,
+		ctx?: ExtensionContext,
+		metadata?: { scope?: PhaseScopeInput },
+	) => Promise<SingleResult>;
 	/** Dispatch-owned, generation-guarded worktree settlement hook. Its apply
 	 * runs under the canonical original-repository lane. */
 	finalizeIsolation: (generation: number, result?: SingleResult) => Promise<WorktreeFinalization | undefined>;

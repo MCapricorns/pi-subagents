@@ -10,6 +10,7 @@ import {
 	type AttemptControl,
 	type RpcSteerCommand,
 } from "../src/execution/rpc-control.ts";
+import { normalizePhaseScope } from "../src/delegation/phase-scope.ts";
 import { getProjectRoot } from "../src/execution/spawn.ts";
 import { readThreadRecords } from "../src/lifecycle/durable.ts";
 import { createRuntime, type SubagentRuntime, type SubagentThread, type ThreadState } from "../src/lifecycle/runtime.ts";
@@ -17,6 +18,7 @@ import { registerLookupTools } from "../src/lifecycle/tools.ts";
 import { monitor } from "../src/presentation/monitor.ts";
 
 type RegisteredTool = {
+	parameters?: any;
 	execute: (
 		toolCallId: string,
 		params: any,
@@ -480,14 +482,18 @@ describe("subagent_control park", () => {
 		}
 	});
 
-	it("continues a parked thread on resume", async () => {
+	it("continues a parked thread with immutable phase identity and additive scope metadata", async () => {
 		const { runtime, tools } = harness();
 		const thread = makeThread(32, new RpcRunControl("Implement the original objective", 1), "parked");
 		thread.sessionId = "session-32";
 		thread.sessionDir = join(tmpdir(), "session-32");
+		thread.phaseId = "original-phase";
+		thread.scope = normalizePhaseScope({ paths: ["src"] }, thread.cwd);
 		let resumed = 0;
-		thread.resume = async (objective) => {
+		const metadata: Array<{ scope?: unknown } | undefined> = [];
+		thread.resume = async (objective, _ctx, nextMetadata) => {
 			resumed++;
+			metadata.push(nextMetadata);
 			return {
 				agent: "artisan",
 				task: objective ?? thread.task,
@@ -499,11 +505,21 @@ describe("subagent_control park", () => {
 			};
 		};
 		runtime.threads.set(thread.id, thread);
-
 		try {
-			const response = await execute(tools.get("subagent_control")!, { action: "resume", id: 32 });
-			assert.match(resultText(response), /resumed run #32: continuing current objective/i);
-			assert.equal(resumed, 1);
+			const control = tools.get("subagent_control")!;
+			assert.equal(control.parameters?.properties?.phaseId, undefined);
+			const inherited = await execute(control, { action: "resume", id: 32 });
+			assert.match(resultText(inherited), /resumed run #32: continuing current objective/i);
+			assert.deepEqual(metadata[0], { scope: undefined });
+			const additionalScope = { symbols: [{ path: "src/parser.ts", name: "parse" }] };
+			await execute(control, {
+				action: "resume",
+				id: 32,
+				scope: additionalScope,
+			});
+			assert.deepEqual(metadata[1], { scope: additionalScope });
+			assert.equal(thread.phaseId, "original-phase");
+			assert.equal(resumed, 2);
 		} finally {
 			await shutdown(runtime);
 		}

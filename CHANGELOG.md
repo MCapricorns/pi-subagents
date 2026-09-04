@@ -4,6 +4,23 @@ Published versions of `@ferris1225/pi-subagents`. Unpublished numbers
 (`4.2.3`, `4.2.6`, `4.2.9`–`4.2.11`) never shipped on npm; their changes
 landed in the next published release.
 
+## 4.3.9
+
+- Add optional bounded stable `phaseId` and exact declarative write `scope` claims to single
+  and parallel dispatches. Phase identity is immutable across task rewrites and resume; scope
+  is monotonic across retained generations and survives durable v1 restore. Exact task+cwd
+  remains the compatibility fallback.
+- Reject deterministic duplicates and declared writer-scope conflicts before parallel batch
+  allocation. Fresh single and resumed writers also reject normalized absolute scope overlap
+  with active leases, without requiring equal caller cwd. Parallel calls that omit scope remain
+  compatible and explicitly report `independence not verified`; declared claims do not prove
+  natural-language task independence. Scope is conflict metadata, not permissions or a sandbox.
+- Add the advisory-only `subagent_risk` tool. Without a model call it resolves the repository
+  root, reads root-relative tracked and untracked changes from `HEAD`, and applies fixed
+  explainable rules for concurrency, trust-boundary, persistence-compatibility, and
+  failure-cancellation risk. It propagates cancellation, and suggests but never dispatches or
+  requires a Sentinel review.
+
 ## 4.3.8
 
 - Restore `sentinel` as an optional fresh-context reviewer instead of the mandatory

@@ -4,6 +4,7 @@ import { realpath } from "node:fs/promises";
 import { join, resolve } from "node:path";
 import type { ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { isWriteCapableAgent, type AgentConfig } from "../delegation/agents.ts";
+import type { PhaseScope } from "../delegation/phase-scope.ts";
 import { roleThinkingLevel, type SubagentsConfig, type ThinkingLevel } from "../configuration/config.ts";
 import { removeThreadRecord, threadRecordFromThread, upsertThreadRecord } from "./durable.ts";
 import {
@@ -195,9 +196,14 @@ export interface ResumeReservation {
 	sessionDir?: string;
 }
 
-/** The dispatcher's full internal entry point; the public tool surface only
- * uses the first four parameters. */
+/** Dispatcher's internal entry point. Public phase/scope claims are normalized
+ * into options; resume adds lifecycle-only continuation fields there too. */
 export interface StartBackgroundOptions {
+	/** Normalized identity and claims for a fresh or resumed generation. */
+	phaseId?: string;
+	scope?: PhaseScope;
+	/** Fresh-dispatch hint OR-merged with live capability; false cannot downgrade a writer. Resume stays monotonic. */
+	writeCapable?: boolean;
 	/** Resume path only: the thread whose retained context continues. */
 	existingThread?: SubagentThread;
 	appendedObjectiveOnResume?: boolean;

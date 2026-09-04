@@ -12,12 +12,13 @@ once and your main agent delegates on its own.
 
 ## What's new
 
-**4.3.8** — `sentinel` is back as an optional fresh-context reviewer. It reads a
-completed diff with no memory of how it was written and returns only evidence-backed
-defects and test gaps; the main agent dispatches it for diffs that touch concurrency,
-trust boundaries, persistence, or failure paths, never as a fixed pre-commit ritual, and
-routes a finding back to the thread that owns the change. Configs written by
-4.3.5–4.3.7 adopt it once; a deliberate disable sticks.
+**4.3.9** — dispatch admission now accepts bounded stable `phaseId` identities and exact
+declarative write `scope` claims. Fresh/resumed writers are checked against active leases;
+parallel batches preflight deterministic duplicates and all declared scope conflicts before
+allocation. Omitted scopes remain compatible; a parallel call that omits `scope` reports
+`independence not verified`. Declared claims do not prove natural-language task independence.
+The no-model-call `subagent_risk` advisory classifies changed tracked and untracked paths
+with fixed, documented rules before main decides whether a Sentinel review is worthwhile.
 
 See [CHANGELOG.md](./CHANGELOG.md).
 
@@ -50,9 +51,10 @@ back — with you. This extension owns them:
   handoff costs. Every brief carries the objective and done condition, exact paths,
   facts already established with citations, boundaries, and the expected output, so a
   child starts from evidence instead of re-deriving it.
-- One normalized task and working directory owns its phase: an exact duplicate of an
-  active run is rejected, and an exact re-run of a finished brief with retained
-  context is rejected in favor of resuming it, so the same work is never bought twice.
+- A stable `phaseId` owns a logical phase in one resolved working directory even if
+  its task wording changes. IDs are 1–80 ASCII letters, numbers, or `._:-`, starting
+  with a letter or number, so lease output stays single-line. Exact normalized task+cwd
+  remains the backward-compatible fallback for old calls.
 - Follow-up work stays on the same thread: `steer` a running phase, `resume` or
   `park` a thread with its retained context, `stop` a phase the evidence made moot.
 - Background completions and stop results arrive at the next parent model boundary;
@@ -122,15 +124,30 @@ what the injected delegation guidance produces when the main agent dispatches fo
 ```ts
 // One task
 subagent({
+  phaseId: "cache-invalidation-fix",
   agent: "artisan",
   task: "Fix the cache invalidation bug in src/cache, add regression tests, run the checks.",
+  scope: {
+    paths: ["src/cache"],
+    symbols: [{ path: "test/cache.test.ts", name: "invalidates stale entries" }],
+  },
 });
 
 // Parallel only when each scope independently justifies a child
 subagent({
   tasks: [
-    { agent: "scout", task: "Research current provider API limits in primary sources and cite URLs." },
-    { agent: "artisan", task: "Fix config validation in src/config.ts and its tests." },
+    {
+      agent: "artisan",
+      phaseId: "provider-docs",
+      task: "Update provider limits documentation from the established API citations.",
+      scope: { paths: ["docs/provider-limits.md"] },
+    },
+    {
+      agent: "artisan",
+      phaseId: "config-validation",
+      task: "Fix config validation in src/config.ts and its tests.",
+      scope: { paths: ["src/config.ts", "test/config.test.ts"] },
+    },
   ],
 });
 ```
@@ -140,13 +157,13 @@ independent unit in one `tasks` array. The runtime paces execution instead, runn
 half the machine's cores with a 4–6 child-process bound; wider batches queue and
 start automatically as slots free.
 
-A run leases its normalized task and resolved working directory across agent
-names. Dispatching the same pair again while the run is active is rejected and
-names the existing run id. Once the run has finished in this session and still
-holds its retained session, the same pair is rejected too, pointing at
-`subagent_control resume` — the thread that already did the work continues for a
-fraction of a fresh run — or at restating the brief with what changed. Matching is
-exact, never fuzzy.
+A run leases its stable, single-line `phaseId` in the resolved working directory.
+Rewording the task with the same `phaseId` is rejected and names the existing run.
+The id remains immutable across resume. Calls that omit `phaseId` keep the old exact
+normalized task+cwd behavior; consequently, equal task text with different phase ids is
+still rejected by that fallback. Matching is deterministic, never fuzzy, embedding-based,
+or inferred from natural language. Active leases win over matching settled threads when
+the runtime chooses which owner to report.
 
 Because queueing is pacing rather than refusal, it is always reported as such.
 Dispatch confirmations name each waiting run's real reason — waiting for a free
@@ -190,7 +207,48 @@ paths, or when the checks cannot prove the change. It is never a fixed pre-commi
 ritual. A finding is evidence, not an order: main routes it to the thread that owns
 the change with `subagent_control resume`, or fixes it inline when that is cheaper.
 
+`subagent_risk({})` is an advisory-only, no-model-call check over tracked and untracked
+changes relative to `HEAD`. It resolves the repository root first, so a nested `cwd` still
+returns repository-root-relative paths, including untracked files outside that subdirectory.
+Its fixed case-insensitive path-token rules flag:
+`concurrency` (`thread`, `queue`, `parallel`, `dispatch`, locks/races and related tokens);
+`trust-boundary` (`auth`, credentials, permissions, policy, secrets, sandbox, security, trust, tokens);
+`persistence-compatibility` (durable state, manifests, migrations, restore, schemas,
+serialization/storage); and `failure-cancellation` (abort, cancel, errors/failures, recovery,
+retry, stop, timeout). It returns the changed paths, matched categories, and whether those
+rules suggest Sentinel. If Git or `HEAD` is unavailable, it reports advisory unavailable; an
+aborted tool call propagates cancellation instead of converting it to an advisory result. It
+never blocks, starts a child, or automatically dispatches Sentinel.
+
+This classifier is intentionally conservative and explainable: it only sees path names, so
+it can produce false positives and miss risky behavior hidden behind neutral names. Main
+still decides whether review pays from the actual diff, test evidence, handoff cost, and the
+complete conversation. The runtime can enforce explicit phase/scope admission, but cannot
+safely force the natural-language judgment of whether work is worth delegating.
+
 ## Parallel edits
+
+`scope` is declarative admission metadata for expected writes, not access control. `paths`
+contains exact file or directory paths; `symbols` contains exact `{ path, name }` claims.
+Paths resolve from each task's caller-facing cwd and use case-insensitive comparison on
+Windows. Wildcard `*` and `?` inputs are rejected; other punctuation is treated literally,
+so paths such as `app/[id]/page.tsx` are valid exact claims. A path claim overlaps the same
+path, an ancestor/descendant path, or a symbol under that path; identical path+symbol
+claims overlap, while two different symbols in the same file may run together.
+
+Fresh single dispatches and resumes check a declared writer scope against active, parked,
+resuming, interrupting, or settling writer leases before allocating a generation. Scope
+comparison uses normalized absolute claims rather than requiring equal caller cwd, so a
+repo-root claim still conflicts with the same path claimed from a nested cwd. Settled
+threads do not block a later phase solely because it edits the same scope.
+
+Before allocating any run in a parallel call, the runtime also rejects deterministic phase
+duplicates within the batch or against existing active/retained threads, then compares
+declared writer scopes across the whole batch. A definite conflict rejects the whole batch
+with zero starts. Parallel calls without `scope` remain valid, but their tool result and
+launch receipt say `independence not verified`; that means the contract lacked enough
+metadata, not that overlap was proved safe. Single calls never make a batch-independence
+claim. The existing shared-checkout writer lane remains the final serialization boundary.
 
 - Single tasks use your checkout. Every parallel write-capable agent (`artisan`,
   `steward`, and custom writers) defaults to a detached Git worktree, so
@@ -230,7 +288,7 @@ Every dispatch returns a stable `#id`, which is the handle for the thread tools:
 
 | Tool               | What it does |
 | ------------------ | ------------ |
-| `subagent_control` | `steer` a running RPC attempt with additional evidence/guidance, continuing the same thread with it when the thread has settled or is parked; `resume` a parked/settled thread with an optional appended `objective`; `park` a running thread at a stable checkpoint, keeping its session and worktree for a later resume. |
+| `subagent_control` | `steer` a running RPC attempt with additional evidence/guidance, continuing the same thread with it when the thread has settled or is parked; `resume` a parked/settled thread with an optional appended `objective` and additive `scope`; `park` a running thread at a stable checkpoint, keeping its session and worktree for a later resume. |
 | `subagent_stop`    | Destructively cancel, deliver partial output, and retire the thread. Steering and follow-up messages still queued in the child are dropped so nothing can revive it later. |
 
 ```ts
@@ -238,6 +296,13 @@ subagent_control({ action: "steer", id: 7, objective: "The failing request used 
 subagent_control({ action: "park", id: 7 });
 subagent_control({ action: "resume", id: 7, objective: "Finish the tests." });
 ```
+
+A fresh dispatch stores `phaseId` and normalized `scope` on its stable thread and durable
+v1 record. `resume` always keeps the thread's phase id. An optional resume `scope` adds
+normalized claims to the retained scope; it cannot shrink or clear prior claims, so edits
+already present in a retained worktree stay covered by admission. Resume also rechecks the
+unioned scope against other active writer leases before starting a generation. Existing v1
+manifests without these optional fields remain readable.
 
 `steer` requires a nonblank `objective`. While the child RPC is running, it adds
 guidance to the current phase without replacing the original task. If the thread has

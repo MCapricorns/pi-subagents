@@ -19,6 +19,7 @@ import { mkdir, readFile, realpath, rename, rm, writeFile } from "node:fs/promis
 import { uptime } from "node:os";
 import { dirname, isAbsolute, join, relative, resolve } from "node:path";
 import type { UsageStats } from "../execution/rpc-control.ts";
+import { normalizePhaseId, normalizePhaseScope, type PhaseScope } from "../delegation/phase-scope.ts";
 import type { SubagentThread } from "./runtime.ts";
 import { getResultOutput, isFailedResult, getProjectRoot, getSubagentsRoot, type SingleResult } from "../execution/spawn.ts";
 import { isManagedSessionDir, isManagedWorktreeLayout, samePath } from "../isolation/managed-paths.ts";
@@ -76,6 +77,9 @@ export interface ThreadRecord {
 	generation: number;
 	agentName: string;
 	task: string;
+	phaseId?: string;
+	scope?: PhaseScope;
+	writeCapable?: boolean;
 	cwd: string;
 	executionCwd: string;
 	/** Resolved (clamped) level of the last generation. */
@@ -166,6 +170,14 @@ function normalizeRecord(value: unknown): ThreadRecord | undefined {
 	if (raw.state !== "parked" && raw.state !== "completed" && raw.state !== "failed") return undefined;
 	const worktree = raw.worktree === undefined ? undefined : normalizeWorktreeSnapshot(raw.worktree);
 	if (worktree === null) return undefined;
+	let phaseId: string | undefined;
+	let scope: PhaseScope | undefined;
+	try {
+		phaseId = normalizePhaseId(raw.phaseId as string | undefined);
+		scope = normalizePhaseScope(raw.scope as Parameters<typeof normalizePhaseScope>[0], raw.cwd);
+	} catch {
+		return undefined;
+	}
 	return {
 		runId: raw.runId,
 		createdAt: raw.createdAt,
@@ -173,6 +185,9 @@ function normalizeRecord(value: unknown): ThreadRecord | undefined {
 		generation: typeof raw.generation === "number" && Number.isInteger(raw.generation) && raw.generation >= 0 ? raw.generation : 0,
 		agentName: raw.agentName,
 		task: raw.task,
+		...(phaseId ? { phaseId } : {}),
+		...(scope ? { scope } : {}),
+		...(typeof raw.writeCapable === "boolean" ? { writeCapable: raw.writeCapable } : {}),
 		cwd: raw.cwd,
 		executionCwd: typeof raw.executionCwd === "string" && raw.executionCwd ? raw.executionCwd : raw.cwd,
 		...(typeof raw.thinkingLevel === "string" && raw.thinkingLevel ? { thinkingLevel: raw.thinkingLevel } : {}),
@@ -375,6 +390,9 @@ export function threadRecordFromThread(
 		generation: thread.generation,
 		agentName: thread.agentName,
 		task: thread.task,
+		...(thread.phaseId ? { phaseId: thread.phaseId } : {}),
+		...(thread.scope ? { scope: thread.scope } : {}),
+		...(thread.writeCapable !== undefined ? { writeCapable: thread.writeCapable } : {}),
 		cwd: thread.cwd,
 		executionCwd: thread.executionCwd,
 		...(thread.thinkingLevel ? { thinkingLevel: thread.thinkingLevel } : {}),

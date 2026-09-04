@@ -28,6 +28,12 @@ import {
 } from "../presentation/format.ts";
 import { monitor } from "../presentation/monitor.ts";
 import { findDuplicateDispatch } from "../delegation/prompt.ts";
+import {
+	findWriterLeaseScopeOverlap,
+	mergePhaseScopes,
+	normalizePhaseId,
+	normalizePhaseScope,
+} from "../delegation/phase-scope.ts";
 import { persistRecoveryRecords, recoveryRecordFromFinalization } from "../isolation/recovery.ts";
 import type { SubagentRuntime, SubagentThread, ThreadState } from "./runtime.ts";
 import { forkRetainedSession } from "../execution/session-fork.ts";
@@ -105,6 +111,9 @@ export function createBackgroundDispatcher(options: BackgroundDispatcherOptions)
 		startOptions: StartBackgroundOptions = {},
 	): Promise<SingleResult> => {
 		const {
+			phaseId: requestedPhaseId,
+			scope: requestedScope,
+			writeCapable: requestedWriteCapable,
 			existingThread,
 			appendedObjectiveOnResume = false,
 			environment,
@@ -127,16 +136,30 @@ export function createBackgroundDispatcher(options: BackgroundDispatcherOptions)
 		const resolveLiveAgentTools = (candidate: AgentConfig): AgentConfig =>
 			resolveAgentTools({ ...candidate, tools: discoveredAgent.tools }, runtime.getActiveTools());
 		const agent = resolveLiveAgentTools(discoveredAgent);
+
+		const originalCwd = resolve(cwd ?? runCtx.cwd);
+		let phaseId: string | undefined;
+		let scope: ReturnType<typeof normalizePhaseScope>;
+		try {
+			phaseId = normalizePhaseId(existingThread ? existingThread.phaseId : requestedPhaseId);
+			const requested = normalizePhaseScope(requestedScope, originalCwd);
+			scope = existingThread ? mergePhaseScopes(existingThread.scope, requested) : requested;
+		} catch (error) {
+			return failedStartResult(agentName, task, error instanceof Error ? error.message : String(error));
+		}
+		const currentWriteCapable = isWriteCapableAgent(agent);
+		const priorWriteCapable = existingThread
+			? (existingThread.writeCapable ?? existingThread.agentName !== "scout")
+			: Boolean(requestedWriteCapable);
+		const writeCapable = priorWriteCapable || currentWriteCapable;
 		if (isolation === "worktree" && !isWorktreeCapableAgent(agent)) {
 			return {
 				...failedStartResult(agentName, task, `Agent "${agentName}" is read-only; worktree isolation is available only to write-capable agents such as artisan.`),
 				isolation,
 			};
 		}
-
-		const originalCwd = resolve(cwd ?? runCtx.cwd);
 		if (!existingThread) {
-			const duplicate = findDuplicateDispatch(runtime.threads.values(), task, originalCwd);
+			const duplicate = findDuplicateDispatch(runtime.threads.values(), task, originalCwd, phaseId);
 			if (duplicate?.kind === "active") {
 				return failedStartResult(
 					agentName,
@@ -150,7 +173,17 @@ export function createBackgroundDispatcher(options: BackgroundDispatcherOptions)
 				return failedStartResult(
 					agentName,
 					task,
-					`Run #${duplicate.source.id} (${duplicate.source.agentName}) already ${duplicate.source.state} this exact brief and kept its context; its result was delivered. Resume #${duplicate.source.id} with an appended objective instead of paying for a second run, or restate the brief with what changed.`,
+					`Run #${duplicate.source.id} (${duplicate.source.agentName}) already ${duplicate.source.state} this logical phase and kept its context; its result was delivered. Resume #${duplicate.source.id} with an appended objective instead of paying for a second run${phaseId ? "; keep using the same phaseId on that thread" : ", or restate the brief with what changed"}.`,
+				);
+			}
+		}
+		if (writeCapable && scope) {
+			const conflict = findWriterLeaseScopeOverlap(scope, runtime.threads.values(), existingThread?.id);
+			if (conflict) {
+				return failedStartResult(
+					agentName,
+					task,
+					`Declared writer scope ${conflict.overlap.left} overlaps active run #${conflict.lease.id} scope ${conflict.overlap.right}; no new generation was started.`,
 				);
 			}
 		}
@@ -230,6 +263,9 @@ export function createBackgroundDispatcher(options: BackgroundDispatcherOptions)
 			thread.generation = generation;
 			thread.agentName = agent.name;
 			thread.task = task;
+			thread.phaseId = phaseId;
+			thread.scope = scope;
+			thread.writeCapable = writeCapable;
 			thread.cwd = originalCwd;
 			thread.executionCwd = executionCwd;
 			thread.thinkingLevel = thinkingLevel;
@@ -253,6 +289,9 @@ export function createBackgroundDispatcher(options: BackgroundDispatcherOptions)
 				generation,
 				agentName: agent.name,
 				task,
+				phaseId,
+				scope,
+				writeCapable,
 				cwd: originalCwd,
 				executionCwd,
 				thinkingLevel,
@@ -281,7 +320,7 @@ export function createBackgroundDispatcher(options: BackgroundDispatcherOptions)
 		// Shared write-capable runs serialize on the repository lane so their
 		// edits cannot race; the lane wait releases the process slot because it
 		// is write serialization, not pool pacing.
-		const reserveManagedLane = isolation === "shared" && isWriteCapableAgent(agent);
+		const reserveManagedLane = isolation === "shared" && writeCapable;
 		const runGeneration = async (backgroundSignal: AbortSignal, controller: AbortController): Promise<void> => {
 				if (runtime.threads.get(runId)?.generation !== generation) return;
 				if (isolation === "worktree" && !worktree) {
@@ -718,13 +757,25 @@ export function installThreadLifecycle(thread: SubagentThread, deps: ThreadLifec
 		});
 	};
 
-	thread.resume = async (objective?: string, resumeCtx?: ExtensionContext): Promise<SingleResult> => {
+	thread.resume = async (
+		objective?: string,
+		resumeCtx?: ExtensionContext,
+		metadata?: { scope?: Parameters<typeof normalizePhaseScope>[0] },
+	): Promise<SingleResult> => {
 		const requestedObjective = objective?.trim();
 		if (!runtime.sessionActive || runtime.threads.get(runId) !== thread) {
 			return failedStartResult(thread.agentName, thread.task, `Run #${runId} belongs to a parent session that has shut down.`);
 		}
 		if (objective !== undefined && !requestedObjective) {
 			return failedStartResult(thread.agentName, thread.task, "resume objective must be non-blank when provided.");
+		}
+		const continuationPhaseId = thread.phaseId;
+		let continuationScope: ReturnType<typeof normalizePhaseScope>;
+		try {
+			const additionalScope = normalizePhaseScope(metadata?.scope, thread.cwd);
+			continuationScope = mergePhaseScopes(thread.scope, additionalScope);
+		} catch (error) {
+			return failedStartResult(thread.agentName, thread.task, error instanceof Error ? error.message : String(error));
 		}
 		if (thread.retired) return failedStartResult(thread.agentName, thread.task, `Run #${runId} was retired by subagent_stop.`);
 		if (thread.resumeUnavailableReason) {
@@ -750,6 +801,7 @@ export function installThreadLifecycle(thread: SubagentThread, deps: ThreadLifec
 			sessionId: previousSessionId,
 			sessionDir: previousSessionDir,
 		};
+		thread.admissionScope = continuationScope;
 		thread.lifecycleOperation = "resume";
 		thread.state = "resuming";
 		const finishPreflight = beginRuntimePreflight(runtime);
@@ -763,6 +815,7 @@ export function installThreadLifecycle(thread: SubagentThread, deps: ThreadLifec
 			// Never wait forever on a previous generation that is still settling
 			// (e.g. blocked behind the managed repository lane in finalization).
 			if (!(await quiesced(thread.generationCompletion))) {
+				if (ownsResumeReservation(runtime, thread, reservation)) thread.state = previousState;
 				return failedStartResult(
 					thread.agentName,
 					thread.task,
@@ -829,6 +882,8 @@ export function installThreadLifecycle(thread: SubagentThread, deps: ThreadLifec
 				thread.isolation,
 				{
 					existingThread: thread,
+					phaseId: continuationPhaseId,
+					scope: continuationScope,
 					appendedObjectiveOnResume: objective !== undefined,
 					environment: {
 						ctx: currentCtx,
@@ -883,6 +938,7 @@ export function installThreadLifecycle(thread: SubagentThread, deps: ThreadLifec
 			);
 		} finally {
 			finishPreflight();
+			if (thread.lifecycleVersion === reservation.version) thread.admissionScope = undefined;
 			if (
 				thread.lifecycleOperation === "resume" &&
 				thread.lifecycleVersion === reservation.version

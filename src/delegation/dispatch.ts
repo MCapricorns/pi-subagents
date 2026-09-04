@@ -7,10 +7,11 @@
  */
 
 import { StringEnum, type Usage } from "@earendil-works/pi-ai";
+import { resolve } from "node:path";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { Text } from "@earendil-works/pi-tui";
 import { Type } from "typebox";
-import { discoverAgents } from "./agents.ts";
+import { discoverAgents, isWriteCapableAgent, type AgentConfig } from "./agents.ts";
 import { loadConfig } from "../configuration/config.ts";
 import { formatCompletionBlock, formatUsage } from "../presentation/format.ts";
 import {
@@ -22,7 +23,17 @@ import {
 	sumUsage,
 	type RunWaitReason,
 } from "../presentation/monitor.ts";
-import { formatPhaseLeaseReceipt } from "./prompt.ts";
+import { findDuplicateDispatch, formatParallelScopeAdmissionNote, formatPhaseLeaseReceipt } from "./prompt.ts";
+import {
+	findPhaseScopeOverlap,
+	findWriterLeaseScopeOverlap,
+	normalizePhaseId,
+	normalizePhaseScope,
+	PHASE_ID_MAX_LENGTH,
+	PHASE_ID_PATTERN_SOURCE,
+	type PhaseScope,
+	type PhaseScopeInput,
+} from "./phase-scope.ts";
 import type { SubagentRuntime, SubagentThread } from "../lifecycle/runtime.ts";
 import { createBackgroundDispatcher } from "../lifecycle/thread-lifecycle.ts";
 import {
@@ -53,6 +64,23 @@ const IsolationSchema = Type.Optional(
 	StringEnum(["shared", "worktree"] as const, { description: ISOLATION_DESCRIPTION }),
 );
 
+const PhaseIdSchema = Type.Optional(Type.String({
+	minLength: 1,
+	maxLength: PHASE_ID_MAX_LENGTH,
+	pattern: PHASE_ID_PATTERN_SOURCE,
+	description: "Stable logical phase id: 1-80 ASCII letters, numbers, or ._:- characters, starting with a letter or number. Reuse it when task wording changes so duplicate fresh dispatches are rejected.",
+}));
+const ScopeSchema = Type.Optional(Type.Object({
+	paths: Type.Optional(Type.Array(Type.String({
+		...NON_BLANK_TASK_OPTIONS,
+		description: "Exact file or directory write claim resolved from the caller-facing cwd; wildcard * and ? are rejected, while other punctuation is literal.",
+	}))),
+	symbols: Type.Optional(Type.Array(Type.Object({
+		path: Type.String({ ...NON_BLANK_TASK_OPTIONS, description: "Exact file path resolved from the caller-facing cwd." }),
+		name: Type.String({ ...NON_BLANK_TASK_OPTIONS, description: "Exact symbol name claimed for writing." }),
+	}))),
+}, { description: "Declarative write-conflict metadata for admission, not filesystem permissions or a sandbox. If present, at least one valid claim is required." }));
+
 const WaitSchema = Type.Optional(
 	Type.Boolean({
 		description:
@@ -69,6 +97,8 @@ const TaskItem = Type.Object({
 		...NON_BLANK_TASK_OPTIONS,
 		description: TASK_BRIEF_DESCRIPTION,
 	}),
+	phaseId: PhaseIdSchema,
+	scope: ScopeSchema,
 	cwd: Type.Optional(Type.String({ description: "Working directory for the agent process" })),
 	isolation: IsolationSchema,
 });
@@ -78,6 +108,8 @@ const SubagentParams = Type.Object({
 	task: Type.Optional(
 		Type.String({ ...NON_BLANK_TASK_OPTIONS, description: `${TASK_BRIEF_DESCRIPTION} (single mode)` }),
 	),
+	phaseId: PhaseIdSchema,
+	scope: ScopeSchema,
 	tasks: Type.Optional(Type.Array(TaskItem, { description: "Independently justified, disjoint phases for parallel execution" })),
 	cwd: Type.Optional(Type.String({ description: "Working directory for the agent process (single mode)" })),
 	isolation: IsolationSchema,
@@ -107,6 +139,91 @@ export function defaultIsolationMode(
 	if (declared === "shared") return "shared";
 	if (declared === "worktree" && writeCapable) return "worktree";
 	return mode === "parallel" && writeCapable ? "worktree" : "shared";
+}
+
+interface PreparedDispatchTask {
+	index: number;
+	agent: string;
+	task: string;
+	cwd: string;
+	phaseId?: string;
+	scope?: PhaseScope;
+	isolation?: IsolationMode;
+	writeCapable: boolean;
+}
+
+function prepareDispatchTasks(
+	tasks: ReadonlyArray<{ agent: string; task: string; cwd?: string; phaseId?: string; scope?: PhaseScopeInput; isolation?: IsolationMode }>,
+	callerCwd: string,
+	agents: readonly AgentConfig[],
+): PreparedDispatchTask[] {
+	return tasks.map((item, index) => {
+		const cwd = resolve(callerCwd, item.cwd ?? ".");
+		const agent = agents.find((candidate) => candidate.name === item.agent);
+		return {
+			index,
+			agent: item.agent,
+			task: item.task,
+			cwd,
+			phaseId: normalizePhaseId(item.phaseId),
+			scope: normalizePhaseScope(item.scope, cwd),
+			isolation: item.isolation,
+			writeCapable: agent ? isWriteCapableAgent(agent) : true,
+		};
+	});
+}
+
+function parallelAdmissionConflict(
+	tasks: readonly PreparedDispatchTask[],
+	threads: Iterable<SubagentThread>,
+): string | undefined {
+	for (let leftIndex = 0; leftIndex < tasks.length; leftIndex++) {
+		for (let rightIndex = leftIndex + 1; rightIndex < tasks.length; rightIndex++) {
+			const left = tasks[leftIndex]!;
+			const right = tasks[rightIndex]!;
+			const duplicate = findDuplicateDispatch([{
+				id: left.index,
+				agentName: left.agent,
+				task: left.task,
+				phaseId: left.phaseId,
+				cwd: left.cwd,
+				state: "queued",
+			}], right.task, right.cwd, right.phaseId);
+			if (duplicate) {
+				return `deterministic duplicate between tasks[${left.index}] and tasks[${right.index}]`;
+			}
+		}
+	}
+	const leases = [...threads];
+	for (const task of tasks) {
+		const duplicate = findDuplicateDispatch(leases, task.task, task.cwd, task.phaseId);
+		if (duplicate?.kind === "active") {
+			return `tasks[${task.index}] duplicates active run #${duplicate.source.id} (${duplicate.source.agentName})`;
+		}
+		if (duplicate?.kind === "settled") {
+			return `tasks[${task.index}] duplicates settled run #${duplicate.source.id} (${duplicate.source.agentName}); resume that retained thread instead`;
+		}
+	}
+	const writers = tasks.filter(
+		(task): task is PreparedDispatchTask & { scope: PhaseScope } => task.writeCapable && task.scope !== undefined,
+	);
+	for (let leftIndex = 0; leftIndex < writers.length; leftIndex++) {
+		for (let rightIndex = leftIndex + 1; rightIndex < writers.length; rightIndex++) {
+			const left = writers[leftIndex]!;
+			const right = writers[rightIndex]!;
+			const overlap = findPhaseScopeOverlap(left.scope, right.scope);
+			if (overlap) {
+				return `tasks[${left.index}] scope ${overlap.left} overlaps tasks[${right.index}] scope ${overlap.right}`;
+			}
+		}
+	}
+	for (const task of writers) {
+		const conflict = findWriterLeaseScopeOverlap(task.scope, leases);
+		if (conflict) {
+			return `tasks[${task.index}] scope ${conflict.overlap.left} overlaps run #${conflict.lease.id} scope ${conflict.overlap.right}`;
+		}
+	}
+	return undefined;
 }
 
 /** Map the child's own usage tally onto pi's tool-result `Usage`, so sub-agent
@@ -325,11 +442,15 @@ export function registerSubagentTool(pi: ExtensionAPI, runtime: SubagentRuntime)
 		(mode: "single" | "parallel", background = false) =>
 		(results: SingleResult[]): SubagentDetails => ({ mode, results, background });
 
-	const phaseLeaseReceipt = (runIds: number[]): string =>
+	const phaseLeaseReceipt = (
+		runIds: number[],
+		options: { mode: "single" } | { mode: "parallel"; declaredScopesComplete: boolean },
+	): string =>
 		formatPhaseLeaseReceipt(
 			runIds
 				.map((runId) => runtime.threads.get(runId))
 				.filter((thread): thread is SubagentThread => thread !== undefined),
+			options,
 		);
 
 	/** Pacing note appended to dispatch confirmations whenever runs are actually
@@ -378,7 +499,7 @@ export function registerSubagentTool(pi: ExtensionAPI, runtime: SubagentRuntime)
 	pi.registerTool({
 		name: "subagent",
 		label: "Subagent",
-		description: "Start paid leaf runs for broad reconnaissance or substantial self-contained work. Each normalized task+cwd owns its phase: an exact duplicate of an active run is rejected, and one of a finished run with retained context is rejected in favor of subagent_control resume. Batch scopes must be independent. wait:true returns results in-turn; otherwise completions wake main. Parallel writers default to detached Git worktrees; isolation:'shared' serializes same-repository writes.",
+		description: "Start paid leaf runs for substantial self-contained work. phaseId is a stable single-line logical identity; exact task+cwd remains the compatibility fallback. scope declares exact write-conflict metadata (not permissions or sandboxing). Fresh single and resumed writer scopes are checked against active leases; parallel batches also preflight deterministic duplicates and all declared scope overlaps before allocation. A parallel batch that omits scope reports `independence not verified`; declared claims do not prove natural-language task independence. wait:true returns results in-turn; otherwise completions wake main.",
 		parameters: SubagentParams,
 
 		async execute(_toolCallId, params, signal, onUpdate, ctx) {
@@ -452,10 +573,21 @@ export function registerSubagentTool(pi: ExtensionAPI, runtime: SubagentRuntime)
 			// each delegated phase. The queue paces child processes without changing
 			// phase ownership or requiring a per-call task cap.
 			if (params.tasks && params.tasks.length > 0) {
-				// Admission is synchronous and ordered; slow worktree preparation belongs
-				// to the bounded queue. Promise.all preserves caller result order while no
-				// item waits for a sibling's filesystem setup.
-				const results = await Promise.all(params.tasks.map((item) => {
+				let prepared: PreparedDispatchTask[];
+				try {
+					prepared = prepareDispatchTasks(params.tasks, ctx.cwd, agents);
+				} catch (error) {
+					throw new Error(`Parallel admission rejected: ${error instanceof Error ? error.message : String(error)} No background tasks were started.`);
+				}
+				const conflict = parallelAdmissionConflict(prepared, runtime.threads.values());
+				if (conflict) {
+					throw new Error(`Parallel admission rejected: ${conflict}. No background tasks were started.`);
+				}
+				const declaredScopesComplete = prepared.every((item) => item.scope !== undefined);
+				const admissionNote = formatParallelScopeAdmissionNote(declaredScopesComplete);
+				// Duplicate and scope admission completes for the whole batch before any
+				// startBackground call can allocate a run. Worktree preparation stays queued.
+				const results = await Promise.all(prepared.map((item) => {
 					const catalogAgent = agents.find((candidate) => candidate.name === item.agent);
 					return startBackground(
 						item.agent,
@@ -464,11 +596,16 @@ export function registerSubagentTool(pi: ExtensionAPI, runtime: SubagentRuntime)
 						defaultIsolationMode(
 							"parallel",
 							item.agent,
-							item.isolation as IsolationMode | undefined,
+							item.isolation,
 							catalogAgent ? isWorktreeCapableAgent(catalogAgent) : undefined,
 							catalogAgent?.isolation,
 						),
-						{ deliveryRoute: params.wait ? "await" : "background" },
+						{
+							deliveryRoute: params.wait ? "await" : "background",
+							phaseId: item.phaseId,
+							scope: item.scope,
+							writeCapable: item.writeCapable,
+						},
 					);
 				}));
 				const startedRuns = results.filter((result) => result.exitCode === -1);
@@ -492,9 +629,10 @@ export function registerSubagentTool(pi: ExtensionAPI, runtime: SubagentRuntime)
 					const blocks = await awaitRunResults(runtime, startedIds, signal, config.maxResultLines, ctx.cwd, makeProgress(makeDetails("parallel", true)(results)));
 					if (signal?.aborted) runtime.fallbackAwaitDelivery(startedIds);
 					else runtime.completeAwaitDelivery(startedIds);
-					const text = failureLines.length > 0
+					const resultText = failureLines.length > 0
 						? `${blocks}\n\nLaunch failures:\n${failureLines.join("\n")}`
 						: blocks;
+					const text = `${resultText}\n\n${admissionNote}`;
 					return {
 						content: [{ type: "text", text }],
 						details: makeDetails("parallel", true)(results),
@@ -502,7 +640,7 @@ export function registerSubagentTool(pi: ExtensionAPI, runtime: SubagentRuntime)
 					};
 				}
 				const text = [
-					phaseLeaseReceipt(startedIds),
+					phaseLeaseReceipt(startedIds, { mode: "parallel", declaredScopesComplete }),
 					...(failureLines.length > 0 ? ["Launch failures:", ...failureLines] : []),
 				].join("\n") + queuePacingNote();
 				return {
@@ -511,19 +649,37 @@ export function registerSubagentTool(pi: ExtensionAPI, runtime: SubagentRuntime)
 				};
 			}
 
-			const singleCatalogAgent = agents.find((candidate) => candidate.name === params.agent);
+			let single: PreparedDispatchTask;
+			try {
+				single = prepareDispatchTasks([{
+					agent: params.agent as string,
+					task: params.task as string,
+					cwd: params.cwd,
+					phaseId: params.phaseId,
+					scope: params.scope,
+					isolation: params.isolation as IsolationMode | undefined,
+				}], ctx.cwd, agents)[0]!;
+			} catch (error) {
+				throw new Error(`Dispatch admission rejected: ${error instanceof Error ? error.message : String(error)}`);
+			}
+			const singleCatalogAgent = agents.find((candidate) => candidate.name === single.agent);
 			const result = await startBackground(
-				params.agent as string,
-				params.task as string,
-				params.cwd,
+				single.agent,
+				single.task,
+				single.cwd,
 				defaultIsolationMode(
 					"single",
-					params.agent as string,
-					params.isolation as IsolationMode | undefined,
+					single.agent,
+					single.isolation,
 					singleCatalogAgent ? isWorktreeCapableAgent(singleCatalogAgent) : undefined,
 					singleCatalogAgent?.isolation,
 				),
-				{ deliveryRoute: params.wait ? "await" : "background" },
+				{
+					deliveryRoute: params.wait ? "await" : "background",
+					phaseId: single.phaseId,
+					scope: single.scope,
+					writeCapable: single.writeCapable,
+				},
 			);
 			if (result.exitCode !== -1) {
 				throw new Error(getResultOutput(result));
@@ -541,7 +697,7 @@ export function registerSubagentTool(pi: ExtensionAPI, runtime: SubagentRuntime)
 			return {
 				content: [{
 					type: "text",
-					text: phaseLeaseReceipt(result.runId === undefined ? [] : [result.runId]) + queuePacingNote(),
+					text: phaseLeaseReceipt(result.runId === undefined ? [] : [result.runId], { mode: "single" }) + queuePacingNote(),
 				}],
 				details: makeDetails("single", true)([result]),
 			};

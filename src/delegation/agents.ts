@@ -54,6 +54,7 @@ export const SUBAGENT_TOOL_NAMES = [
 	"subagent",
 	"subagent_control",
 	"subagent_stop",
+	"subagent_risk",
 ] as const;
 const SUBAGENT_TOOL_NAME_SET = new Set<string>(SUBAGENT_TOOL_NAMES);
 

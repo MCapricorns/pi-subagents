@@ -24,6 +24,7 @@ import { getConfigPath, loadConfig } from "./src/configuration/config.ts";
 import { runSetup } from "./src/configuration/setup.ts";
 import { discoverAgents } from "./src/delegation/agents.ts";
 import { registerSubagentTool } from "./src/delegation/dispatch.ts";
+import { registerSubagentRiskTool } from "./src/delegation/risk.ts";
 import { buildDelegationDirective } from "./src/delegation/prompt.ts";
 import { currentSubagentDepth } from "./src/execution/spawn.ts";
 import { createRuntime } from "./src/lifecycle/runtime.ts";
@@ -69,6 +70,7 @@ export default function (pi: ExtensionAPI): void {
 	});
 
 	registerSubagentTool(pi, runtime);
+	registerSubagentRiskTool(pi);
 	registerLookupTools(pi, runtime);
 
 	pi.registerCommand("subagents-setup", {

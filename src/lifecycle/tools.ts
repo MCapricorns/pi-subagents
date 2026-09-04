@@ -34,6 +34,13 @@ function renderFirstLine(result: { content?: unknown }, label: string, theme: an
 }
 
 export function registerLookupTools(pi: ExtensionAPI, runtime: SubagentRuntime): void {
+	const ResumeScopeSchema = Type.Optional(Type.Object({
+		paths: Type.Optional(Type.Array(Type.String({ minLength: 1, pattern: "\\S" }))),
+		symbols: Type.Optional(Type.Array(Type.Object({
+			path: Type.String({ minLength: 1, pattern: "\\S" }),
+			name: Type.String({ minLength: 1, pattern: "\\S" }),
+		}))),
+	}, { description: "Additional declarative write claims for resume; normalized claims are unioned with retained scope and cannot remove it. Scope is conflict metadata, not permissions or a sandbox." }));
 	const SubagentControlParams = Type.Object({
 		action: StringEnum(["steer", "resume", "park"] as const, {
 			description:
@@ -43,6 +50,7 @@ export function registerLookupTools(pi: ExtensionAPI, runtime: SubagentRuntime):
 		objective: Type.Optional(
 			Type.String({ description: "Guidance for steer (required and nonblank), or an optional appended objective for resume. Ignored by park." }),
 		),
+		scope: ResumeScopeSchema,
 	});
 
 	/** A thread that a steer can continue instead of reject: it is not live, but
@@ -52,7 +60,7 @@ export function registerLookupTools(pi: ExtensionAPI, runtime: SubagentRuntime):
 	pi.registerTool({
 		name: "subagent_control",
 		label: "Subagent Control",
-		description: "Steer a running child with additional guidance (continuing it if it has settled or is parked), resume a parked/settled thread, or park a running thread at a stable checkpoint, by stable run id.",
+		description: "Steer a running child, resume a parked/settled thread, or park a running thread by stable run id. Resume keeps phaseId immutable and may only extend retained scope.",
 		parameters: SubagentControlParams,
 
 		async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
@@ -103,7 +111,9 @@ export function registerLookupTools(pi: ExtensionAPI, runtime: SubagentRuntime):
 					return textResult("resume objective must be non-blank when provided.");
 				}
 				const hadRetainedSession = Boolean(thread.sessionId && thread.sessionDir);
-				const pending = await thread.resume(requestedObjective, ctx);
+				const pending = await thread.resume(requestedObjective, ctx, {
+					scope: params.scope,
+				});
 				if (pending.exitCode !== -1) return textResult(getResultOutput(pending));
 				const currentObjective = formatTaskSummary(requestedObjective ?? thread.task, 80, false);
 				const mode = requestedObjective
