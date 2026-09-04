@@ -10,6 +10,7 @@ import {
 	DEFAULT_MAX_RESULT_LINES,
 	IDLE_TIMEOUT_SEC_LIMIT,
 	MAX_RESULT_LINES_LIMIT,
+	configuredModelForAgent,
 	loadConfig,
 	normalizeConfig,
 	roleThinkingLevel,
@@ -17,8 +18,8 @@ import {
 } from "../src/config.ts";
 
 describe("catalog", () => {
-	it("ships three built-ins and enables them by default", () => {
-		assert.deepEqual(BUILTIN_AGENT_NAMES, ["scout", "artisan", "steward"]);
+	it("ships four built-ins and enables them by default", () => {
+		assert.deepEqual(BUILTIN_AGENT_NAMES, ["scout", "artisan", "steward", "sentinel"]);
 		assert.deepEqual(DEFAULT_ENABLED_AGENTS, [...BUILTIN_AGENT_NAMES]);
 	});
 
@@ -26,7 +27,15 @@ describe("catalog", () => {
 		assert.equal(roleThinkingLevel("scout"), "low");
 		assert.equal(roleThinkingLevel("artisan"), "high");
 		assert.equal(roleThinkingLevel("steward"), "medium");
+		assert.equal(roleThinkingLevel("sentinel"), "max");
 		assert.equal(roleThinkingLevel("custom"), "medium");
+	});
+
+	it("defaults sentinel to the artisan model unless explicitly configured", () => {
+		const models = { artisan: "anthropic/implement", sentinel: "openai/review" };
+		assert.equal(configuredModelForAgent({ artisan: models.artisan }, "sentinel"), models.artisan);
+		assert.equal(configuredModelForAgent(models, "sentinel"), models.sentinel);
+		assert.equal(configuredModelForAgent(models, "scout"), undefined);
 	});
 });
 
@@ -35,6 +44,7 @@ describe("normalizeConfig", () => {
 		const config = normalizeConfig(undefined);
 		assert.deepEqual(config.enabledAgents, [...DEFAULT_ENABLED_AGENTS]);
 		assert.equal(config.agentScope, "user");
+		assert.deepEqual(config.knownAgents, [...BUILTIN_AGENT_NAMES]);
 		assert.deepEqual(config.agentModels, {});
 		assert.deepEqual(config.agentThinkingLevels, {});
 	});
@@ -115,12 +125,44 @@ describe("loadConfig", () => {
 		}), "utf8");
 
 		const config = await loadConfig(path);
-		assert.deepEqual(config.enabledAgents, ["artisan"]);
+		assert.deepEqual(config.enabledAgents, ["artisan", "sentinel"]);
+		assert.deepEqual(config.knownAgents, ["scout", "artisan", "steward", "sentinel"]);
 		assert.equal(config.agentModels.artisan, "anthropic/primary");
 		assert.equal(config.agentThinkingLevels.artisan, "high");
 
 		const saved = JSON.parse(readFileSync(path, "utf8")) as Record<string, unknown>;
 		assert.ok(!("unknownKey" in saved));
+	});
+
+	it("enables sentinel once when upgrading a pre-sentinel allow-list", async () => {
+		const dir = mkdtempSync(join(tmpdir(), "pi-subagents-test-"));
+		const path = join(dir, "pi-subagents.json");
+		writeFileSync(path, JSON.stringify({
+			enabledAgents: ["scout", "artisan", "steward"],
+			agentModels: { artisan: "anthropic/primary" },
+		}), "utf8");
+
+		const config = await loadConfig(path);
+		assert.deepEqual(config.enabledAgents, ["scout", "artisan", "steward", "sentinel"]);
+		assert.deepEqual(config.knownAgents, ["scout", "artisan", "steward", "sentinel"]);
+		assert.equal(config.agentModels.sentinel, undefined);
+
+		const saved = JSON.parse(readFileSync(path, "utf8")) as Record<string, unknown>;
+		assert.deepEqual(saved.knownAgents, ["scout", "artisan", "steward", "sentinel"]);
+	});
+
+	it("keeps sentinel disabled after the config has surfaced it", async () => {
+		const dir = mkdtempSync(join(tmpdir(), "pi-subagents-test-"));
+		const path = join(dir, "pi-subagents.json");
+		writeFileSync(path, JSON.stringify({
+			enabledAgents: ["scout", "artisan", "steward"],
+			knownAgents: ["scout", "artisan", "steward", "sentinel"],
+		}), "utf8");
+
+		const config = await loadConfig(path);
+		assert.deepEqual(config.enabledAgents, ["scout", "artisan", "steward"]);
+		assert.deepEqual(config.knownAgents, ["scout", "artisan", "steward", "sentinel"]);
+		assert.deepEqual(await loadConfig(path), config);
 	});
 
 	it("round-trips selected models and thinking preferences", async () => {

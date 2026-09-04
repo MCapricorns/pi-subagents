@@ -1,8 +1,9 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
-import type { AgentConfig } from "../src/agents.ts";
+import { loadBuiltinAgents, type AgentConfig } from "../src/agents.ts";
 import type { SubagentsConfig } from "../src/config.ts";
+import { defaultIsolationMode, isWorktreeCapableAgent } from "../src/dispatch.ts";
 import { createRuntime, type SubagentThread } from "../src/runtime.ts";
 import { findDuplicateActiveDispatch, type PhaseLeaseSource } from "../src/prompt.ts";
 import { createBackgroundDispatcher } from "../src/thread-lifecycle.ts";
@@ -17,6 +18,18 @@ function source(partial: Partial<PhaseLeaseSource> = {}): PhaseLeaseSource {
 		...partial,
 	};
 }
+
+describe("isolation policy", () => {
+	it("keeps sentinel on the shared checkout it reviews", () => {
+		const sentinel = loadBuiltinAgents().find((agent) => agent.name === "sentinel");
+		assert.ok(sentinel);
+		assert.equal(isWorktreeCapableAgent(sentinel), false);
+		assert.equal(
+			defaultIsolationMode("parallel", sentinel.name, undefined, isWorktreeCapableAgent(sentinel), sentinel.isolation),
+			"shared",
+		);
+	});
+});
 
 describe("duplicate active dispatch", () => {
 	it("matches normalized task and resolved cwd across agents without fuzzy matching", () => {

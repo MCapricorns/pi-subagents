@@ -1,20 +1,16 @@
-/**
- * Interactive configuration wizard for /subagents-setup.
- *
- * The wizard stays one level deep: which agents run, then a model and an
- * optional thinking override per agent. Role thinking defaults apply until
- * the user picks a level. Everything else (agent scope, idle timeout, result
- * lines) is config-file-only.
- */
+/** Single-overlay editor for the UI-configurable pi-subagents settings. */
 
-import { stat } from "node:fs/promises";
 import type { Api, Model } from "@earendil-works/pi-ai";
-import type { ExtensionCommandContext } from "@earendil-works/pi-coding-agent";
+import type { ExtensionCommandContext, Theme } from "@earendil-works/pi-coding-agent";
 import {
-	AGENT_PROFILES,
+	truncateToWidth,
+	type Component,
+	type Focusable,
+	type KeybindingsManager,
+	type TUI,
+} from "@earendil-works/pi-tui";
+import {
 	BUILTIN_AGENT_NAMES,
-	DEFAULT_CONFIG,
-	DEFAULT_ENABLED_AGENTS,
 	agentProfile,
 	errorMessage,
 	getConfigPath,
@@ -29,302 +25,284 @@ import {
 	applyAgentModelChoice,
 	availableModelsInScope,
 	buildModelPickerItems,
-	currentModelRef,
 	findModelByRef,
-	modelRef,
 	resolveThinkingLevel,
 	supportedThinkingLevels,
 } from "./models.ts";
-import { promptSelectMany, promptSelectOne } from "./ui.ts";
+import { makePickerStyles, Picker } from "./ui.ts";
 
-const THINKING_LEVEL_HINTS: Record<ThinkingLevel, string> = {
-	off: "no reasoning tokens",
-	minimal: "minimal reasoning",
-	low: "light reasoning",
-	medium: "balanced reasoning",
-	high: "deep reasoning",
-	xhigh: "extra-deep reasoning",
-	max: "strongest reasoning",
-};
+const FIELD_COUNT = 3;
+const WIDE_LAYOUT_MIN_WIDTH = 112;
 
-function agentPickerItems(): Array<{ value: string; label: string; description: string }> {
-	return BUILTIN_AGENT_NAMES.map((name) => {
-		const profile = AGENT_PROFILES[name];
-		return {
-			value: name,
-			label: name,
-			description: `${profile.summary} — ${profile.remark}`,
-		};
-	});
+type SetupResult = SubagentsConfig | undefined;
+
+export interface SetupOverlayOptions {
+	config: SubagentsConfig;
+	models: readonly Model<Api>[];
+	mainModel: Model<Api> | undefined;
+	theme: Theme;
+	tui: TUI;
+	keybindings: KeybindingsManager;
+	onDone: (result: SetupResult) => void;
 }
 
-function moduleLabel(name: string): string {
-	const profile = agentProfile(name);
-	return profile ? `${name} — ${profile.summary}` : name;
-}
-
-async function configExists(configPath: string): Promise<boolean> {
-	try {
-		await stat(configPath);
-		return true;
-	} catch {
-		return false;
-	}
-}
-
-async function pickEnabledAgents(
-	ctx: ExtensionCommandContext,
-	current: readonly string[],
-): Promise<string[] | undefined> {
-	const picked = await promptSelectMany(
-		ctx,
-		"Which agents should run?",
-		"Each line is a role and its job. Space toggles • Enter confirms • Esc back",
-		agentPickerItems(),
-		current,
-	);
-	return picked;
-}
-
-async function pickConfiguredModel(
-	ctx: ExtensionCommandContext,
-	title: string,
-	configuredRef: string | undefined,
-	escNote: string,
-): Promise<string | undefined> {
-	const models = availableModelsInScope(ctx);
-	const items = buildModelPickerItems({
-		models,
-		configuredRef,
-		mainRef: currentModelRef(ctx),
-	});
-	return promptSelectOne(
-		ctx,
-		title,
-		`Type to filter by provider, model, or capability • ↑/↓ • Enter selects • Esc ${escNote}`,
-		items,
-		configuredRef ?? CURRENT_MAIN_MODEL,
-	);
-}
-
-async function pickAgentModel(
-	ctx: ExtensionCommandContext,
-	agentName: string,
-	currentRef: string | undefined,
-	escNote = "cancels this setup pass",
-): Promise<string | undefined> {
-	const profile = agentProfile(agentName);
-	const duty = profile ? ` — ${profile.summary}` : "";
-	return pickConfiguredModel(ctx, `Model for ${agentName}${duty}?`, currentRef, escNote);
-}
-
-function effectiveModelForChoice(
-	ctx: ExtensionCommandContext,
-	choice: string,
-): Model<Api> | undefined {
-	if (choice === CURRENT_MAIN_MODEL) return ctx.model;
-	return findModelByRef(availableModelsInScope(ctx), choice);
-}
-
-/** Role default is the first row. Picking it clears a stored override. */
-async function pickAgentStrength(
-	ctx: ExtensionCommandContext,
-	agentName: string,
-	model: Model<Api> | undefined,
-	current: ThinkingLevel | undefined,
-	escNote = "cancels this setup pass",
-): Promise<ThinkingLevel | undefined> {
-	const supported = supportedThinkingLevels(model);
-	const roleDefault = resolveThinkingLevel(model, roleThinkingLevel(agentName));
-	if (supported.length <= 1) return roleDefault;
-
-	const currentEffective = current ? resolveThinkingLevel(model, current) : roleDefault;
-	const modelName = model ? modelRef(model) : "current main model";
-	const options = supported.map((level) => {
-		const tags = [
-			level === roleDefault ? "role default" : "",
-			current !== undefined && currentEffective === level ? "current" : "",
-		].filter(Boolean);
-		return {
-			value: level,
-			label: `${level} — ${THINKING_LEVEL_HINTS[level]}${tags.length ? ` (${tags.join(", ")})` : ""}`,
-		};
-	});
-	return promptSelectOne(
-		ctx,
-		`Thinking for ${agentName}?`,
-		`${agentName} defaults to ${roleDefault} on ${modelName} • Enter selects • Esc ${escNote}`,
-		options,
-		currentEffective,
-	) as Promise<ThinkingLevel | undefined>;
-}
-
-async function pickAgentToConfigure(
-	ctx: ExtensionCommandContext,
-	enabledAgents: readonly string[],
-): Promise<string | undefined> {
-	if (enabledAgents.length === 0) {
-		ctx.ui.notify("No agents are enabled. Enable agents first.", "warning");
-		return undefined;
-	}
-	return promptSelectOne(
-		ctx,
-		"Configure which agent?",
-		"Name, then what it owns • ↑/↓ • Enter selects • Esc returns to settings",
-		enabledAgents.map((name) => {
-			const profile = agentProfile(name);
-			return {
-				value: name,
-				label: moduleLabel(name),
-				description: profile?.remark,
-			};
-		}),
-	);
-}
-
-interface ConfiguredAgentChoice {
-	name: string;
-	model: string;
-	strength: ThinkingLevel;
-}
-
-async function configureOneAgent(
-	ctx: ExtensionCommandContext,
-	config: SubagentsConfig,
-): Promise<ConfiguredAgentChoice | undefined> {
-	while (true) {
-		const name = await pickAgentToConfigure(ctx, config.enabledAgents);
-		if (name === undefined) return undefined;
-		const profile = agentProfile(name);
-		if (profile) ctx.ui.notify(`${name}: ${profile.remark}`, "info");
-
-		while (true) {
-			const modelChoice = await pickAgentModel(
-				ctx,
-				name,
-				config.agentModels[name],
-				"returns to agent selection",
-			);
-			if (modelChoice === undefined) break;
-			const model = effectiveModelForChoice(ctx, modelChoice);
-			const strength = await pickAgentStrength(
-				ctx,
-				name,
-				model,
-				config.agentThinkingLevels[name],
-				"returns to model selection",
-			);
-			if (strength === undefined) continue;
-			return { name, model: modelChoice, strength };
-		}
-	}
-}
-
-function keepAgentEntries<T>(record: Record<string, T>, enabled: readonly string[]): Record<string, T> {
-	const keep = new Set(enabled);
-	return Object.fromEntries(Object.entries(record).filter(([name]) => keep.has(name)));
-}
-
-function applyThinkingChoice(
-	levels: Record<string, ThinkingLevel>,
-	agentName: string,
-	strength: ThinkingLevel,
-): Record<string, ThinkingLevel> {
-	const next = { ...levels };
-	if (strength === roleThinkingLevel(agentName)) delete next[agentName];
-	else next[agentName] = strength;
-	return next;
-}
-
-async function introduceSetup(ctx: ExtensionCommandContext): Promise<boolean> {
-	const lines = BUILTIN_AGENT_NAMES.map((name) => {
-		const profile = AGENT_PROFILES[name];
-		return `${name} — ${profile.summary}. ${profile.remark}`;
-	});
-	ctx.ui.notify(
-		`pi-subagents: ${lines.join(" ")} Pick a model for each role next. Thinking defaults per role (scout low, artisan high, steward medium); change it on a role when you want.`,
-		"info",
-	);
-	const choice = await ctx.ui.select("How to configure pi-subagents", [
-		"Continue — pick a model for each role (thinking has a role default you can change later)",
-	]);
-	return choice !== undefined;
-}
-
-async function runFullSetup(ctx: ExtensionCommandContext, configPath: string, base: SubagentsConfig): Promise<boolean> {
-	if (!(await introduceSetup(ctx))) return false;
-
-	const enabled = await pickEnabledAgents(ctx, base.enabledAgents);
-	if (enabled === undefined) return false;
-
-	let agentModels = keepAgentEntries(base.agentModels, enabled);
-	for (const agentName of enabled) {
-		const profile = agentProfile(agentName);
-		if (profile) ctx.ui.notify(`${agentName}: ${profile.remark}`, "info");
-		const choice = await pickAgentModel(ctx, agentName, agentModels[agentName]);
-		if (choice === undefined) return false;
-		agentModels = applyAgentModelChoice(agentModels, agentName, choice);
-	}
-
-	const next: SubagentsConfig = {
-		enabledAgents: enabled,
-		agentModels,
-		agentThinkingLevels: keepAgentEntries(base.agentThinkingLevels, enabled),
-		maxResultLines: base.maxResultLines,
-		agentScope: base.agentScope,
-		idleTimeoutSec: base.idleTimeoutSec,
+function cloneConfig(config: SubagentsConfig): SubagentsConfig {
+	return {
+		...config,
+		enabledAgents: [...config.enabledAgents],
+		knownAgents: [...config.knownAgents],
+		agentModels: { ...config.agentModels },
+		agentThinkingLevels: { ...config.agentThinkingLevels },
 	};
-	await saveConfig(next, configPath);
-	ctx.ui.notify(
-		`pi-subagents saved to ${configPath}. Role thinking defaults apply; open Configure an agent to change one.`,
-		"info",
-	);
-	return true;
 }
 
-async function runMenu(ctx: ExtensionCommandContext, configPath: string, config: SubagentsConfig): Promise<void> {
-	while (true) {
-		const choice = await ctx.ui.select("pi-subagents settings", [
-			"Enable/disable agents — choose which roles are available",
-			"Configure an agent — model and thinking, with its job on the row",
-			"Full re-setup — walk through the team and pick models again",
-		]);
-		if (choice === undefined) return;
-		if (choice.startsWith("Full")) {
-			if (await runFullSetup(ctx, configPath, config)) return;
-			continue;
-		}
+function setupAgentNames(config: SubagentsConfig): string[] {
+	return [
+		...new Set([
+			...BUILTIN_AGENT_NAMES,
+			...config.knownAgents,
+			...config.enabledAgents,
+			...Object.keys(config.agentModels),
+			...Object.keys(config.agentThinkingLevels),
+		]),
+	];
+}
 
-		let next: SubagentsConfig = {
-			...config,
-			agentModels: { ...config.agentModels },
-			agentThinkingLevels: { ...config.agentThinkingLevels },
-		};
-		if (choice.startsWith("Enable")) {
-			const enabled = await pickEnabledAgents(ctx, config.enabledAgents);
-			if (enabled === undefined) continue;
-			next.enabledAgents = enabled;
-			next.agentModels = keepAgentEntries(next.agentModels, enabled);
-			next.agentThinkingLevels = keepAgentEntries(next.agentThinkingLevels, enabled);
-		} else {
-			let configuredAny = false;
-			while (true) {
-				const picked = await configureOneAgent(ctx, next);
-				if (!picked) break;
-				configuredAny = true;
-				next.agentModels = applyAgentModelChoice(next.agentModels, picked.name, picked.model);
-				next.agentThinkingLevels = applyThinkingChoice(next.agentThinkingLevels, picked.name, picked.strength);
+/**
+ * Transactional settings component. It mutates only its private draft and
+ * returns that draft exclusively from the explicit Save & Exit row.
+ */
+export class SetupOverlay implements Component, Focusable {
+	private _focused = false;
+	private readonly state: SubagentsConfig;
+	private readonly agents: string[];
+	private row = 0;
+	private field = 0;
+	private modelPicker: Picker | undefined;
+
+	constructor(private readonly options: SetupOverlayOptions) {
+		this.state = cloneConfig(options.config);
+		this.agents = setupAgentNames(this.state);
+		this.state.knownAgents = [...new Set([...this.state.knownAgents, ...this.agents])];
+	}
+
+	get focused(): boolean {
+		return this._focused;
+	}
+
+	set focused(value: boolean) {
+		this._focused = value;
+		if (this.modelPicker) this.modelPicker.focused = value;
+	}
+
+	render(width: number): string[] {
+		if (this.modelPicker) return this.modelPicker.render(width);
+
+		const { theme } = this.options;
+		const safeWidth = Math.max(0, width);
+		const fit = (line: string): string => truncateToWidth(line, safeWidth, "", true);
+		const border = theme.fg("border", "─".repeat(Math.max(1, safeWidth)));
+		const lines = [
+			border,
+			theme.fg("accent", theme.bold("pi-subagents setup")),
+			theme.fg("dim", "↑/↓ agent or action • ←/→ field • Enter/Space edit • Esc cancels without saving"),
+			border,
+		];
+
+		const maxVisibleAgents = safeWidth >= WIDE_LAYOUT_MIN_WIDTH ? 8 : 3;
+		const activeAgentRow = Math.min(this.row, this.agents.length - 1);
+		const start = Math.max(
+			0,
+			Math.min(activeAgentRow - Math.floor(maxVisibleAgents / 2), this.agents.length - maxVisibleAgents),
+		);
+		const end = Math.min(start + maxVisibleAgents, this.agents.length);
+		for (let index = start; index < end; index++) {
+			const name = this.agents[index]!;
+			const active = index === this.row;
+			const cursor = active ? theme.fg("accent", "❯ ") : "  ";
+			const enabled = this.state.enabledAgents.includes(name);
+			const enabledText = this.cell(enabled ? "[x]" : "[ ]", active && this.field === 0);
+			const profile = agentProfile(name);
+			const nameText = profile ? `${name} — ${profile.summary}` : `${name} (custom)`;
+			const modelText = this.cell(`model: ${this.modelDisplay(name)}`, active && this.field === 1);
+			const thinkingText = this.cell(`thinking: ${this.thinkingDisplay(name)}`, active && this.field === 2);
+
+			if (safeWidth >= WIDE_LAYOUT_MIN_WIDTH) {
+				lines.push(`${cursor}${enabledText} ${nameText} │ ${modelText} │ ${thinkingText}`);
+			} else {
+				lines.push(`${cursor}${enabledText} ${nameText}`);
+				lines.push(`    ${modelText}`);
+				lines.push(`    ${thinkingText}`);
 			}
-			if (!configuredAny) continue;
-			await saveConfig(next, configPath);
-			ctx.ui.notify(`pi-subagents updated. Saved to ${configPath}`, "info");
-			config = next;
-			continue;
+		}
+		const range = start > 0 || end < this.agents.length
+			? `agents ${start + 1}-${end} of ${this.agents.length}`
+			: undefined;
+		const selectedName = this.agents[this.row];
+		const selectedProfile = selectedName ? agentProfile(selectedName) : undefined;
+		const context = [range, selectedProfile?.remark].filter(Boolean).join(" · ");
+		if (context) lines.push(theme.fg("dim", `  ${context}`));
+		lines.push(border);
+		lines.push(this.actionLine(this.agents.length, "Save & Exit", "persist all changes"));
+		lines.push(this.actionLine(this.agents.length + 1, "Cancel", "discard this session"));
+		lines.push(border);
+		return lines.map(fit);
+	}
+
+	handleInput(data: string): void {
+		if (this.modelPicker) {
+			this.modelPicker.handleInput(data);
+			return;
 		}
 
-		await saveConfig(next, configPath);
-		ctx.ui.notify(`pi-subagents updated. Saved to ${configPath}`, "info");
-		return;
+		const { keybindings } = this.options;
+		const rowCount = this.agents.length + 2;
+		if (keybindings.matches(data, "tui.select.cancel")) {
+			this.options.onDone(undefined);
+			return;
+		}
+		if (keybindings.matches(data, "tui.select.up")) {
+			this.row = (this.row - 1 + rowCount) % rowCount;
+		} else if (keybindings.matches(data, "tui.select.down")) {
+			this.row = (this.row + 1) % rowCount;
+		} else if (this.row < this.agents.length && keybindings.matches(data, "tui.editor.cursorLeft")) {
+			this.field = (this.field - 1 + FIELD_COUNT) % FIELD_COUNT;
+		} else if (this.row < this.agents.length && keybindings.matches(data, "tui.editor.cursorRight")) {
+			this.field = (this.field + 1) % FIELD_COUNT;
+		} else if (keybindings.matches(data, "tui.select.confirm") || data === " ") {
+			this.activateCurrent();
+		}
+		this.options.tui.requestRender();
+	}
+
+	invalidate(): void {
+		this.modelPicker?.invalidate();
+	}
+
+	private cell(text: string, selected: boolean): string {
+		if (!selected) return text;
+		return this.options.theme.bg("selectedBg", this.options.theme.fg("accent", text));
+	}
+
+	private actionLine(row: number, label: string, description: string): string {
+		const active = this.row === row;
+		const cursor = active ? this.options.theme.fg("accent", "❯ ") : "  ";
+		const text = active ? this.cell(label, true) : label;
+		return `${cursor}${text} ${this.options.theme.fg("dim", `— ${description}`)}`;
+	}
+
+	private activateCurrent(): void {
+		if (this.row === this.agents.length) {
+			this.options.onDone(cloneConfig(this.state));
+			return;
+		}
+		if (this.row === this.agents.length + 1) {
+			this.options.onDone(undefined);
+			return;
+		}
+
+		const name = this.agents[this.row];
+		if (!name) return;
+		if (this.field === 0) this.toggleEnabled(name);
+		else if (this.field === 1) this.openModelPicker(name);
+		else this.cycleThinking(name);
+	}
+
+	private toggleEnabled(name: string): void {
+		if (this.state.enabledAgents.includes(name)) {
+			this.state.enabledAgents = this.state.enabledAgents.filter((candidate) => candidate !== name);
+		} else {
+			this.state.enabledAgents = [...this.state.enabledAgents, name];
+		}
+	}
+
+	private openModelPicker(name: string): void {
+		const explicitRef = this.state.agentModels[name];
+		const items = buildModelPickerItems({
+			models: this.options.models,
+			configuredRef: explicitRef,
+			mainRef: this.options.mainModel ? `${this.options.mainModel.provider}/${this.options.mainModel.id}` : undefined,
+		});
+		if (name === "sentinel") {
+			const inherited = this.state.agentModels.artisan ?? "current main model";
+			items[0] = {
+				value: CURRENT_MAIN_MODEL,
+				label: "Follow artisan (role default)",
+				description: `Clear the sentinel override; currently follows ${inherited}`,
+			};
+		}
+
+		const styles = makePickerStyles(this.options.theme);
+		this.modelPicker = new Picker(
+			items,
+			styles,
+			[
+				styles.title(`Model for ${name}`),
+				styles.hint("Type to filter • ↑/↓ move • Enter select • Esc return to table"),
+			],
+			this.options.tui,
+			this.options.keybindings,
+			{
+				onSelect: (choice) => {
+					this.state.agentModels = applyAgentModelChoice(this.state.agentModels, name, choice);
+					this.clampThinkingOverride(name);
+					if (name === "artisan" && this.state.agentModels.sentinel === undefined) {
+						this.clampThinkingOverride("sentinel");
+					}
+					this.closeModelPicker();
+				},
+				onCancel: () => this.closeModelPicker(),
+			},
+			explicitRef ?? CURRENT_MAIN_MODEL,
+		);
+		this.modelPicker.focused = this.focused;
+	}
+
+	private closeModelPicker(): void {
+		this.modelPicker = undefined;
+		this.options.tui.requestRender();
+	}
+
+	private effectiveModel(name: string): Model<Api> | undefined {
+		const explicitRef = this.state.agentModels[name];
+		const inheritedRef = name === "sentinel" && explicitRef === undefined ? this.state.agentModels.artisan : undefined;
+		return findModelByRef(this.options.models, explicitRef ?? inheritedRef) ?? this.options.mainModel;
+	}
+
+	private clampThinkingOverride(name: string): void {
+		const current = this.state.agentThinkingLevels[name];
+		if (current === undefined) return;
+		this.state.agentThinkingLevels[name] = resolveThinkingLevel(this.effectiveModel(name), current);
+	}
+
+	private cycleThinking(name: string): void {
+		const model = this.effectiveModel(name);
+		const roleDefault = resolveThinkingLevel(model, roleThinkingLevel(name));
+		const overrides = supportedThinkingLevels(model).filter((level) => level !== roleDefault);
+		const current = this.state.agentThinkingLevels[name];
+		let next: ThinkingLevel | undefined;
+		if (current === undefined) {
+			next = overrides[0];
+		} else {
+			const index = overrides.indexOf(current);
+			next = index < 0 || index === overrides.length - 1 ? undefined : overrides[index + 1];
+		}
+		if (next === undefined) delete this.state.agentThinkingLevels[name];
+		else this.state.agentThinkingLevels[name] = next;
+	}
+
+	private modelDisplay(name: string): string {
+		const explicitRef = this.state.agentModels[name];
+		if (explicitRef) return explicitRef;
+		if (name === "sentinel") return `follow artisan → ${this.state.agentModels.artisan ?? "current main"}`;
+		return "current main (dynamic)";
+	}
+
+	private thinkingDisplay(name: string): string {
+		const override = this.state.agentThinkingLevels[name];
+		if (override !== undefined) return `${resolveThinkingLevel(this.effectiveModel(name), override)} (override)`;
+		const roleDefault = resolveThinkingLevel(this.effectiveModel(name), roleThinkingLevel(name));
+		return `${roleDefault} (role default)`;
 	}
 }
 
@@ -334,13 +312,32 @@ export async function runSetup(ctx: ExtensionCommandContext, configPath: string 
 		ctx.ui.notify("/subagents-setup requires Pi's interactive TUI.", "error");
 		return;
 	}
+
 	try {
-		const exists = await configExists(configPath);
-		const config = await loadConfig(configPath);
-		if (exists) await runMenu(ctx, configPath, config);
-		else if (!(await runFullSetup(ctx, configPath, { ...DEFAULT_CONFIG, enabledAgents: [...DEFAULT_ENABLED_AGENTS] }))) {
-			ctx.ui.notify("pi-subagents setup cancelled.", "info");
+		const config = await loadConfig(configPath, { persistNormalization: false });
+		const models = availableModelsInScope(ctx);
+		const result = await ctx.ui.custom<SetupResult>(
+			(tui, theme, keybindings, done) =>
+				new SetupOverlay({
+					config,
+					models,
+					mainModel: ctx.model,
+					theme,
+					tui,
+					keybindings,
+					onDone: done,
+				}),
+			{
+				overlay: true,
+				overlayOptions: { anchor: "center", width: "90%", minWidth: 36, maxHeight: "90%", margin: 1 },
+			},
+		);
+		if (result === undefined) {
+			ctx.ui.notify("pi-subagents setup cancelled; no changes saved.", "info");
+			return;
 		}
+		await saveConfig(result, configPath);
+		ctx.ui.notify(`pi-subagents updated. Saved to ${configPath}`, "info");
 	} catch (error) {
 		ctx.ui.notify(`pi-subagents setup failed: ${errorMessage(error)}`, "error");
 	}

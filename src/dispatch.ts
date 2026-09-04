@@ -1,7 +1,7 @@
 /**
- * The `subagent` tool: dispatches the enabled agents (scout, artisan, steward,
- * plus custom roles) as isolated pi
- * child processes, single or parallel. Owns the public dispatch contract and
+ * The `subagent` tool: dispatches enabled scout, artisan, steward, sentinel,
+ * and custom roles as isolated pi child processes, single or parallel.
+ * Owns the public dispatch contract and
  * per-run status tracking. Stable thread generations, final integration, and
  * completion ownership live in thread-lifecycle.ts.
  */
@@ -11,7 +11,7 @@ import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { Text } from "@earendil-works/pi-tui";
 import { join, resolve } from "node:path";
 import { Type } from "typebox";
-import { discoverAgents, isWriteCapableAgent, resolveAgentTools, type AgentConfig } from "./agents.ts";
+import { discoverAgents, resolveAgentTools, type AgentConfig } from "./agents.ts";
 import { loadConfig } from "./config.ts";
 import { formatCompletionBlock, formatUsage, queuedResult } from "./format.ts";
 import {
@@ -39,6 +39,7 @@ import {
 } from "./spawn.ts";
 import {
 	createBackgroundDispatcher,
+	isWorktreeCapableAgent,
 	projectResultsRoot,
 	resolveDispatchModelRoute,
 	runInManagedRepositoryLane,
@@ -47,7 +48,7 @@ import {
 } from "./thread-lifecycle.ts";
 import type { IsolationMode } from "./worktree.ts";
 
-export { isWorktreeCapableAgent, runInManagedRepositoryLane } from "./thread-lifecycle.ts";
+export { isWorktreeCapableAgent, runInManagedRepositoryLane };
 
 const NON_BLANK_TASK_OPTIONS = { minLength: 1, pattern: "\\S" } as const;
 
@@ -88,7 +89,7 @@ const SubagentParams = Type.Object({
 
 /** Roles that default to worktree isolation in parallel dispatches even when
  * the live catalog cannot be consulted (render-only call sites). Custom
- * write-capable agents join them via isWriteCapableAgent on the execute path. */
+ * worktree-capable agents join them via the live catalog on the execute path. */
 const WORKTREE_DEFAULT_AGENTS = new Set(["artisan", "steward"]);
 
 /** Resolve the default isolation for a dispatch. Precedence: an explicit
@@ -467,7 +468,7 @@ export function registerSubagentTool(pi: ExtensionAPI, runtime: SubagentRuntime)
 							"parallel",
 							item.agent,
 							item.isolation as IsolationMode | undefined,
-							catalogAgent ? isWriteCapableAgent(catalogAgent) : undefined,
+							catalogAgent ? isWorktreeCapableAgent(catalogAgent) : undefined,
 							catalogAgent?.isolation,
 						),
 						{ deliveryRoute: params.wait ? "await" : "background" },
@@ -522,7 +523,7 @@ export function registerSubagentTool(pi: ExtensionAPI, runtime: SubagentRuntime)
 					"single",
 					params.agent as string,
 					params.isolation as IsolationMode | undefined,
-					singleCatalogAgent ? isWriteCapableAgent(singleCatalogAgent) : undefined,
+					singleCatalogAgent ? isWorktreeCapableAgent(singleCatalogAgent) : undefined,
 					singleCatalogAgent?.isolation,
 				),
 				{ deliveryRoute: params.wait ? "await" : "background" },

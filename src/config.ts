@@ -13,7 +13,11 @@ import { dirname, join } from "node:path";
 import { getAgentDir, withFileMutationQueue } from "@earendil-works/pi-coding-agent";
 
 /** Full catalog of agents shipped with the package (selectable in /subagents-setup). */
-export const BUILTIN_AGENT_NAMES = ["scout", "artisan", "steward"] as const;
+export const BUILTIN_AGENT_NAMES = ["scout", "artisan", "steward", "sentinel"] as const;
+
+// Historical catalog for configs written before the marker existed. Keep this
+// frozen so future built-ins are still recognized as new.
+const PRE_SENTINEL_AGENT_NAMES = ["scout", "artisan", "steward"] as const;
 
 /** Agents enabled out of the box on a fresh install. */
 export const DEFAULT_ENABLED_AGENTS: readonly string[] = [...BUILTIN_AGENT_NAMES];
@@ -34,6 +38,8 @@ export function roleThinkingLevel(agentName: string): ThinkingLevel {
 			return "low";
 		case "artisan":
 			return "high";
+		case "sentinel":
+			return "max";
 		case "steward":
 			return "medium";
 		default:
@@ -41,26 +47,38 @@ export function roleThinkingLevel(agentName: string): ThinkingLevel {
 	}
 }
 
+/** Sentinel shares artisan's configured model unless it has its own override. */
+export function configuredModelForAgent(
+	agentModels: Readonly<Record<string, string>>,
+	agentName: string,
+): string | undefined {
+	return agentModels[agentName] ?? (agentName === "sentinel" ? agentModels.artisan : undefined);
+}
+
 /** Short responsibility line shown next to each built-in in setup lists. */
 export interface AgentProfile {
 	/** A few words for picker rows. */
 	summary: string;
-	/** What this role owns, for first-run copy and the configure step. */
+	/** What this role owns, shown for its selected setup row. */
 	remark: string;
 }
 
 export const AGENT_PROFILES: Record<(typeof BUILTIN_AGENT_NAMES)[number], AgentProfile> = {
 	scout: {
-		summary: "read-only recon",
-		remark: "Broad or unknown reconnaissance. Returns decisive citations as leads, never proof.",
+		summary: "recon / research",
+		remark: "Maps unfamiliar code or external facts read-only, returning decisive file or source citations as leads, never proof.",
 	},
 	artisan: {
-		summary: "implement / fix",
-		remark: "Owns implementation, code refactors, and directly affected tests/docs; a disproved defect means zero edits.",
+		summary: "primary change",
+		remark: "Owns a substantial implementation, fix, refactor, test, or docs change through root cause, affected verification, and local hygiene.",
 	},
 	steward: {
 		summary: "pre-commit finish",
 		remark: "Cleans a completed broad or multi-writer diff and synchronizes cross-cutting docs/comments without changing behavior.",
+	},
+	sentinel: {
+		summary: "adversarial review",
+		remark: "Challenges every cleaned pre-commit diff against matching skills; follows artisan's model with max thinking by default.",
 	},
 };
 
@@ -89,6 +107,9 @@ export const IDLE_TIMEOUT_SEC_LIMIT = 600;
 export interface SubagentsConfig {
 	/** Agent names that are discoverable and injected. Fresh-install default: every built-in agent. */
 	enabledAgents: string[];
+	/** Agent names already presented by setup. Built-ins use this catalog to opt in
+	 * once on upgrade without undoing a later explicit disable. */
+	knownAgents: string[];
 	/** Per-agent model override, keyed by agent name, as "provider/model-id". */
 	agentModels: Record<string, string>;
 	/** Optional per-agent thinking override from `/subagents-setup`. Missing =
@@ -97,7 +118,7 @@ export interface SubagentsConfig {
 	/**
 	 * Max lines of a sub-agent result carried in the completion message. Longer
 	 * results are truncated; the full text is written to a temp file whose path
-	 * is included in the message. Default: 80.
+	 * is included in the message. Default: 40.
 	 */
 	maxResultLines: number;
 	/** Which agent directories to discover from. Default: "user". */
@@ -112,6 +133,7 @@ export interface SubagentsConfig {
 
 export const DEFAULT_CONFIG: SubagentsConfig = {
 	enabledAgents: [...DEFAULT_ENABLED_AGENTS],
+	knownAgents: [...BUILTIN_AGENT_NAMES],
 	agentModels: {},
 	agentThinkingLevels: {},
 	maxResultLines: DEFAULT_MAX_RESULT_LINES,
@@ -120,10 +142,9 @@ export const DEFAULT_CONFIG: SubagentsConfig = {
 };
 
 export const FIRST_RUN_SETUP_HINT =
-	"Run /subagents-setup to choose enabled roles and pick their models. " +
-	"Keep orchestration on the strongest main model; prefer an efficient model for scout and steward. " +
-	"Scout handles clustered broad reconnaissance, artisan implements with affected tests/docs, " +
-	"and steward finishes completed broad or multi-writer changes before commit.";
+	"Run /subagents-setup to choose enabled roles, models, and thinking levels. " +
+	"Sentinel follows artisan's model by default and requests max thinking; scout and steward can use efficient models. " +
+	"Scout maps code or researches external sources, artisan owns the primary change, steward cleans broad final diffs, and sentinel reviews after cleanup before every commit.";
 
 export function getConfigPath(agentDir: string = getAgentDir()): string {
 	return join(agentDir, CONFIG_FILE_NAME);
@@ -164,6 +185,14 @@ export function normalizeConfig(raw: unknown): SubagentsConfig {
 		);
 		// An explicitly empty array is honored; duplicates collapse.
 		config.enabledAgents = [...new Set(names.map((name) => name.trim()))];
+	}
+
+	const rawKnownAgents = Array.isArray(raw.knownAgents) ? raw.knownAgents : PRE_SENTINEL_AGENT_NAMES;
+	config.knownAgents = [...new Set(rawKnownAgents.filter(
+		(name): name is string => typeof name === "string" && name.trim().length > 0,
+	).map((name) => name.trim()))];
+	for (const name of config.enabledAgents) {
+		if (!config.knownAgents.includes(name)) config.knownAgents.push(name);
 	}
 
 	if (isRecord(raw.agentModels)) {
@@ -207,9 +236,26 @@ function defaultConfig(): SubagentsConfig {
 	return {
 		...DEFAULT_CONFIG,
 		enabledAgents: [...DEFAULT_CONFIG.enabledAgents],
+		knownAgents: [...DEFAULT_CONFIG.knownAgents],
 		agentModels: {},
 		agentThinkingLevels: {},
 	};
+}
+
+function adoptNewBuiltins(config: SubagentsConfig): SubagentsConfig {
+	const known = new Set(config.knownAgents);
+	const fresh = BUILTIN_AGENT_NAMES.filter((name) => !known.has(name));
+	if (fresh.length === 0) return config;
+	return {
+		...config,
+		enabledAgents: [...new Set([...config.enabledAgents, ...fresh])],
+		knownAgents: [...known, ...fresh],
+	};
+}
+
+export interface LoadConfigOptions {
+	/** Disable read-time canonicalization for transactional UI sessions. */
+	persistNormalization?: boolean;
 }
 
 /**
@@ -217,7 +263,10 @@ function defaultConfig(): SubagentsConfig {
  * A corrupt file also falls back to defaults rather than throwing, so startup never breaks.
  * Valid fields are normalized and unknown fields are omitted when the config is saved.
  */
-export async function loadConfig(configPath: string = getConfigPath()): Promise<SubagentsConfig> {
+export async function loadConfig(
+	configPath: string = getConfigPath(),
+	options: LoadConfigOptions = {},
+): Promise<SubagentsConfig> {
 	let text: string;
 	try {
 		text = await readFile(configPath, "utf8");
@@ -233,10 +282,10 @@ export async function loadConfig(configPath: string = getConfigPath()): Promise<
 		return defaultConfig();
 	}
 
-	const config = normalizeConfig(parsed);
+	const config = adoptNewBuiltins(normalizeConfig(parsed));
 
 	// Persist the canonical shape when invalid or unknown fields were omitted.
-	if (JSON.stringify(config) !== JSON.stringify(parsed)) {
+	if (options.persistNormalization !== false && JSON.stringify(config) !== JSON.stringify(parsed)) {
 		try {
 			await saveConfig(config, configPath);
 		} catch {

@@ -115,7 +115,7 @@ const here = dirname(fileURLToPath(import.meta.url));
 /** <package>/agents — the agents shipped with this extension. */
 export const BUILTIN_AGENTS_DIR = join(here, "..", "agents");
 
-/** Agents shipped with the package (used by the setup wizard for per-agent defaults). */
+/** Agents shipped with the package and surfaced by the setup overlay. */
 export function loadBuiltinAgents(): AgentConfig[] {
 	return loadAgentsFromDir(BUILTIN_AGENTS_DIR, "builtin");
 }

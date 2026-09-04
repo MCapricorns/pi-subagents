@@ -23,7 +23,7 @@ async function removeUnavailableAgentModels(
 		await saveConfig({ ...config, agentModels: kept }, runtime.configPath);
 		const list = dropped.map(({ agent, ref }) => `${agent}: ${ref}`).join(", ");
 		ctx.ui.notify(
-			`pi-subagents: removed stale agent model overrides that are no longer available (${list}). Those agents now follow the current main model; run /subagents-setup to re-pick.`,
+			`pi-subagents: removed stale agent model overrides that are no longer available (${list}). Those agents now use their role's default model route; run /subagents-setup to re-pick.`,
 			"warning",
 		);
 	} catch {

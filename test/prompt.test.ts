@@ -37,6 +37,12 @@ describe("buildDelegationDirective", () => {
 		const directive = buildDelegationDirective(loadBuiltinAgents());
 		assert.match(directive, /Each child starts a paid context/u);
 		assert.match(directive, /Cluster related reconnaissance into one scout brief/u);
+		assert.match(directive, /external research/u);
+		assert.match(directive, /primary change/u);
+		assert.match(directive, /Before every commit: cleanup -> sentinel review/u);
+		assert.match(directive, /`wait: true` only when the result is the immediate dependency/u);
+		assert.match(directive, /Never sleep or poll/u);
+		assert.ok(directive.indexOf("cleanup -> sentinel review") < directive.indexOf("dispatch sentinel"));
 		assert.match(directive, /One owner per phase/u);
 		assert.match(directive, /main may inspect its result, citations, diff/u);
 		assert.doesNotMatch(directive, /Delegate aggressively|dispatch more|keep working/u);
@@ -46,7 +52,7 @@ describe("buildDelegationDirective", () => {
 	it("shows routing only for enabled roles", () => {
 		const directive = buildDelegationDirective([agent("artisan")]);
 		assert.match(directive, /`artisan`:/u);
-		assert.doesNotMatch(directive, /`scout`:|`steward`:/u);
+		assert.doesNotMatch(directive, /`scout`:|`steward`:|`sentinel`:/u);
 	});
 
 	it("renders only bounded active and settling leases", () => {
@@ -59,7 +65,7 @@ describe("buildDelegationDirective", () => {
 			lease({ id: 16, state: "failed" }),
 		]);
 		assert.match(directive, /#11 broad reconnaissance \(scout, running\): Map dispatch ownership/u);
-		assert.match(directive, /#13 implementation and targeted checks \(artisan, settling\): Apply focused edit/u);
+		assert.match(directive, /#13 primary change \(artisan, settling\): Apply focused edit/u);
 		assert.match(directive, /2 more active leases omitted/u);
 		assert.doesNotMatch(directive, /#12|#14|#15|#16/u);
 	});
@@ -69,7 +75,7 @@ describe("buildDelegationDirective", () => {
 			lease({ id: 21, agentName: "artisan", task: "Implement duplicate rejection" }),
 		]);
 		assert.match(receipt, /^Active phase lease:/u);
-		assert.match(receipt, /#21 implementation and targeted checks/u);
+		assert.match(receipt, /#21 primary change/u);
 		assert.match(receipt, /Do not duplicate it/u);
 		assert.doesNotMatch(receipt, /never blocks|dispatch more|keep working/u);
 	});

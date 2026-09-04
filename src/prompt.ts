@@ -34,8 +34,9 @@ function bullets(lines: readonly string[]): string {
 
 function phaseForAgent(agentName: string): string {
 	if (agentName === "scout") return "broad reconnaissance";
-	if (agentName === "artisan") return "implementation and targeted checks";
+	if (agentName === "artisan") return "primary change";
 	if (agentName === "steward") return "pre-commit cleanup and cross-cutting docs";
+	if (agentName === "sentinel") return "post-cleanup adversarial review";
 	return "delegated scope";
 }
 
@@ -104,16 +105,21 @@ export function buildDelegationDirective(
 	const hasScout = agents.some((agent) => agent.name === "scout");
 	const hasArtisan = agents.some((agent) => agent.name === "artisan");
 	const hasSteward = agents.some((agent) => agent.name === "steward");
+	const hasSentinel = agents.some((agent) => agent.name === "sentinel");
 
 	const dispatchRules = [
-		"Main owns routing, architecture, integration, the final gate, and release. Each child starts a paid context; delegate only when saved main-context work exceeds handoff cost.",
-		"Keep atomic lookups, focused edits, known answers, and context-heavy work in main. Cluster related reconnaissance into one scout brief.",
-		...(hasScout ? ["`scout`: broad or unfamiliar reconnaissance; return compact findings and decisive citations."] : []),
-		...(hasArtisan ? ["`artisan`: substantial self-contained implementation, including affected tests, docs, comments, and targeted checks."] : []),
-		...(hasSteward ? ["`steward`: one pre-commit cleanup or cross-cutting docs/comments pass for a completed broad or multi-writer change; keep small diff hygiene inline."] : []),
-		"One owner per phase; dependent phases wait. A launch leases that phase: main may inspect its result, citations, diff, and check output but must not rerun it.",
-		"Parallelize only independently justified, disjoint scopes. Brief goal, scope, constraints, and expected output; resume retained work with `subagent_control`.",
-		"Completions deliver automatically. Never poll, restate a result, or finish while a run is active.",
+		`Main owns routing, architecture, integration, the final gate, and release. Each child starts a paid context; delegate only when handoff saves more than it costs${hasSentinel ? ", except required sentinel review before commit" : ""}.`,
+		"Keep atomic lookups, focused edits, known answers, and context-heavy work in main. Cluster related reconnaissance into one scout brief, including external research.",
+		...(hasScout ? ["`scout`: read-only broad code mapping or external research; return file/source citations as leads, not proof."] : []),
+		...(hasArtisan ? ["`artisan`: one substantial primary change; own root cause, implementation, affected tests/docs, and targeted checks."] : []),
+		...(hasSteward ? ["`steward`: final cleanup/docs sync for a completed broad or multi-writer diff; keep focused hygiene inline."] : []),
+		...(hasSentinel ? ["`sentinel`: read-only post-cleanup review; use matching skills and report only evidenced defects."] : []),
+		...(hasSentinel
+			? [`Before every commit: cleanup -> sentinel review. ${hasSteward ? "Use steward once only for broad or multi-writer diffs" : "Keep cleanup inline"}. Then dispatch sentinel on the final diff and check evidence. After review fixes, clean and review once more; findings block commit.`]
+			: []),
+		"One owner per phase; dependent phases wait. A launch leases that phase: main may inspect its result, citations, diff, and checks, not redo the phase; main still runs the final gate.",
+		"Parallelize only independent, disjoint scopes. Brief goal, paths, constraints, and expected output; resume with `subagent_control`.",
+		"`wait: true` only when the result is the immediate dependency; otherwise continue disjoint work. Never sleep or poll, and never finish while a run is active.",
 		"Inspect the integrated diff and actual check output. Never report an unrun check as passed.",
 	];
 

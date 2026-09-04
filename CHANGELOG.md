@@ -4,6 +4,19 @@ Published versions of `@ferris1225/pi-subagents`. Unpublished numbers
 (`4.2.3`, `4.2.6`, `4.2.9`–`4.2.11`) never shipped on npm; their changes
 landed in the next published release.
 
+## 4.3.3
+
+- Add `sentinel`, a concise read-only adversarial reviewer that runs after cleanup,
+  follows artisan's configured model by default, requests maximum supported thinking,
+  and stays on the shared checkout.
+- Replace `/subagents-setup`'s sequential menus with one transactional overlay for
+  enabled roles, models, and thinking. Cancellation writes nothing; disabled custom
+  roles remain visible, and newly shipped built-ins are adopted exactly once.
+- Show each active run's effective `think:<level>` in the widget.
+- Expand scout into primary-source external research, make artisan the complete
+  primary-change owner, and keep detailed Ferris rules in skills while embedding the
+  minimum diagnosis, testing, cleanup, and evidence gates in role prompts.
+
 ## 4.3.2
 
 - Let scout use active, known-safe retrieval plugins: `anchor_grep`, web content

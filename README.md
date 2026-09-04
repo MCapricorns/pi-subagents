@@ -6,15 +6,16 @@
 ![platform](https://img.shields.io/badge/platform-Windows%20%7C%20macOS%20%7C%20Linux-lightgrey)
 ![pi](https://img.shields.io/badge/pi-extension-orange)
 
-A managed engineering team for [pi](https://github.com/earendil-works/pi): three
-focused sub-agents, durable threads, and Git worktree
-isolation. You install it once and your main agent delegates on its own.
+A managed engineering team for [pi](https://github.com/earendil-works/pi): four
+focused sub-agents, durable threads, and Git worktree isolation. You install it
+once and your main agent delegates on its own.
 
 ## What's new
 
-**4.3.2** — scout can use active, known-safe retrieval plugins including Hash
-Edit Pro search, web content, and Context7 documentation tools. Missing plugins
-are ignored; shells, mutation tools, and unknown custom tools remain blocked.
+**4.3.3** — adds the post-cleanup `sentinel`, a transactional all-in-one setup
+overlay, effective thinking in the live widget, and primary-source external research
+for scout. Role prompts now keep only essential fallback gates while detailed Ferris
+rules remain canonical in skills.
 See [CHANGELOG.md](./CHANGELOG.md).
 
 ## Contents
@@ -63,10 +64,11 @@ Requires **pi >= 0.84.4** and **Node.js >= 22.19.0**.
 pi install npm:@ferris1225/pi-subagents
 ```
 
-Open pi and run `/subagents-setup`. Choose the enabled roles, then pick a model
-and optional thinking override for each. Fresh installs select all three, but
-you can disable any role or use `[]` to disable delegation. Then just ask for
-work:
+Open pi and run `/subagents-setup`. One overlay shows every role's enabled state,
+model, and effective thinking level. Move through the grid, search models in place,
+then choose **Save & Exit** to write everything once; **Cancel** or `Esc` discards
+the draft. Fresh installs select all four, and an upgrade surfaces a new built-in
+once without re-enabling it after you deliberately turn it off. Then ask for work:
 
 ```text
 Map how authentication works, fix the refresh race, run the tests, and review the diff.
@@ -77,11 +79,18 @@ directly when you want exact control.
 
 ## The team
 
-| Agent     | Access    | Owns |
-| --------- | --------- | ---- |
-| `scout`   | Read-only | Broad or unfamiliar reconnaissance with compact findings and decisive citations. Its output is a retrieval lead, not proof. |
-| `artisan` | Full      | A substantial self-contained implementation, including affected tests, docs, comments, targeted checks, and local cleanup. |
-| `steward` | Full      | One pre-commit cleanup or cross-cutting docs/comments pass after a broad or multi-writer change is complete. |
+| Agent      | Access      | Owns |
+| ---------- | ----------- | ---- |
+| `scout`    | Read-only   | Broad or unfamiliar code reconnaissance and external research. Returns compact file citations or source URLs as leads, not proof. |
+| `artisan`  | Full        | One substantial primary change—implementation, fix, refactor, test, or docs—through root cause, affected verification, and local hygiene. |
+| `steward`  | Full        | One final cleanup and cross-cutting docs/comment sync pass after a broad or multi-writer change. |
+| `sentinel` | Review-only | A post-cleanup adversarial review against matching Ferris skills; reports only evidence-backed defects and concrete test gaps. |
+
+Role prompts carry the non-negotiable minimum even if skill matching misses:
+root-cause-first diagnosis, meaningful test evidence, bounded cleanup, and
+evidence-only review. Detailed language, platform, debugging, testing, and audit
+rules stay in the Ferris skills; artisan and sentinel load the matching skills,
+while steward always loads `ferris-audit`. This avoids duplicated, drifting prompts.
 
 Custom roles join them with a Markdown file (see [Custom agents](#custom-agents)).
 
@@ -102,7 +111,7 @@ subagent({
 // Parallel only when each scope independently justifies a child
 subagent({
   tasks: [
-    { agent: "scout", task: "Map model fallback across src/rpc-run.ts and src/spawn.ts." },
+    { agent: "scout", task: "Research current provider API limits in primary sources and cite URLs." },
     { agent: "artisan", task: "Fix config validation in src/config.ts and its tests." },
   ],
 });
@@ -125,16 +134,25 @@ starting its child — alongside the slot capacity. A run that waits for the wri
 lane releases its slot first, so serialized writers never starve new dispatches.
 
 One child owns one coherent phase. Dependent work starts only after its
-prerequisite delivers. Artisan owns the affected tests, docs, comments, targeted
-checks, and local cleanup for its implementation. Scout stays read-only. Main
-inspects the integrated diff and runs the final gate.
+prerequisite delivers. Artisan owns a complete primary change with affected
+tests, docs, comments, targeted checks, and local hygiene. Scout owns broad code
+mapping or external research and stays read-only.
+
+With the default team, every commit ends in one order: cleanup -> `sentinel`. A
+focused diff gets the `ferris-audit` pass inline; a broad or multi-writer diff
+gets one `steward` pass that attacks touched dead code, duplication, tangled
+conditionals, needless layers, and spaghetti growth without widening into a
+repo refactor. Sentinel then reviews the cleaned diff against matching skills.
+A review-driven edit repeats that sequence once; unresolved findings block the
+commit. Main inspects the final diff and runs the final gate.
 
 ## Parallel edits
 
 - Single tasks use your checkout. Every parallel write-capable agent (`artisan`,
   `steward`, and custom writers) defaults to a detached Git worktree, so
   parallel writers run at the same time. Worktree mode needs a committed `HEAD`,
-  and read-only agents reject it.
+  and scout/sentinel reject it. Sentinel stays shared so it sees the caller's
+  uncommitted diff.
 - A role file can pin its own default with `isolation: worktree` or
   `isolation: shared` in the frontmatter. Precedence is an explicit per-dispatch
   `isolation`, then the role's declaration, then the parallel write default.
@@ -173,6 +191,9 @@ main model. `wait: true` instead holds that tool call until its new runs settle,
 which is useful for one-shot `pi -p` sessions. It claims the delivery route before
 launch, so the same result cannot also arrive as a background completion; if the
 parent turn is aborted, delivery falls back to the completion path.
+Use `wait: true` only when the result is the immediate dependency. Otherwise
+leave it in the background and continue real disjoint work — never burn main
+context on `sleep` or polling while a child keeps running.
 
 The wait has no timer chosen by the model: it resolves when its run settles, and
 a parked run returns its resume handle. Control operations are bounded so they do
@@ -199,23 +220,23 @@ The TUI widget renders one line per active run in fixed identity columns —
 status icon, right-aligned `#id`, padded agent name, then the task label — so
 every label starts at the same column, with the live activity dimmed after
 `↳` on its own line and the rest of the telemetry flowing inline after ` · `: the
-worktree badge, the token flow in the footer vocabulary (`↑` input, `↓` output,
-`R`/`W` cache read/write), cost, the full `provider/model` ref, the
-wait state, and an elapsed time that always carries seconds. A live run renders
-two lines: what it is — agent, task, token flow, cost, provider/model, elapsed —
+worktree badge, wait state, token flow in the footer vocabulary (`↑` input, `↓`
+output, `R`/`W` cache read/write), cost, full `provider/model`, current effective
+`think:<level>`, and seconds-precision elapsed. A live run renders
+two lines: what it is — agent, task, usage, model, thinking, elapsed —
 and, dim under the label column, what it is doing right now:
 
 ```text
-● #12 artisan  src/cache.ts · worktree:a91f3c · ↑5.2k ↓41.0k R210.0k W6.1k $1.9400 · 12m06s
+● #12 artisan  src/cache.ts · worktree:a91f3c · ↑5.2k ↓41.0k R210.0k W6.1k $1.9400 · think:high · 12m06s
   ↳ edit src/auth.ts
-● #15 scout    src/models.ts · ↑1.2k ↓8.4k R31.0k W1.1k $0.0900 · openai/gpt-5-mini · 3m07s
+● #15 scout    src/models.ts · ↑1.2k ↓8.4k R31.0k W1.1k $0.0900 · openai/gpt-5-mini · think:low · 3m07s
                 ↳ grep fallback
 ○ #23 artisan  src/config.ts · repo lane
 ○ #24 artisan ↻  tests/config.test.ts · queued · 5m02s
 ```
 
-Telemetry drops leftmost-first when a row runs out of width (badge, wait
-state, usage, model) while the elapsed survives every width. Queued rows state
+Telemetry drops leftmost-first when a row runs out of width (badge, wait state,
+usage, model, thinking) while elapsed survives every width. Queued rows state
 what they actually wait for — `queued` for a free process slot, `repo lane`
 for shared-checkout write serialization, or `starting` — and a resumed thread
 carries a dim `↻` in its agent column with its cumulative time. The widget is
@@ -257,16 +278,19 @@ rather than a fabricated number.
 
 ## Models, thinking, and tools
 
-Each agent runs on the current main model or on one you pick in
-`/subagents-setup`, which labels vision and text-only models. If a selected model
-is missing, rate-limited, or fails at the provider level, the **same retained
+Each agent runs on the current main model or one picked in `/subagents-setup`,
+which labels vision and text-only models. Without its own override, `sentinel`
+uses `artisan`'s configured model; if artisan also follows main, sentinel does
+too. If a selected model is missing, rate-limited, or fails at the provider level,
+the **same retained
 session** continues on the main model, so finished searches, reads, and edits
 survive. Ordinary task failures do not trigger a handoff.
 
-Thinking is a **role default** — scout `low`, artisan `high`, steward
-`medium` — clamped to what the effective model supports. `/subagents-setup` →
-_Configure an agent_ lists only the levels that model supports, with the role
-default marked. There is no Auto choice, no per-dispatch `thinking` flag, and
+Thinking is a **role default** — scout `low`, artisan `high`, steward `medium`,
+sentinel `max` — clamped to what the effective model supports. The unified setup
+grid shows the effective level; changing the thinking cell cycles only supported
+levels, and returning to the role default clears the stored override. There is no
+Auto choice, no per-dispatch `thinking` flag, and
 no `thinking` field in agent Markdown. Precedence: your setup override > the
 role default, then the model clamp. There is no separate vision mode — assign
 a multimodal model and name the image paths in the task.
@@ -286,15 +310,28 @@ declared by other roles are conservatively treated as write-capable when
 isolation is chosen. An empty resolved snapshot starts the child with
 `--no-tools`.
 
+For external research scout prefers official documentation, specifications, release
+notes, and first-party repositories; it fetches decisive pages rather than citing
+search snippets, records material dates/versions, and marks uncertainty.
+
+`sentinel` has an explicit retrieval/documentation list plus a portable shell
+slot for Git inspection and the smallest proving check. It is pinned to `shared`
+so it sees the current uncommitted diff. Its concise prompt loads matching ferris
+skills, preserves their owners, and forbids mutation; that is a review contract,
+not a hard shell sandbox.
+
 ## Configuration
 
-`/subagents-setup` enables or disables roles and configures a model plus optional
-thinking override for each enabled role. The same settings live in
+`/subagents-setup` opens one transactional overlay for every built-in and already
+configured custom role. Its grid edits enabled state, model, and thinking before
+**Save & Exit** persists the complete draft; **Cancel**/`Esc` writes nothing. Model
+selection remains inside the overlay and supports fuzzy search. Other settings live in
 `~/.pi/agent/pi-subagents.json` (following `PI_CODING_AGENT_DIR`):
 
 ```json
 {
-  "enabledAgents": ["scout", "artisan", "steward"],
+  "enabledAgents": ["scout", "artisan", "steward", "sentinel"],
+  "knownAgents": ["scout", "artisan", "steward", "sentinel"],
   "agentModels": { "scout": "anthropic/claude-haiku-4-5" },
   "agentThinkingLevels": { "artisan": "high" },
   "maxResultLines": 40,
@@ -303,19 +340,21 @@ thinking override for each enabled role. The same settings live in
 }
 ```
 
-| Field                 | Meaning                                                                           |
-| --------------------- | --------------------------------------------------------------------------------- |
-| `enabledAgents`       | Agents available for discovery and delegation. `[]` disables all.                 |
-| `agentModels`         | Optional `provider/model-id` per agent; missing = current main model.             |
-| `agentThinkingLevels` | Optional setup override per agent; missing = the role default.                    |
-| `maxResultLines`      | Lines kept in a completion message before the artifact takes over. Default `40`.  |
-| `agentScope`          | Discover `user`, `project`, or `both` agent directories. Default `user`.          |
-| `idleTimeoutSec`      | Seconds without child RPC output before termination; `0` disables. Default `90`.  |
+| Field                 | Meaning |
+| --------------------- | ------- |
+| `enabledAgents`       | Agents available for discovery and delegation. `[]` disables all. |
+| `knownAgents`         | Roles already surfaced by setup; retains disabled custom roles and tracks built-in adoption. |
+| `agentModels`         | Optional model per agent; missing means main, except sentinel inherits artisan's override. |
+| `agentThinkingLevels` | Optional setup override per agent; missing means the role default. |
+| `maxResultLines`      | Lines kept in a completion message before the artifact takes over. Default `40`. |
+| `agentScope`          | Discover `user`, `project`, or `both` agent directories. Default `user`. |
+| `idleTimeoutSec`      | Seconds without child RPC output before termination; `0` disables. Default `90`. |
 
 When at least one role is enabled, the cost-aware delegation directive is injected
-automatically. `enabledAgents` is authoritative: the extension neither re-enables
-a disabled role nor adopts or renames roles. Invalid known fields fall back safely,
-and unknown fields are dropped when the canonical config is persisted.
+automatically. `enabledAgents` is authoritative after catalog adoption: a newly
+shipped built-in is appended once, then `knownAgents` records that it was surfaced
+so a deliberate later disable remains disabled. Invalid known fields fall back
+safely, and unknown fields are dropped when canonical config is persisted.
 
 At session start, model overrides that pi no longer reports are removed with a
 one-time notice. If pi's own session compaction fails mid-thread, a notice surfaces

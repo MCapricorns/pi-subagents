@@ -6,12 +6,12 @@
  *   id and agent so every label starts at the same column; a resumed thread
  *   carries a dim `↻` inside the agent column.
  * - A live run owns two lines. Line 1 is what it is: identity, task label,
- *   then the telemetry flow (`provider/model`, token flow in the pi-footer
- *   vocabulary `↑in ↓out R/W cache`, cost, wait state, seconds-precision
- *   elapsed). Line 2 is what it is doing right now: the live activity, dim,
- *   indented under the label column behind a `↳` marker.
+ *   then the telemetry flow (worktree, wait state, token flow in the pi-footer
+ *   vocabulary `↑in ↓out R/W cache`, cost, `provider/model`, effective
+ *   `think:<level>`, seconds-precision elapsed). Line 2 is the current activity,
+ *   dim and indented under the label column behind a `↳` marker.
  * - Telemetry drops leftmost-first under width pressure (badge, wait, usage,
- *   model); the elapsed survives every width.
+ *   model, thinking); the elapsed survives every width.
  * - Queued rows say what they actually wait for ("queued" for a process slot,
  *   "repo lane" for shared-writer serialization, "starting" while the child
  *   process launches) instead of one catch-all "queued".
@@ -129,24 +129,25 @@ function usagePart(usage: UsageStats | undefined): string | undefined {
 }
 
 /** Telemetry tail parts of a run row: badge and wait word first (dropped first
- * under pressure), then the usage part, the model, and the always-surviving
- * elapsed. */
+ * under pressure), then usage, model, effective thinking strength, and the
+ * always-surviving elapsed time. */
 function telemetryTailParts(run: RunView, now: number): Array<string | undefined> {
-	// Queued rows omit the model (the route is re-resolved at actual start).
+	// Queued rows omit model and thinking because the route is re-resolved at actual start.
 	// The full provider/model ref is kept — "which provider served this run" is
 	// exactly what a multi-provider session needs to see.
 	const modelPart = run.status === "queued" || !run.model ? undefined : run.model;
+	const thinkingPart = run.status === "queued" || !run.thinking ? undefined : `think:${run.thinking}`;
 	const badge = run.isolation === "worktree" ? worktreeBadge(run) : undefined;
 	const wait = run.status === "queued" ? waitWord(run) : undefined;
-	// Drop order under pressure: badge, wait word, usage, model; elapsed
+	// Drop order under pressure: badge, wait word, usage, model, thinking; elapsed
 	// survives every width the identity leaves room for.
-	return [badge, wait, usagePart(run.usage), modelPart, formatElapsed(run, now) || undefined];
+	return [badge, wait, usagePart(run.usage), modelPart, thinkingPart, formatElapsed(run, now) || undefined];
 }
 
 /** Two lines for a live run. Line 1 is what the run is: identity, task label,
- * then the telemetry flow (worktree badge, token flow, cost, provider/model,
- * wait state, elapsed). Line 2 is what it is doing right now: the live
- * activity, dim, indented under the label column behind a `↳` marker. The
+ * then telemetry (worktree badge, wait state, token flow, cost, provider/model,
+ * effective thinking, elapsed). Line 2 is the current activity, dim and indented
+ * under the label column behind a `↳` marker. The
  * label takes the full content budget on line 1; the identity and the elapsed
  * survive every width. */
 function primaryLine(

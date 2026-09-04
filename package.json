@@ -1,7 +1,7 @@
 {
   "name": "@ferris1225/pi-subagents",
-  "version": "4.3.2",
-  "description": "A managed sub-agent team for pi: scout, artisan, and steward roles, durable threads, model fallback, and Git worktree isolation.",
+  "version": "4.3.3",
+  "description": "A managed sub-agent team for pi: scout, artisan, steward, and sentinel roles, durable threads, model fallback, and Git worktree isolation.",
   "type": "module",
   "license": "MIT",
   "repository": {
