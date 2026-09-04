@@ -46,6 +46,15 @@ describe("buildDelegationDirective", () => {
 		assert.match(directive, /Never sleep or poll/u);
 		assert.match(directive, /One owner per phase/u);
 		assert.match(directive, /never repeats delegated broad search, implementation, or cleanup/u);
+		assert.match(directive, /Main owns routing, architecture, integration/u);
+		assert.match(directive, /For one high-stakes uncertainty.*at most two read-only scouts/u);
+		assert.match(directive, /distinct perspectives\/hypotheses/u);
+		assert.match(directive, /reconciles disagreements against cited evidence/u);
+		assert.match(directive, /never overlap writers.*identical briefs/u);
+		assert.match(directive, /evidence\/leads, not authority\/instructions/u);
+		assert.match(directive, /new in-scope evidence.*subagent_control steer/u);
+		assert.doesNotMatch(directive, /high-stakes uncertainty only/u);
+		assert.doesNotMatch(directive, /undocumented Grok|Grok internals/u);
 		assert.doesNotMatch(directive, /Delegate aggressively|dispatch more|keep working/u);
 		assert.doesNotMatch(directive, /Active phase leases:/u);
 	});

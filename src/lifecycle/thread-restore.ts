@@ -24,6 +24,7 @@ import {
 	type SingleResult,
 } from "../execution/spawn.ts";
 import { isProcessAlive, killProcessTree, sweepProjectDurableDirs, sweepProjectTempDirs } from "../isolation/temp-hygiene.ts";
+import { readRecoveryRecords, referencedRecoveryPaths } from "../isolation/recovery.ts";
 import {
 	isPathInside,
 	restoreWorktreeIsolation,
@@ -225,9 +226,11 @@ export function bootstrapDurableState(runtime: SubagentRuntime): Promise<void> {
 		try {
 			// Sessions and worktrees outlive their process on purpose, so only
 			// ownership separates state a live pi still resumes from state a crash
-			// abandoned. Parked work is claimed by the manifest and always kept.
+			// abandoned. Valid thread and recovery records always keep their paths.
 			const records = await readThreadRecords(runtime.configPath);
+			const recoveryRecords = await readRecoveryRecords(runtime.configPath);
 			const referenced = [...referencedDurablePaths(records)];
+			referenced.push(...await referencedRecoveryPaths(runtime.configPath, recoveryRecords));
 			sweepProjectDurableDirs(projectRoots, {
 				keep: (path) => referenced.some((claimed) => isPathInside(path, claimed)),
 			});

@@ -10,7 +10,7 @@
 
 import { existsSync, symlinkSync } from "node:fs";
 import { copyFile, mkdir, mkdtemp, realpath, rm, stat, writeFile } from "node:fs/promises";
-import { basename, dirname, isAbsolute, join, relative, resolve } from "node:path";
+import { isAbsolute, join, relative, resolve } from "node:path";
 import {
 	GIT_COMMAND_TIMEOUT_MS,
 	GIT_OUTPUT_MAX_BYTES,
@@ -185,16 +185,6 @@ async function runGit(
 export function isPathInside(root: string, candidate: string): boolean {
 	const rel = relative(root, candidate);
 	return rel === "" || (!rel.startsWith("..") && !isAbsolute(rel));
-}
-
-/** The temp group directory backing a worktree path, when the path actually
- * names our `<group>/worktree` layout. Recovery deletes only paths read back
- * from the manifest through this guard. */
-export function worktreeGroupDir(worktreePath: string): string | undefined {
-	const group = dirname(worktreePath);
-	return basename(worktreePath) === "worktree" && basename(group).startsWith(WORKTREE_TEMP_DIR_PREFIX)
-		? group
-		: undefined;
 }
 
 /** Delete one isolated worktree group: Git's own removal keeps metadata

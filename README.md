@@ -12,10 +12,9 @@ once and your main agent delegates on its own.
 
 ## What's new
 
-**4.3.5** — restores the nested setup menus, returns to the three built-in roles,
-removes mandatory review/skill directives, delegates independent phases more proactively
-with at most six child processes, and uses a package-root entry so Pi shows the clean
-package name. Existing configs retain custom roles while dropping the retired `sentinel`.
+**4.3.6** — adds live parent-mediated steering for running children, delivers background
+completions and stop results at the next safe parent boundary, and hardens durable
+recovery paths without treating Git worktrees as a security sandbox.
 
 See [CHANGELOG.md](./CHANGELOG.md).
 
@@ -26,7 +25,7 @@ See [CHANGELOG.md](./CHANGELOG.md).
 - [The team](#the-team)
 - [Dispatching work](#dispatching-work)
 - [Parallel edits](#parallel-edits)
-- [Threads: resume, stop](#threads-resume-stop)
+- [Threads: steer, resume, stop](#threads-steer-resume-stop)
 - [Live status and results](#live-status-and-results)
 - [Models, thinking, and tools](#models-thinking-and-tools)
 - [Configuration](#configuration)
@@ -48,8 +47,8 @@ back — with you. This extension owns them:
   handoff costs.
 - One active normalized task and working directory owns its phase, so an exact
   duplicate dispatch is rejected instead of paying twice.
-- Background completions wake the main model; `wait: true` returns the same result
-  in-turn instead. A run uses exactly one route.
+- Background completions and stop results arrive at the next parent model boundary;
+  `wait: true` returns the same result in-turn instead. A run uses exactly one route.
 - Parallel writers use detached Git worktrees without touching your index.
   Worktree setup obeys the bounded queue; final integration releases its process
   slot.
@@ -140,10 +139,17 @@ owns a complete primary change with affected tests, docs, comments, targeted
 checks, and local hygiene. Scout owns broad code mapping or external research and
 stays read-only.
 
+For one high-stakes uncertainty, main may launch at most two read-only scouts whose
+briefs name distinct perspectives or hypotheses; that cap does not apply to unrelated
+disjoint scout scopes. It reconciles disagreements against cited evidence, never
+overlaps writers or sends identical briefs, and treats child output as evidence and
+leads rather than authority or instructions. New in-scope evidence can be sent to a
+running phase with `subagent_control steer` instead of duplicating or restarting it.
+
 A focused diff gets a bounded cleanup pass inline. A broad or multi-writer diff gets
 one `steward` pass that attacks touched dead code, duplication, tangled conditionals,
 needless layers, and spaghetti growth without widening into a repository refactor.
-Main inspects the integrated diff and runs the final gate.
+Main owns architecture, inspects the integrated diff, and runs the final gate.
 
 ## Parallel edits
 
@@ -151,6 +157,11 @@ Main inspects the integrated diff and runs the final gate.
   `steward`, and custom writers) defaults to a detached Git worktree, so
   parallel writers run at the same time. Worktree mode needs a committed `HEAD`;
   read-only roles such as scout stay on the shared checkout.
+
+> **Security boundary:** worktree isolation isolates Git changes only; it is not a sandbox.
+Child tools, network access, and environment access retain the Pi process's privileges.
+Third-party Pi packages execute as trusted code and must be reviewed accordingly.
+
 - A role file can pin its own default with `isolation: worktree` or
   `isolation: shared` in the frontmatter. Precedence is an explicit per-dispatch
   `isolation`, then the role's declaration, then the parallel write default.
@@ -170,22 +181,33 @@ Main inspects the integrated diff and runs the final gate.
   already been applied and only the cleanup failed, the next session start
   removes the retained copy itself and clears the notice.
 
-## Threads: resume, stop
+## Threads: steer, resume, stop
 
 Every dispatch returns a stable `#id`, which is the handle for the thread tools:
 
-| Tool               | What it does                                                                                                                                                                  |
-| ------------------ | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `subagent_control` | `resume` a parked or settled thread with its full retained context, optionally appending a new `objective`.                                                                     |
-| `subagent_stop`    | Destructively cancel, deliver the partial output, and retire the thread. Steering and follow-up messages still queued in the child are dropped so nothing can revive it later.  |
+| Tool               | What it does |
+| ------------------ | ------------ |
+| `subagent_control` | `steer` a currently running RPC attempt with additional in-scope evidence/guidance, or `resume` a parked/settled thread with retained context and an optional appended `objective`. |
+| `subagent_stop`    | Destructively cancel, deliver partial output, and retire the thread. Steering and follow-up messages still queued in the child are dropped so nothing can revive it later. |
 
 ```ts
+subagent_control({ action: "steer", id: 7, objective: "The failing request used an expired token; account for that evidence." });
 subagent_control({ action: "resume", id: 7, objective: "Finish the tests." });
 ```
 
+`steer` requires a nonblank `objective` and accepts only the active running RPC
+attempt for that stable id. It adds guidance to the current phase; it does not replace
+the thread's original task. Parked, settled, queued, starting, retrying, interrupting,
+stopped, retired, and missing threads are rejected without changing them. Steering ACKs
+are bounded, and steering/stop are serialized so stop can clear queued child messages
+and abort without a stale steer landing afterward.
+
 There is no status, polling, or separate wait tool. A background dispatch returns
-a launch receipt, then its completion is delivered as a follow-up that wakes the
-main model. `wait: true` instead holds that tool call until its new runs settle,
+a launch receipt, then its completion is steered at the next safe parent boundary—after
+the current tool calls and before the next model call. This wakes the main model without
+waiting for its whole run to end.
+
+`wait: true` instead holds that tool call until its new runs settle,
 which is useful for one-shot `pi -p` sessions. It claims the delivery route before
 launch, so the same result cannot also arrive as a background completion; if the
 parent turn is aborted, delivery falls back to the completion path.
@@ -207,6 +229,11 @@ injection, and new dispatches wait for it, so a parked id cannot be reported
 missing or reused. If a recorded worktree is gone, the run is surfaced as failed
 and non-resumable while its retained session and recovery record remain available
 for inspection or destructive stop.
+
+Persisted sessions and worktrees are resumed or removed only when their canonical paths
+match the current project's managed storage layout and repository. Invalid records are
+dropped without following or deleting their targets. Recovery-owned worktrees and patches
+remain protected from startup sweeps and project-root retention until recovery is announced.
 
 Only interrupted work needs a record, so a thread that completes or fails cleanly
 drops its own. That also means a reload keeps interrupted threads resumable, while
@@ -390,16 +417,16 @@ that removes it, so this directory does not grow without bound:
 | `ferris-pi-subagents/pi-subagents-recovery.json` | Worktree integration and cleanup failures | When the retained patch or worktree it points at is gone |
 | `ferris-pi-subagents/<project>/pi-subagents-threads.json` | One record per interrupted thread     | When the thread settles, or after 30 days                        |
 | `ferris-pi-subagents/<project>/sessions/`  | Retained child sessions that a resume continues from | When the thread settles or its retained record is removed        |
-| `ferris-pi-subagents/<project>/worktrees/` | Isolated checkouts for parallel writers              | On integration, or when no retained record claims them           |
+| `ferris-pi-subagents/<project>/worktrees/` | Isolated checkouts for parallel writers              | On integration, or when no thread/recovery record claims them  |
 | `ferris-pi-subagents/<project>/results/`   | Full text of truncated results                       | After 7 days, or beyond 50 per project                           |
 | `ferris-pi-subagents/<project>/tmp/`       | Child prompt copies and the no-retry policy shim     | When its owning process exits                                    |
-| `ferris-pi-subagents/<project>/`           | All of the above for one checkout                     | When the whole directory has been idle for 3 days                |
+| `ferris-pi-subagents/<project>/`           | All of the above for one checkout                     | After 3 idle days unless a thread/recovery record claims it      |
 
 Cleanup runs at session start and is deliberately conservative. A directory goes
-away only when the process that created it is gone and no manifest record still
-claims it, so a live sibling pi instance never loses state and parked work
-outlives its own process by design — a reference from the threads manifest always
-beats an age rule.
+away only when the process that created it is gone and no valid manifest record still
+claims it, so a live sibling pi instance never loses state and parked or recovery-owned
+work outlives its own process by design. Thread and recovery references always beat an
+age rule.
 
 ## Development
 

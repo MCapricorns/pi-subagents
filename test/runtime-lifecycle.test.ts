@@ -1,10 +1,11 @@
 import assert from "node:assert/strict";
-import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, realpath, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, it } from "node:test";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { BackgroundTaskQueue, resolveSubagentConcurrency } from "../src/execution/background.ts";
+import { getProjectRoot } from "../src/execution/spawn.ts";
 import type { CompletionMessageItem } from "../src/lifecycle/completion.ts";
 import { readThreadRecords, upsertThreadRecord, type ThreadRecord } from "../src/lifecycle/durable.ts";
 import { monitor } from "../src/presentation/monitor.ts";
@@ -110,7 +111,7 @@ describe("BackgroundTaskQueue slot ownership", () => {
 });
 
 describe("completion delivery ownership", () => {
-	it("uses follow-up wakeups and delivers an awaited result through exactly one route", () => {
+	it("steers completions before the next parent model call and delivers an awaited result once", () => {
 		const sent: Array<{ message: any; options: any }> = [];
 		const runtime = createRuntime(fakePi(sent), join(tmpdir(), "pi-subagents-test-config.json"));
 
@@ -127,7 +128,7 @@ describe("completion delivery ownership", () => {
 		runtime.completionBatcher.flush();
 		runtime.fallbackAwaitDelivery([2]);
 		assert.equal(sent.length, 1);
-		assert.deepEqual(sent[0]?.options, { deliverAs: "followUp", triggerTurn: true });
+		assert.deepEqual(sent[0]?.options, { deliverAs: "steer", triggerTurn: true });
 	});
 
 	it("flushes held successes before an immediate failure", () => {
@@ -149,13 +150,14 @@ describe("durable worktree restoration", () => {
 	it("surfaces a missing recorded worktree as failed and non-resumable", async () => {
 		const root = await mkdtemp(join(tmpdir(), "pi-subagents-restore-"));
 		const configPath = join(root, "settings.json");
-		const cwd = join(root, "project");
-		const sessionDir = join(root, "session");
+		const cwd = await realpath(process.cwd());
+		const projectRoot = getProjectRoot(configPath, cwd);
+		const sessionDir = join(projectRoot, "sessions", "pi-subagent-session-retained");
 		const sessionId = "retained-session";
-		await mkdir(cwd, { recursive: true });
 		await mkdir(sessionDir, { recursive: true });
 		await writeFile(join(sessionDir, `2026-01-01T00-00-00.000Z_${sessionId}.jsonl`), "{}\n", "utf8");
-		const missingWorktree = join(root, "missing-worktree");
+		const worktreeGroup = join(projectRoot, "worktrees", "pi-subagent-worktree-missing");
+		const missingWorktree = join(worktreeGroup, "worktree");
 		const record: ThreadRecord = {
 			runId: 41,
 			createdAt: Date.now(),
@@ -176,8 +178,8 @@ describe("durable worktree restoration", () => {
 				originalRoot: cwd,
 				cwd: missingWorktree,
 				worktreePath: missingWorktree,
-				tempDir: join(root, "worktree-group"),
-				patchPath: join(root, "worktree-group", "changes.patch"),
+				tempDir: worktreeGroup,
+				patchPath: join(worktreeGroup, "changes.patch"),
 				head: "abc",
 				integrationBaseHead: "abc",
 				state: "active",

@@ -1,6 +1,6 @@
 /**
- * Thread controls around the subagent runtime: subagent_control (resume) and
- * destructive subagent_stop. There is no status/poll tool — completions carry
+ * Thread controls around the subagent runtime: subagent_control (steer/resume)
+ * and destructive subagent_stop. There is no status/poll tool — completions carry
  * each result (with an on-disk artifact when truncated) and wake the main
  * model, so waiting is never a tool call; the only in-turn block is `wait:
  * true` on a dispatch, for one-shot parents that exit at end of turn.
@@ -34,19 +34,19 @@ function renderFirstLine(result: { content?: unknown }, label: string, theme: an
 
 export function registerLookupTools(pi: ExtensionAPI, runtime: SubagentRuntime): void {
 	const SubagentControlParams = Type.Object({
-		action: StringEnum(["resume"] as const, {
+		action: StringEnum(["resume", "steer"] as const, {
 			description: "Control operation for the logical sub-agent thread.",
 		}),
 		id: Type.Integer({ minimum: 1, description: "Stable run id shown by subagent dispatch output." }),
 		objective: Type.Optional(
-			Type.String({ description: "Optional appended objective for resume. Omit to continue the current retained objective." }),
+			Type.String({ description: "Guidance for steer (required and nonblank), or an optional appended objective for resume." }),
 		),
 	});
 
 	pi.registerTool({
 		name: "subagent_control",
 		label: "Subagent Control",
-		description: "Resume a parked or settled child thread by run id, reusing its retained session when available. An optional objective is appended to its current goal.",
+		description: "Steer an active running child with additional guidance, or resume a parked/settled thread by stable run id.",
 		parameters: SubagentControlParams,
 
 		async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
@@ -64,6 +64,44 @@ export function registerLookupTools(pi: ExtensionAPI, runtime: SubagentRuntime):
 
 			try {
 				switch (params.action) {
+					case "steer": {
+						const objective = nonBlank(params.objective);
+						if (!objective) {
+							return { content: [{ type: "text", text: "steer objective must be non-blank." }], details: {} };
+						}
+						if (thread.retired) {
+							return { content: [{ type: "text", text: `Run #${thread.id} was retired by subagent_stop and cannot be steered.` }], details: {} };
+						}
+						let unavailable: string | undefined;
+						if (thread.lifecycleOperation === "stop" || thread.state === "stopped") unavailable = "stopped";
+						else if (thread.lifecycleOperation === "park") unavailable = "parking";
+						else if (thread.lifecycleOperation === "settle") unavailable = `settled (${thread.state})`;
+						else if (thread.state === "completed" || thread.state === "failed") unavailable = `settled (${thread.state})`;
+						else if (thread.state === "queued" || thread.state === "resuming") {
+							const phase = thread.control.getPhase();
+							unavailable = phase === "starting" || phase === "retrying" ? phase : thread.state;
+						} else if (thread.state !== "running") unavailable = thread.state;
+						if (unavailable) {
+							return {
+								content: [{ type: "text", text: `Run #${thread.id} is ${unavailable}; only an active running RPC attempt can be steered. No guidance was sent.` }],
+								details: {},
+							};
+						}
+						const steered = await thread.control.steer(objective);
+						if (!steered.accepted) {
+							if (steered.reason === "no-active-attempt") {
+								return { content: [{ type: "text", text: `Run #${thread.id} is marked running but has no active RPC attempt; no guidance was sent.` }], details: {} };
+							}
+							return {
+								content: [{ type: "text", text: `Run #${thread.id} is ${steered.phase}; only an active running RPC attempt can be steered. No guidance was sent.` }],
+								details: {},
+							};
+						}
+						return {
+							content: [{ type: "text", text: `Steered run #${thread.id} with additional in-scope guidance; its original objective is unchanged.` }],
+							details: {},
+						};
+					}
 					case "resume": {
 						if (thread.retired) {
 							return { content: [{ type: "text", text: `Run #${thread.id} was retired by subagent_stop and has no resumable session.` }], details: {} };

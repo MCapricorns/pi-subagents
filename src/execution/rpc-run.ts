@@ -17,6 +17,7 @@ import { SUBAGENT_TOOL_NAMES, type AgentConfig } from "../delegation/agents.ts";
 import type { ThinkingLevel } from "../configuration/config.ts";
 import { writeTempOwnerMarker } from "../isolation/temp-hygiene.ts";
 import {
+	asPlainTextRpcPrompt,
 	emptyUsage,
 	RpcRunControl,
 	type AttemptControl,
@@ -24,6 +25,8 @@ import {
 	type RpcSingleResult,
 	type SubagentLiveEvent,
 } from "./rpc-control.ts";
+
+export { asPlainTextRpcPrompt };
 
 export const DEPTH_ENV_VAR = "PI_SUBAGENT_DEPTH";
 export const SUBAGENT_KILL_GRACE_MS = 5_000;
@@ -33,20 +36,14 @@ export const RPC_COMMAND_TIMEOUT_MS = 30_000;
 /** clear_queue is stop-path hygiene ahead of the abort: give it its own short
  * budget so a hung response cannot eat into the abort-settle window. */
 const RPC_CLEAR_QUEUE_TIMEOUT_MS = 2_000;
+/** Keep logical stop responsive when a steering ACK is lost. */
+const RPC_STEER_ACK_TIMEOUT_MS = 2_000;
 /** Time allowed for the child to boot and answer get_state. */
 export const RPC_READY_TIMEOUT_MS = 60_000;
 export const RPC_ABORT_SETTLE_TIMEOUT_MS = 5_000;
 
 export function isRpcCommandTimeoutError(message?: string): boolean {
 	return typeof message === "string" && message.includes("Timed out waiting for RPC response");
-}
-
-/** Prevent RPC prompt expansion when a control objective itself starts with
- * slash (for example `/subagents-setup`). The original text stays verbatim
- * below a non-command prefix and therefore always starts a model turn. */
-export function asPlainTextRpcPrompt(message: string): string {
-	if (!message.trimStart().startsWith("/")) return message;
-	return `Treat the following as plain-text sub-agent instructions, not a Pi command:\n\n${message}`;
 }
 
 export function currentSubagentDepth(env: NodeJS.ProcessEnv = process.env): number {
@@ -452,29 +449,24 @@ export async function runRpcAgentAttempt(options: RunRpcAttemptOptions): Promise
 			});
 		});
 
-	const send = async (command: Record<string, unknown>, timeoutMs = commandTimeoutMs): Promise<RpcResponse> => {
+	const send = async <T extends { type: string }>(command: T, timeoutMs = commandTimeoutMs): Promise<RpcResponse> => {
 		if (finished || closed) throw new Error("Subagent RPC process is no longer active.");
 		const id = `req_${++requestId}`;
 		const payload = { ...command, id };
 		return new Promise<RpcResponse>((resolve, reject) => {
 			const pending: PendingRequest = { resolve, reject };
+			pending.timer = setTimeout(() => {
+				pendingRequests.delete(id);
+				reject(new Error(`Timed out waiting for RPC response to ${String(command.type)}.`));
+			}, timeoutMs);
+			if (typeof pending.timer.unref === "function") pending.timer.unref();
 			pendingRequests.set(id, pending);
-			void writeLine(payload).then(
-				() => {
-					if (!pendingRequests.has(id)) return;
-					pending.timer = setTimeout(() => {
-						pendingRequests.delete(id);
-						reject(new Error(`Timed out waiting for RPC response to ${String(command.type)}.`));
-					}, timeoutMs);
-					if (typeof pending.timer.unref === "function") pending.timer.unref();
-				},
-				(error) => {
-					if (!pendingRequests.has(id)) return;
-					pendingRequests.delete(id);
-					if (pending.timer) clearTimeout(pending.timer);
-					reject(error instanceof Error ? error : new Error(String(error)));
-				},
-			);
+			void writeLine(payload).catch((error) => {
+				if (!pendingRequests.has(id)) return;
+				pendingRequests.delete(id);
+				if (pending.timer) clearTimeout(pending.timer);
+				reject(error instanceof Error ? error : new Error(String(error)));
+			});
 		}).then((response) => {
 			if (!response.success) {
 				throw new RpcCommandRejectedError(response.error || `RPC ${response.command} failed.`);
@@ -537,6 +529,9 @@ export async function runRpcAgentAttempt(options: RunRpcAttemptOptions): Promise
 	};
 
 	const attemptControl: AttemptControl = {
+		async steer(command): Promise<void> {
+			await send(command, RPC_STEER_ACK_TIMEOUT_MS);
+		},
 		async stop(reason = "Subagent was aborted"): Promise<void> {
 			if (finished) {
 				if (!closed) await processClosed.promise;
@@ -792,7 +787,10 @@ export async function runRpcAgentAttempt(options: RunRpcAttemptOptions): Promise
 
 	if (signal) {
 		abortHandler = () => {
-			void attemptControl.stop("Subagent was aborted").catch(() => undefined);
+			const stopping = control
+				? control.stop("Subagent was aborted")
+				: attemptControl.stop("Subagent was aborted");
+			void stopping.catch(() => undefined);
 		};
 		if (signal.aborted) abortHandler();
 		else signal.addEventListener("abort", abortHandler, { once: true });

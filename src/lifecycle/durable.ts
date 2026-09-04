@@ -15,19 +15,22 @@
 
 import { withFileMutationQueue } from "@earendil-works/pi-coding-agent";
 import { existsSync, type Dirent, readdirSync, statSync } from "node:fs";
-import { mkdir, readFile, rename, rm, writeFile } from "node:fs/promises";
+import { mkdir, readFile, realpath, rename, rm, writeFile } from "node:fs/promises";
 import { uptime } from "node:os";
-import { dirname, join } from "node:path";
+import { dirname, isAbsolute, join, relative, resolve } from "node:path";
 import type { UsageStats } from "../execution/rpc-control.ts";
 import type { SubagentThread } from "./runtime.ts";
 import { getResultOutput, isFailedResult, getProjectRoot, getSubagentsRoot, type SingleResult } from "../execution/spawn.ts";
+import { isManagedSessionDir, isManagedWorktreeLayout, samePath } from "../isolation/managed-paths.ts";
+import { readRecoveryRecords, referencedRecoveryPaths } from "../isolation/recovery.ts";
 import {
 	isPathInside,
+	normalizeWorktreeSnapshot,
+	resolveRepositoryRoot,
 	restoreWorktreeIsolation,
 	type IsolationMode,
-	normalizeWorktreeSnapshot,
-	worktreeSnapshot,
 	type WorktreeSnapshot,
+	worktreeSnapshot,
 } from "../isolation/worktree.ts";
 
 export const THREADS_MANIFEST_FILE_NAME = "pi-subagents-threads.json";
@@ -35,7 +38,7 @@ const THREADS_MANIFEST_VERSION = 1;
 
 /** Project directories whose newest file has not been touched for this long
  * are deleted wholesale at session start, so per-project sessions/worktrees/results
- * can never accumulate forever. Parked threads' manifest references always
+ * can never accumulate forever. Valid thread and recovery manifest references always
  * win over the age rule. */
 export const PROJECT_ROOT_MAX_AGE_MS = 3 * 24 * 60 * 60 * 1_000;
 
@@ -190,19 +193,80 @@ function normalizeRecord(value: unknown): ThreadRecord | undefined {
 	};
 }
 
-async function readManifestRecords(path: string): Promise<ThreadRecord[]> {
+interface ThreadManifestRead {
+	valid: boolean;
+	sourceCount: number;
+	records: ThreadRecord[];
+}
+
+async function readManifest(path: string): Promise<ThreadManifestRead> {
 	try {
-		const parsed = JSON.parse(await readFile(path, "utf8")) as {
-			records?: unknown;
+		const parsed = JSON.parse(await readFile(path, "utf8")) as { records?: unknown };
+		if (!Array.isArray(parsed.records)) return { valid: false, sourceCount: 0, records: [] };
+		return {
+			valid: true,
+			sourceCount: parsed.records.length,
+			records: parsed.records.flatMap((record) => {
+				const normalized = normalizeRecord(record);
+				return normalized ? [normalized] : [];
+			}),
 		};
-		if (!Array.isArray(parsed.records)) return [];
-		return parsed.records.flatMap((record) => {
-			const normalized = normalizeRecord(record);
-			return normalized ? [normalized] : [];
-		});
 	} catch {
-		return [];
+		return { valid: false, sourceCount: 0, records: [] };
 	}
+}
+
+async function readManifestRecords(path: string): Promise<ThreadRecord[]> {
+	return (await readManifest(path)).records;
+}
+
+async function validateThreadRecord(
+	configPath: string,
+	manifestPath: string,
+	record: ThreadRecord,
+): Promise<boolean> {
+	if (
+		!isAbsolute(record.cwd) ||
+		!isAbsolute(record.executionCwd) ||
+		record.cwd !== resolve(record.cwd) ||
+		record.executionCwd !== resolve(record.executionCwd) ||
+		!samePath(dirname(manifestPath), getProjectRoot(configPath, record.cwd))
+	) {
+		return false;
+	}
+	if ((record.sessionId === undefined) !== (record.sessionDir === undefined)) return false;
+	if (record.sessionDir && !await isManagedSessionDir(configPath, record.cwd, record.sessionDir)) return false;
+	if (record.isolation === "shared") {
+		return record.worktree === undefined && samePath(record.executionCwd, record.cwd);
+	}
+	const worktree = record.worktree;
+	if (!worktree || !await isManagedWorktreeLayout(configPath, record.cwd, worktree)) return false;
+	try {
+		const canonicalCwd = await realpath(record.cwd);
+		const canonicalRoot = await resolveRepositoryRoot(record.cwd);
+		if (!samePath(worktree.originalCwd, canonicalCwd) || !samePath(worktree.originalRoot, canonicalRoot)) {
+			return false;
+		}
+		if (!isPathInside(canonicalRoot, canonicalCwd)) return false;
+		const restoredCwd = join(worktree.worktreePath, relative(canonicalRoot, canonicalCwd));
+		if (!samePath(worktree.cwd, restoredCwd) || !samePath(record.executionCwd, restoredCwd)) return false;
+		if (existsSync(worktree.cwd)) {
+			const [realWorktree, realCwd] = await Promise.all([realpath(worktree.worktreePath), realpath(worktree.cwd)]);
+			if (!samePath(realCwd, join(realWorktree, relative(canonicalRoot, canonicalCwd)))) return false;
+		}
+		return true;
+	} catch {
+		return false;
+	}
+}
+
+async function validatedManifestRecords(
+	configPath: string,
+	path: string,
+	records: readonly ThreadRecord[],
+): Promise<ThreadRecord[]> {
+	const validity = await Promise.all(records.map((record) => validateThreadRecord(configPath, path, record)));
+	return records.filter((_record, index) => validity[index]);
 }
 
 /** Manifest paths of every project that has a durable root. */
@@ -221,7 +285,12 @@ function projectManifestPaths(durableRoot: string): string[] {
 export async function readThreadRecords(configPath: string): Promise<ThreadRecord[]> {
 	const manifests = await Promise.all(
 		projectManifestPaths(getSubagentsRoot(configPath))
-			.map((path) => readManifestRecords(path)),
+			.map((path) => withFileMutationQueue(path, async () => {
+				const manifest = await readManifest(path);
+				const validated = await validatedManifestRecords(configPath, path, manifest.records);
+				if (!manifest.valid || validated.length !== manifest.sourceCount) await writeManifest(path, validated);
+				return validated;
+			})),
 	);
 	return manifests.flat();
 }
@@ -367,11 +436,14 @@ export async function pruneThreadRecords(
 	const durableRoot = getSubagentsRoot(configPath);
 	for (const path of projectManifestPaths(durableRoot)) {
 		await withFileMutationQueue(path, async () => {
-			const records = await readManifestRecords(path);
-			if (records.length === 0) return;
-			let changed = false;
+			const manifest = await readManifest(path);
+			const records = manifest.records;
+			if (manifest.valid && records.length === 0) return;
+			const validity = await Promise.all(records.map((record) => validateThreadRecord(configPath, path, record)));
+			let changed = !manifest.valid || manifest.sourceCount !== records.length || validity.some((valid) => !valid);
 			const kept: ThreadRecord[] = [];
-			for (const record of records) {
+			for (const [index, record] of records.entries()) {
+				if (!validity[index]) continue;
 				if (now - record.updatedAt <= PARKED_RECORD_MAX_AGE_MS) {
 					kept.push(record);
 					continue;
@@ -384,8 +456,8 @@ export async function pruneThreadRecords(
 	}
 }
 
-/** Paths a manifest still references; used by the state-root sweep so
- * freshly created-but-unrecorded directories are never touched. */
+/** Paths a thread manifest still references; combined with recovery references by
+ * startup retention before any durable directory is swept. */
 export function referencedDurablePaths(records: readonly ThreadRecord[]): Set<string> {
 	const paths = new Set<string>();
 	for (const record of records) {
@@ -436,13 +508,15 @@ function isIdleSince(root: string, cutoffMs: number, now: number): boolean {
 }
 
 /** Delete project directories under the ferris-pi-subagents root that have
- * been idle past PROJECT_ROOT_MAX_AGE_MS. A directory containing any path the
- * threads manifest still references is never touched, so parked work outlives
- * the age rule. Returns the removed directory names. */
+ * been idle past PROJECT_ROOT_MAX_AGE_MS. A directory containing any path a valid
+ * thread or recovery manifest still references is never touched. Returns the removed
+ * directory names. */
 export async function pruneStaleProjectRoots(configPath: string, options: { now?: number } = {}): Promise<string[]> {
 	const now = options.now ?? Date.now();
 	const records = await readThreadRecords(configPath).catch(() => [] as ThreadRecord[]);
+	const recoveryRecords = await readRecoveryRecords(configPath).catch(() => []);
 	const referenced = referencedDurablePaths(records);
+	for (const path of await referencedRecoveryPaths(configPath, recoveryRecords)) referenced.add(path);
 	const root = getSubagentsRoot(configPath);
 	let projects: Dirent[];
 	try {

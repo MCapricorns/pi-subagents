@@ -80,8 +80,25 @@ export type RpcControlPhase =
 	| "settled"
 	| "stopped";
 
+export interface RpcSteerCommand {
+	type: "prompt";
+	message: string;
+	streamingBehavior: "steer";
+}
+
+export type RpcSteerResult =
+	| { accepted: true }
+	| { accepted: false; phase: RpcControlPhase; reason: "not-running" | "no-active-attempt" };
+
 export interface AttemptControl {
+	steer(command: RpcSteerCommand): Promise<void>;
 	stop(reason?: string): Promise<void>;
+}
+
+/** Prevent RPC prompt expansion when a message starts with a slash command. */
+export function asPlainTextRpcPrompt(message: string): string {
+	if (!message.trimStart().startsWith("/")) return message;
+	return `Treat the following as plain-text sub-agent instructions, not a Pi command:\n\n${message}`;
 }
 
 /**
@@ -163,6 +180,24 @@ export class RpcRunControl {
 	updateAttemptPhase(token: number, phase: RpcControlPhase): void {
 		if (this.attempt?.token !== token) return;
 		this.setPhase(phase);
+	}
+
+	async steer(objective: string): Promise<RpcSteerResult> {
+		return this.serialize(async () => {
+			if (this.stopRequested || this.phase !== "running") {
+				return { accepted: false, phase: this.phase, reason: "not-running" };
+			}
+			const attempt = this.attempt?.control;
+			if (!attempt) {
+				return { accepted: false, phase: this.phase, reason: "no-active-attempt" };
+			}
+			await attempt.steer({
+				type: "prompt",
+				message: asPlainTextRpcPrompt(objective),
+				streamingBehavior: "steer",
+			});
+			return { accepted: true };
+		});
 	}
 
 	async stop(reason = "Subagent was aborted"): Promise<void> {

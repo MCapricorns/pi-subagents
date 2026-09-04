@@ -4,6 +4,7 @@ import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, it } from "node:test";
+import { getProjectRoot } from "../src/execution/spawn.ts";
 import {
 	getRecoveryManifestPath,
 	persistRecoveryRecords,
@@ -12,12 +13,13 @@ import {
 	type RecoveryRecord,
 } from "../src/isolation/recovery.ts";
 
-function record(runId: number, error: string): RecoveryRecord {
+function record(configPath: string, runId: number, error: string): RecoveryRecord {
+	const group = join(getProjectRoot(configPath, process.cwd()), "worktrees", `pi-subagent-worktree-${runId}`);
 	return {
 		runId,
 		createdAt: runId * 1000,
 		integrated: false,
-		worktreePath: `C:\\worktrees\\${runId}`,
+		worktreePath: join(group, "worktree"),
 		error,
 	};
 }
@@ -27,8 +29,8 @@ describe("recovery manifest storage", () => {
 		const root = await mkdtemp(join(tmpdir(), "pi-subagents-recovery-"));
 		const configPath = join(root, "pi-subagents.json");
 		const legacyPath = join(root, "pi-subagents-recovery.json");
-		const current = record(2, "current");
-		const legacy = record(1, "legacy");
+		const current = record(configPath, 2, "current");
+		const legacy = record(configPath, 1, "legacy");
 
 		try {
 			await persistRecoveryRecords(configPath, [current]);

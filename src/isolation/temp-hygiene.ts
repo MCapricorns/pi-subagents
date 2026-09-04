@@ -14,8 +14,8 @@
  * that no manifest record claims — a settled thread still resumable in the
  * session that produced it — belongs to a live owner and survives; the same
  * directory left behind by a crash does not. Callers sweeping durable roots
- * additionally pass the paths their manifest still references, so parked work is
- * never removed even if its owner is long gone.
+ * additionally pass the paths their thread and recovery manifests still reference,
+ * so parked and retained work is never removed even if its owner is long gone.
  *
  * A live sibling pi instance never loses its directories: `kill(pid, 0)` only
  * reports "no such process" when the pid genuinely does not exist, so a live
@@ -200,11 +200,11 @@ export function sweepProjectTempDirs(
  * leaves a full worktree checkout and its session behind until the whole project
  * goes idle for days — which never happens in a checkout still being worked in.
  *
- * `keep` must report every path the threads manifest still references; parked
- * work outlives its owner by design. Removal is a plain recursive delete, the
- * same as the idle-project rule: an abandoned worktree may leave a prunable
- * registration in its origin repository, which `git worktree prune` and routine
- * gc clear on their own. */
+ * `keep` must report every path the thread and recovery manifests still reference;
+ * parked and retained recovery work outlives its owner by design. Removal is a
+ * plain recursive delete, as in idle-project cleanup. An abandoned worktree may
+ * leave a prunable registration in its origin repository, which
+ * `git worktree prune` and routine gc clear on their own. */
 export function sweepProjectDurableDirs(
 	durableRoot: string,
 	options: SweepOptions = {},

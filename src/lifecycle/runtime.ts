@@ -107,7 +107,7 @@ export interface SubagentRuntime {
 	 * one-time session-start notice. */
 	restoredRunIds: number[];
 	restoredNotified: boolean;
-	/** Deliver a batch of completion messages as a waking follow-up. */
+	/** Deliver a batch at the next safe parent turn boundary and wake an idle parent. */
 	sendCompletionGroup: (items: CompletionMessageItem[]) => void;
 	/** Claim the sole delivery route before a generation can settle. */
 	claimRunDelivery: (runId: number, route: "background" | "await") => void;
@@ -189,10 +189,10 @@ export function createRuntime(pi: ExtensionAPI, configPath: string): SubagentRun
 				content: formatCompletionMessage(items) + formatActiveRunsFooter(active),
 				display: true,
 			};
-			// Follow-ups never interrupt an active parent lane. triggerTurn wakes an
-			// idle parent immediately, while a streaming parent receives the result
-			// only after its current tool/assistant lane settles.
-			pi.sendMessage(message, { deliverAs: "followUp", triggerTurn: true });
+			// Steer delivers after the current assistant turn's tool calls and before
+			// the next model call. A follow-up would wait for the whole parent run to
+			// settle, allowing completions and stop results to arrive after its final reply.
+			pi.sendMessage(message, { deliverAs: "steer", triggerTurn: true });
 		},
 		claimRunDelivery: (runId, route) => {
 			runDeliveries.set(runId, { route, immediate: false });

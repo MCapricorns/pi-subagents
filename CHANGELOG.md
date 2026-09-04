@@ -4,6 +4,27 @@ Published versions of `@ferris1225/pi-subagents`. Unpublished numbers
 (`4.2.3`, `4.2.6`, `4.2.9`–`4.2.11`) never shipped on npm; their changes
 landed in the next published release.
 
+## 4.3.6
+
+- Add `subagent_control steer` for nonblank, parent-mediated guidance to the current active
+  RPC attempt without replacing its logical objective. Stable control serialization orders
+  steering against stop and AbortSignal shutdown; bounded ACKs keep stop responsive.
+- Refine the lean delegation directive: main owns architecture; for one high-stakes
+  uncertainty at most two read-only scouts may examine distinct hypotheses, without
+  capping unrelated disjoint scout scopes; main reconciles cited evidence, writers
+  and briefs never overlap, and new evidence steers the existing phase instead of
+  duplicating or restarting it.
+- Steer background completions and stop results into the next parent model boundary
+  instead of queuing them until the whole parent run settles, preventing stale notifications
+  from arriving after the main agent has already finished.
+- Validate durable session, worktree, repository, and recovery paths against their canonical
+  project-scoped layout before restore or cleanup. Forged and junction-escaping records are
+  dropped without deleting external targets.
+- Keep worktree and patch artifacts referenced by recovery records through durable sweeps and
+  stale project-root retention until their recovery notice can be delivered.
+- Clarify that worktree isolation protects Git changes rather than sandboxing child privileges
+  or third-party Pi packages.
+
 ## 4.3.5
 
 - Restore `/subagents-setup`'s nested menu flow, fuzzy model picker, and disabled
