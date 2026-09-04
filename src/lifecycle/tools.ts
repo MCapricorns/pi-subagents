@@ -1,9 +1,10 @@
 /**
- * Thread controls around the subagent runtime: subagent_control (steer/resume)
- * and destructive subagent_stop. There is no status/poll tool — completions carry
- * each result (with an on-disk artifact when truncated) and wake the main
- * model, so waiting is never a tool call; the only in-turn block is `wait:
- * true` on a dispatch, for one-shot parents that exit at end of turn.
+ * Thread controls around the subagent runtime: subagent_control
+ * (steer/resume/park) and destructive subagent_stop. There is no status/poll
+ * tool — completions carry each result (with an on-disk artifact when
+ * truncated) and wake the main model, so waiting is never a tool call; the only
+ * in-turn block is `wait: true` on a dispatch, for one-shot parents that exit
+ * at end of turn.
  */
 
 import { StringEnum } from "@earendil-works/pi-ai";
@@ -15,10 +16,10 @@ import { DEFAULT_MAX_RESULT_LINES, loadConfig } from "../configuration/config.ts
 import { removeThreadRecord } from "./durable.ts";
 import { formatCompletionBlock, matchRunIds } from "../presentation/format.ts";
 import { emptyUsage } from "../execution/rpc-control.ts";
-import { formatTaskSummary, monitor } from "../presentation/monitor.ts";
+import { formatTaskSummary, formatUsageCompact, monitor } from "../presentation/monitor.ts";
 import { persistRecoveryRecords, recoveryRecordFromFinalization } from "../isolation/recovery.ts";
 import type { SubagentRuntime, SubagentThread } from "./runtime.ts";
-import { CONTROL_QUIESCE_TIMEOUT_MS, projectResultsRoot, quiesced } from "./thread-shared.ts";
+import { CONTROL_QUIESCE_TIMEOUT_MS, persistThreadCheckpoint, projectResultsRoot, quiesced } from "./thread-shared.ts";
 import { getResultOutput, type SingleResult } from "../execution/spawn.ts";
 import type { WorktreeFinalization } from "../isolation/worktree.ts";
 
@@ -34,19 +35,24 @@ function renderFirstLine(result: { content?: unknown }, label: string, theme: an
 
 export function registerLookupTools(pi: ExtensionAPI, runtime: SubagentRuntime): void {
 	const SubagentControlParams = Type.Object({
-		action: StringEnum(["resume", "steer"] as const, {
-			description: "Control operation for the logical sub-agent thread.",
+		action: StringEnum(["steer", "resume", "park"] as const, {
+			description:
+				"steer: send guidance to the running attempt (a settled or parked thread continues with it); resume: continue a parked or settled thread; park: pause a running thread at a stable checkpoint, keeping its session and worktree for a later resume.",
 		}),
 		id: Type.Integer({ minimum: 1, description: "Stable run id shown by subagent dispatch output." }),
 		objective: Type.Optional(
-			Type.String({ description: "Guidance for steer (required and nonblank), or an optional appended objective for resume." }),
+			Type.String({ description: "Guidance for steer (required and nonblank), or an optional appended objective for resume. Ignored by park." }),
 		),
 	});
+
+	/** A thread that a steer can continue instead of reject: it is not live, but
+	 * its retained session can absorb the guidance as an appended objective. */
+	type ContinuableState = "completed" | "failed" | "parked";
 
 	pi.registerTool({
 		name: "subagent_control",
 		label: "Subagent Control",
-		description: "Steer an active running child with additional guidance, or resume a parked/settled thread by stable run id.",
+		description: "Steer a running child with additional guidance (continuing it if it has settled or is parked), resume a parked/settled thread, or park a running thread at a stable checkpoint, by stable run id.",
 		parameters: SubagentControlParams,
 
 		async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
@@ -61,69 +67,152 @@ export function registerLookupTools(pi: ExtensionAPI, runtime: SubagentRuntime):
 				const trimmed = value?.trim();
 				return trimmed ? trimmed : undefined;
 			};
+			const textResult = (text: string) => ({ content: [{ type: "text" as const, text }], details: {} });
+			/** Why the thread has no steerable/parkable running RPC attempt right now. */
+			const inactiveReason = (): string | undefined => {
+				// Park drives the control through `stopped` before it records the
+				// checkpoint, so the operation is named ahead of the transient state.
+				if (thread.lifecycleOperation === "park") return "parking";
+				if (thread.lifecycleOperation === "stop" || thread.state === "stopped") return "stopped";
+				if (thread.lifecycleOperation === "resume") return "resuming";
+				if (thread.lifecycleOperation === "settle" || thread.state === "completed" || thread.state === "failed") {
+					return `settled (${thread.state})`;
+				}
+				if (thread.state === "queued" || thread.state === "resuming") {
+					const phase = thread.control.getPhase();
+					return phase === "starting" || phase === "retrying" ? phase : thread.state;
+				}
+				return thread.state === "running" ? undefined : thread.state;
+			};
+			const resumeThread = async (
+				objective: string | undefined,
+				continuedFrom?: ContinuableState,
+			) => {
+				if (thread.retired) {
+					return textResult(`Run #${thread.id} was retired by subagent_stop and has no resumable session.`);
+				}
+				if (
+					thread.state !== "parked" &&
+					thread.state !== "completed" &&
+					thread.state !== "failed"
+				) {
+					return textResult(`Run #${thread.id} is ${thread.state}; it must be parked or settled before resume.`);
+				}
+				const requestedObjective = objective === undefined ? undefined : nonBlank(objective);
+				if (objective !== undefined && !requestedObjective) {
+					return textResult("resume objective must be non-blank when provided.");
+				}
+				const hadRetainedSession = Boolean(thread.sessionId && thread.sessionDir);
+				const pending = await thread.resume(requestedObjective, ctx);
+				if (pending.exitCode !== -1) return textResult(getResultOutput(pending));
+				const currentObjective = formatTaskSummary(requestedObjective ?? thread.task, 80, false);
+				const mode = requestedObjective
+					? `appended objective: ${currentObjective}`
+					: `continuing current objective: ${currentObjective}`;
+				const context = hadRetainedSession ? "retained context reused" : "no prior child context";
+				const prefix = continuedFrom
+					? `Run #${thread.id} was already ${continuedFrom} before steering; resumed the same thread`
+					: `Resumed run #${thread.id}`;
+				return textResult(`${prefix}: ${mode}; ${context}.`);
+			};
+			/** Steering guidance for a thread that is no longer live continues the
+			 * same thread with that guidance instead of being dropped, so the
+			 * evidence is never re-bought by a second dispatch. */
+			const continueSteer = async (objective: string) => {
+				const continuable = (): ContinuableState | undefined =>
+					thread.state === "completed" || thread.state === "failed" || thread.state === "parked"
+						? thread.state
+						: undefined;
+				if (thread.lifecycleOperation === "settle" || (!continuable() && thread.control.getPhase() === "settled")) {
+					if (!(await quiesced(thread.generationCompletion))) return undefined;
+				}
+				const state = continuable();
+				if (!state || thread.lifecycleOperation) return undefined;
+				return resumeThread(objective, state);
+			};
 
 			try {
 				switch (params.action) {
 					case "steer": {
 						const objective = nonBlank(params.objective);
 						if (!objective) {
-							return { content: [{ type: "text", text: "steer objective must be non-blank." }], details: {} };
+							return textResult("steer objective must be non-blank.");
 						}
 						if (thread.retired) {
-							return { content: [{ type: "text", text: `Run #${thread.id} was retired by subagent_stop and cannot be steered.` }], details: {} };
+							return textResult(`Run #${thread.id} was retired by subagent_stop and cannot be steered.`);
 						}
-						let unavailable: string | undefined;
-						if (thread.lifecycleOperation === "stop" || thread.state === "stopped") unavailable = "stopped";
-						else if (thread.lifecycleOperation === "park") unavailable = "parking";
-						else if (thread.lifecycleOperation === "settle") unavailable = `settled (${thread.state})`;
-						else if (thread.state === "completed" || thread.state === "failed") unavailable = `settled (${thread.state})`;
-						else if (thread.state === "queued" || thread.state === "resuming") {
-							const phase = thread.control.getPhase();
-							unavailable = phase === "starting" || phase === "retrying" ? phase : thread.state;
-						} else if (thread.state !== "running") unavailable = thread.state;
+						const continued = await continueSteer(objective);
+						if (continued) return continued;
+						const unavailable = inactiveReason();
 						if (unavailable) {
-							return {
-								content: [{ type: "text", text: `Run #${thread.id} is ${unavailable}; only an active running RPC attempt can be steered. No guidance was sent.` }],
-								details: {},
-							};
+							return textResult(`Run #${thread.id} is ${unavailable}; only an active running RPC attempt can be steered. No guidance was sent.`);
 						}
 						const steered = await thread.control.steer(objective);
 						if (!steered.accepted) {
+							const resumed = await continueSteer(objective);
+							if (resumed) return resumed;
 							if (steered.reason === "no-active-attempt") {
-								return { content: [{ type: "text", text: `Run #${thread.id} is marked running but has no active RPC attempt; no guidance was sent.` }], details: {} };
+								return textResult(`Run #${thread.id} is marked running but has no active RPC attempt; no guidance was sent.`);
 							}
-							return {
-								content: [{ type: "text", text: `Run #${thread.id} is ${steered.phase}; only an active running RPC attempt can be steered. No guidance was sent.` }],
-								details: {},
-							};
+							return textResult(`Run #${thread.id} is ${steered.phase}; only an active running RPC attempt can be steered. No guidance was sent.`);
 						}
-						return {
-							content: [{ type: "text", text: `Steered run #${thread.id} with additional in-scope guidance; its original objective is unchanged.` }],
-							details: {},
-						};
+						return textResult(`Steered run #${thread.id} with additional in-scope guidance; its original objective is unchanged.`);
 					}
 					case "resume": {
+						return resumeThread(params.objective);
+					}
+					case "park": {
 						if (thread.retired) {
-							return { content: [{ type: "text", text: `Run #${thread.id} was retired by subagent_stop and has no resumable session.` }], details: {} };
+							return textResult(`Run #${thread.id} was retired by subagent_stop and cannot be parked.`);
 						}
-						if (!(["parked", "completed", "failed"] as const).includes(thread.state as any)) {
-							return { content: [{ type: "text", text: `Run #${thread.id} is ${thread.state}; it must be parked or settled before resume.` }], details: {} };
+						const unavailable = inactiveReason();
+						if (unavailable) {
+							return textResult(`Run #${thread.id} is ${unavailable}; only an active running RPC attempt can be parked. Use subagent_stop to discard a run that has not started.`);
 						}
-						const objective = params.objective === undefined ? undefined : nonBlank(params.objective);
-						if (params.objective !== undefined && !objective) {
-							return { content: [{ type: "text", text: "resume objective must be non-blank when provided." }], details: {} };
+						if (!thread.sessionId || !thread.sessionDir) {
+							return textResult(`Run #${thread.id} has no retained session yet; steer it or let it settle instead.`);
 						}
-						const hadRetainedSession = Boolean(thread.sessionId && thread.sessionDir);
-						const pending = await thread.resume(objective, ctx);
-						if (pending.exitCode !== -1) {
-							return { content: [{ type: "text", text: getResultOutput(pending) }], details: {} };
+						// Park interrupts the child at its next safe point but keeps the
+						// session and worktree, so the thread returns to `parked`, not to a
+						// failure. Claim synchronously like stop; the generation body sees
+						// the claim and leaves publication to this path.
+						const parkVersion = ++thread.lifecycleVersion;
+						thread.lifecycleOperation = "park";
+						const generation = thread.generation;
+						const controller = thread.queueController;
+						const completion = thread.generationCompletion;
+						const ownsPark = (): boolean =>
+							runtime.threads.get(thread.id) === thread &&
+							thread.generation === generation &&
+							thread.lifecycleVersion === parkVersion &&
+							thread.lifecycleOperation === "park" &&
+							!thread.retired;
+						try {
+							await quiesced(thread.control.stop("Parked by subagent_control at a stable checkpoint.").catch(() => undefined));
+							if (!(await quiesced(completion))) runtime.backgroundQueue.cancel(controller);
+							if (!ownsPark()) {
+								return textResult(`Run #${thread.id} changed while it was being parked; no checkpoint was recorded by this call.`);
+							}
+							if (runtime.runControllers.get(thread.id) === controller) runtime.runControllers.delete(thread.id);
+							if (thread.queueController === controller) thread.queueController = undefined;
+							thread.state = "parked";
+							monitor.setStatus(thread.id, "parked");
+							thread.elapsedMs = monitor.getElapsedMs(thread.id) ?? thread.elapsedMs;
+							persistThreadCheckpoint(runtime, thread, "parked");
+							const run = monitor.findRun(thread.id);
+							const usage = run ? formatUsageCompact(run.usage) : "";
+							if (runtime.sessionActive) {
+								ctx.ui.notify(`■ #${thread.id} ${run ? monitor.summarize(run) : thread.agentName} · parked`, "info");
+							}
+							const retained = thread.isolation === "worktree" ? "session and worktree" : "session";
+							return textResult(
+								`Parked run #${thread.id} (${thread.agentName}) at a stable checkpoint${usage ? ` after ${usage}` : ""}. Its retained ${retained} continue on subagent_control resume (optionally with an appended objective) or on steer; subagent_stop discards them.`,
+							);
+						} finally {
+							if (thread.lifecycleVersion === parkVersion && thread.lifecycleOperation === "park") {
+								thread.lifecycleOperation = undefined;
+							}
 						}
-						const currentObjective = formatTaskSummary(objective ?? thread.task, 80, false);
-						const mode = objective
-							? `appended objective: ${currentObjective}`
-							: `continuing current objective: ${currentObjective}`;
-						const context = hadRetainedSession ? "retained context reused" : "no prior child context";
-						return { content: [{ type: "text", text: `Resumed run #${thread.id}: ${mode}; ${context}.` }], details: {} };
 					}
 				}
 			} catch (error) {

@@ -60,11 +60,14 @@ const WaitSchema = Type.Optional(
 	}),
 );
 
+const TASK_BRIEF_DESCRIPTION =
+	"Complete brief for one substantial self-contained phase; the child has no memory of this conversation. State the objective and done condition, exact paths/symbols, facts already established (with citations) so it starts there, boundaries, and the expected output shape.";
+
 const TaskItem = Type.Object({
 	agent: Type.String({ description: "Name of the agent to invoke" }),
 	task: Type.String({
 		...NON_BLANK_TASK_OPTIONS,
-		description: "Substantial self-contained phase worth a fresh paid context (the agent has no memory of this conversation)",
+		description: TASK_BRIEF_DESCRIPTION,
 	}),
 	cwd: Type.Optional(Type.String({ description: "Working directory for the agent process" })),
 	isolation: IsolationSchema,
@@ -73,7 +76,7 @@ const TaskItem = Type.Object({
 const SubagentParams = Type.Object({
 	agent: Type.Optional(Type.String({ description: "Name of the agent to invoke (single mode)" })),
 	task: Type.Optional(
-		Type.String({ ...NON_BLANK_TASK_OPTIONS, description: "Substantial self-contained phase worth a fresh paid context (single mode)" }),
+		Type.String({ ...NON_BLANK_TASK_OPTIONS, description: `${TASK_BRIEF_DESCRIPTION} (single mode)` }),
 	),
 	tasks: Type.Optional(Type.Array(TaskItem, { description: "Independently justified, disjoint phases for parallel execution" })),
 	cwd: Type.Optional(Type.String({ description: "Working directory for the agent process (single mode)" })),
@@ -375,7 +378,7 @@ export function registerSubagentTool(pi: ExtensionAPI, runtime: SubagentRuntime)
 	pi.registerTool({
 		name: "subagent",
 		label: "Subagent",
-		description: "Start paid leaf runs for broad reconnaissance or substantial self-contained work. Each active normalized task+cwd owns its phase; exact duplicates are rejected. Batch scopes must be independent. wait:true returns results in-turn; otherwise completions wake main. Parallel writers default to detached Git worktrees; isolation:'shared' serializes same-repository writes.",
+		description: "Start paid leaf runs for broad reconnaissance or substantial self-contained work. Each normalized task+cwd owns its phase: an exact duplicate of an active run is rejected, and one of a finished run with retained context is rejected in favor of subagent_control resume. Batch scopes must be independent. wait:true returns results in-turn; otherwise completions wake main. Parallel writers default to detached Git worktrees; isolation:'shared' serializes same-repository writes.",
 		parameters: SubagentParams,
 
 		async execute(_toolCallId, params, signal, onUpdate, ctx) {

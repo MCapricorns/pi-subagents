@@ -206,6 +206,11 @@ export class RpcRunControl {
 			this.stopMessage = reason;
 			const attempt = this.attempt?.control;
 			if (attempt) await attempt.stop(reason);
+			// The attempt resolves only after its process tree closed, so these pids
+			// now name nothing of ours. A parked record can outlive this process by
+			// days; persisting dead pids would let a later restore kill whatever
+			// process the OS reassigned them to.
+			this.childPids.clear();
 			this.setPhase("stopped");
 		});
 	}

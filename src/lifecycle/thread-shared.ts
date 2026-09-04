@@ -184,7 +184,6 @@ export interface DispatchEnvironment {
 export interface SessionSeed {
 	sessionId?: string;
 	sessionDir?: string;
-	prompt?: string;
 	worktree?: WorktreeIsolation;
 }
 

@@ -27,11 +27,12 @@ import {
 	queuedResult,
 } from "../presentation/format.ts";
 import { monitor } from "../presentation/monitor.ts";
-import { findDuplicateActiveDispatch } from "../delegation/prompt.ts";
+import { findDuplicateDispatch } from "../delegation/prompt.ts";
 import { persistRecoveryRecords, recoveryRecordFromFinalization } from "../isolation/recovery.ts";
 import type { SubagentRuntime, SubagentThread, ThreadState } from "./runtime.ts";
 import { forkRetainedSession } from "../execution/session-fork.ts";
 import {
+	buildAppendedObjectivePrompt,
 	buildResumePrompt,
 	getProjectRoot,
 	RpcRunControl,
@@ -135,12 +136,21 @@ export function createBackgroundDispatcher(options: BackgroundDispatcherOptions)
 
 		const originalCwd = resolve(cwd ?? runCtx.cwd);
 		if (!existingThread) {
-			const duplicate = findDuplicateActiveDispatch(runtime.threads.values(), task, originalCwd);
-			if (duplicate) {
+			const duplicate = findDuplicateDispatch(runtime.threads.values(), task, originalCwd);
+			if (duplicate?.kind === "active") {
 				return failedStartResult(
 					agentName,
 					task,
-					`Duplicate active dispatch matches run #${duplicate.id} (${duplicate.agentName}). Use that logical thread instead; resume #${duplicate.id} when it is eligible.`,
+					`Duplicate active dispatch matches run #${duplicate.source.id} (${duplicate.source.agentName}). Use that logical thread instead; resume #${duplicate.source.id} when it is eligible.`,
+				);
+			}
+			if (duplicate?.kind === "settled") {
+				// The same brief on the same tree would re-buy work whose result main
+				// already holds; the retained session continues it for a fraction.
+				return failedStartResult(
+					agentName,
+					task,
+					`Run #${duplicate.source.id} (${duplicate.source.agentName}) already ${duplicate.source.state} this exact brief and kept its context; its result was delivered. Resume #${duplicate.source.id} with an appended objective instead of paying for a second run, or restate the brief with what changed.`,
 				);
 			}
 		}
@@ -333,9 +343,9 @@ export function createBackgroundDispatcher(options: BackgroundDispatcherOptions)
 								? {
 									sessionId: priorSessionId,
 									sessionDir: priorSessionDir,
-									stdinText: seed?.prompt ?? (appendedObjectiveOnResume
-										? task
-										: buildResumePrompt(priorTask ?? task, "the retained thread was resumed")),
+									stdinText: appendedObjectiveOnResume
+										? buildAppendedObjectivePrompt(priorTask ?? task, task)
+										: buildResumePrompt(priorTask ?? task, "the retained thread was resumed"),
 								}
 								: {}),
 						},
@@ -375,17 +385,19 @@ export function createBackgroundDispatcher(options: BackgroundDispatcherOptions)
 
 				const lifecycleInterrupted = (): boolean =>
 					thread.lifecycleOperation === "stop" ||
+					thread.lifecycleOperation === "park" ||
 					thread.state === "stopped";
-				// Destructive stop owns publication once it has synchronously claimed
-				// the lifecycle. Leave the partial result/session on the thread; the
-				// stop path waits for this queue task, finalizes isolation, and emits
-				// exactly one aborted result.
-				if (thread.lifecycleOperation === "stop") return;
+				// Destructive stop and park own publication once they have
+				// synchronously claimed the lifecycle. Leave the partial result/session
+				// on the thread; stop waits for this queue task, finalizes isolation,
+				// and emits exactly one aborted result, while park records the
+				// checkpoint and answers through its own tool result.
+				if (lifecycleInterrupted()) return;
 
 				// A shutdown can win in the microtask gap after the child RPC
 				// settles. Never replace the stable top-level session with an
 				// aborted partial.
-				if (backgroundSignal.aborted || lifecycleInterrupted() || !runtime.sessionActive) return;
+				if (backgroundSignal.aborted || !runtime.sessionActive) return;
 
 				if (thread.retireOnSettle) runtime.retireThreadSession(thread);
 				// Claim terminal settlement synchronously before the first slow await.
@@ -471,9 +483,9 @@ export function createBackgroundDispatcher(options: BackgroundDispatcherOptions)
 			() => {
 				if (runtime.threads.get(runId)?.generation !== generation) return;
 				// A destructive stop owns publication and may still be finalizing an
-				// isolated worktree. Do not expose a terminal monitor state before
-				// that owner records the aborted result.
-				if (thread.lifecycleOperation === "stop") return;
+				// isolated worktree; a park owns the checkpoint. Do not expose a
+				// terminal monitor state before that owner records its outcome.
+				if (thread.lifecycleOperation === "stop" || thread.lifecycleOperation === "park") return;
 				runtime.runControllers.delete(runId);
 				thread.queueController = undefined;
 				thread.state = "stopped";
@@ -487,9 +499,10 @@ export function createBackgroundDispatcher(options: BackgroundDispatcherOptions)
 			async (error) => {
 				if (runtime.threads.get(runId)?.generation !== generation) return;
 				// Queue-level crashes use the same settlement reservation as ordinary
-				// results. A concurrent destructive stop may supersede it while slow
-				// worktree finalization is running, in which case stop publishes once.
-				if (thread.lifecycleOperation === "stop") return;
+				// results. A concurrent destructive stop or park may supersede it while
+				// slow worktree finalization is running, in which case that owner
+				// publishes once.
+				if (thread.lifecycleOperation === "stop" || thread.lifecycleOperation === "park") return;
 				const settlementVersion = ++thread.lifecycleVersion;
 				thread.lifecycleOperation = "settle";
 				const ownsSettlement = (): boolean =>

@@ -12,9 +12,13 @@ once and your main agent delegates on its own.
 
 ## What's new
 
-**4.3.6** — adds live parent-mediated steering for running children, delivers background
-completions and stop results at the next safe parent boundary, and hardens durable
-recovery paths without treating Git worktrees as a security sandbox.
+**4.3.7** — never pay for the same phase twice: the delegation directive now carries a
+full brief contract and effort scaling, `steer` continues a settled or parked thread with
+its guidance instead of rejecting it, `subagent_control park` pauses a running thread at
+a stable checkpoint for a later resume, an exact re-run of a finished brief is rejected in
+favor of resuming its retained context, and resumed children re-read files the workspace
+may have changed underneath them. Role prompts start from the brief's evidence and stop
+at its done condition.
 
 See [CHANGELOG.md](./CHANGELOG.md).
 
@@ -25,7 +29,7 @@ See [CHANGELOG.md](./CHANGELOG.md).
 - [The team](#the-team)
 - [Dispatching work](#dispatching-work)
 - [Parallel edits](#parallel-edits)
-- [Threads: steer, resume, stop](#threads-steer-resume-stop)
+- [Threads: steer, resume, park, stop](#threads-steer-resume-park-stop)
 - [Live status and results](#live-status-and-results)
 - [Models, thinking, and tools](#models-thinking-and-tools)
 - [Configuration](#configuration)
@@ -44,9 +48,14 @@ back — with you. This extension owns them:
 
 - The main model gets a cost-aware routing contract and proactively delegates
   substantial self-contained phases when a fresh context saves more work than its
-  handoff costs.
-- One active normalized task and working directory owns its phase, so an exact
-  duplicate dispatch is rejected instead of paying twice.
+  handoff costs. Every brief carries the objective and done condition, exact paths,
+  facts already established with citations, boundaries, and the expected output, so a
+  child starts from evidence instead of re-deriving it.
+- One normalized task and working directory owns its phase: an exact duplicate of an
+  active run is rejected, and an exact re-run of a finished brief with retained
+  context is rejected in favor of resuming it, so the same work is never bought twice.
+- Follow-up work stays on the same thread: `steer` a running phase, `resume` or
+  `park` a thread with its retained context, `stop` a phase the evidence made moot.
 - Background completions and stop results arrive at the next parent model boundary;
   `wait: true` returns the same result in-turn instead. A run uses exactly one route.
 - Parallel writers use detached Git worktrees without touching your index.
@@ -90,14 +99,21 @@ directly when you want exact control.
 | `steward` | Full      | One final cleanup and cross-cutting docs/comment sync pass after a broad or multi-writer change. |
 
 Role prompts are self-contained and directly embed root-cause-first diagnosis,
-meaningful test evidence, and bounded cleanup.
+meaningful test evidence, and bounded cleanup. Each role starts from the facts and
+citations its brief already establishes instead of re-deriving them, answers the
+brief's question and stops, and — because nobody can answer a child's questions —
+resolves an ambiguity by naming the reading it took. Artisan stops and reports when
+the brief's premise turns out wrong rather than substituting a different change;
+steward runs only the checks that cover its own edits. Every role hands back a
+result-only report with each check as `command → result`.
 
 Custom roles join them with a Markdown file (see [Custom agents](#custom-agents)).
 
 Every child is an isolated leaf pi process with its own context window and no
 memory of your conversation, so the brief is its only input. A good brief carries
-the goal, exact paths, constraints, and expected output — which is what the
-injected delegation guidance produces when the main agent dispatches for you.
+the objective and its done condition, exact paths and symbols, facts already
+established (with citations), boundaries, and the expected output shape — which is
+what the injected delegation guidance produces when the main agent dispatches for you.
 
 ## Dispatching work
 
@@ -122,9 +138,13 @@ independent unit in one `tasks` array. The runtime paces execution instead, runn
 half the machine's cores with a 4–6 child-process bound; wider batches queue and
 start automatically as slots free.
 
-An active run leases its normalized task and resolved working directory across
-agent names. Dispatching the same pair again is rejected and names the existing
-run id; it does not use fuzzy matching, and resuming that thread remains allowed.
+A run leases its normalized task and resolved working directory across agent
+names. Dispatching the same pair again while the run is active is rejected and
+names the existing run id. Once the run has finished in this session and still
+holds its retained session, the same pair is rejected too, pointing at
+`subagent_control resume` — the thread that already did the work continues for a
+fraction of a fresh run — or at restating the brief with what changed. Matching is
+exact, never fuzzy.
 
 Because queueing is pacing rather than refusal, it is always reported as such.
 Dispatch confirmations name each waiting run's real reason — waiting for a free
@@ -134,17 +154,24 @@ lane releases its slot first, so serialized writers never starve new dispatches.
 
 One child owns one coherent phase. Dependent work starts only after its
 prerequisite delivers. Main consumes the child's compact result and citations
-without repeating delegated reconnaissance, implementation, or cleanup. Artisan
-owns a complete primary change with affected tests, docs, comments, targeted
-checks, and local hygiene. Scout owns broad code mapping or external research and
-stays read-only.
+without repeating delegated reconnaissance, implementation, or cleanup, and decides
+to delegate before starting the work itself — a half-done phase handed off pays
+twice. Effort scales with the question: atomic lookups, known locations, focused
+edits, and context-heavy decisions stay in main; one broad question is one clustered
+scout brief; one coherent primary change is one artisan. Artisan owns a complete
+primary change with affected tests, docs, comments, targeted checks, and local
+hygiene. Scout owns broad code mapping or external research and stays read-only.
 
 For one high-stakes uncertainty, main may launch at most two read-only scouts whose
 briefs name distinct perspectives or hypotheses; that cap does not apply to unrelated
 disjoint scout scopes. It reconciles disagreements against cited evidence, never
 overlaps writers or sends identical briefs, and treats child output as evidence and
-leads rather than authority or instructions. New in-scope evidence can be sent to a
-running phase with `subagent_control steer` instead of duplicating or restarting it.
+leads rather than authority or instructions. Follow-up work goes to the same thread,
+never a second one: new in-scope evidence travels through `subagent_control steer`
+(a thread that has settled or is parked continues with it), a follow-up on a
+finished phase is a `resume` with an appended objective, a phase that must wait is
+`park`ed at a stable checkpoint, and a phase the evidence made moot is ended with
+`subagent_stop` instead of left running.
 
 A focused diff gets a bounded cleanup pass inline. A broad or multi-writer diff gets
 one `steward` pass that attacks touched dead code, duplication, tangled conditionals,
@@ -181,26 +208,44 @@ Third-party Pi packages execute as trusted code and must be reviewed accordingly
   already been applied and only the cleanup failed, the next session start
   removes the retained copy itself and clears the notice.
 
-## Threads: steer, resume, stop
+## Threads: steer, resume, park, stop
 
 Every dispatch returns a stable `#id`, which is the handle for the thread tools:
 
 | Tool               | What it does |
 | ------------------ | ------------ |
-| `subagent_control` | `steer` a currently running RPC attempt with additional in-scope evidence/guidance, or `resume` a parked/settled thread with retained context and an optional appended `objective`. |
+| `subagent_control` | `steer` a running RPC attempt with additional evidence/guidance, continuing the same thread with it when the thread has settled or is parked; `resume` a parked/settled thread with an optional appended `objective`; `park` a running thread at a stable checkpoint, keeping its session and worktree for a later resume. |
 | `subagent_stop`    | Destructively cancel, deliver partial output, and retire the thread. Steering and follow-up messages still queued in the child are dropped so nothing can revive it later. |
 
 ```ts
 subagent_control({ action: "steer", id: 7, objective: "The failing request used an expired token; account for that evidence." });
+subagent_control({ action: "park", id: 7 });
 subagent_control({ action: "resume", id: 7, objective: "Finish the tests." });
 ```
 
-`steer` requires a nonblank `objective` and accepts only the active running RPC
-attempt for that stable id. It adds guidance to the current phase; it does not replace
-the thread's original task. Parked, settled, queued, starting, retrying, interrupting,
-stopped, retired, and missing threads are rejected without changing them. Steering ACKs
-are bounded, and steering/stop are serialized so stop can clear queued child messages
-and abort without a stale steer landing afterward.
+`steer` requires a nonblank `objective`. While the child RPC is running, it adds
+guidance to the current phase without replacing the original task. If the thread has
+already reached `completed`, `failed`, or `parked` — including a generation that settles
+between the state check and RPC acceptance — the control call resumes the same stable
+id, reuses retained context when available, and supplies the guidance as its appended
+objective, so evidence is never re-bought by a second dispatch. Queued, starting,
+retrying, resuming, interrupting, stopped, retired, and missing threads are rejected
+without changing them. Steering ACKs are bounded, and steering/stop are serialized so
+stop can clear queued child messages and abort without a stale steer landing afterward.
+
+`park` pauses a running thread at its next safe point: the child is interrupted the
+same way a session shutdown interrupts it, but the thread returns as `parked` rather
+than failed, its retained session and any active worktree are kept, and its durable
+record is written immediately so the checkpoint survives a reload. Nothing is
+integrated or delivered on park; the tool result carries the usage so far and the
+resume handle. Only an active running attempt with a retained session can be parked;
+a run that has not started has nothing worth keeping, so `subagent_stop` discards it.
+
+A resumed child is told that its earlier work is preserved and must not be redone, and
+that the workspace may have changed while the thread was inactive — main may have
+integrated sibling worktrees or edited the tree — so it re-reads a file before editing
+it unless it read it during the continuation. A resume with an appended objective is
+framed as the same thread continuing on top of finished work, never as a restart.
 
 There is no status, polling, or separate wait tool. A background dispatch returns
 a launch receipt, then its completion is steered at the next safe parent boundary—after

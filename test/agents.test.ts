@@ -41,6 +41,11 @@ describe("loadBuiltinAgents", () => {
 		assert.ok(scout.systemPrompt.includes("broad reconnaissance phase"));
 		assert.ok(scout.systemPrompt.includes("Atomic lookups and known locations stay with main"));
 		assert.ok(scout.systemPrompt.includes("Cluster related questions"));
+		assert.ok(scout.systemPrompt.includes("Start from what the brief already establishes"));
+		assert.ok(scout.systemPrompt.includes("Answer the brief's question, then stop"));
+		assert.ok(scout.systemPrompt.includes("nobody answers questions"));
+		assert.match(scout.systemPrompt, /draft code or patches/u);
+		assert.match(scout.systemPrompt, /\(inferred\)/u);
 		assert.ok(!isWriteCapableAgent(scout));
 	});
 
@@ -56,6 +61,11 @@ describe("loadBuiltinAgents", () => {
 		assert.ok(artisan.systemPrompt.includes("local diff hygiene"));
 		assert.ok(artisan.systemPrompt.includes("cross-cutting pre-commit cleanup"));
 		assert.ok(artisan.systemPrompt.includes("do not dispatch agents"));
+		assert.ok(artisan.systemPrompt.includes("Start from the brief's cited lines and stated facts"));
+		assert.match(artisan.systemPrompt, /premise is wrong.*stop and report the conflict with evidence/u);
+		assert.ok(artisan.systemPrompt.includes("nobody answers questions"));
+		assert.match(artisan.systemPrompt, /each check as `command → result`/u);
+		assert.match(artisan.systemPrompt, /disproved assumptions, or out-of-scope follow-ups/u);
 	});
 
 	it("keeps steward on final hygiene and cross-cutting docs", () => {
@@ -69,6 +79,9 @@ describe("loadBuiltinAgents", () => {
 		assert.ok(steward.systemPrompt.includes("dead or unreachable code"));
 		assert.ok(steward.systemPrompt.includes("tangled conditionals"));
 		assert.ok(!steward.systemPrompt.includes("Merging inputs"));
+		assert.ok(steward.systemPrompt.includes("nobody answers questions"));
+		assert.match(steward.systemPrompt, /narrowest checks that cover your own edits/u);
+		assert.match(steward.systemPrompt, /primary change's verification is not yours to repeat/u);
 	});
 
 	it("keeps shell guidance portable", () => {

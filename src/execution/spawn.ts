@@ -344,8 +344,21 @@ export function getResultOutput(result: SingleResult): string {
 	return getFinalOutput(result.messages) || "(no output)";
 }
 
+/** Continuation rules shared by every resume flavor. The workspace clause is
+ * what keeps a retained context from becoming a liability: a parked or settled
+ * thread may return after main integrated sibling worktrees or edited the tree
+ * itself, so a file read in an earlier generation is not proof of its content. */
+const RESUME_CONTINUATION_RULES =
+	"Your earlier work — searches, reads, edits, and reasoning — is preserved in this session's history above; review it before acting. Do not redo searches, reads, or edits that already succeeded. The workspace may have changed while this thread was inactive: before editing a file, re-read it unless you read it during this continuation. Finish with the result-only handoff your role requires.";
+
 export function buildResumePrompt(task: string, reason: string): string {
-	return `You are resuming an earlier sub-agent session after ${reason}. Your earlier work — searches, reads, edits, and reasoning — is preserved in this session's history above; review it before acting. Current objective: ${task}. Pick up exactly where you left off and finish it. Do NOT redo searches, reads, or edits you already completed unless a step clearly failed. Continue now.`;
+	return `You are resuming an earlier sub-agent session after ${reason}. ${RESUME_CONTINUATION_RULES} Current objective: ${task}. Pick up exactly where you left off and finish it. Continue now.`;
+}
+
+/** A resume with an appended objective continues the same thread: the new
+ * objective is guidance layered on retained context, not a restart. */
+export function buildAppendedObjectivePrompt(previousTask: string, objective: string): string {
+	return `You are continuing an earlier sub-agent session with an appended objective from the parent. ${RESUME_CONTINUATION_RULES} Previous objective: ${previousTask}. Appended objective: ${objective}. Complete the appended objective on top of the work already done, without restarting from scratch. Continue now.`;
 }
 
 /** Create a fresh private session directory under the given root. The owner
@@ -440,12 +453,7 @@ export async function runSingleAgent(options: RunSingleOptions): Promise<SingleR
 	const disposition = controlledDisposition(options);
 	if (disposition) return disposition;
 	const objective = control?.getObjective() ?? options.task;
-	let prompt = options.stdinText ?? `Task: ${objective}`;
-	if (control && objective !== options.task) {
-		prompt = options.sessionDir && sessionExists(options.sessionDir, options.sessionId ?? "")
-			? `Abandon the previous objective. New objective: ${objective}`
-			: `Task: ${objective}`;
-	}
+	const prompt = options.stdinText ?? `Task: ${objective}`;
 	const result = await runRpcAgentAttempt({
 		defaultCwd: options.defaultCwd,
 		agent,

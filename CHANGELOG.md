@@ -4,6 +4,39 @@ Published versions of `@ferris1225/pi-subagents`. Unpublished numbers
 (`4.2.3`, `4.2.6`, `4.2.9`–`4.2.11`) never shipped on npm; their changes
 landed in the next published release.
 
+## 4.3.7
+
+- Make `subagent_control steer` continue rather than reject a thread that is no longer
+  live: a child that reached `completed` or `failed` before guidance lands (including
+  settlement between the state check and RPC acceptance) and a `parked` thread both
+  resume the same stable id with the guidance as their appended objective and retained
+  context when available.
+- Add `subagent_control park`: pause a running thread at a stable checkpoint, keep its
+  session and active worktree, write its durable record immediately, and return the
+  usage so far with the resume handle. Only an active running attempt with a retained
+  session can be parked; the generation body leaves publication to the park owner.
+- Reject an exact re-run of a finished brief while the thread that did the work still
+  holds its retained session, pointing at `resume` with an appended objective or at a
+  brief that states what changed. Active duplicates are still named first.
+- Rewrite the injected delegation directive around the brief contract a memoryless child
+  needs (objective and done condition, exact paths, established facts with citations,
+  boundaries, expected output), effort scaling, the steer/resume/park/stop routing for
+  follow-up work, and reading a truncated result's artifact only when the excerpt is
+  insufficient. The `subagent` task parameter states the same contract.
+- Deepen the built-in roles: scout, artisan, and steward start from the brief's cited
+  facts and stop at its done condition, resolve ambiguity by naming the reading taken
+  instead of asking, scout never drafts fixes or patches and marks unverified
+  conclusions `(inferred)`, artisan stops and reports a wrong premise instead of
+  substituting a change, steward runs only the checks that cover its own edits, and
+  every role reports each check as `command → result`.
+- Tell a resumed child that the workspace may have changed while the thread was inactive
+  so it re-reads a file before editing it, and frame an appended-objective resume as a
+  continuation of the same thread rather than sending the bare objective.
+- Clear a stopped generation's recorded child pids once its process tree has closed, so a
+  long-lived parked record can never direct a later restore at a reassigned pid. Remove
+  an unreachable objective-replacement prompt branch and the never-populated
+  `SessionSeed.prompt`.
+
 ## 4.3.6
 
 - Add `subagent_control steer` for nonblank, parent-mediated guidance to the current active
