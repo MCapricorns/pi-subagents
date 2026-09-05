@@ -17,7 +17,7 @@ import {
 } from "../configuration/models.ts";
 import type { SubagentRuntime, SubagentThread } from "./runtime.ts";
 import { getProjectRoot, type SingleResult } from "../execution/spawn.ts";
-import { resolveRepositoryRoot, type IsolationMode, type WorktreeIsolation } from "../isolation/worktree.ts";
+import { resolveRepositoryRoot, type IsolationMode } from "../isolation/worktree.ts";
 
 /** Control operations must never wait forever on a settling generation: the
  * queue task can legitimately spend minutes in worktree finalization (bounded
@@ -114,42 +114,8 @@ export async function runInManagedRepositoryLane<T>(
 	}
 }
 
-/** Track resume setup that has claimed a thread but has not yet enqueued
- * its next generation. Shutdown invalidates these claims and waits for cleanup. */
-export function beginRuntimePreflight(runtime: SubagentRuntime): () => void {
-	let resolvePreflight!: () => void;
-	const preflight = new Promise<void>((resolve) => {
-		resolvePreflight = resolve;
-	});
-	runtime.preflightOperations.add(preflight);
-	return () => {
-		runtime.preflightOperations.delete(preflight);
-		resolvePreflight();
-	};
-}
-
-/** Synchronous CAS used by lifecycle controls across their async preflight. */
-export function ownsResumeReservation(
-	runtime: SubagentRuntime,
-	thread: SubagentThread,
-	reservation: { version: number; generation: number; sessionId?: string; sessionDir?: string },
-): boolean {
-	return (
-		runtime.sessionActive &&
-		runtime.threads.get(thread.id) === thread &&
-		!thread.retired &&
-		thread.lifecycleOperation === "resume" &&
-		thread.lifecycleVersion === reservation.version &&
-		thread.generation === reservation.generation &&
-		thread.sessionId === reservation.sessionId &&
-		thread.sessionDir === reservation.sessionDir
-	);
-}
-
-/** Fire-and-forget durable checkpoint. Parked threads stay resumable across
- * reloads; a settled thread drops its record so the manifest only exists
- * while unfinished work needs it. The live session keeps working when the
- * manifest is unwritable; only cross-reload resume is degraded. */
+/** Best-effort recovery checkpoint. Interrupted work retains its artifacts;
+ * settled work drops the thread record. A failed write never stops the live run. */
 export function persistThreadCheckpoint(
 	runtime: SubagentRuntime,
 	thread: SubagentThread,
@@ -183,33 +149,12 @@ export interface DispatchEnvironment {
 	agents: AgentConfig[];
 }
 
-export interface SessionSeed {
-	sessionId?: string;
-	sessionDir?: string;
-	worktree?: WorktreeIsolation;
-}
-
-export interface ResumeReservation {
-	version: number;
-	generation: number;
-	sessionId?: string;
-	sessionDir?: string;
-}
-
-/** Dispatcher's internal entry point. Public phase/scope claims are normalized
- * into options; resume adds lifecycle-only continuation fields there too. */
+/** Admission metadata for a fresh one-shot run. */
 export interface StartBackgroundOptions {
-	/** Normalized identity and claims for a fresh or resumed generation. */
 	phaseId?: string;
 	scope?: PhaseScope;
-	/** Fresh-dispatch hint OR-merged with live capability; false cannot downgrade a writer. Resume stays monotonic. */
+	/** A false hint cannot downgrade a live write-capable role. */
 	writeCapable?: boolean;
-	/** Resume path only: the thread whose retained context continues. */
-	existingThread?: SubagentThread;
-	appendedObjectiveOnResume?: boolean;
-	environment?: DispatchEnvironment;
-	seed?: SessionSeed;
-	resumeReservation?: ResumeReservation;
 	/** Chosen by the tool call before the queue can start a fast child. */
 	deliveryRoute?: "background" | "await";
 }
@@ -224,12 +169,7 @@ export type StartBackgroundInternal = (
 
 export interface ThreadLifecycleDeps {
 	runtime: SubagentRuntime;
-	/** Fallback context when a control caller supplies none; restored threads
-	 * install without one and rely on the per-call context. */
 	runCtx?: ExtensionContext;
-	/** Fresh dispatch passes the live dispatcher; restored threads resolve it
-	 * from the runtime at call time so they never pin a stale closure. */
-	startBackground: StartBackgroundInternal;
 }
 
 interface DispatchModelRoute {

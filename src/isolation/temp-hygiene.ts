@@ -5,17 +5,15 @@
  * Two classes live there and both are swept the same way. Transient per-run
  * files (child prompt copies, the no-retry policy extension) sit in `tmp/`;
  * retained child sessions and isolated worktrees sit in `sessions/` and
- * `worktrees/`, where they must outlive the process that made them so a reload
- * can resume from them. Every mkdtemp directory gets an owner marker with the
+ * `worktrees/`, where they must outlive the process that made them for manual
+ * recovery after reload. Every mkdtemp directory gets an owner marker with the
  * creating pid. At extension load, directories whose owner is dead are removed;
  * unmarked leftovers fall back to an age cap.
  *
- * Ownership is what makes this safe for the durable class. A retained session
- * that no manifest record claims — a settled thread still resumable in the
- * session that produced it — belongs to a live owner and survives; the same
- * directory left behind by a crash does not. Callers sweeping durable roots
- * additionally pass the paths their thread and recovery manifests still reference,
- * so parked and retained work is never removed even if its owner is long gone.
+ * Ownership keeps a live parent's retained sessions and worktrees intact even
+ * when no manifest record claims them. Callers sweeping durable roots additionally
+ * pass the paths their thread and recovery manifests still reference, so interrupted
+ * and retained work survives even when its owner is gone.
  *
  * A live sibling pi instance never loses its directories: `kill(pid, 0)` only
  * reports "no such process" when the pid genuinely does not exist, so a live
@@ -36,7 +34,7 @@ export const TEMP_OWNER_FILE_NAME = "owner.json";
 const TEMP_DIR_PREFIXES = ["pi-subagents-"] as const;
 
 /** Durable directories created under `<project>/sessions` and
- * `<project>/worktrees`: retained child sessions (including resume forks) and
+ * `<project>/worktrees`: retained child sessions and
  * isolated worktree groups. */
 const DURABLE_DIR_PREFIXES = ["pi-subagent-session-", "pi-subagent-worktree-"] as const;
 

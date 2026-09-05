@@ -147,7 +147,7 @@ describe("completion delivery ownership", () => {
 });
 
 describe("durable worktree restoration", () => {
-	it("surfaces a missing recorded worktree as failed and non-resumable", async () => {
+	it("keeps a missing recorded worktree failure inspectable for recovery", async () => {
 		const root = await mkdtemp(join(tmpdir(), "pi-subagents-restore-"));
 		const configPath = join(root, "settings.json");
 		const cwd = await realpath(process.cwd());
@@ -195,9 +195,8 @@ describe("durable worktree restoration", () => {
 			assert.ok(thread);
 			assert.equal(thread.state, "failed");
 			assert.equal(monitor.findRun(41)?.status, "failed");
-			const resume = await thread.resume();
-			assert.notEqual(resume.exitCode, -1);
-			assert.match(resume.errorMessage ?? resume.stderr, /worktree.*could not be restored/i);
+			assert.match(thread.lastResult?.errorMessage ?? "", /worktree.*could not be restored/i);
+			assert.equal(runtime.settledRuns.get(41), thread.lastResult);
 			await runtime.shutdown();
 			const retained = (await readThreadRecords(configPath)).find((candidate) => candidate.runId === 41);
 			assert.equal(retained?.state, "parked");

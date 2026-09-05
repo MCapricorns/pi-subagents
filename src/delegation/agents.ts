@@ -52,7 +52,7 @@ const READ_ONLY_TOOL_NAMES = new Set([
 ]);
 export const SUBAGENT_TOOL_NAMES = [
 	"subagent",
-	"subagent_control",
+	"subagent_status",
 	"subagent_stop",
 	"subagent_risk",
 ] as const;

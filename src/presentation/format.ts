@@ -9,6 +9,7 @@ import { runLabel, shrinkRunLabel } from "./monitor.ts";
 import { emptyUsage } from "../execution/rpc-control.ts";
 import {
 	RESULT_LINE_MAX,
+	getResultError,
 	getResultOutput,
 	isFailedResult,
 	truncateResultOutput,
@@ -143,6 +144,7 @@ export function formatCompletionBlock(
 		const artifact = options.resultRoot
 			? writeResultArtifact(output, result.agent, options.resultRoot)
 			: "(result root unavailable)";
+		if (options.resultRoot) result.resultFile = artifact;
 		// State the real loss and condition the read: handing the parent both a
 		// summary and a full-text entrance invites the same content twice.
 		const lineLoss = shownLines < totalLines ? `${shownLines} of ${totalLines} lines shown` : `${shownLines} line${shownLines === 1 ? "" : "s"} shown`;
@@ -153,23 +155,11 @@ export function formatCompletionBlock(
 	return lines.join("\n");
 }
 
-/** Instruction appended to a model-level failure: the sub-agent's provider never
- * produced usable output (or the run stalled), so the task is handed back to the
- * main window instead of being left as a dead failure. When the run preserved a
- * session with earlier work (and the run id is known), steer the main agent to
- * RESUME it in-context once a model is available, instead of re-dispatching
- * fresh (which would re-scan everything). */
-export function modelLevelTakeoverNote(result: SingleResult, opts?: { runId?: number }): string {
+/** A terminal model failure hands the unfinished task to main, not another run. */
+export function modelLevelTakeoverNote(result: SingleResult): string {
 	const retry = result.modelFallbackFrom ? ", and the current main model also failed" : "";
-	const detail = result.errorMessage?.trim();
-	const cause = detail
-		? `its model/provider call failed (${detail})`
-		: "its model was unavailable or failed (or the run stalled)";
-	const sessionPreserved = Boolean(result.sessionDir && result.sessionId) && opts?.runId !== undefined;
-	const recovery = sessionPreserved
-		? ` The sub-agent's earlier work in this run is preserved. Once a model is available again, call subagent_control with { action: "resume", id: ${opts!.runId} } to CONTINUE it in-context (it keeps the same run id and does not re-scan), or execute the task in the main window with your own tools.`
-		: ` Please execute this task in the main window with your own tools; do not re-dispatch it as a sub-agent.`;
-	return `The sub-agent could not complete this task: ${cause}${retry}.${recovery}`;
+	const cause = getResultError(result) ?? "its model was unavailable or failed";
+	return `The sub-agent could not complete this task: ${cause}${retry}. Earlier edits and any retained result/session artifacts remain available. Main must inspect that work and finish with its own tools; do not re-dispatch this phase.`;
 }
 
 /** Resolve a run-id request to actual ids: an exact numeric match always wins

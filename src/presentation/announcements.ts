@@ -46,7 +46,7 @@ export function registerAnnouncements(pi: ExtensionAPI, runtime: SubagentRuntime
 			runtime.restoredNotified = true;
 			const ids = runtime.restoredRunIds.map((id) => `#${id}`).join(", ");
 			ctx.ui.notify(
-				`pi-subagents: restored ${runtime.restoredRunIds.length} interrupted thread${runtime.restoredRunIds.length === 1 ? "" : "s"} (${ids}) with retained context. subagent_control resume continues one.`,
+				`pi-subagents: restored ${runtime.restoredRunIds.length} interrupted run${runtime.restoredRunIds.length === 1 ? "" : "s"} (${ids}) for manual recovery. Inspect with subagent_status; main finishes the work.`,
 				"info",
 			);
 		}

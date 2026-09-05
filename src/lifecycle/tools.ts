@@ -1,13 +1,5 @@
-/**
- * Thread controls around the subagent runtime: subagent_control
- * (steer/resume/park) and destructive subagent_stop. There is no status/poll
- * tool — completions carry each result (with an on-disk artifact when
- * truncated) and wake the main model, so waiting is never a tool call; the only
- * in-turn block is `wait: true` on a dispatch, for one-shot parents that exit
- * at end of turn.
- */
+/** Read-only run inspection and destructive cancellation of one-shot runs. */
 
-import { StringEnum } from "@earendil-works/pi-ai";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { Text } from "@earendil-works/pi-tui";
 import { existsSync } from "node:fs";
@@ -16,11 +8,11 @@ import { DEFAULT_MAX_RESULT_LINES, loadConfig } from "../configuration/config.ts
 import { removeThreadRecord } from "./durable.ts";
 import { formatCompletionBlock, matchRunIds } from "../presentation/format.ts";
 import { emptyUsage } from "../execution/rpc-control.ts";
-import { formatTaskSummary, formatUsageCompact, monitor } from "../presentation/monitor.ts";
+import { formatDuration, formatTaskSummary, monitor } from "../presentation/monitor.ts";
 import { persistRecoveryRecords, recoveryRecordFromFinalization } from "../isolation/recovery.ts";
 import type { SubagentRuntime, SubagentThread } from "./runtime.ts";
-import { CONTROL_QUIESCE_TIMEOUT_MS, persistThreadCheckpoint, projectResultsRoot, quiesced } from "./thread-shared.ts";
-import { getResultOutput, type SingleResult } from "../execution/spawn.ts";
+import { CONTROL_QUIESCE_TIMEOUT_MS, projectResultsRoot, quiesced } from "./thread-shared.ts";
+import { getResultError, type SingleResult } from "../execution/spawn.ts";
 import type { WorktreeFinalization } from "../isolation/worktree.ts";
 
 function renderFirstLine(result: { content?: unknown }, label: string, theme: any): Text {
@@ -34,207 +26,79 @@ function renderFirstLine(result: { content?: unknown }, label: string, theme: an
 }
 
 export function registerLookupTools(pi: ExtensionAPI, runtime: SubagentRuntime): void {
-	const ResumeScopeSchema = Type.Optional(Type.Object({
-		paths: Type.Optional(Type.Array(Type.String({ minLength: 1, pattern: "\\S" }))),
-		symbols: Type.Optional(Type.Array(Type.Object({
-			path: Type.String({ minLength: 1, pattern: "\\S" }),
-			name: Type.String({ minLength: 1, pattern: "\\S" }),
-		}))),
-	}, { description: "Additional declarative write claims for resume; normalized claims are unioned with retained scope and cannot remove it. Scope is conflict metadata, not permissions or a sandbox." }));
-	const SubagentControlParams = Type.Object({
-		action: StringEnum(["steer", "resume", "park"] as const, {
-			description:
-				"steer: send guidance to the running attempt (a settled or parked thread continues with it); resume: continue a parked or settled thread; park: pause a running thread at a stable checkpoint, keeping its session and worktree for a later resume.",
-		}),
-		id: Type.Integer({ minimum: 1, description: "Stable run id shown by subagent dispatch output." }),
-		objective: Type.Optional(
-			Type.String({ description: "Guidance for steer (required and nonblank), or an optional appended objective for resume. Ignored by park." }),
-		),
-		scope: ResumeScopeSchema,
-	});
-
-	/** A thread that a steer can continue instead of reject: it is not live, but
-	 * its retained session can absorb the guidance as an appended objective. */
-	type ContinuableState = "completed" | "failed" | "parked";
-
 	pi.registerTool({
-		name: "subagent_control",
-		label: "Subagent Control",
-		description: "Steer a running child, resume a parked/settled thread, or park a running thread by stable run id. Resume keeps phaseId immutable and may only extend retained scope.",
-		parameters: SubagentControlParams,
-
-		async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
-			// A thread parked by the previous process exists only once restore has
-			// read the manifest; resuming before that would deny a live run id.
+		name: "subagent_status",
+		label: "Subagent Status",
+		description: "Read current-session run states without waiting or changing execution. Omit id to list runs, or pass an exact numeric id for progress, elapsed time, failure diagnostics, and retained result/recovery paths. Completions arrive automatically; use this for inspection, not a polling loop.",
+		parameters: Type.Object({
+			id: Type.Optional(Type.Integer({ minimum: 1, description: "Exact run id; omit to list all runs in this parent session." })),
+		}),
+		async execute(_toolCallId, params) {
 			await runtime.durableRestore;
-			const thread = runtime.threads.get(params.id);
-			if (!thread) {
-				return { content: [{ type: "text", text: `No subagent thread matches run #${params.id}.` }], details: {} };
-			}
-			const nonBlank = (value: string | undefined): string | undefined => {
-				const trimmed = value?.trim();
-				return trimmed ? trimmed : undefined;
+			const threads = [...runtime.threads.values()]
+				.filter((thread) => params.id === undefined || thread.id === params.id)
+				.sort((left, right) => left.id - right.id);
+			const runs = threads.map((thread) => {
+				const live = monitor.findRun(thread.id);
+				const result = runtime.settledRuns.get(thread.id) ?? thread.lastResult;
+				const state = thread.lifecycleOperation === "stop" ? "interrupting"
+					: thread.retired ? "stopped"
+					: thread.lifecycleOperation === "settle" ? "settling"
+					: thread.state === "parked" ? "interrupted" : thread.state;
+				return {
+					id: thread.id,
+					agent: thread.agentName,
+					phaseId: thread.phaseId,
+					cwd: thread.cwd,
+					executionCwd: thread.executionCwd,
+					scope: thread.scope,
+					taskSummary: formatTaskSummary(thread.task, 80, false),
+					state,
+					waitReason: state === "queued" ? live?.waitReason : undefined,
+					activity: live?.activity,
+					elapsedMs: monitor.getElapsedMs(thread.id) ?? thread.elapsedMs,
+					model: live?.model ?? result?.model,
+					thinking: live?.thinking ?? result?.thinking ?? thread.thinkingLevel,
+					usage: { ...(live?.usage ?? result?.usage ?? emptyUsage()) },
+					exitCode: result?.exitCode,
+					stopReason: result?.stopReason,
+					errorMessage: result ? getResultError(result) : state === "failed" ? "No failure reason was recorded." : undefined,
+					resultFile: result?.resultFile,
+					sessionDir: thread.retired ? undefined : thread.sessionDir ?? result?.sessionDir,
+					isolation: thread.isolation,
+					integrationStatus: live?.integrationStatus ?? result?.integrationStatus ?? thread.worktree?.state,
+					integrationError: result?.integrationError,
+					integrationWorktreePath: result?.integrationWorktreePath ?? (state === "interrupted" ? thread.worktree?.worktreePath : undefined),
+					integrationPatchPath: result?.integrationPatchPath,
+				};
+			});
+			const text = runs.length === 0
+				? params.id === undefined ? "No subagent runs in this parent session." : `No subagent run matches #${params.id}.`
+				: runs.map((run) => {
+					const parts = [`#${run.id} ${run.agent}`, run.state, formatDuration(run.elapsedMs)];
+					if (run.waitReason) parts.push(`wait: ${run.waitReason}`);
+					if (run.activity) parts.push(run.activity);
+					if (run.errorMessage) parts.push(formatTaskSummary(run.errorMessage, 300, false));
+					const paths = [
+						run.resultFile ? `Result: ${run.resultFile}` : undefined,
+						run.sessionDir ? `Session: ${run.sessionDir}` : undefined,
+						run.integrationWorktreePath ? `Retained worktree: ${run.integrationWorktreePath}` : undefined,
+						run.integrationPatchPath ? `Retained patch: ${run.integrationPatchPath}` : undefined,
+					].filter(Boolean);
+					return `${parts.join(" · ")}\n  ${run.taskSummary}${paths.length ? `\n  ${paths.join("\n  ")}` : ""}`;
+				}).join("\n");
+			return {
+				content: [{ type: "text", text }],
+				details: { runs },
+				...(params.id !== undefined && runs.length === 0 ? { isError: true } : {}),
 			};
-			const textResult = (text: string) => ({ content: [{ type: "text" as const, text }], details: {} });
-			/** Why the thread has no steerable/parkable running RPC attempt right now. */
-			const inactiveReason = (): string | undefined => {
-				// Park drives the control through `stopped` before it records the
-				// checkpoint, so the operation is named ahead of the transient state.
-				if (thread.lifecycleOperation === "park") return "parking";
-				if (thread.lifecycleOperation === "stop" || thread.state === "stopped") return "stopped";
-				if (thread.lifecycleOperation === "resume") return "resuming";
-				if (thread.lifecycleOperation === "settle" || thread.state === "completed" || thread.state === "failed") {
-					return `settled (${thread.state})`;
-				}
-				if (thread.state === "queued" || thread.state === "resuming") {
-					const phase = thread.control.getPhase();
-					return phase === "starting" || phase === "retrying" ? phase : thread.state;
-				}
-				return thread.state === "running" ? undefined : thread.state;
-			};
-			const resumeThread = async (
-				objective: string | undefined,
-				continuedFrom?: ContinuableState,
-			) => {
-				if (thread.retired) {
-					return textResult(`Run #${thread.id} was retired by subagent_stop and has no resumable session.`);
-				}
-				if (
-					thread.state !== "parked" &&
-					thread.state !== "completed" &&
-					thread.state !== "failed"
-				) {
-					return textResult(`Run #${thread.id} is ${thread.state}; it must be parked or settled before resume.`);
-				}
-				const requestedObjective = objective === undefined ? undefined : nonBlank(objective);
-				if (objective !== undefined && !requestedObjective) {
-					return textResult("resume objective must be non-blank when provided.");
-				}
-				const hadRetainedSession = Boolean(thread.sessionId && thread.sessionDir);
-				const pending = await thread.resume(requestedObjective, ctx, {
-					scope: params.scope,
-				});
-				if (pending.exitCode !== -1) return textResult(getResultOutput(pending));
-				const currentObjective = formatTaskSummary(requestedObjective ?? thread.task, 80, false);
-				const mode = requestedObjective
-					? `appended objective: ${currentObjective}`
-					: `continuing current objective: ${currentObjective}`;
-				const context = hadRetainedSession ? "retained context reused" : "no prior child context";
-				const prefix = continuedFrom
-					? `Run #${thread.id} was already ${continuedFrom} before steering; resumed the same thread`
-					: `Resumed run #${thread.id}`;
-				return textResult(`${prefix}: ${mode}; ${context}.`);
-			};
-			/** Steering guidance for a thread that is no longer live continues the
-			 * same thread with that guidance instead of being dropped, so the
-			 * evidence is never re-bought by a second dispatch. */
-			const continueSteer = async (objective: string) => {
-				const continuable = (): ContinuableState | undefined =>
-					thread.state === "completed" || thread.state === "failed" || thread.state === "parked"
-						? thread.state
-						: undefined;
-				if (thread.lifecycleOperation === "settle" || (!continuable() && thread.control.getPhase() === "settled")) {
-					if (!(await quiesced(thread.generationCompletion))) return undefined;
-				}
-				const state = continuable();
-				if (!state || thread.lifecycleOperation) return undefined;
-				return resumeThread(objective, state);
-			};
-
-			try {
-				switch (params.action) {
-					case "steer": {
-						const objective = nonBlank(params.objective);
-						if (!objective) {
-							return textResult("steer objective must be non-blank.");
-						}
-						if (thread.retired) {
-							return textResult(`Run #${thread.id} was retired by subagent_stop and cannot be steered.`);
-						}
-						const continued = await continueSteer(objective);
-						if (continued) return continued;
-						const unavailable = inactiveReason();
-						if (unavailable) {
-							return textResult(`Run #${thread.id} is ${unavailable}; only an active running RPC attempt can be steered. No guidance was sent.`);
-						}
-						const steered = await thread.control.steer(objective);
-						if (!steered.accepted) {
-							const resumed = await continueSteer(objective);
-							if (resumed) return resumed;
-							if (steered.reason === "no-active-attempt") {
-								return textResult(`Run #${thread.id} is marked running but has no active RPC attempt; no guidance was sent.`);
-							}
-							return textResult(`Run #${thread.id} is ${steered.phase}; only an active running RPC attempt can be steered. No guidance was sent.`);
-						}
-						return textResult(`Steered run #${thread.id} with additional in-scope guidance; its original objective is unchanged.`);
-					}
-					case "resume": {
-						return resumeThread(params.objective);
-					}
-					case "park": {
-						if (thread.retired) {
-							return textResult(`Run #${thread.id} was retired by subagent_stop and cannot be parked.`);
-						}
-						const unavailable = inactiveReason();
-						if (unavailable) {
-							return textResult(`Run #${thread.id} is ${unavailable}; only an active running RPC attempt can be parked. Use subagent_stop to discard a run that has not started.`);
-						}
-						if (!thread.sessionId || !thread.sessionDir) {
-							return textResult(`Run #${thread.id} has no retained session yet; steer it or let it settle instead.`);
-						}
-						// Park interrupts the child at its next safe point but keeps the
-						// session and worktree, so the thread returns to `parked`, not to a
-						// failure. Claim synchronously like stop; the generation body sees
-						// the claim and leaves publication to this path.
-						const parkVersion = ++thread.lifecycleVersion;
-						thread.lifecycleOperation = "park";
-						const generation = thread.generation;
-						const controller = thread.queueController;
-						const completion = thread.generationCompletion;
-						const ownsPark = (): boolean =>
-							runtime.threads.get(thread.id) === thread &&
-							thread.generation === generation &&
-							thread.lifecycleVersion === parkVersion &&
-							thread.lifecycleOperation === "park" &&
-							!thread.retired;
-						try {
-							await quiesced(thread.control.stop("Parked by subagent_control at a stable checkpoint.").catch(() => undefined));
-							if (!(await quiesced(completion))) runtime.backgroundQueue.cancel(controller);
-							if (!ownsPark()) {
-								return textResult(`Run #${thread.id} changed while it was being parked; no checkpoint was recorded by this call.`);
-							}
-							if (runtime.runControllers.get(thread.id) === controller) runtime.runControllers.delete(thread.id);
-							if (thread.queueController === controller) thread.queueController = undefined;
-							thread.state = "parked";
-							monitor.setStatus(thread.id, "parked");
-							thread.elapsedMs = monitor.getElapsedMs(thread.id) ?? thread.elapsedMs;
-							persistThreadCheckpoint(runtime, thread, "parked");
-							const run = monitor.findRun(thread.id);
-							const usage = run ? formatUsageCompact(run.usage) : "";
-							if (runtime.sessionActive) {
-								ctx.ui.notify(`■ #${thread.id} ${run ? monitor.summarize(run) : thread.agentName} · parked`, "info");
-							}
-							const retained = thread.isolation === "worktree" ? "session and worktree" : "session";
-							return textResult(
-								`Parked run #${thread.id} (${thread.agentName}) at a stable checkpoint${usage ? ` after ${usage}` : ""}. Its retained ${retained} continue on subagent_control resume (optionally with an appended objective) or on steer; subagent_stop discards them.`,
-							);
-						} finally {
-							if (thread.lifecycleVersion === parkVersion && thread.lifecycleOperation === "park") {
-								thread.lifecycleOperation = undefined;
-							}
-						}
-					}
-				}
-			} catch (error) {
-				throw new Error(`Could not ${params.action} run #${thread.id}: ${error instanceof Error ? error.message : String(error)}`);
-			}
 		},
-
 		renderCall(args, theme) {
-			return new Text(`${theme.fg("toolTitle", theme.bold("subagent_control "))}${theme.fg("accent", `${args.action} #${args.id}`)}`, 0, 0);
+			return new Text(`${theme.fg("toolTitle", theme.bold("subagent_status "))}${theme.fg("accent", args.id === undefined ? "all" : `#${args.id}`)}`, 0, 0);
 		},
-		renderResult(result, _options, theme) {
-			return renderFirstLine(result, "subagent_control ", theme);
+		renderResult(result, options, theme) {
+			if (options.expanded) return new Text(result.content.map((part) => part.type === "text" ? part.text : "").join("\n"), 0, 0);
+			return renderFirstLine(result, "subagent_status ", theme);
 		},
 	});
 
@@ -258,37 +122,27 @@ export function registerLookupTools(pi: ExtensionAPI, runtime: SubagentRuntime):
 
 		async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
 			await runtime.durableRestore;
-			// Start config I/O without yielding: every target below must be claimed
-			// synchronously before a resume preflight can cross its next await.
+			// Claim every target before awaiting process cleanup or configuration I/O.
 			const configPromise = loadConfig(runtime.configPath).catch(() => undefined);
 			const completionResults: SingleResult[] = [];
 			const candidateIds = params.all === true
 				? [...new Set([
 					...runtime.runControllers.keys(),
 					...[...runtime.threads.values()]
-						.filter((thread) =>
-							thread.lifecycleOperation !== undefined ||
-							["queued", "resuming", "running", "interrupting"].includes(thread.state),
-						)
+						.filter((thread) => thread.lifecycleOperation !== undefined || ["queued", "running", "interrupting"].includes(thread.state))
 						.map((thread) => thread.id),
 				])]
 				: [...runtime.threads.keys()];
-			const targets =
-				params.all === true
-					? candidateIds
-					: params.id !== undefined && params.id.trim() !== ""
-						? matchRunIds(candidateIds, params.id.trim())
-						: [];
+			const targets = params.all === true
+				? candidateIds
+				: params.id?.trim() ? matchRunIds(candidateIds, params.id.trim()) : [];
 
 			if (targets.length === 0) {
 				const available = [...runtime.threads.keys()].map((id) => `#${id}`).join(", ");
 				return {
-					content: [{
-						type: "text",
-						text: params.all === true
-							? "No active subagent runs to stop."
-							: `No subagent thread matches "${params.id}".${available ? ` Known threads: ${available}.` : ""}`,
-					}],
+					content: [{ type: "text", text: params.all === true
+						? "No active subagent runs to stop."
+						: `No subagent thread matches "${params.id}".${available ? ` Known threads: ${available}.` : ""}` }],
 					details: {},
 				};
 			}
@@ -299,7 +153,6 @@ export function registerLookupTools(pi: ExtensionAPI, runtime: SubagentRuntime):
 				run: ReturnType<typeof monitor.findRun>;
 				previousState: SubagentThread["state"];
 				wasQueued: boolean;
-				wasResuming: boolean;
 				wasActive: boolean;
 				generation: number;
 				controller: AbortController | undefined;
@@ -312,39 +165,23 @@ export function registerLookupTools(pi: ExtensionAPI, runtime: SubagentRuntime):
 				if (!thread) continue;
 				const previousState = thread.state;
 				const wasQueued = previousState === "queued";
-				const wasResuming = previousState === "resuming";
-				const wasActive =
-					thread.lifecycleOperation !== undefined ||
-					["queued", "resuming", "running", "interrupting"].includes(previousState);
+				const wasActive = thread.lifecycleOperation !== undefined || ["queued", "running", "interrupting"].includes(previousState);
 				const stopVersion = ++thread.lifecycleVersion;
-				// Stop-all claims every target before the first await. This invalidates
-				// all concurrent resume preflights as one synchronous operation.
 				thread.lifecycleOperation = "stop";
 				thread.retired = true;
 				thread.retireOnSettle = true;
 				thread.state = "stopped";
 				const stopMessage = wasQueued
 					? "Stopped by subagent_stop before the run started."
-					: wasResuming
-						? "Stopped by subagent_stop while resume was preparing."
-						: wasActive
-							? "Stopped by subagent_stop."
-							: previousState === "parked"
-								? "Stopped by subagent_stop from a parked checkpoint."
-								: "Retired by subagent_stop.";
+					: wasActive ? "Stopped by subagent_stop."
+						: previousState === "parked" ? "Stopped by subagent_stop from an interrupted checkpoint."
+							: "Retired by subagent_stop.";
 				claimed.push({
-					runId,
-					thread,
-					run: monitor.findRun(runId),
-					previousState,
-					wasQueued,
-					wasResuming,
-					wasActive,
+					runId, thread, run: monitor.findRun(runId), previousState, wasQueued, wasActive,
 					generation: thread.generation,
 					controller: thread.queueController,
 					completion: thread.generationCompletion,
-					stopVersion,
-					stopMessage,
+					stopVersion, stopMessage,
 				});
 			}
 
@@ -368,7 +205,6 @@ export function registerLookupTools(pi: ExtensionAPI, runtime: SubagentRuntime):
 					run,
 					previousState,
 					wasQueued,
-					wasResuming,
 					wasActive,
 					generation,
 					controller,
@@ -392,7 +228,6 @@ export function registerLookupTools(pi: ExtensionAPI, runtime: SubagentRuntime):
 				let stoppedResult: SingleResult | undefined;
 				if (
 					wasQueued ||
-					wasResuming ||
 					previousState === "parked" ||
 					!runtime.settledRuns.has(runId)
 				) {
@@ -451,8 +286,8 @@ export function registerLookupTools(pi: ExtensionAPI, runtime: SubagentRuntime):
 									error: "subagent_stop timed out waiting for worktree integration; it continues in the background",
 								}),
 							]).catch(() => undefined);
+							pendingIntegration.push(`#${runId}`);
 						}
-						pendingIntegration.push(`#${runId}`);
 					} else if (finalization.status === "retained") {
 						retainedIntegration.push(`#${runId}`);
 					}

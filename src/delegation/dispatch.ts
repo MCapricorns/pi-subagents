@@ -37,6 +37,7 @@ import {
 import type { SubagentRuntime, SubagentThread } from "../lifecycle/runtime.ts";
 import { createBackgroundDispatcher } from "../lifecycle/thread-lifecycle.ts";
 import {
+	getResultError,
 	getResultOutput,
 	isFailedResult,
 	type SingleResult,
@@ -201,7 +202,7 @@ function parallelAdmissionConflict(
 			return `tasks[${task.index}] duplicates active run #${duplicate.source.id} (${duplicate.source.agentName})`;
 		}
 		if (duplicate?.kind === "settled") {
-			return `tasks[${task.index}] duplicates settled run #${duplicate.source.id} (${duplicate.source.agentName}); resume that retained thread instead`;
+			return `tasks[${task.index}] duplicates settled run #${duplicate.source.id} (${duplicate.source.agentName}); inspect it with subagent_status and handle follow-up work in main`;
 		}
 	}
 	const writers = tasks.filter(
@@ -251,13 +252,8 @@ function toolUsage(runtime: SubagentRuntime, runIds: number[]): { usage?: Usage 
 	return parts.length > 0 ? { usage: toToolUsage(sumUsage(parts)) } : {};
 }
 
-/** In-turn wait behind dispatch `wait: true` — the escape hatch for one-shot
- * `pi -p` parents that exit at end of turn or an immediate dependent step: hold
- * the call until every run it started settles, then hand back result blocks. No
- * timer: a waiter resolves the moment its run's result registers (children
- * are bounded by the idle watchdog), an already-parked run answers
- * immediately with its resume handle, and the turn's abort signal remains the
- * escape hatch. */
+/** In-turn wait for a fresh dispatch. Registration resolves it without a model-chosen
+ * timer; parent abort or removal ends the wait without losing background delivery. */
 export async function awaitRunResults(
 	runtime: SubagentRuntime,
 	runIds: number[],
@@ -270,7 +266,7 @@ export async function awaitRunResults(
 		const already = runtime.settledRuns.get(runId);
 		if (already) return Promise.resolve({ result: already });
 		if (monitor.findRun(runId)?.status === "parked") {
-			return Promise.resolve({ note: `run #${runId} is parked at a stable checkpoint; use subagent_control resume to continue it` });
+			return Promise.resolve({ note: `run #${runId} was interrupted; inspect retained work with subagent_status and finish it in main` });
 		}
 		return new Promise((resolve) => {
 			let done = false;
@@ -299,7 +295,7 @@ export async function awaitRunResults(
 				}
 				const live = monitor.findRun(runId);
 				if (live?.status === "parked") {
-					finish({ note: `run #${runId} was parked at a stable checkpoint; use subagent_control resume to continue it` });
+					finish({ note: `run #${runId} was interrupted; inspect retained work with subagent_status and finish it in main` });
 					return;
 				}
 				if (!live) {
@@ -359,15 +355,12 @@ export async function awaitRunResults(
 }
 
 export function registerSubagentTool(pi: ExtensionAPI, runtime: SubagentRuntime): void {
-	// Latest dispatch environment. The dispatcher is created once per process so
-	// restored threads can resume before any dispatch has run; each execute
-	// refreshes the fallback context, config, and agent catalog it resolves.
+	// Each dispatch refreshes the context, config, and agent catalog.
 	const environmentRef: { current: DispatchEnvironment | undefined } = { current: undefined };
 
 	// Terminal rows stay in the monitor until the next beginTurn so the footer
 	// can count them beside siblings that are still live. The widget ignores
-	// them. A second finishRun for the same endedAt is a no-op; a resume
-	// clears endedAt, so the next settlement notifies again.
+	// them. Repeated publication of the same settlement is a no-op.
 	const publishedEndedAt = new Map<number, number>();
 	const finishRun = (
 		runId: number,
@@ -382,7 +375,12 @@ export function registerSubagentTool(pi: ExtensionAPI, runtime: SubagentRuntime)
 		if (endedAt !== undefined) publishedEndedAt.set(runId, endedAt);
 		if (opts?.silent || !runtime.sessionActive) return;
 		const icon = status === "done" ? "✓" : "✗";
-		environmentRef.current?.ctx.ui.notify(`${icon} #${run.id} ${monitor.summarize(run)}`, status === "done" ? "info" : "error");
+		const result = runtime.threads.get(runId)?.lastResult;
+		const error = status === "failed" ? result ? getResultError(result) : "No failure reason was recorded." : undefined;
+		environmentRef.current?.ctx.ui.notify(
+			`${icon} #${run.id} ${monitor.summarize(run)}${error ? ` · ${formatTaskSummary(error, 300, false)}` : ""}`,
+			status === "done" ? "info" : "error",
+		);
 	};
 
 	// Live sub-agent activity → concise one-line status ("thinking",
@@ -494,12 +492,11 @@ export function registerSubagentTool(pi: ExtensionAPI, runtime: SubagentRuntime)
 		makeLiveHandler,
 		makeDetails,
 	});
-	runtime.dispatcher = startBackground;
 
 	pi.registerTool({
 		name: "subagent",
 		label: "Subagent",
-		description: "Start paid leaf runs for substantial self-contained work. phaseId is a stable single-line logical identity; exact task+cwd remains the compatibility fallback. scope declares exact write-conflict metadata (not permissions or sandboxing). Fresh single and resumed writer scopes are checked against active leases; parallel batches also preflight deterministic duplicates and all declared scope overlaps before allocation. A parallel batch that omits scope reports `independence not verified`; declared claims do not prove natural-language task independence. wait:true returns results in-turn; otherwise completions wake main.",
+		description: "Start paid one-shot leaf runs for substantial self-contained work. phaseId is a stable logical identity; exact task+cwd is the fallback. scope declares write-conflict metadata, not permissions or a sandbox. Fresh writers are checked against active leases; parallel batches preflight duplicate phases and declared overlaps before allocation. Missing scope reports `independence not verified`; claims do not prove task independence. wait:true returns results in-turn; otherwise completions wake main. Inspect with subagent_status, cancel with subagent_stop; main handles failed or incomplete work.",
 		parameters: SubagentParams,
 
 		async execute(_toolCallId, params, signal, onUpdate, ctx) {
@@ -522,8 +519,6 @@ export function registerSubagentTool(pi: ExtensionAPI, runtime: SubagentRuntime)
 				projectTrusted: ctx.isProjectTrusted?.() === true,
 			});
 			const agents = discovery.agents;
-			// Refresh the dispatcher's fallback environment so control operations
-			// (resume of restored threads) never run on a stale context.
 			environmentRef.current = { ctx, config, agents };
 
 			const hasTasks = (params.tasks?.length ?? 0) > 0;

@@ -63,6 +63,23 @@ describe("truncateResultOutput", () => {
 });
 
 describe("formatCompletionBlock", () => {
+	it("states when no failure reason was recorded instead of showing only partial work", () => {
+		const block = formatCompletionBlock({
+			agent: "artisan", task: "Finish the change", exitCode: 1, stderr: "", usage: emptyUsage(),
+			messages: [{ role: "assistant", content: [{ type: "text", text: "Partial work" }], stopReason: "toolUse" } as never],
+		}, 40);
+		assert.match(block, /no failure reason was recorded/i);
+		assert.match(block, /Partial work/);
+	});
+
+	it("recovers a recorded assistant error even when the result summary omitted it", () => {
+		const block = formatCompletionBlock({
+			agent: "artisan", task: "Finish the change", exitCode: 1, stderr: "", usage: emptyUsage(),
+			messages: [{ role: "assistant", content: [], stopReason: "error", errorMessage: "Provider unavailable" } as never],
+		}, 40);
+		assert.match(block, /Provider unavailable/);
+	});
+
 	it("states a width clip without inventing a 40-of-2 line loss", () => {
 		const long = "x".repeat(RESULT_LINE_MAX + 5);
 		const block = formatCompletionBlock({

@@ -94,28 +94,6 @@ export function normalizePhaseScope(
 	};
 }
 
-/** Merge normalized continuation claims monotonically so retained edits never lose coverage. */
-export function mergePhaseScopes(
-	previous: PhaseScope | undefined,
-	additional: PhaseScope | undefined,
-): PhaseScope | undefined {
-	if (!previous) return additional;
-	if (!additional) return previous;
-	const paths = [...new Set([...(previous.paths ?? []), ...(additional.paths ?? [])])];
-	const symbols: SymbolScopeClaim[] = [];
-	const symbolKeys = new Set<string>();
-	for (const symbol of [...(previous.symbols ?? []), ...(additional.symbols ?? [])]) {
-		const key = `${symbol.path}\0${symbol.name}`;
-		if (symbolKeys.has(key)) continue;
-		symbolKeys.add(key);
-		symbols.push(symbol);
-	}
-	return {
-		...(paths.length > 0 ? { paths } : {}),
-		...(symbols.length > 0 ? { symbols } : {}),
-	};
-}
-
 function containsPath(ancestor: string, candidate: string): boolean {
 	if (ancestor === candidate) return true;
 	const child = relative(ancestor, candidate);
@@ -170,12 +148,10 @@ export function findPhaseScopeOverlap(
 export interface WriterScopeLease {
 	id: number;
 	agentName: string;
-	state: "queued" | "resuming" | "running" | "interrupting" | "parked" | "completed" | "failed" | "stopped";
-	lifecycleOperation?: "park" | "resume" | "stop" | "settle";
+	state: "queued" | "running" | "interrupting" | "parked" | "completed" | "failed" | "stopped";
+	lifecycleOperation?: "stop" | "settle";
 	retired?: boolean;
 	scope?: PhaseScope;
-	/** Transient monotonic scope claimed while a continuation is preparing. */
-	admissionScope?: PhaseScope;
 	writeCapable?: boolean;
 }
 
@@ -184,24 +160,18 @@ export interface WriterLeaseScopeOverlap {
 	overlap: PhaseScopeOverlap;
 }
 
-const SCOPE_ADMISSION_STATES = new Set<WriterScopeLease["state"]>(["queued", "resuming", "running", "interrupting", "parked"]);
+const SCOPE_ADMISSION_STATES = new Set<WriterScopeLease["state"]>(["queued", "running", "interrupting", "parked"]);
 
-/** Compare absolute normalized claims against active writer leases. Scope identity,
- * unlike phase identity, is independent of the caller's cwd. Settled phases do not block. */
+/** Compare absolute normalized claims against active writer leases across caller cwds. */
 export function findWriterLeaseScopeOverlap(
 	scope: PhaseScope,
 	leases: Iterable<WriterScopeLease>,
-	excludeRunId?: number,
 ): WriterLeaseScopeOverlap | undefined {
 	for (const lease of leases) {
-		if (lease.id === excludeRunId) continue;
 		const active = lease.lifecycleOperation === "settle" || SCOPE_ADMISSION_STATES.has(lease.state);
-		const leaseScope = lease.admissionScope ?? lease.scope;
-		const writes =
-			lease.admissionScope !== undefined ||
-			(lease.writeCapable ?? lease.agentName !== "scout");
-		if (!active || lease.retired || !writes || !leaseScope) continue;
-		const overlap = findPhaseScopeOverlap(scope, leaseScope);
+		const writes = lease.writeCapable ?? lease.agentName !== "scout";
+		if (!active || lease.retired || !writes || !lease.scope) continue;
+		const overlap = findPhaseScopeOverlap(scope, lease.scope);
 		if (overlap) return { lease, overlap };
 	}
 	return undefined;

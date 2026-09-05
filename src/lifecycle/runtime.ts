@@ -1,15 +1,15 @@
 /**
  * Shared per-session runtime state for pi-subagents.
  *
- * The extension registers several tools (subagent, subagent_control/stop)
+ * The extension registers dispatch, read-only status, and destructive stop tools
  * that share the background queue, completion batcher, abort controllers per
  * run, and settled-results store.
  * `createRuntime` builds those once per extension load and hands the same object
  * to every registration site, so state stays in one place without globals.
  */
 
-import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
-import type { PhaseScope, PhaseScopeInput } from "../delegation/phase-scope.ts";
+import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
+import type { PhaseScope } from "../delegation/phase-scope.ts";
 import { rmSync } from "node:fs";
 import { resolveSubagentConcurrency, BackgroundTaskQueue } from "../execution/background.ts";
 import {
@@ -23,21 +23,12 @@ import { type ThinkingLevel } from "../configuration/config.ts";
 import { removeThreadRecord, threadRecordFromThread, upsertThreadRecord, type ThreadRecord } from "./durable.ts";
 import { isRunActiveStatus, monitor } from "../presentation/monitor.ts";
 import type { RpcRunControl } from "../execution/rpc-control.ts";
-import type { StartBackgroundInternal } from "./thread-shared.ts";
 import { isFailedResult, type SingleResult } from "../execution/spawn.ts";
 import type { IsolationMode, WorktreeFinalization, WorktreeIsolation } from "../isolation/worktree.ts";
 
-export type ThreadState =
-	| "queued"
-	| "resuming"
-	| "running"
-	| "interrupting"
-	| "parked"
-	| "completed"
-	| "failed"
-	| "stopped";
+export type ThreadState = "queued" | "running" | "interrupting" | "parked" | "completed" | "failed" | "stopped";
 
-export type ThreadLifecycleOperation = "park" | "resume" | "stop" | "settle";
+export type ThreadLifecycleOperation = "stop" | "settle";
 
 export interface SubagentThread {
 	id: number;
@@ -46,53 +37,36 @@ export interface SubagentThread {
 	task: string;
 	phaseId?: string;
 	scope?: PhaseScope;
-	/** Monotonic continuation scope visible while resume preflight is in flight. */
-	admissionScope?: PhaseScope;
 	/** Capability snapshot used by declared-scope admission, including after restore. */
 	writeCapable?: boolean;
 	/** Caller-facing cwd in the original worktree. */
 	cwd: string;
 	/** Actual child cwd (the equivalent path inside an isolated worktree). */
 	executionCwd: string;
-	/** Level actually used, after clamping to the effective model's capability. */
 	thinkingLevel?: ThinkingLevel;
-	/** Level the dispatch asked for, before clamping; replayed on every resume. */
 	requestedThinkingLevel?: ThinkingLevel;
 	isolation: IsolationMode;
 	worktree?: WorktreeIsolation;
-	/** Durable restoration failure that permanently blocks continuation. */
-	resumeUnavailableReason?: string;
 	/** Original durable evidence retained when its worktree handle is unavailable. */
 	restorationRecord?: ThreadRecord;
 	state: ThreadState;
 	control: RpcRunControl;
 	queueController?: AbortController;
-	/** Resolves only after the current generation's child process, isolation
-	 * finalization, and queue work have fully quiesced and released their
-	 * concurrency slot. */
+	/** Resolves after the child, isolation finalization, and queue work fully quiesce. */
 	generationCompletion: Promise<void>;
-	/** Synchronous CAS used by lifecycle controls across their async preflight. */
+	/** Arbitration between asynchronous settlement and destructive stop. */
 	lifecycleVersion: number;
 	lifecycleOperation?: ThreadLifecycleOperation;
 	sessionId?: string;
 	sessionDir?: string;
-	/** Active execution time accumulated across retained resume generations. */
 	elapsedMs: number;
-	/** Most recent generation result, retained for parked destructive-stop output. */
+	/** Terminal or interrupted partial result; independent of the transient monitor row. */
 	lastResult?: SingleResult;
 	/** A destructive stop retires context even if the active child settles later. */
 	retireOnSettle?: boolean;
 	retired?: boolean;
-	/** Installed by dispatch so the control tool can restart the same logical id. */
-	resume: (
-		objective?: string,
-		ctx?: ExtensionContext,
-		metadata?: { scope?: PhaseScopeInput },
-	) => Promise<SingleResult>;
-	/** Dispatch-owned, generation-guarded worktree settlement hook. Its apply
-	 * runs under the canonical original-repository lane. */
+	/** All owners finalize under the same original-repository lane. */
 	finalizeIsolation: (generation: number, result?: SingleResult) => Promise<WorktreeFinalization | undefined>;
-	/** Best-effort shutdown notification for retained integration artifacts. */
 	notifyIsolationFailure?: (finalization: WorktreeFinalization) => void;
 	isolationFailureNotified?: boolean;
 }
@@ -104,9 +78,6 @@ export interface SubagentRuntime {
 	getActiveTools: () => string[];
 	/** False after session_shutdown; guards delivery and queue work. */
 	sessionActive: boolean;
-	/** The process-wide background dispatcher. Set at tool registration so
-	 * threads restored from the durable manifest can resume before any dispatch. */
-	dispatcher?: StartBackgroundInternal;
 	/** Resolves when the load-time durable restore pass has finished. Everything
 	 * that answers "which threads exist" awaits it — the lookup tools, a fresh
 	 * dispatch before it allocates a run id, and the restored-thread notice — so
@@ -140,9 +111,6 @@ export interface SubagentRuntime {
 	registerRunResult: (runId: number, result: SingleResult) => void;
 	/** Logical threads outlive process attempts and completed generations. */
 	threads: Map<number, SubagentThread>;
-	/** Resume setup that has claimed a thread but has not yet enqueued its
-	 * next generation. Shutdown invalidates these claims and waits for cleanup. */
-	preflightOperations: Set<Promise<void>>;
 	/** Every session directory retained for this parent session. */
 	sessionDirs: Set<string>;
 	retainSession: (result: Pick<SingleResult, "sessionDir">) => void;
@@ -242,7 +210,6 @@ export function createRuntime(pi: ExtensionAPI, configPath: string): SubagentRun
 		settledRuns: new Map<number, SingleResult>(),
 		settledListeners: new Map<number, Set<(result: SingleResult) => void>>(),
 		threads: new Map<number, SubagentThread>(),
-		preflightOperations: new Set<Promise<void>>(),
 		sessionDirs: new Set<string>(),
 		retainSession: (result) => {
 			if (result.sessionDir) runtime.sessionDirs.add(result.sessionDir);
@@ -278,11 +245,9 @@ export function createRuntime(pi: ExtensionAPI, configPath: string): SubagentRun
 			if (!runtime.sessionActive) return;
 			runtime.sessionActive = false;
 			const shutdownThreads = [...runtime.threads.values()];
-			const liveStates = new Set(["queued", "resuming", "running", "interrupting"]);
+			const liveStates = new Set(["queued", "running", "interrupting"]);
 			const previousStates = new Map(shutdownThreads.map((thread) => [thread.id, thread.state] as const));
-			// Invalidate every lifecycle claim synchronously before the first await.
-			// Resume preflight checks both this version and sessionActive, then
-			// cleans any worktree/session it created before resolving its tracker.
+			// Invalidate pending lifecycle claims synchronously before the first await.
 			// A generation already inside its settlement keeps its own claim: it
 			// finalizes its worktree and persists its terminal record itself.
 			const interrupting = shutdownThreads.filter((thread) =>
@@ -299,29 +264,21 @@ export function createRuntime(pi: ExtensionAPI, configPath: string): SubagentRun
 				if (thread.lifecycleOperation === "settle") continue;
 				thread.lifecycleOperation = "stop";
 				// Deliberately NOT retireOnSettle: shutdown interrupts to the last
-				// checkpoint but keeps the session/worktree resumable across reload.
+				// checkpoint and preserves session/worktree artifacts for manual recovery.
 				thread.retireOnSettle = false;
 				if (liveStates.has(thread.state)) thread.state = "stopped";
 			}
-			const preflights = [...runtime.preflightOperations];
 			runtime.completionBatcher.dispose();
-			// Held items are dropped exactly like the batcher's abandoned ones: the
-			// session is gone, so there is no window left to deliver them into.
+			// The parent session is gone; no window remains for buffered delivery.
 			heldCompletions = [];
 			compactionInFlight = false;
 			runtime.backgroundQueue.cancelAll();
-			// Await live RPC process-tree cleanup and continuation preflight rollback
-			// before persisting records or releasing ownership maps.
+			// Quiesce child processes and owned queue work before persisting records.
 			await Promise.all([
-				Promise.all(
-					interrupting.map((thread) =>
-						thread.control.stop("Parent session shut down").catch(() => undefined),
-					),
-				),
-				Promise.allSettled(preflights),
+				...interrupting.map((thread) => thread.control.stop("Parent session shut down").catch(() => undefined)),
 				runtime.backgroundQueue.waitForIdle(),
 			]);
-			// Only interrupted (parked) threads stay resumable across reloads:
+			// Only interrupted work keeps recovery artifacts across reloads:
 			// each keeps its durable record and retained artifacts. Settled
 			// threads drop their record — the manifest exists only while
 			// unfinished work needs it — and their sessions are deleted now. A
@@ -332,16 +289,13 @@ export function createRuntime(pi: ExtensionAPI, configPath: string): SubagentRun
 			const records: ThreadRecord[] = [];
 			for (const thread of runtime.threads.values()) {
 				if (thread.retired) continue;
-				if (thread.resumeUnavailableReason) {
-					// Restoration failures retain their durable evidence and session until
-					// an explicit destructive stop retires them.
-					if (thread.restorationRecord) {
-						records.push({
-							...thread.restorationRecord,
-							updatedAt: Date.now(),
-							elapsedMs: thread.elapsedMs,
-						});
-					}
+				if (thread.restorationRecord) {
+					// Keep recovery evidence until an explicit destructive stop retires it.
+					records.push({
+						...thread.restorationRecord,
+						updatedAt: Date.now(),
+						elapsedMs: thread.elapsedMs,
+					});
 					continue;
 				}
 				const previous = previousStates.get(thread.id) ?? thread.state;
@@ -382,7 +336,6 @@ export function createRuntime(pi: ExtensionAPI, configPath: string): SubagentRun
 			// sessionDirs entries still referenced by records stay owned by the
 			// manifest; the next process re-registers them at restore.
 			runtime.sessionDirs.clear();
-			runtime.preflightOperations.clear();
 			runtime.threads.clear();
 			monitor.clear();
 		},

@@ -43,9 +43,8 @@ const THREADS_MANIFEST_VERSION = 1;
  * win over the age rule. */
 export const PROJECT_ROOT_MAX_AGE_MS = 3 * 24 * 60 * 60 * 1_000;
 
-/** Fixed retention: parked work (which may hold unintegrated changes) stops
- * being resumable after a month. Older manifests may still carry settled
- * records from previous versions; restore discards them on sight. */
+/** Interrupted work retains its recovery record for a month. Older manifests
+ * may still carry settled records; restore discards those on sight. */
 export const PARKED_RECORD_MAX_AGE_MS = 30 * 24 * 60 * 60 * 1_000;
 
 /** Result excerpts are for status display after restore, not full transcripts. */
@@ -84,7 +83,7 @@ export interface ThreadRecord {
 	executionCwd: string;
 	/** Resolved (clamped) level of the last generation. */
 	thinkingLevel?: string;
-	/** Level the dispatch requested; a resume after a restart re-runs at it. */
+	/** Originally requested level, retained with the recovery metadata. */
 	requestedThinkingLevel?: string;
 	isolation: IsolationMode;
 	state: "parked" | "completed" | "failed";
@@ -106,9 +105,8 @@ export function currentBootId(now = Date.now()): number {
 /** Whether a record's `childPids` can still name processes of this boot. Pids
  * are only unique within a boot: after a restart the same number belongs to
  * whatever claimed it, so restore must not signal them. Records written before
- * this field existed carry no boot id and count as unverifiable — leaving a
- * stray child alive costs a resumable session nothing, while killing an
- * unrelated process tree is not recoverable. */
+ * this field existed carry no boot id and count as unverifiable; leaving a
+ * stray child alive is safer than killing an unrelated process tree. */
 export function isCurrentBoot(record: ThreadRecord, now = Date.now()): boolean {
 	if (record.bootId === undefined) return false;
 	return Math.abs(record.bootId - currentBootId(now)) <= BOOT_ID_TOLERANCE_MS;
@@ -375,7 +373,7 @@ function summarizeResult(result: SingleResult): ThreadResultSummary | undefined 
 
 /** Project a live thread into its durable record. Only handles whose
  * filesystem is still meaningful are persisted; finalized-and-removed
- * worktrees keep just their checkpoint commit for continuation resumes. */
+ * worktrees keep their checkpoint commit as recovery evidence. */
 export function threadRecordFromThread(
 	thread: SubagentThread,
 	state: "parked" | "completed" | "failed",

@@ -46,16 +46,17 @@ describe("buildDelegationDirective", () => {
 		assert.match(directive, /`sentinel`: read-only fresh-context review of a completed diff/u);
 		assert.match(directive, /only when the diff touches concurrency, trust boundaries/u);
 		assert.match(directive, /never a commit ritual/u);
-		assert.match(directive, /Route findings to the owner via `resume` or fix inline/u);
+		assert.match(directive, /Main handles review findings/u);
 		assert.match(directive, /stable `phaseId`.*exact writer `scope`/u);
 		assert.match(directive, /depends on handoff cost and full conversation context/u);
 		assert.match(directive, /never infer it as a natural-language safety claim/u);
 		assert.match(directive, /`subagent_risk` applies fixed changed-path rules without a model/u);
 		assert.doesNotMatch(directive, /Before every commit|findings block commit|review once more/u);
 		assert.match(directive, /`wait: true` only when the result is the immediate dependency/u);
-		assert.match(directive, /Never sleep or poll/u);
+		assert.match(directive, /Never sleep to wait/u);
+		assert.match(directive, /not a polling loop/u);
 		assert.match(directive, /One owner per phase/u);
-		assert.match(directive, /never repeats delegated broad search, implementation, or cleanup/u);
+		assert.match(directive, /without repeating completed delegated searches or edits/u);
 		assert.match(directive, /Main owns routing, architecture, integration, the final gate, and release/u);
 		assert.match(directive, /For one high-stakes uncertainty.*at most two read-only scouts/u);
 		assert.match(directive, /distinct perspectives\/hypotheses/u);
@@ -78,16 +79,15 @@ describe("buildDelegationDirective", () => {
 		assert.match(directive, /expected output shape/u);
 	});
 
-	it("routes follow-up work back to the same thread", () => {
+	it("provides one-shot dispatch, read-only status, and main takeover instead of continuation controls", () => {
 		const directive = buildDelegationDirective(loadBuiltinAgents());
-		assert.match(directive, /Same thread, never a second one/u);
-		assert.match(directive, /reuse its immutable `phaseId`/u);
-		assert.match(directive, /`subagent_control steer` sends new evidence to a running phase/u);
-		assert.match(directive, /`resume` continues parked\/finished context, retains prior scope/u);
-		assert.match(directive, /may add claims but never remove them/u);
-		assert.match(directive, /`park` pauses/u);
-		assert.match(directive, /`subagent_stop` retires/u);
-		assert.match(directive, /exact task\+cwd fallback/u);
+		assert.match(directive, /One dispatch, one result/u);
+		assert.match(directive, /no steer, park, or resume controls/u);
+		assert.match(directive, /Main handles failed or incomplete work with its own tools/u);
+		assert.match(directive, /different deliverable needs a new phase and brief/u);
+		assert.match(directive, /`subagent_status` is read-only on-demand inspection, not a polling loop/u);
+		assert.match(directive, /`subagent_stop` destructively cancels\/retires/u);
+		assert.match(directive, /Duplicate identity is `phaseId` or exact task\+cwd/u);
 		assert.match(directive, /never fuzzy or embedding-based/u);
 		assert.match(directive, /read a truncated result's artifact only when the shown lines are insufficient/u);
 	});

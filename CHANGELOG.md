@@ -4,6 +4,30 @@ Published versions of `@ferris1225/pi-subagents`. Unpublished numbers
 (`4.2.3`, `4.2.6`, `4.2.9`–`4.2.11`) never shipped on npm; their changes
 landed in the next published release.
 
+## 4.3.10
+
+- Add read-only `subagent_status`: list current-session runs or inspect an exact id,
+  including progress, elapsed time, terminal diagnostics, and retained artifact paths.
+  Runtime facts use Pi's existing `details.runs`; children do not need strict JSON reports.
+- Remove `subagent_control` and all steer/park/resume entry points, continuation
+  admission, session forking, and resume widget markers. Main handles failed or
+  incomplete phases; new deliverables get new briefs. Dispatch, automatic completion
+  delivery, destructive stop, RPC cancellation, and manual worktree recovery remain.
+- Keep interrupted worktree edits even when the retained Pi session file is missing.
+  Manual recovery no longer depends on model context; managed-path validation and
+  index-preserving Git integration stay intact.
+- Record child exits before RPC settlement with their exit code or signal instead
+  of returning only partial output. Clear stale provider errors after successful Pi
+  retries, expose missing diagnostic evidence explicitly, and keep individual failed
+  tool calls separate from a terminal run failure. Preserve safe pre-prompt startup
+  retries and keep the last recorded cause when that retry budget is exhausted.
+- Require Pi 0.85.0 and reuse its exported RPC command/response types. Include its
+  official server package as a peer and development dependency: the unbundled SDK
+  and CLI require it at runtime, not only in tests.
+- Discover actual built-in/custom role definitions in setup, respecting project
+  trust. Saving selection removes unavailable names and overrides without retired-role
+  aliases or config migration; real disabled and never-configured custom roles remain selectable.
+
 ## 4.3.9
 
 - Add optional bounded stable `phaseId` and exact declarative write `scope` claims to single

@@ -20,7 +20,6 @@ import type { IsolationMode, WorktreeFinalizationStatus } from "../isolation/wor
 // ---------------------------------------------------------------------------
 
 export type RunStatus = "queued" | "running" | "interrupting" | "parked" | "done" | "failed";
-export type ContinuationKind = "resume-retained" | "resume-appended";
 
 /** Why a queued run has produced no output yet. Three genuinely different
  * situations used to be reported as one "queued": waiting for a free process
@@ -56,8 +55,6 @@ export interface RunView {
 	thinking?: string;
 	isolation?: IsolationMode;
 	integrationStatus?: RunIntegrationStatus;
-	/** Short worktree-group identity (mkdtemp suffix) shared by every run inside
-	 * one isolated worktree; changes when a continuation worktree is created. */
 	worktreeId?: string;
 	status: RunStatus;
 	/** What a queued run is actually waiting for; see RunWaitReason. */
@@ -73,15 +70,11 @@ export interface RunView {
 	elapsedMs: number;
 	/** Epoch ms when the latest active segment stopped. */
 	endedAt?: number;
-	/** Why this generation reused retained context, shown in the widget/status. */
-	continuationKind?: ContinuationKind;
 }
 
-/** Extra metadata for a run whose row must carry isolation or resume context. */
 export interface RunChainMeta {
 	isolation?: IsolationMode;
 	worktreeId?: string;
-	continuationKind?: ContinuationKind;
 	/** Initial wait reason; defaults to "process-slot" (a fresh dispatch enters
 	 * the process queue). Children spawned outside the queue pass "starting"
 	 * because they never wait for a slot. */
@@ -326,7 +319,6 @@ export function formatDuration(ms: number): string {
 	return `${hours}h${String(minutes % 60).padStart(2, "0")}m${String(seconds).padStart(2, "0")}s`;
 }
 
-/** Cumulative active time across generations; parked gaps never count. */
 export function elapsedMilliseconds(run: RunView, now: number = Date.now()): number {
 	let elapsed = run.elapsedMs ?? 0;
 	if (run.activeSince !== undefined) elapsed += Math.max(0, now - run.activeSince);
@@ -341,14 +333,6 @@ export function elapsedMilliseconds(run: RunView, now: number = Date.now()): num
 export function formatElapsed(run: RunView, now: number = Date.now()): string {
 	if (run.startedAt === undefined && run.elapsedMs <= 0) return "";
 	return formatDuration(elapsedMilliseconds(run, now));
-}
-
-export function continuationLabel(kind: ContinuationKind | undefined): string | undefined {
-	switch (kind) {
-		case "resume-retained": return "resume: current objective";
-		case "resume-appended": return "resume: appended objective";
-		default: return undefined;
-	}
 }
 
 /** Max length of the argument target inside a formatted activity line. */
@@ -505,7 +489,6 @@ export class MonitorStore {
 			usage: emptyUsage(),
 			elapsedMs: 0,
 			...(meta?.isolation ? { isolation: meta.isolation, integrationStatus: meta.isolation === "worktree" ? "pending" : undefined, ...(meta.worktreeId ? { worktreeId: meta.worktreeId } : {}) } : {}),
-			...(meta?.continuationKind ? { continuationKind: meta.continuationKind } : {}),
 		});
 		this.notify();
 		return id;
@@ -608,81 +591,9 @@ export class MonitorStore {
 	}
 
 
-	/** Update the objective shown for a resumed generation. */
-	setTask(id: number, task: string): void {
-		const run = this.find(id);
-		if (!run) return;
-		run.task = task;
-		run.label = runLabel(task);
-		this.notify();
-	}
-
-	setContinuationKind(id: number, kind: ContinuationKind): void {
-		const run = this.find(id);
-		if (!run) return;
-		run.continuationKind = kind;
-		this.notify();
-	}
-
 	getElapsedMs(id: number, now: number = Date.now()): number | undefined {
 		const run = this.find(id);
 		return run ? elapsedMilliseconds(run, now) : undefined;
-	}
-
-	/** Reuse a stable logical run id for a resumed generation without discarding
-	 * active time accumulated by earlier generations. */
-	restartRun(
-		id: number,
-		agent: string,
-		task: string,
-		model?: string,
-		thinking?: string,
-		isolation?: IsolationMode,
-		meta?: { elapsedMs?: number; continuationKind?: ContinuationKind; worktreeId?: string },
-	): void {
-		const run = this.find(id);
-		if (!run) {
-			this.runs.push({
-				id,
-				agent,
-				task,
-				label: runLabel(task),
-				model,
-				thinking,
-				...(isolation
-					? {
-						isolation,
-						integrationStatus: isolation === "worktree" ? "pending" as const : undefined,
-						...(isolation === "worktree" && meta?.worktreeId ? { worktreeId: meta.worktreeId } : {}),
-					}
-					: {}),
-				status: "queued",
-				waitReason: "process-slot",
-				usage: emptyUsage(),
-				elapsedMs: meta?.elapsedMs ?? 0,
-				continuationKind: meta?.continuationKind,
-			});
-			this.notify();
-			return;
-		}
-		run.agent = agent;
-		run.task = task;
-		run.label = runLabel(task);
-		run.model = model;
-		run.thinking = thinking;
-		if (isolation) run.isolation = isolation;
-		run.integrationStatus = isolation === "worktree" ? "pending" : undefined;
-		if (isolation === "worktree" && meta?.worktreeId) run.worktreeId = meta.worktreeId;
-		else if (isolation !== "worktree") run.worktreeId = undefined;
-		run.status = "queued";
-		run.waitReason = "process-slot";
-		run.usage = emptyUsage();
-		run.activity = undefined;
-		run.activeSince = undefined;
-		run.endedAt = undefined;
-		run.elapsedMs = Math.max(run.elapsedMs, meta?.elapsedMs ?? 0);
-		run.continuationKind = meta?.continuationKind;
-		this.notify();
 	}
 
 	/** Look up a run by id without removing it. */
@@ -721,8 +632,6 @@ export class MonitorStore {
 	summarize(run: RunView): string {
 		const usage = formatUsageCompact(run.usage);
 		const parts = [run.agent];
-		const continuation = continuationLabel(run.continuationKind);
-		if (continuation) parts.push(continuation);
 		if (run.model) parts.push(run.model);
 		if (run.thinking) parts.push(`thinking ${run.thinking}`);
 		if (run.isolation === "worktree") parts.push(`worktree ${run.integrationStatus ?? "active"}`);

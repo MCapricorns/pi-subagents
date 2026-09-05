@@ -16,6 +16,8 @@ import {
 	type RecoveryRecord,
 } from "../src/isolation/recovery.ts";
 import { TEMP_OWNER_FILE_NAME } from "../src/isolation/temp-hygiene.ts";
+import { createWorktreeIsolation, worktreeSnapshot } from "../src/isolation/worktree.ts";
+import { monitor } from "../src/presentation/monitor.ts";
 import {
 	PARKED_RECORD_MAX_AGE_MS,
 	PROJECT_ROOT_MAX_AGE_MS,
@@ -107,6 +109,46 @@ async function withFixture(run: (root: string, configPath: string) => Promise<vo
 		await rm(root, { recursive: true, force: true });
 	}
 }
+
+describe("interrupted work without a retained session", () => {
+	it("keeps isolated edits and allows final integration without changing the parent's index", async () => {
+		await withFixture(async (root, configPath) => {
+			const { cwd, repository } = await createRepository(root);
+			await execFileAsync("git", ["config", "core.autocrlf", "false"], { cwd: repository });
+			await writeFile(join(repository, "tracked.txt"), "parent staged edit\n", "utf8");
+			await execFileAsync("git", ["add", "tracked.txt"], { cwd: repository });
+			const indexBefore = (await execFileAsync("git", ["diff", "--cached"], { cwd: repository })).stdout;
+			const projectRoot = getProjectRoot(configPath, cwd);
+			const worktree = await createWorktreeIsolation(cwd, { tempBaseDir: join(projectRoot, "worktrees") });
+			const pendingFile = join(worktree.cwd, "pending.txt");
+			await writeFile(pendingFile, "unmerged child edit\n", "utf8");
+			const sessionDir = join(projectRoot, "sessions", "pi-subagent-session-missing");
+			await mkdir(sessionDir, { recursive: true });
+			const record = threadRecord(cwd, {
+				isolation: "worktree", executionCwd: worktree.cwd, worktree: worktreeSnapshot(worktree),
+				sessionId: "missing", sessionDir,
+			});
+			const runtime = createRuntime(fakePi(), configPath);
+			try {
+				await writeThreadManifest(configPath, cwd, [record]);
+				assert.equal((await readThreadRecords(configPath)).length, 1, "the recovery record must pass path validation");
+				const restored = await restoreDurableThreads(runtime);
+				assert.equal(existsSync(pendingFile), true, "a missing session must not delete unintegrated edits");
+				assert.deepEqual(restored, [71]);
+				const thread = runtime.threads.get(71)!;
+				assert.equal(thread.sessionId, undefined);
+				assert.equal(thread.sessionDir, undefined);
+				assert.equal((await thread.finalizeIsolation(thread.generation))?.status, "integrated");
+				assert.equal(await readFile(join(cwd, "pending.txt"), "utf8"), "unmerged child edit\n");
+				assert.equal((await execFileAsync("git", ["diff", "--cached"], { cwd: repository })).stdout, indexBefore);
+			} finally {
+				await runtime.shutdown();
+				await worktree.discard().catch(() => undefined);
+				monitor.clear();
+			}
+		});
+	});
+});
 
 describe("durable thread path validation", () => {
 	it("does not restore a forged external session and removes its record", async () => {

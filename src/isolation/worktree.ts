@@ -1,8 +1,8 @@
 /**
  * Detached Git worktree isolation for write-capable sub-agents.
  *
- * A handle is created before a child is queued and stays owned by the logical
- * thread across retries, model candidates, and resumes. Finalize
+ * A handle is created in the bounded queue and stays owned by the logical run
+ * across startup retries and model candidates. Finalize
  * is idempotent: it records a binary patch, applies it to the original working
  * tree without touching its index, then removes/prunes the temporary worktree.
  * Failed integration deliberately retains both the worktree and patch.
@@ -17,7 +17,6 @@ import {
 	runCommand,
 	type CommandResult,
 	type CommandRunner,
-	WORKTREE_PATCH_MAX_BYTES,
 } from "./git-command.ts";
 import { writeTempOwnerMarker } from "./temp-hygiene.ts";
 
@@ -25,9 +24,7 @@ export type IsolationMode = "shared" | "worktree";
 
 const WORKTREE_TEMP_DIR_PREFIX = "pi-subagent-worktree-";
 
-/** Short stable identity of one isolated worktree group (the mkdtemp suffix).
- * Continuation generations create a fresh worktree, so the identity
- * visibly changes when the group's filesystem boundary changes. */
+/** Short stable identity of one isolated worktree group (the mkdtemp suffix). */
 export function worktreeGroupId(worktree: Pick<WorktreeIsolation, "tempDir">): string {
 	const base = worktree.tempDir.split(/[\\/]/).filter(Boolean).pop() ?? worktree.tempDir;
 	return base.startsWith(WORKTREE_TEMP_DIR_PREFIX)
@@ -60,9 +57,8 @@ export interface WorktreeCheckpointRef {
 }
 
 /** Persistable projection of one worktree handle: enough to rebuild the
- * handle after a reload or restart. Patch bytes are deliberately omitted —
- * only the checkpoint commit, which lives in the shared repository object
- * store, is needed to seed a continuation. */
+ * handle after a reload or restart. Patch bytes are deliberately omitted;
+ * the checkpoint commit remains in the shared repository as recovery evidence. */
 export interface WorktreeSnapshot {
 	originalCwd: string;
 	originalRoot: string;
@@ -81,11 +77,6 @@ export interface WorktreeCreateOptions {
 	/** Parent directory for the worktree group: the project-scoped durable
 	 * worktrees root, so isolation never lands in the OS temp directory. */
 	tempBaseDir: string;
-	/** Complete source generation checkpoint merged onto the current HEAD. */
-	seedCheckpoint?: WorktreeCheckpoint;
-	/** The seed is already present in the parent checkout, so only later edits
-	 * should be integrated when this continuation settles. */
-	seedIsIntegrated?: boolean;
 }
 
 export type WorktreeFinalizationStatus = "integrated" | "no_changes" | "retained";
@@ -110,17 +101,12 @@ export interface WorktreeIsolation {
 	readonly tempDir: string;
 	readonly patchPath: string;
 	readonly head: string;
-	/** Diff base for final integration; a continuation baseline commit when
-	 * the generation was seeded with already-integrated work. */
+	/** Diff base retained in snapshots so recovery never reapplies integrated work. */
 	readonly integrationBaseHead: string;
 	readonly state: "active" | "finalizing" | WorktreeFinalizationStatus;
-	/** Checkpoint retained after finalization for continuation resumes. */
+	/** Checkpoint retained after finalization for recovery evidence. */
 	getContinuationCheckpoint(): WorktreeCheckpoint | undefined;
-	/** Capture the complete isolated filesystem state for a fresh continuation.
-	 * The synthetic commit lets Git merge an already-committed seed without
-	 * attempting to apply the same patch twice. */
-	snapshotCheckpoint(): Promise<WorktreeCheckpoint>;
-	/** Remove a newly-created continuation that failed before it was dispatched. */
+	/** Remove an unused worktree whose dispatch was cancelled. */
 	discard(): Promise<void>;
 	/** Whether anything is pending against the integration base — the same
 	 * question finalization answers as `hadChanges`, asked before settlement so
@@ -319,8 +305,7 @@ class GitWorktreeIsolation implements WorktreeIsolation {
 	private currentState: WorktreeIsolation["state"] = "active";
 	private finalization?: Promise<WorktreeFinalization>;
 	private discardPromise?: Promise<void>;
-	/** Full workspace checkpoint relative to the generation's starting HEAD,
-	 * retained after cleanup so settled threads can continue safely. */
+	/** Full workspace checkpoint retained for manual recovery. */
 	private continuationCheckpoint?: WorktreeCheckpoint;
 
 	constructor(
@@ -332,8 +317,7 @@ class GitWorktreeIsolation implements WorktreeIsolation {
 		readonly patchPath: string,
 		readonly head: string,
 		private readonly runner: CommandRunner,
-		/** May be a synthetic tree commit representing a seed that the parent
-		 * checkout already contains. Finalization then integrates only new edits. */
+		/** A restored base may represent work already integrated into the parent. */
 		readonly integrationBaseHead: string = head,
 		restored?: {
 			state: WorktreeIsolation["state"];
@@ -354,19 +338,6 @@ class GitWorktreeIsolation implements WorktreeIsolation {
 		return this.continuationCheckpoint ? cloneCheckpoint(this.continuationCheckpoint) : undefined;
 	}
 
-	async snapshotCheckpoint(): Promise<WorktreeCheckpoint> {
-		if (this.continuationCheckpoint) return cloneCheckpoint(this.continuationCheckpoint);
-		if (this.currentState === "no_changes") {
-			return { baseHead: this.head, commit: this.head, patch: Buffer.alloc(0) };
-		}
-		if (!existsSync(this.worktreePath)) {
-			throw new Error(`Cannot snapshot isolated worktree after it was removed: ${this.worktreePath}`);
-		}
-		const snapshot = await this.collectChanges(this.head);
-		this.continuationCheckpoint = await this.createCheckpoint(snapshot.stdout);
-		return cloneCheckpoint(this.continuationCheckpoint);
-	}
-
 	discard(): Promise<void> {
 		if (this.discardPromise) return this.discardPromise;
 		if (this.finalization) {
@@ -385,8 +356,8 @@ class GitWorktreeIsolation implements WorktreeIsolation {
 
 	async hasPendingChanges(): Promise<boolean> {
 		// A settled worktree already recorded the answer; asking Git again after
-		// removal would fail. Diffing the integration base (not HEAD) keeps a
-		// continuation honest: only this generation's own work counts.
+		// removal would fail. Diffing the integration base (not HEAD) excludes
+		// previously integrated work from the recovered run's pending changes.
 		if (this.currentState === "no_changes") return false;
 		if (this.currentState !== "active" || !existsSync(this.worktreePath)) return true;
 		const diff = await this.collectChanges(this.integrationBaseHead);
@@ -633,50 +604,6 @@ export async function createWorktreeIsolation(
 		await mkdir(isolatedCwd, { recursive: true });
 		await linkNodeModules(runner, target.originalRoot, worktreePath);
 
-		let integrationBaseHead = target.head;
-		const checkpoint = options.seedCheckpoint;
-		if (checkpoint && checkpoint.patch.length > WORKTREE_PATCH_MAX_BYTES) {
-			throw new Error(
-				`Isolated checkpoint exceeds the ${WORKTREE_PATCH_MAX_BYTES}-byte patch limit (${checkpoint.patch.length} bytes).`,
-			);
-		}
-		if (checkpoint && checkpoint.patch.length > 0) {
-			// Merge the checkpoint commit with today's HEAD instead of blindly
-			// applying its old patch. If the parent committed generation one after
-			// integration, Git recognizes the equivalent tree and produces HEAD
-			// unchanged; unrelated newer commits are preserved by the three-way merge.
-			const merged = await runGit(
-				runner,
-				worktreePath,
-				["merge-tree", "--write-tree", "--messages", target.head, checkpoint.commit],
-				`Merging isolated checkpoint into continuation ${worktreePath}`,
-			);
-			const mergedTree = merged.stdout.toString("utf8").split(/\r?\n/, 1)[0]?.trim();
-			if (!mergedTree) throw new Error("Git returned no merged continuation tree id.");
-			await runGit(
-				runner,
-				worktreePath,
-				["read-tree", "--reset", "-u", mergedTree],
-				`Materializing isolated checkpoint in ${worktreePath}`,
-			);
-			if (options.seedIsIntegrated) {
-				const commit = await runGit(
-					runner,
-					worktreePath,
-					[
-						"-c", "user.name=pi-subagents",
-						"-c", "user.email=pi-subagents@example.invalid",
-						"commit-tree", mergedTree,
-						"-p", target.head,
-						"-m", "pi-subagents continuation baseline",
-					],
-					`Creating continuation baseline commit in ${worktreePath}`,
-				);
-				integrationBaseHead = commit.stdout.toString("utf8").trim();
-				if (!integrationBaseHead) throw new Error("Git returned no continuation baseline commit id.");
-			}
-		}
-
 		return new GitWorktreeIsolation(
 			target.originalCwd,
 			target.originalRoot,
@@ -686,7 +613,6 @@ export async function createWorktreeIsolation(
 			patchPath,
 			target.head,
 			runner,
-			integrationBaseHead,
 		);
 	} catch (error) {
 		const rollbackErrors: string[] = [];
@@ -795,8 +721,7 @@ export function normalizeWorktreeSnapshot(value: unknown): WorktreeSnapshot | nu
 /** Rebuild a handle from a persisted snapshot. Returns undefined when the
  * on-disk worktree that an active/retained snapshot promises is gone; settled
  * states (integrated/no_changes) intentionally need no filesystem. The
- * restored checkpoint carries no patch bytes — only its commit is consumed by
- * continuation seeds. */
+ * restored checkpoint retains its commit identity without duplicating patch bytes. */
 export async function restoreWorktreeIsolation(
 	snapshot: WorktreeSnapshot,
 	options: { runner?: CommandRunner } = {},

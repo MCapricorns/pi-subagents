@@ -290,7 +290,7 @@ export function isRetryableStartupFailure(result: SingleResult, durationMs: numb
 }
 
 export function formatStartupRetryExhaustedError(model: string, attempts: number): string {
-	return `Subagent failed to start after ${attempts} attempt${attempts === 1 ? "" : "s"} on ${model}: the child failed before its initial RPC prompt was dispatched and produced no model, tool, output, or usage activity. This is typically a concurrent pi startup race (several sub-agents starting at once). Retry the dispatch, or dispatch fewer sub-agents at once.`;
+	return `Subagent failed to start after ${attempts} attempt${attempts === 1 ? "" : "s"} on ${model}: the child failed before its initial RPC prompt was dispatched and produced no model, tool, output, or usage activity. Main handles this phase; inspect launch diagnostics instead of redispatching it.`;
 }
 
 export async function waitForStartupRetry(delayMs: number, signal?: AbortSignal): Promise<boolean> {
@@ -334,31 +334,31 @@ async function waitForControlledRetry(
 	return !signal?.aborted && !control?.isStopRequested();
 }
 
-export function getResultOutput(result: SingleResult): string {
-	if (isFailedResult(result)) {
-		const error = result.errorMessage || result.stderr;
-		const partial = getFinalOutput(result.messages);
-		if (error && partial) return `${error}\n\n--- Partial output ---\n${partial}`;
-		return error || partial || "(no output)";
-	}
-	return getFinalOutput(result.messages) || "(no output)";
+/** Runtime/assistant diagnostics, never an inference from individual failed tools. */
+export function getResultError(result: SingleResult): string | undefined {
+	if (result.exitCode === -1 || !isFailedResult(result)) return undefined;
+	return result.errorMessage?.trim()
+		|| lastAssistantMessage(result.messages)?.errorMessage?.trim()
+		|| result.stderr.trim()
+		|| (result.stopReason === "aborted"
+			? "Subagent was aborted."
+			: `Subagent failed (exit code ${result.exitCode}${result.stopReason ? `, stop reason ${result.stopReason}` : ""}); no failure reason was recorded.`);
 }
 
-/** Continuation rules shared by every resume flavor. The workspace clause is
- * what keeps a retained context from becoming a liability: a parked or settled
- * thread may return after main integrated sibling worktrees or edited the tree
- * itself, so a file read in an earlier generation is not proof of its content. */
+export function getResultOutput(result: SingleResult): string {
+	const error = getResultError(result);
+	const output = getFinalOutput(result.messages);
+	if (error && output) return `${error}\n\n--- Partial output ---\n${output}`;
+	return error || output || "(no output)";
+}
+
+/** Model handoff preserves useful history, but main or siblings may have edited
+ * the workspace since the selected model last read it. */
 const RESUME_CONTINUATION_RULES =
 	"Your earlier work — searches, reads, edits, and reasoning — is preserved in this session's history above; review it before acting. Do not redo searches, reads, or edits that already succeeded. The workspace may have changed while this thread was inactive: before editing a file, re-read it unless you read it during this continuation. Finish with the result-only handoff your role requires.";
 
 export function buildResumePrompt(task: string, reason: string): string {
 	return `You are resuming an earlier sub-agent session after ${reason}. ${RESUME_CONTINUATION_RULES} Current objective: ${task}. Pick up exactly where you left off and finish it. Continue now.`;
-}
-
-/** A resume with an appended objective continues the same thread: the new
- * objective is guidance layered on retained context, not a restart. */
-export function buildAppendedObjectivePrompt(previousTask: string, objective: string): string {
-	return `You are continuing an earlier sub-agent session with an appended objective from the parent. ${RESUME_CONTINUATION_RULES} Previous objective: ${previousTask}. Appended objective: ${objective}. Complete the appended objective on top of the work already done, without restarting from scratch. Continue now.`;
 }
 
 /** Create a fresh private session directory under the given root. The owner
@@ -553,10 +553,11 @@ export async function runSingleAgentWithMainFallback(
 			}
 			const delay = startupDelays[attempt];
 			if (delay === undefined) {
-				lastResult.errorMessage = formatStartupRetryExhaustedError(
+				const reason = getResultError(lastResult);
+				lastResult.errorMessage = [formatStartupRetryExhaustedError(
 					lastResult.model ?? opts.agent.model ?? "default",
 					attempt + 1,
-				);
+				), reason].filter(Boolean).join("\n");
 				lastResult.stopReason ??= "error";
 				lastResult.dispatchFailed = true;
 				return lastResult;

@@ -9,6 +9,7 @@
 import { stat } from "node:fs/promises";
 import type { Api, Model } from "@earendil-works/pi-ai";
 import type { ExtensionCommandContext } from "@earendil-works/pi-coding-agent";
+import { discoverAgents } from "../delegation/agents.ts";
 import {
 	AGENT_PROFILES,
 	BUILTIN_AGENT_NAMES,
@@ -46,16 +47,13 @@ const THINKING_LEVEL_HINTS: Record<ThinkingLevel, string> = {
 	max: "strongest reasoning",
 };
 
-function setupAgentNames(config: SubagentsConfig): string[] {
-	return [
-		...new Set([
-			...BUILTIN_AGENT_NAMES,
-			...config.knownAgents,
-			...config.enabledAgents,
-			...Object.keys(config.agentModels),
-			...Object.keys(config.agentThinkingLevels),
-		]),
-	];
+function setupAgentNames(ctx: ExtensionCommandContext, config: SubagentsConfig): string[] {
+	const { agents } = discoverAgents(ctx.cwd, {
+		scope: config.agentScope,
+		projectTrusted: ctx.isProjectTrusted?.() === true,
+	});
+	const available = new Set(agents.map((agent) => agent.name));
+	return [...new Set([...BUILTIN_AGENT_NAMES, ...available])].filter((name) => available.has(name));
 }
 
 function agentPickerItems(names: readonly string[]): Array<{ value: string; label: string; description: string }> {
@@ -87,12 +85,13 @@ async function pickEnabledAgents(
 	ctx: ExtensionCommandContext,
 	config: SubagentsConfig,
 ): Promise<string[] | undefined> {
+	const names = setupAgentNames(ctx, config);
 	return promptSelectMany(
 		ctx,
 		"Which agents should run?",
 		"Each line is a role and its job. Space toggles • Enter confirms • Esc back",
-		agentPickerItems(setupAgentNames(config)),
-		config.enabledAgents,
+		agentPickerItems(names),
+		config.enabledAgents.filter((name) => names.includes(name)),
 	);
 }
 
@@ -210,8 +209,10 @@ async function configureOneAgent(
 	ctx: ExtensionCommandContext,
 	config: SubagentsConfig,
 ): Promise<ConfiguredAgentChoice | undefined> {
+	const available = setupAgentNames(ctx, config);
+	const enabled = config.enabledAgents.filter((name) => available.includes(name));
 	while (true) {
-		const name = await pickAgentToConfigure(ctx, config.enabledAgents);
+		const name = await pickAgentToConfigure(ctx, enabled);
 		if (name === undefined) return undefined;
 		const profile = agentProfile(name);
 		if (profile) ctx.ui.notify(`${name}: ${profile.remark}`, "info");
@@ -289,7 +290,7 @@ async function runFullSetup(ctx: ExtensionCommandContext, configPath: string, ba
 
 	const next: SubagentsConfig = {
 		enabledAgents: enabled,
-		knownAgents: setupAgentNames(base),
+		knownAgents: setupAgentNames(ctx, base),
 		agentModels,
 		agentThinkingLevels: keepAgentEntries(base.agentThinkingLevels, enabled),
 		maxResultLines: base.maxResultLines,
@@ -326,6 +327,7 @@ async function runMenu(ctx: ExtensionCommandContext, configPath: string, config:
 			const enabled = await pickEnabledAgents(ctx, config);
 			if (enabled === undefined) continue;
 			next.enabledAgents = enabled;
+			next.knownAgents = setupAgentNames(ctx, config);
 			next.agentModels = keepAgentEntries(next.agentModels, enabled);
 			next.agentThinkingLevels = keepAgentEntries(next.agentThinkingLevels, enabled);
 		} else {

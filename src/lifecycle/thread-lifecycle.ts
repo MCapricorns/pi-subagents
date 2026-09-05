@@ -4,42 +4,20 @@
  * Dispatch owns tool policy and role briefs; this module owns one
  * stable parent generation end to end: managed-repository lane use,
  * worktree setup/finalization, queue/process ownership,
- * retained-session resume, and guarded one-time terminal publication.
+ * recovery artifacts, and guarded one-time terminal publication.
  */
 
-import type { ExtensionContext } from "@earendil-works/pi-coding-agent";
-import { existsSync } from "node:fs";
-import { rm } from "node:fs/promises";
 import { join, resolve } from "node:path";
-import {
-	discoverAgents,
-	isWriteCapableAgent,
-	resolveAgentTools,
-	type AgentConfig,
-} from "../delegation/agents.ts";
-import { type CompletionMessageItem } from "./completion.ts";
+import { isWriteCapableAgent, resolveAgentTools, type AgentConfig } from "../delegation/agents.ts";
+import type { CompletionMessageItem } from "./completion.ts";
 import { loadConfig } from "../configuration/config.ts";
-import {
-	dispatchFailedResult,
-	failedStartResult,
-	formatCompletionBlock,
-	modelLevelTakeoverNote,
-	queuedResult,
-} from "../presentation/format.ts";
+import { dispatchFailedResult, failedStartResult, formatCompletionBlock, modelLevelTakeoverNote, queuedResult } from "../presentation/format.ts";
 import { monitor } from "../presentation/monitor.ts";
 import { findDuplicateDispatch } from "../delegation/prompt.ts";
-import {
-	findWriterLeaseScopeOverlap,
-	mergePhaseScopes,
-	normalizePhaseId,
-	normalizePhaseScope,
-} from "../delegation/phase-scope.ts";
+import { findWriterLeaseScopeOverlap, normalizePhaseId, normalizePhaseScope } from "../delegation/phase-scope.ts";
 import { persistRecoveryRecords, recoveryRecordFromFinalization } from "../isolation/recovery.ts";
 import type { SubagentRuntime, SubagentThread, ThreadState } from "./runtime.ts";
-import { forkRetainedSession } from "../execution/session-fork.ts";
 import {
-	buildAppendedObjectivePrompt,
-	buildResumePrompt,
 	getProjectRoot,
 	RpcRunControl,
 	isFailedResult,
@@ -50,18 +28,13 @@ import {
 	type SubagentLiveEvent,
 } from "../execution/spawn.ts";
 import {
-	beginRuntimePreflight,
 	isWorktreeCapableAgent,
-	ownsResumeReservation,
 	persistThreadCheckpoint,
 	projectResultsRoot,
-	quiesced,
 	resolveDispatchModelRoute,
 	runInManagedRepositoryLane,
 	withWorktreeSystemPrompt,
 	type DispatchEnvironment,
-	type ResumeReservation,
-	type SessionSeed,
 	type StartBackgroundInternal,
 	type StartBackgroundOptions,
 	type ThreadLifecycleDeps,
@@ -76,8 +49,7 @@ import {
 
 interface BackgroundDispatcherOptions {
 	runtime: SubagentRuntime;
-	/** Live dispatch environment; resolved lazily so control operations work
-	 * before the first dispatch of a process (restored threads). */
+	/** Current parent context, config, and role catalog for a fresh dispatch. */
 	getEnvironment: () => DispatchEnvironment;
 	finishRun: (
 		runId: number,
@@ -110,135 +82,67 @@ export function createBackgroundDispatcher(options: BackgroundDispatcherOptions)
 		isolation: IsolationMode = "shared",
 		startOptions: StartBackgroundOptions = {},
 	): Promise<SingleResult> => {
-		const {
-			phaseId: requestedPhaseId,
-			scope: requestedScope,
-			writeCapable: requestedWriteCapable,
-			existingThread,
-			appendedObjectiveOnResume = false,
-			environment,
-			seed,
-			resumeReservation,
-			deliveryRoute = "background",
-		} = startOptions;
 		if (!runtime.sessionActive) {
-			return failedStartResult(agentName, task, "Parent session shut down before this subagent generation could start.");
+			return failedStartResult(agentName, task, "Parent session shut down before this subagent run could start.");
 		}
-		if (existingThread && (!resumeReservation || !ownsResumeReservation(runtime, existingThread, resumeReservation))) {
-			return failedStartResult(agentName, task, `Run #${existingThread.id} changed while resume was preparing; no new generation was started.`);
-		}
-		const baseEnvironment = environment ?? getEnvironment();
+		const baseEnvironment = getEnvironment();
 		const runCtx = baseEnvironment.ctx;
 		const runConfig = baseEnvironment.config;
-		const runAgents = baseEnvironment.agents;
-		const discoveredAgent = runAgents.find((candidate) => candidate.name === agentName);
+		const discoveredAgent = baseEnvironment.agents.find((candidate) => candidate.name === agentName);
 		if (!discoveredAgent) return failedStartResult(agentName, task, `Unknown agent: "${agentName}".`);
 		const resolveLiveAgentTools = (candidate: AgentConfig): AgentConfig =>
 			resolveAgentTools({ ...candidate, tools: discoveredAgent.tools }, runtime.getActiveTools());
 		const agent = resolveLiveAgentTools(discoveredAgent);
-
 		const originalCwd = resolve(cwd ?? runCtx.cwd);
 		let phaseId: string | undefined;
 		let scope: ReturnType<typeof normalizePhaseScope>;
 		try {
-			phaseId = normalizePhaseId(existingThread ? existingThread.phaseId : requestedPhaseId);
-			const requested = normalizePhaseScope(requestedScope, originalCwd);
-			scope = existingThread ? mergePhaseScopes(existingThread.scope, requested) : requested;
+			phaseId = normalizePhaseId(startOptions.phaseId);
+			scope = normalizePhaseScope(startOptions.scope, originalCwd);
 		} catch (error) {
 			return failedStartResult(agentName, task, error instanceof Error ? error.message : String(error));
 		}
-		const currentWriteCapable = isWriteCapableAgent(agent);
-		const priorWriteCapable = existingThread
-			? (existingThread.writeCapable ?? existingThread.agentName !== "scout")
-			: Boolean(requestedWriteCapable);
-		const writeCapable = priorWriteCapable || currentWriteCapable;
+		const writeCapable = Boolean(startOptions.writeCapable) || isWriteCapableAgent(agent);
 		if (isolation === "worktree" && !isWorktreeCapableAgent(agent)) {
 			return {
 				...failedStartResult(agentName, task, `Agent "${agentName}" is read-only; worktree isolation is available only to write-capable agents such as artisan.`),
 				isolation,
 			};
 		}
-		if (!existingThread) {
-			const duplicate = findDuplicateDispatch(runtime.threads.values(), task, originalCwd, phaseId);
-			if (duplicate?.kind === "active") {
-				return failedStartResult(
-					agentName,
-					task,
-					`Duplicate active dispatch matches run #${duplicate.source.id} (${duplicate.source.agentName}). Use that logical thread instead; resume #${duplicate.source.id} when it is eligible.`,
-				);
-			}
-			if (duplicate?.kind === "settled") {
-				// The same brief on the same tree would re-buy work whose result main
-				// already holds; the retained session continues it for a fraction.
-				return failedStartResult(
-					agentName,
-					task,
-					`Run #${duplicate.source.id} (${duplicate.source.agentName}) already ${duplicate.source.state} this logical phase and kept its context; its result was delivered. Resume #${duplicate.source.id} with an appended objective instead of paying for a second run${phaseId ? "; keep using the same phaseId on that thread" : ", or restate the brief with what changed"}.`,
-				);
-			}
+		const duplicate = findDuplicateDispatch(runtime.threads.values(), task, originalCwd, phaseId);
+		if (duplicate) {
+			return failedStartResult(agentName, task,
+				`Run #${duplicate.source.id} (${duplicate.source.agentName}) already owns this logical phase (${duplicate.source.state}). Do not redispatch it; inspect its result or let it finish. Main handles follow-up work.`);
 		}
 		if (writeCapable && scope) {
-			const conflict = findWriterLeaseScopeOverlap(scope, runtime.threads.values(), existingThread?.id);
+			const conflict = findWriterLeaseScopeOverlap(scope, runtime.threads.values());
 			if (conflict) {
-				return failedStartResult(
-					agentName,
-					task,
-					`Declared writer scope ${conflict.overlap.left} overlaps active run #${conflict.lease.id} scope ${conflict.overlap.right}; no new generation was started.`,
-				);
+				return failedStartResult(agentName, task,
+					`Declared writer scope ${conflict.overlap.left} overlaps active run #${conflict.lease.id} scope ${conflict.overlap.right}; no run was started.`);
 			}
 		}
 		const projectRoot = getProjectRoot(runtime.configPath, originalCwd);
 		const sessionsRoot = join(projectRoot, "sessions");
 		const worktreesRoot = join(projectRoot, "worktrees");
 		const scratchRoot = join(projectRoot, "tmp");
-		const previousWorktree = existingThread?.worktree;
-		let worktree = seed?.worktree ?? previousWorktree;
-		if (isolation === "worktree" && worktree && worktree.state !== "active") {
-			return {
-				...failedStartResult(agentName, task, `Run #${existingThread?.id ?? "?"} has no active continuation worktree.`),
-				isolation,
-				integrationStatus: worktree.state === "finalizing" ? "pending" : worktree.state,
-			};
-		}
-		let executionCwd = worktree?.cwd ?? originalCwd;
-		let worktreeGroup = worktree ? worktreeGroupId(worktree) : undefined;
-		// A resume re-runs at the strength its dispatch asked for, so the retained
-		// request survives generations (and, via the durable record, restarts).
+		let worktree: WorktreeIsolation | undefined;
+		let executionCwd = originalCwd;
+		let worktreeGroup: string | undefined;
 		const resolvedRoute = resolveDispatchModelRoute(agent, runConfig, runCtx);
-		// Isolation is a persistent system-level invariant, not a one-shot task
-		// prefix: resumes and main-model
-		// handoffs all keep the same worktree boundary.
 		const route = isolation === "worktree"
 			? { ...resolvedRoute, agent: withWorktreeSystemPrompt(resolvedRoute.agent) }
 			: resolvedRoute;
 		const thinkingLevel = route.thinkingLevel;
-		const priorTask = existingThread?.task;
-		const priorSessionId = seed?.sessionId ?? existingThread?.sessionId;
-		const priorSessionDir = seed?.sessionDir ?? existingThread?.sessionDir;
-		const runId = existingThread?.id ?? monitor.addRun(agent.name, task, route.agent.model, thinkingLevel, {
-			isolation,
-			...(worktreeGroup ? { worktreeId: worktreeGroup } : {}),
-		});
-		runtime.claimRunDelivery(runId, deliveryRoute);
-		const generation = (existingThread?.generation ?? 0) + 1;
+		const runId = monitor.addRun(agent.name, task, route.agent.model, thinkingLevel, { isolation });
+		runtime.claimRunDelivery(runId, startOptions.deliveryRoute ?? "background");
+		const generation = 1;
 		const pending: SingleResult = {
 			...queuedResult(route.agent, task, thinkingLevel),
 			runId,
 			projectCwd: originalCwd,
 			isolation,
 			...(isolation === "worktree" ? { integrationStatus: "pending" as const } : {}),
-			...(seed?.sessionId && seed.sessionDir
-				? { sessionId: seed.sessionId, sessionDir: seed.sessionDir }
-				: {}),
 		};
-		if (existingThread) {
-			monitor.restartRun(runId, agent.name, task, route.agent.model, thinkingLevel, isolation, {
-				elapsedMs: existingThread.elapsedMs,
-				continuationKind: appendedObjectiveOnResume ? "resume-appended" : "resume-retained",
-				...(worktreeGroup ? { worktreeId: worktreeGroup } : {}),
-			});
-			runtime.settledRuns.delete(runId);
-		}
 
 		let thread!: SubagentThread;
 		const control = new RpcRunControl(task, generation, (phase) => {
@@ -257,62 +161,29 @@ export function createBackgroundDispatcher(options: BackgroundDispatcherOptions)
 			else if (state === "running") monitor.setStatus(runId, "running");
 		});
 
-
-		if (existingThread) {
-			thread = existingThread;
-			thread.generation = generation;
-			thread.agentName = agent.name;
-			thread.task = task;
-			thread.phaseId = phaseId;
-			thread.scope = scope;
-			thread.writeCapable = writeCapable;
-			thread.cwd = originalCwd;
-			thread.executionCwd = executionCwd;
-			thread.thinkingLevel = thinkingLevel;
-			thread.isolation = isolation;
-			thread.worktree = worktree;
-			thread.state = "queued";
-			thread.control = control;
-			// A newly admitted generation owns no output yet. Keeping the prior
-			// generation here would make a queued stop publish stale task,
-			// session metadata as this generation's partial.
-			thread.lastResult = undefined;
-			if (seed?.sessionId && seed.sessionDir) {
-				thread.sessionId = seed.sessionId;
-				thread.sessionDir = seed.sessionDir;
-			}
-			thread.retireOnSettle = false;
-			thread.isolationFailureNotified = false;
-		} else {
-			thread = {
-				id: runId,
-				generation,
-				agentName: agent.name,
-				task,
-				phaseId,
-				scope,
-				writeCapable,
-				cwd: originalCwd,
-				executionCwd,
-				thinkingLevel,
-				isolation,
-				worktree,
-				state: "queued",
-				control,
-				generationCompletion: Promise.resolve(),
-				lifecycleVersion: 0,
-				elapsedMs: 0,
-				sessionId: seed?.sessionId,
-				sessionDir: seed?.sessionDir,
-				resume: async () => failedStartResult(agent.name, task, "Thread resume was not initialized."),
-				finalizeIsolation: async () => undefined,
-			};
-			runtime.threads.set(runId, thread);
-		}
+		thread = {
+			id: runId,
+			generation,
+			agentName: agent.name,
+			task,
+			phaseId,
+			scope,
+			writeCapable,
+			cwd: originalCwd,
+			executionCwd,
+			thinkingLevel,
+			isolation,
+			state: "queued",
+			control,
+			generationCompletion: Promise.resolve(),
+			lifecycleVersion: 0,
+			elapsedMs: 0,
+			finalizeIsolation: async () => undefined,
+		};
+		runtime.threads.set(runId, thread);
 		const installCurrentLifecycle = (): void => installThreadLifecycle(thread, {
 			runtime,
 			runCtx,
-			startBackground: (...args) => startBackground(...args),
 		});
 		if (isolation === "shared" || worktree) installCurrentLifecycle();
 
@@ -378,15 +249,6 @@ export function createBackgroundDispatcher(options: BackgroundDispatcherOptions)
 							idleTimeoutMs: activeIdleTimeoutMs,
 							sessionRoot: sessionsRoot,
 							scratchRoot,
-							...(priorSessionId && priorSessionDir
-								? {
-									sessionId: priorSessionId,
-									sessionDir: priorSessionDir,
-									stdinText: appendedObjectiveOnResume
-										? buildAppendedObjectivePrompt(priorTask ?? task, task)
-										: buildResumePrompt(priorTask ?? task, "the retained thread was resumed"),
-								}
-								: {}),
 						},
 						activeRoute.mainFallbackRef,
 					);
@@ -403,8 +265,7 @@ export function createBackgroundDispatcher(options: BackgroundDispatcherOptions)
 					};
 				}
 
-				// A stale process/generation may finish after a superseded resume. It owns
-				// no monitor mutation, result registration, or completion delivery.
+				// Stale work from a retired parent owns no publication or monitor updates.
 				if (runtime.threads.get(runId)?.generation !== generation) return;
 				result.runId = runId;
 				result.projectCwd = originalCwd;
@@ -423,14 +284,9 @@ export function createBackgroundDispatcher(options: BackgroundDispatcherOptions)
 				}
 
 				const lifecycleInterrupted = (): boolean =>
-					thread.lifecycleOperation === "stop" ||
-					thread.lifecycleOperation === "park" ||
-					thread.state === "stopped";
-				// Destructive stop and park own publication once they have
-				// synchronously claimed the lifecycle. Leave the partial result/session
-				// on the thread; stop waits for this queue task, finalizes isolation,
-				// and emits exactly one aborted result, while park records the
-				// checkpoint and answers through its own tool result.
+					thread.lifecycleOperation === "stop" || thread.state === "stopped";
+				// Stop owns publication once it claims the lifecycle. Leave the partial
+				// result on the thread for that owner to finalize and deliver once.
 				if (lifecycleInterrupted()) return;
 
 				// A shutdown can win in the microtask gap after the child RPC
@@ -484,7 +340,7 @@ export function createBackgroundDispatcher(options: BackgroundDispatcherOptions)
 				const completion: CompletionMessageItem = {
 					agent: result.agent,
 					block: modelLevel
-						? `${formatCompletionBlock(result, runConfig.maxResultLines, { resultRoot: projectResultsRoot(runtime.configPath, result.projectCwd ?? originalCwd) })}\n\n${modelLevelTakeoverNote(result, { runId })}`
+						? `${formatCompletionBlock(result, runConfig.maxResultLines, { resultRoot: projectResultsRoot(runtime.configPath, result.projectCwd ?? originalCwd) })}\n\n${modelLevelTakeoverNote(result)}`
 						: formatCompletionBlock(result, runConfig.maxResultLines, { resultRoot: projectResultsRoot(runtime.configPath, result.projectCwd ?? originalCwd) }),
 					usage: result.usage,
 				};
@@ -522,9 +378,9 @@ export function createBackgroundDispatcher(options: BackgroundDispatcherOptions)
 			() => {
 				if (runtime.threads.get(runId)?.generation !== generation) return;
 				// A destructive stop owns publication and may still be finalizing an
-				// isolated worktree; a park owns the checkpoint. Do not expose a
+				// isolated worktree. Do not expose a
 				// terminal monitor state before that owner records its outcome.
-				if (thread.lifecycleOperation === "stop" || thread.lifecycleOperation === "park") return;
+				if (thread.lifecycleOperation === "stop") return;
 				runtime.runControllers.delete(runId);
 				thread.queueController = undefined;
 				thread.state = "stopped";
@@ -538,10 +394,10 @@ export function createBackgroundDispatcher(options: BackgroundDispatcherOptions)
 			async (error) => {
 				if (runtime.threads.get(runId)?.generation !== generation) return;
 				// Queue-level crashes use the same settlement reservation as ordinary
-				// results. A concurrent destructive stop or park may supersede it while
+				// results. A concurrent destructive stop may supersede it while
 				// slow worktree finalization is running, in which case that owner
 				// publishes once.
-				if (thread.lifecycleOperation === "stop" || thread.lifecycleOperation === "park") return;
+				if (thread.lifecycleOperation === "stop") return;
 				const settlementVersion = ++thread.lifecycleVersion;
 				thread.lifecycleOperation = "settle";
 				const ownsSettlement = (): boolean =>
@@ -608,16 +464,10 @@ export function createBackgroundDispatcher(options: BackgroundDispatcherOptions)
 	return startBackground;
 }
 
-/** Install resume/finalize control surfaces on a thread. Called for
- * every fresh generation (closures refresh with the current dispatch context)
- * and for threads restored from the durable manifest, whose startBackground
- * resolves the live dispatcher at call time. */
+/** Install the shared settlement hook for a fresh run or recovered worktree. */
 export function installThreadLifecycle(thread: SubagentThread, deps: ThreadLifecycleDeps): void {
-	const { runtime, startBackground } = deps;
+	const { runtime } = deps;
 	const runId = thread.id;
-	const projectRoot = getProjectRoot(runtime.configPath, thread.cwd);
-	const sessionsRoot = join(projectRoot, "sessions");
-	const worktreesRoot = join(projectRoot, "worktrees");
 
 	thread.notifyIsolationFailure = (finalization) => {
 		const paths = [finalization.worktreePath, finalization.patchPath].filter(Boolean).join(" · ");
@@ -694,257 +544,4 @@ export function installThreadLifecycle(thread: SubagentThread, deps: ThreadLifec
 		return finalization;
 	};
 
-	const cleanupTrackedSessionDir = async (sessionDir: string, action: string): Promise<void> => {
-		try {
-			await rm(sessionDir, { recursive: true, force: true });
-			runtime.sessionDirs.delete(sessionDir);
-		} catch (error) {
-			// Keep ownership so shutdown can retry; losing the path here leaks a
-			// cloned session containing retained model context on Windows locks.
-			try {
-				deps.runCtx?.ui.notify(
-					`✗ ${action}; retained ${sessionDir} for shutdown cleanup: ${error instanceof Error ? error.message : String(error)}`,
-					"error",
-				);
-			} catch {
-				/* cleanup ownership remains tracked even if the UI is unavailable */
-			}
-		}
-	};
-
-	const discardUnusedWorktree = async (candidate: WorktreeIsolation | undefined): Promise<void> => {
-		if (!candidate) return;
-		try {
-			await candidate.discard();
-		} catch (error) {
-			const retainedPath = existsSync(candidate.worktreePath)
-				? candidate.worktreePath
-				: existsSync(candidate.tempDir)
-					? candidate.tempDir
-					: undefined;
-			const finalization: WorktreeFinalization = {
-				status: "retained",
-				integrated: false,
-				hadChanges: false,
-				originalRoot: candidate.originalRoot,
-				...(retainedPath ? { worktreePath: retainedPath } : {}),
-				...(existsSync(candidate.patchPath) ? { patchPath: candidate.patchPath } : {}),
-				error: `Discarding unused continuation failed: ${error instanceof Error ? error.message : String(error)}`,
-			};
-			await persistRecoveryRecords(runtime.configPath, [
-				recoveryRecordFromFinalization(runId, finalization),
-			]).catch(() => undefined);
-			try {
-				thread.notifyIsolationFailure?.(finalization);
-			} catch {
-				/* parent UI may already be shutting down */
-			}
-		}
-	};
-
-	const createContinuationWorktree = async (
-		source: WorktreeIsolation,
-		seedIsIntegrated: boolean,
-	): Promise<WorktreeIsolation> => {
-		if (source.state === "finalizing") {
-			throw new Error(`Run #${runId}'s worktree is still finalizing.`);
-		}
-		const seedCheckpoint = await source.snapshotCheckpoint();
-		return createWorktreeIsolation(thread.cwd, {
-			seedCheckpoint,
-			seedIsIntegrated,
-			tempBaseDir: worktreesRoot,
-		});
-	};
-
-	thread.resume = async (
-		objective?: string,
-		resumeCtx?: ExtensionContext,
-		metadata?: { scope?: Parameters<typeof normalizePhaseScope>[0] },
-	): Promise<SingleResult> => {
-		const requestedObjective = objective?.trim();
-		if (!runtime.sessionActive || runtime.threads.get(runId) !== thread) {
-			return failedStartResult(thread.agentName, thread.task, `Run #${runId} belongs to a parent session that has shut down.`);
-		}
-		if (objective !== undefined && !requestedObjective) {
-			return failedStartResult(thread.agentName, thread.task, "resume objective must be non-blank when provided.");
-		}
-		const continuationPhaseId = thread.phaseId;
-		let continuationScope: ReturnType<typeof normalizePhaseScope>;
-		try {
-			const additionalScope = normalizePhaseScope(metadata?.scope, thread.cwd);
-			continuationScope = mergePhaseScopes(thread.scope, additionalScope);
-		} catch (error) {
-			return failedStartResult(thread.agentName, thread.task, error instanceof Error ? error.message : String(error));
-		}
-		if (thread.retired) return failedStartResult(thread.agentName, thread.task, `Run #${runId} was retired by subagent_stop.`);
-		if (thread.resumeUnavailableReason) {
-			return failedStartResult(thread.agentName, thread.task, thread.resumeUnavailableReason);
-		}
-		if (thread.lifecycleOperation) {
-			return failedStartResult(thread.agentName, thread.task, `Run #${runId} is already resuming.`);
-		}
-		if (!["parked", "completed", "failed"].includes(thread.state)) {
-			return failedStartResult(thread.agentName, thread.task, `Run #${runId} is ${thread.state}; it must be parked or settled before resume.`);
-		}
-
-		// Lifecycle CAS: claim synchronously before the first await, then cancel
-		// and fully quiesce any superseded queue/process before cloning or
-		// reusing its session. A second resume sees this claim immediately.
-		const previousState = thread.state;
-		const previousSessionId = thread.sessionId;
-		const previousSessionDir = thread.sessionDir;
-		const previousExecutionCwd = thread.executionCwd;
-		const reservation: ResumeReservation = {
-			version: ++thread.lifecycleVersion,
-			generation: thread.generation,
-			sessionId: previousSessionId,
-			sessionDir: previousSessionDir,
-		};
-		thread.admissionScope = continuationScope;
-		thread.lifecycleOperation = "resume";
-		thread.state = "resuming";
-		const finishPreflight = beginRuntimePreflight(runtime);
-		const supersededController = thread.queueController;
-		runtime.backgroundQueue.cancel(supersededController);
-		runtime.runControllers.delete(runId);
-
-		let continuationWorktree: WorktreeIsolation | undefined;
-		let clonedSession: Awaited<ReturnType<typeof forkRetainedSession>> | undefined;
-		try {
-			// Never wait forever on a previous generation that is still settling
-			// (e.g. blocked behind the managed repository lane in finalization).
-			if (!(await quiesced(thread.generationCompletion))) {
-				if (ownsResumeReservation(runtime, thread, reservation)) thread.state = previousState;
-				return failedStartResult(
-					thread.agentName,
-					thread.task,
-					`Run #${runId}'s previous generation is still settling; retry the resume shortly.`,
-				);
-			}
-			if (!ownsResumeReservation(runtime, thread, reservation)) {
-				return failedStartResult(
-					thread.agentName,
-					thread.task,
-					thread.retired
-						? `Run #${runId} was retired by subagent_stop; no new generation was started.`
-						: `Run #${runId} changed while resume was preparing; no new generation was started.`,
-				);
-			}
-			thread.state = "resuming";
-			const currentCtx = resumeCtx ?? deps.runCtx;
-			if (!currentCtx) {
-				throw new Error(`Run #${runId} has no dispatch context for resume.`);
-			}
-			let seed: SessionSeed | undefined;
-			if (thread.isolation === "worktree" && thread.worktree?.state !== "active") {
-				if (!thread.worktree) throw new Error(`Run #${runId} has no isolated worktree checkpoint.`);
-				const seedAlreadyIntegrated =
-					thread.worktree.state === "integrated" ||
-					thread.worktree.state === "no_changes" ||
-					thread.lastResult?.integrationApplied === true;
-				continuationWorktree = await createContinuationWorktree(thread.worktree, seedAlreadyIntegrated);
-				if (!ownsResumeReservation(runtime, thread, reservation)) {
-					throw new Error(`Run #${runId} changed while its continuation worktree was being created.`);
-				}
-				seed = { worktree: continuationWorktree };
-				if (previousSessionId && previousSessionDir) {
-					clonedSession = await forkRetainedSession({
-						cwd: previousExecutionCwd,
-						targetCwd: continuationWorktree.cwd,
-						sessionDir: previousSessionDir,
-						sessionId: previousSessionId,
-						targetRoot: sessionsRoot,
-					});
-					runtime.sessionDirs.add(clonedSession.sessionDir);
-					if (!ownsResumeReservation(runtime, thread, reservation)) {
-						throw new Error(`Run #${runId} changed while its retained session was being cloned.`);
-					}
-					seed.sessionId = clonedSession.sessionId;
-					seed.sessionDir = clonedSession.sessionDir;
-				}
-			}
-
-			const currentConfig = await loadConfig(runtime.configPath);
-			if (!ownsResumeReservation(runtime, thread, reservation)) {
-				throw new Error(`Run #${runId} changed while resume configuration was loading.`);
-			}
-			const currentAgents = discoverAgents(currentCtx.cwd, {
-				scope: currentConfig.agentScope,
-				enabledNames: currentConfig.enabledAgents,
-				projectTrusted: currentCtx.isProjectTrusted?.() === true,
-			}).agents;
-			const nextTask = requestedObjective ?? thread.task;
-			const pending = await startBackground(
-				thread.agentName,
-				nextTask,
-				thread.cwd,
-				thread.isolation,
-				{
-					existingThread: thread,
-					phaseId: continuationPhaseId,
-					scope: continuationScope,
-					appendedObjectiveOnResume: objective !== undefined,
-					environment: {
-						ctx: currentCtx,
-						config: currentConfig,
-						agents: currentAgents,
-					},
-					seed,
-					resumeReservation: reservation,
-				},
-			);
-			if (pending.exitCode !== -1) {
-				if (clonedSession) {
-					await cleanupTrackedSessionDir(
-						clonedSession.sessionDir,
-						`Could not discard failed resume session clone for run #${runId}`,
-					);
-				}
-				await discardUnusedWorktree(continuationWorktree);
-				if (ownsResumeReservation(runtime, thread, reservation)) thread.state = previousState;
-				return pending;
-			}
-
-			// The cloned branch replaces the removed-worktree session for this
-			// logical id. Keep an undeletable old dir in runtime cleanup if needed.
-			if (clonedSession && previousSessionDir && previousSessionDir !== clonedSession.sessionDir) {
-				try {
-					await rm(previousSessionDir, { recursive: true, force: true });
-					runtime.sessionDirs.delete(previousSessionDir);
-				} catch {
-					/* shutdown retries cleanup of the old retained branch */
-				}
-			}
-			return pending;
-		} catch (error) {
-			if (clonedSession) {
-				await cleanupTrackedSessionDir(
-					clonedSession.sessionDir,
-					`Could not discard interrupted resume session clone for run #${runId}`,
-				);
-			}
-			await discardUnusedWorktree(continuationWorktree);
-			if (ownsResumeReservation(runtime, thread, reservation)) {
-				thread.state = previousState;
-				thread.sessionId = previousSessionId;
-				thread.sessionDir = previousSessionDir;
-				thread.executionCwd = previousExecutionCwd;
-			}
-			return failedStartResult(
-				thread.agentName,
-				requestedObjective ?? thread.task,
-				`Could not resume run #${runId}: ${error instanceof Error ? error.message : String(error)}`,
-			);
-		} finally {
-			finishPreflight();
-			if (thread.lifecycleVersion === reservation.version) thread.admissionScope = undefined;
-			if (
-				thread.lifecycleOperation === "resume" &&
-				thread.lifecycleVersion === reservation.version
-			) {
-				thread.lifecycleOperation = undefined;
-			}
-		}
-	};
 }

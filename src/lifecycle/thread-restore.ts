@@ -12,7 +12,6 @@ import {
 	restoredResultFromSummary,
 	type ThreadRecord,
 } from "./durable.ts";
-import { failedStartResult } from "../presentation/format.ts";
 import { monitor } from "../presentation/monitor.ts";
 import { emptyUsage } from "../execution/rpc-control.ts";
 import type { SubagentRuntime, SubagentThread, ThreadState } from "./runtime.ts";
@@ -33,8 +32,7 @@ import {
 } from "../isolation/worktree.ts";
 import { installThreadLifecycle } from "./thread-lifecycle.ts";
 
-/** Dropped restored record: no session means no context to resume, so its
- * artifacts go away with the record. */
+/** Release managed artifacts belonging to a discarded, already-settled record. */
 async function discardRestoredRecord(runtime: SubagentRuntime, record: ThreadRecord): Promise<void> {
 	if (record.sessionDir) {
 		await rm(record.sessionDir, { recursive: true, force: true }).catch(() => undefined);
@@ -74,31 +72,15 @@ function createRestoredThread(
 		sessionId: record.sessionId,
 		sessionDir: record.sessionDir,
 		lastResult: restoredResultFromSummary(record),
-		resume: async () => failedStartResult(record.agentName, record.task, "Thread resume was not initialized."),
 		finalizeIsolation: async () => undefined,
 	};
-	installThreadLifecycle(thread, {
-		runtime,
-		startBackground: (...args) => {
-			const dispatcher = runtime.dispatcher;
-			if (!dispatcher) {
-				return Promise.resolve(failedStartResult(
-					record.agentName,
-					record.task,
-					`Run #${record.runId} cannot continue: no dispatch context is available yet. Dispatch any subagent once, then retry.`,
-				));
-			}
-			return dispatcher(...args);
-		},
-	});
+	installThreadLifecycle(thread, { runtime });
 	return thread;
 }
 
-/** Rebuild interrupted (parked) threads from the durable manifest after a
- * reload or restart. Orphaned children recorded by the previous process are
- * killed first; records whose retained session vanished — and settled records
- * left by older versions, which hold no work worth resuming — drop out with
- * their artifacts. Returns the restored run ids. */
+/** Rebuild interrupted records for manual recovery after reload. Orphaned children
+ * are stopped first; missing session files do not discard isolated edits. Already-
+ * settled records from older versions are removed with their managed artifacts. */
 export async function restoreDurableThreads(runtime: SubagentRuntime): Promise<number[]> {
 	const records = await readThreadRecords(runtime.configPath);
 	const restoredIds: number[] = [];
@@ -121,22 +103,18 @@ export async function restoreDurableThreads(runtime: SubagentRuntime): Promise<n
 			record.sessionId !== undefined &&
 			record.sessionDir !== undefined &&
 			sessionExists(record.sessionDir, record.sessionId);
-		if (!sessionValid) {
-			await discardRestoredRecord(runtime, record);
-			continue;
-		}
+		const restoredRecord = sessionValid ? record : { ...record, sessionId: undefined, sessionDir: undefined };
 		const worktree = record.worktree
 			? await restoreWorktreeIsolation(record.worktree).catch(() => undefined)
 			: undefined;
 		const restorationFailed = record.isolation === "worktree" && record.worktree !== undefined && !worktree;
-		const thread = createRestoredThread(runtime, record, worktree, restorationFailed ? "failed" : "parked");
+		const thread = createRestoredThread(runtime, restoredRecord, worktree, restorationFailed ? "failed" : "parked");
 		runtime.threads.set(record.runId, thread);
-		runtime.sessionDirs.add(record.sessionDir!);
+		if (thread.sessionDir) runtime.sessionDirs.add(thread.sessionDir);
 		if (restorationFailed) {
-			const reason = `Run #${record.runId}'s recorded worktree could not be restored; isolated edits may be unavailable. The retained session and durable record were kept, but this thread cannot be resumed.`;
-			thread.resumeUnavailableReason = reason;
+			const reason = `Run #${record.runId}'s recorded worktree could not be restored; isolated edits may be unavailable. The durable record and any remaining artifacts were kept for manual recovery by main.`;
 			thread.restorationRecord = record;
-			const previous = restoredResultFromSummary(record);
+			const previous = thread.lastResult;
 			const failed: SingleResult = {
 				agent: record.agentName,
 				task: record.task,
@@ -149,8 +127,8 @@ export async function restoreDurableThreads(runtime: SubagentRuntime): Promise<n
 				stopReason: "error",
 				errorMessage: reason,
 				dispatchFailed: true,
-				sessionId: record.sessionId,
-				sessionDir: record.sessionDir,
+				sessionId: thread.sessionId,
+				sessionDir: thread.sessionDir,
 				projectCwd: record.cwd,
 				runId: record.runId,
 				isolation: "worktree",
@@ -228,7 +206,7 @@ export function bootstrapDurableState(runtime: SubagentRuntime): Promise<void> {
 		}
 		try {
 			// Sessions and worktrees outlive their process on purpose, so only
-			// ownership separates state a live pi still resumes from state a crash
+			// ownership separates a live Pi's state from artifacts a crash
 			// abandoned. Valid thread and recovery records always keep their paths.
 			const records = await readThreadRecords(runtime.configPath);
 			const recoveryRecords = await readRecoveryRecords(runtime.configPath);

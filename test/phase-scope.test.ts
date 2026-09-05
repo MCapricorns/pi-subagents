@@ -8,13 +8,12 @@ import { registerSubagentTool } from "../src/delegation/dispatch.ts";
 import {
 	findPhaseScopeOverlap,
 	findWriterLeaseScopeOverlap,
-	mergePhaseScopes,
 	normalizePhaseId,
 	normalizePhaseScope,
 	PHASE_ID_MAX_LENGTH,
 	PHASE_ID_PATTERN_SOURCE,
 } from "../src/delegation/phase-scope.ts";
-import { emptyUsage, RpcRunControl } from "../src/execution/rpc-control.ts";
+import { RpcRunControl } from "../src/execution/rpc-control.ts";
 import {
 	getThreadsManifestPath,
 	readThreadRecords,
@@ -91,14 +90,6 @@ function activeWriter(id: number, cwd: string, path: string): SubagentThread {
 		generationCompletion: Promise.resolve(),
 		lifecycleVersion: 0,
 		elapsedMs: 0,
-		resume: async () => ({
-			agent: "artisan",
-			task: "Existing writer",
-			exitCode: 1,
-			messages: [],
-			stderr: "not used",
-			usage: emptyUsage(),
-		}),
 		finalizeIsolation: async () => undefined,
 	};
 }
@@ -144,17 +135,6 @@ describe("phase and scope normalization", () => {
 			const upper = normalizePhaseScope({ paths: ["SRC/A.TS"] }, cwd)!;
 			assert.ok(findPhaseScopeOverlap(file, upper), "Windows path overlap is case-insensitive");
 		}
-	});
-
-	it("extends continuation scope without dropping retained claims", () => {
-		const cwd = resolve("scope-fixture");
-		const previous = normalizePhaseScope({ paths: ["src"] }, cwd);
-		const additional = normalizePhaseScope({ paths: ["docs"], symbols: [{ path: "test/a.ts", name: "case A" }] }, cwd);
-		assert.deepEqual(mergePhaseScopes(previous, additional), {
-			paths: [canonical(join(cwd, "src")), canonical(join(cwd, "docs"))],
-			symbols: [{ path: canonical(join(cwd, "test/a.ts")), name: "case A" }],
-		});
-		assert.deepEqual(mergePhaseScopes(previous, undefined), previous);
 	});
 
 	it("publishes the same bounded phase id contract in single and parallel schemas", async () => {
@@ -309,21 +289,6 @@ describe("parallel scope admission", () => {
 		);
 	});
 
-	it("exposes additive scope during the resuming preflight window", () => {
-		const cwd = resolve("scope-fixture");
-		const resuming = activeWriter(77, cwd, "src");
-		resuming.state = "resuming";
-		resuming.writeCapable = false;
-		resuming.admissionScope = mergePhaseScopes(
-			resuming.scope,
-			normalizePhaseScope({ paths: ["docs"] }, cwd),
-		);
-		const conflict = findWriterLeaseScopeOverlap(
-			normalizePhaseScope({ paths: ["docs/guide.md"] }, cwd)!,
-			[resuming],
-		);
-		assert.equal(conflict?.lease.id, 77);
-	});
 });
 
 describe("single scope admission", () => {

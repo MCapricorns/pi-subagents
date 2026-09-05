@@ -3,8 +3,8 @@
  *
  * A child stays alive across prompt/abort operations and speaks
  * strict LF-delimited JSONL. The process is terminated only after the logical
- * run settles, is parked/stopped, or fails. Session files remain owned by the
- * parent runtime so a later generation can resume the same thread.
+ * run settles, is stopped, or fails. Session files remain owned by the parent
+ * runtime for in-run model fallback and manual recovery.
  */
 
 import { spawn, type ChildProcess } from "node:child_process";
@@ -13,6 +13,7 @@ import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { basename, join } from "node:path";
 import { StringDecoder } from "node:string_decoder";
 import type { Message } from "@earendil-works/pi-ai";
+import type { RpcCommand, RpcExtensionUIResponse, RpcResponse } from "@earendil-works/pi-coding-agent";
 import { SUBAGENT_TOOL_NAMES, type AgentConfig } from "../delegation/agents.ts";
 import type { ThinkingLevel } from "../configuration/config.ts";
 import { writeTempOwnerMarker } from "../isolation/temp-hygiene.ts";
@@ -36,8 +37,6 @@ export const RPC_COMMAND_TIMEOUT_MS = 30_000;
 /** clear_queue is stop-path hygiene ahead of the abort: give it its own short
  * budget so a hung response cannot eat into the abort-settle window. */
 const RPC_CLEAR_QUEUE_TIMEOUT_MS = 2_000;
-/** Keep logical stop responsive when a steering ACK is lost. */
-const RPC_STEER_ACK_TIMEOUT_MS = 2_000;
 /** Time allowed for the child to boot and answer get_state. */
 export const RPC_READY_TIMEOUT_MS = 60_000;
 export const RPC_ABORT_SETTLE_TIMEOUT_MS = 5_000;
@@ -195,15 +194,6 @@ async function writePromptToTempFile(
 		await rm(dir, { recursive: true, force: true }).catch(() => undefined);
 		throw error;
 	}
-}
-
-interface RpcResponse {
-	id?: string;
-	type: "response";
-	command: string;
-	success: boolean;
-	error?: string;
-	data?: unknown;
 }
 
 interface RpcSessionUsage {
@@ -435,7 +425,7 @@ export async function runRpcAgentAttempt(options: RunRpcAttemptOptions): Promise
 	const readyTimeoutMs = options.rpcReadyTimeoutMs ?? RPC_READY_TIMEOUT_MS;
 	const commandTimeoutMs = options.rpcCommandTimeoutMs ?? RPC_COMMAND_TIMEOUT_MS;
 
-	const writeLine = (value: object): Promise<void> =>
+	const writeLine = (value: RpcCommand | RpcExtensionUIResponse): Promise<void> =>
 		new Promise((resolve, reject) => {
 			if (!proc.stdin || proc.stdin.destroyed || !proc.stdin.writable) {
 				reject(new Error("Subagent RPC stdin is not writable."));
@@ -449,7 +439,10 @@ export async function runRpcAgentAttempt(options: RunRpcAttemptOptions): Promise
 			});
 		});
 
-	const send = async <T extends { type: string }>(command: T, timeoutMs = commandTimeoutMs): Promise<RpcResponse> => {
+	const send = async <T extends RpcCommand>(
+		command: T,
+		timeoutMs = commandTimeoutMs,
+	): Promise<Extract<RpcResponse, { command: T["type"]; success: true }>> => {
 		if (finished || closed) throw new Error("Subagent RPC process is no longer active.");
 		const id = `req_${++requestId}`;
 		const payload = { ...command, id };
@@ -471,7 +464,7 @@ export async function runRpcAgentAttempt(options: RunRpcAttemptOptions): Promise
 			if (!response.success) {
 				throw new RpcCommandRejectedError(response.error || `RPC ${response.command} failed.`);
 			}
-			return response;
+			return response as Extract<RpcResponse, { command: T["type"]; success: true }>;
 		});
 	};
 
@@ -501,9 +494,8 @@ export async function runRpcAgentAttempt(options: RunRpcAttemptOptions): Promise
 	const abortAcceptedPrompt = async (): Promise<boolean> => {
 		const acceptance = await initialPrompt.promise;
 		if (!acceptance.accepted) return false;
-		// Pi continues queued steering/follow-up messages after an abort. Drop
-		// them first so a stopped run — or a later resume of its retained
-		// thread — cannot be revived by stale queue entries. Best-effort: an
+		// Pi continues queued messages after an abort. Drop them first so stale
+		// queue entries cannot revive a stopped run. Best-effort: an
 		// older child rejects the command and a hung child falls through to
 		// the bounded abort below.
 		try {
@@ -529,9 +521,6 @@ export async function runRpcAgentAttempt(options: RunRpcAttemptOptions): Promise
 	};
 
 	const attemptControl: AttemptControl = {
-		async steer(command): Promise<void> {
-			await send(command, RPC_STEER_ACK_TIMEOUT_MS);
-		},
 		async stop(reason = "Subagent was aborted"): Promise<void> {
 			if (finished) {
 				if (!closed) await processClosed.promise;
@@ -693,8 +682,8 @@ export async function runRpcAgentAttempt(options: RunRpcAttemptOptions): Promise
 					result.usage.contextTokens = usage.totalTokens || 0;
 				}
 				if (!result.model && (message as any).model) result.model = (message as any).model;
-				if ((message as any).stopReason) result.stopReason = (message as any).stopReason;
-				if ((message as any).errorMessage) result.errorMessage = (message as any).errorMessage;
+				result.stopReason = message.stopReason;
+				result.errorMessage = message.errorMessage;
 			}
 			emit({ kind: "usage", usage: { ...result.usage }, model: result.model });
 		}
@@ -747,25 +736,35 @@ export async function runRpcAgentAttempt(options: RunRpcAttemptOptions): Promise
 		finish();
 	});
 
-	proc.once("close", (code) => {
+	proc.once("close", (code, exitSignal) => {
 		closed = true;
-		resolveInitialPrompt(false, new Error(`Subagent RPC process exited before the initial prompt was accepted (code=${code ?? "signal"}).`));
+		const disposition = exitSignal ? `signal=${exitSignal}` : `code=${code}`;
+		resolveInitialPrompt(false, new Error(`Subagent RPC process exited before the initial prompt was accepted (${disposition}).`));
 		if (forceKillTimer) clearTimeout(forceKillTimer);
 		stdoutBuffer += stdoutDecoder.end();
 		result.stderr += stderrDecoder.end();
 		if (stdoutBuffer.length > 0) processLine(stdoutBuffer);
 		const exitError = new Error(
-			`Subagent RPC process exited before settling (code=${code ?? "signal"}).${result.stderr ? ` ${result.stderr.trim()}` : ""}`,
+			`Subagent RPC process exited before settling (${disposition}).${result.stderr ? ` ${result.stderr.trim()}` : ""}`,
 		);
 		rejectPending(exitError);
 		if (abortSettlement) {
 			abortSettlement.reject(exitError);
 			abortSettlement = undefined;
 		}
-		if (!finished) {
+		if (!finished && !usageSettlementStarted) {
+			const silentStartupExit = !result.rpcPromptDispatched && !result.rpcActivity
+				&& result.messages.length === 0 && !result.stderr.trim() && !result.errorMessage?.trim();
 			result.exitCode = code === 0 ? 1 : (code ?? 1);
-			result.stopReason ??= signal?.aborted ? "aborted" : "error";
-			if (signal?.aborted) result.errorMessage ??= "Subagent was aborted";
+			result.stopReason = signal?.aborted ? "aborted" : "error";
+			if (signal?.aborted) {
+				result.errorMessage ||= "Subagent was aborted";
+			} else {
+				result.errorMessage = result.errorMessage?.trim()
+					? `${result.errorMessage}\n${exitError.message}` : exitError.message;
+				if (silentStartupExit) result.rpcStartupFailed = true;
+				else result.dispatchFailed = true;
+			}
 			finish();
 		}
 		processClosed.resolve();

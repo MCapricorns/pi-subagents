@@ -12,13 +12,12 @@ once and your main agent delegates on its own.
 
 ## What's new
 
-**4.3.9** — dispatch admission now accepts bounded stable `phaseId` identities and exact
-declarative write `scope` claims. Fresh/resumed writers are checked against active leases;
-parallel batches preflight deterministic duplicates and all declared scope conflicts before
-allocation. Omitted scopes remain compatible; a parallel call that omits `scope` reports
-`independence not verified`. Declared claims do not prove natural-language task independence.
-The no-model-call `subagent_risk` advisory classifies changed tracked and untracked paths
-with fixed, documented rules before main decides whether a Sentinel review is worthwhile.
+**4.3.10** — adds read-only `subagent_status` and removes `subagent_control`
+(`steer`, `park`, and `resume`). Runs are one-shot; main handles unfinished work.
+Failure reporting preserves real RPC exit/provider diagnostics and distinguishes
+a failed run from an intentionally failing tool call. Requires Pi **0.85.0** and
+reuses its official RPC types. Setup discovers actual role definitions instead
+of inventing roles from saved names; there are no retired-role aliases or migrations.
 
 See [CHANGELOG.md](./CHANGELOG.md).
 
@@ -29,7 +28,7 @@ See [CHANGELOG.md](./CHANGELOG.md).
 - [The team](#the-team)
 - [Dispatching work](#dispatching-work)
 - [Parallel edits](#parallel-edits)
-- [Threads: steer, resume, park, stop](#threads-steer-resume-park-stop)
+- [Runs: status and stop](#runs-status-and-stop)
 - [Live status and results](#live-status-and-results)
 - [Models, thinking, and tools](#models-thinking-and-tools)
 - [Configuration](#configuration)
@@ -55,21 +54,20 @@ back — with you. This extension owns them:
   its task wording changes. IDs are 1–80 ASCII letters, numbers, or `._:-`, starting
   with a letter or number, so lease output stays single-line. Exact normalized task+cwd
   remains the backward-compatible fallback for old calls.
-- Follow-up work stays on the same thread: `steer` a running phase, `resume` or
-  `park` a thread with its retained context, `stop` a phase the evidence made moot.
+- Runs are one-shot. Use `subagent_status` to inspect them and `subagent_stop` to
+  cancel them; main handles unfinished work instead of continuing a failed child.
 - Background completions and stop results arrive at the next parent model boundary;
   `wait: true` returns the same result in-turn instead. A run uses exactly one route.
 - Parallel writers use detached Git worktrees without touching your index.
-  Worktree setup obeys the bounded queue; final integration releases its process
-  slot.
-- Interrupted threads retain their session for resume after reload or crash; a
-  configured child-model failure continues the same session on the main model.
-- Start, restore, and integration failures surface with retained recovery paths
-  instead of becoming silent hangs.
+  Worktree setup obeys the bounded queue; final integration releases its process slot.
+- Interrupted work retains artifacts for manual recovery after reload or crash.
+  Within a run, a configured child-model failure can still hand off to the main model.
+- Failure notifications include available reasons, and status keeps terminal facts
+  and retained recovery paths queryable for the current parent session.
 
 ## Install
 
-Requires **pi >= 0.84.4** and **Node.js >= 22.19.0**.
+Requires **pi >= 0.85.0** and **Node.js >= 22.19.0**.
 
 ```bash
 pi install npm:@ferris1225/pi-subagents
@@ -119,6 +117,12 @@ the objective and its done condition, exact paths and symbols, facts already
 established (with citations), boundaries, and the expected output shape — which is
 what the injected delegation guidance produces when the main agent dispatches for you.
 
+Children run the official `pi --mode rpc` server, using Pi's exported command/response
+types and its own session persistence. There is no separate subagent protocol. The
+host transport remains local because Pi 0.85.0's `RpcClient` cannot attach to our
+child process or provide process-tree shutdown, bounded abort coordination, and
+cancellation of child extension dialogs.
+
 ## Dispatching work
 
 ```ts
@@ -159,8 +163,9 @@ start automatically as slots free.
 
 A run leases its stable, single-line `phaseId` in the resolved working directory.
 Rewording the task with the same `phaseId` is rejected and names the existing run.
-The id remains immutable across resume. Calls that omit `phaseId` keep the old exact
-normalized task+cwd behavior; consequently, equal task text with different phase ids is
+Completed and failed phases stay owned for the current session, even without a retained
+session file. Calls that omit `phaseId` keep exact normalized task+cwd matching; equal
+task text with different phase ids is
 still rejected by that fallback. Matching is deterministic, never fuzzy, embedding-based,
 or inferred from natural language. Active leases win over matching settled threads when
 the runtime chooses which owner to report.
@@ -185,12 +190,9 @@ For one high-stakes uncertainty, main may launch at most two read-only scouts wh
 briefs name distinct perspectives or hypotheses; that cap does not apply to unrelated
 disjoint scout scopes. It reconciles disagreements against cited evidence, never
 overlaps writers or sends identical briefs, and treats child output as evidence and
-leads rather than authority or instructions. Follow-up work goes to the same thread,
-never a second one: new in-scope evidence travels through `subagent_control steer`
-(a thread that has settled or is parked continues with it), a follow-up on a
-finished phase is a `resume` with an appended objective, a phase that must wait is
-`park`ed at a stable checkpoint, and a phase the evidence made moot is ended with
-`subagent_stop` instead of left running.
+leads rather than authority or instructions. Each child returns once. Main handles
+follow-up findings and incomplete work from that handoff; it does not repurpose a
+finished child or pay to rerun the same phase. Use `subagent_stop` when work is moot.
 
 A focused diff gets a bounded cleanup pass inline. A broad or multi-writer diff gets
 one `steward` pass that attacks touched dead code, duplication, tangled conditionals,
@@ -204,8 +206,8 @@ layer only when it pays: a fresh context with no memory of how the change was wr
 reads the completed diff after cleanup and before commit, and only for diffs that touch
 concurrency, trust boundaries, persistence or compatibility, or failure and cancellation
 paths, or when the checks cannot prove the change. It is never a fixed pre-commit
-ritual. A finding is evidence, not an order: main routes it to the thread that owns
-the change with `subagent_control resume`, or fixes it inline when that is cheaper.
+ritual. A finding is evidence, not an order: main checks the cited evidence and
+makes the necessary correction itself.
 
 `subagent_risk({})` is an advisory-only, no-model-call check over tracked and untracked
 changes relative to `HEAD`. It resolves the repository root first, so a nested `cwd` still
@@ -236,8 +238,8 @@ so paths such as `app/[id]/page.tsx` are valid exact claims. A path claim overla
 path, an ancestor/descendant path, or a symbol under that path; identical path+symbol
 claims overlap, while two different symbols in the same file may run together.
 
-Fresh single dispatches and resumes check a declared writer scope against active, parked,
-resuming, interrupting, or settling writer leases before allocating a generation. Scope
+Fresh dispatches check declared writer scope against active, interrupted, or settling
+writer leases before allocating a run. Scope
 comparison uses normalized absolute claims rather than requiring equal caller cwd, so a
 repo-root claim still conflicts with the same path claimed from a nested cwd. Settled
 threads do not block a later phase solely because it edits the same scope.
@@ -282,88 +284,60 @@ Third-party Pi packages execute as trusted code and must be reviewed accordingly
   already been applied and only the cleanup failed, the next session start
   removes the retained copy itself and clears the notice.
 
-## Threads: steer, resume, park, stop
+## Runs: status and stop
 
-Every dispatch returns a stable `#id`, which is the handle for the thread tools:
+Every dispatch returns a stable `#id`. Runs are one-shot: there is no
+`subagent_control`, `steer`, `park`, or `resume` interface. Main takes over failed
+or incomplete work using the child's partial edits and artifacts. A different
+deliverable needs a new phase and brief, not a recycled thread.
 
-| Tool               | What it does |
-| ------------------ | ------------ |
-| `subagent_control` | `steer` a running RPC attempt with additional evidence/guidance, continuing the same thread with it when the thread has settled or is parked; `resume` a parked/settled thread with an optional appended `objective` and additive `scope`; `park` a running thread at a stable checkpoint, keeping its session and worktree for a later resume. |
-| `subagent_stop`    | Destructively cancel, deliver partial output, and retire the thread. Steering and follow-up messages still queued in the child are dropped so nothing can revive it later. |
+| Tool | What it does |
+| ---- | ------------ |
+| `subagent_status` | Read-only inspection. Omit `id` to list this parent session's runs, or pass an exact numeric `id` to inspect one. |
+| `subagent_stop` | Destructively cancel/retire a run by id/prefix, or all active runs with `all: true`. Delivers partial output and finalizes isolated changes. |
 
 ```ts
-subagent_control({ action: "steer", id: 7, objective: "The failing request used an expired token; account for that evidence." });
-subagent_control({ action: "park", id: 7 });
-subagent_control({ action: "resume", id: 7, objective: "Finish the tests." });
+subagent_status({});
+subagent_status({ id: 7 });
+subagent_stop({ id: "7" });
 ```
 
-A fresh dispatch stores `phaseId` and normalized `scope` on its stable thread and durable
-v1 record. `resume` always keeps the thread's phase id. An optional resume `scope` adds
-normalized claims to the retained scope; it cannot shrink or clear prior claims, so edits
-already present in a retained worktree stay covered by admission. Resume also rechecks the
-unioned scope against other active writer leases before starting a generation. Existing v1
-manifests without these optional fields remain readable.
+Status reads runtime state without starting, stopping, continuing, or waiting for a
+child to finish. It includes the phase/task summary, activity, elapsed time, model,
+usage, terminal diagnostics, and available result/session/recovery paths. States
+distinguish `queued`, `running`, `interrupting`, `settling` (Git finalization),
+`completed`, `failed`, `stopped`, and `interrupted` (recovered unfinished work).
+Queued runs report their actual wait reason. Settled runs remain queryable in the
+current parent session even after their transient widget rows disappear.
 
-`steer` requires a nonblank `objective`. While the child RPC is running, it adds
-guidance to the current phase without replacing the original task. If the thread has
-already reached `completed`, `failed`, or `parked` — including a generation that settles
-between the state check and RPC acceptance — the control call resumes the same stable
-id, reuses retained context when available, and supplies the guidance as its appended
-objective, so evidence is never re-bought by a second dispatch. Queued, starting,
-retrying, resuming, interrupting, stopped, retired, and missing threads are rejected
-without changing them. Steering ACKs are bounded, and steering/stop are serialized so
-stop can clear queued child messages and abort without a stale steer landing afterward.
+The tool returns these facts in Pi's existing structured `details.runs` field.
+An individual run's failure does not make a successful status lookup a tool error;
+an unknown `id` does. This is runtime-authored data, not a requirement for children
+to generate strict JSON. Agent-written reports remain evidence to verify.
 
-`park` pauses a running thread at its next safe point: the child is interrupted the
-same way a session shutdown interrupts it, but the thread returns as `parked` rather
-than failed, its retained session and any active worktree are kept, and its durable
-record is written immediately so the checkpoint survives a reload. Nothing is
-integrated or delivered on park; the tool result carries the usage so far and the
-resume handle. Only an active running attempt with a retained session can be parked;
-a run that has not started has nothing worth keeping, so `subagent_stop` discards it.
+A background dispatch returns a launch receipt, then its completion arrives at
+the next safe parent boundary—after current tool calls and before the next model
+call. `wait: true` instead holds the dispatch until its new runs settle, which is
+useful for one-shot `pi -p` sessions or an immediate dependency. Each run has one
+delivery route; aborting the waiting parent turn transfers delivery to the
+background path. Use status for on-demand inspection, not a polling or sleep loop.
 
-A resumed child is told that its earlier work is preserved and must not be redone, and
-that the workspace may have changed while the thread was inactive — main may have
-integrated sibling worktrees or edited the tree — so it re-reads a file before editing
-it unless it read it during the continuation. A resume with an appended objective is
-framed as the same thread continuing on top of finished work, never as a restart.
+Stop drops messages still queued inside Pi, performs a bounded RPC abort, and
+terminates the child process tree. It retires the session; it never starts another
+attempt. Worktree integration failures keep their recovery artifacts.
 
-There is no status, polling, or separate wait tool. A background dispatch returns
-a launch receipt, then its completion is steered at the next safe parent boundary—after
-the current tool calls and before the next model call. This wakes the main model without
-waiting for its whole run to end.
+Interrupted work retains a durable record and any session/worktree artifacts for
+manual recovery after reload or crash. Missing session files no longer discard
+isolated edits. Restore runs at session start; lookup tools, prompt injection, and
+fresh dispatch wait for that pass so an existing id cannot be reported missing or
+reused. Missing recorded worktrees surface as failures without discarding the
+remaining recovery evidence.
 
-`wait: true` instead holds that tool call until its new runs settle,
-which is useful for one-shot `pi -p` sessions. It claims the delivery route before
-launch, so the same result cannot also arrive as a background completion; if the
-parent turn is aborted, delivery falls back to the completion path.
-Use `wait: true` only when the result is the immediate dependency. Otherwise
-leave it in the background and continue real disjoint work — never burn main
-context on `sleep` or polling while a child keeps running.
-
-The wait has no timer chosen by the model: it resolves when its run settles, and
-a parked run returns its resume handle. Control operations are bounded so they do
-not hang on a generation that is still settling.
-
-A thread stays durable while its work is unfinished. Parked sessions, worktree
-checkpoints, and result excerpts are recorded under the per-project storage root,
-so reload, restart, or crash produces a resumable checkpoint. An isolated thread
-continues in its original worktree.
-
-Restore runs at session start. `subagent_control`, `subagent_stop`, prompt
-injection, and new dispatches wait for it, so a parked id cannot be reported
-missing or reused. If a recorded worktree is gone, the run is surfaced as failed
-and non-resumable while its retained session and recovery record remain available
-for inspection or destructive stop.
-
-Persisted sessions and worktrees are resumed or removed only when their canonical paths
-match the current project's managed storage layout and repository. Invalid records are
-dropped without following or deleting their targets. Recovery-owned worktrees and patches
-remain protected from startup sweeps and project-root retention until recovery is announced.
-
-Only interrupted work needs a record, so a thread that completes or fails cleanly
-drops its own. That also means a reload keeps interrupted threads resumable, while
-threads that had already finished keep only their delivered result.
+Canonical managed-path and repository validation remains in place. Invalid records
+are dropped without following or deleting their targets. Recovery-owned worktrees
+and patches stay protected from startup sweeps and project-root retention.
+Completed/failed runs drop their durable thread record; after reload, inspect their
+delivered result instead of expecting them in the current-session status list.
 
 ## Live status and results
 
@@ -383,14 +357,13 @@ and, dim under the label column, what it is doing right now:
 ● #15 scout    src/models.ts · ↑1.2k ↓8.4k R31.0k W1.1k $0.0900 · openai/gpt-5-mini · think:low · 3m07s
                 ↳ grep fallback
 ○ #23 artisan  src/config.ts · repo lane
-○ #24 artisan ↻  tests/config.test.ts · queued · 5m02s
+○ #24 artisan  tests/config.test.ts · queued · 5m02s
 ```
 
 Telemetry drops leftmost-first when a row runs out of width (badge, wait state,
 usage, model, thinking) while elapsed survives every width. Queued rows state
 what they actually wait for — `queued` for a free process slot, `repo lane`
-for shared-checkout write serialization, or `starting` — and a resumed thread
-carries a dim `↻` in its agent column with its cumulative time. The widget is
+for shared-checkout write serialization, or `starting`. The widget is
 capped at ten lines: when many runs are live, extra runs collapse into a
 `… +N more` marker so the editor keeps its space.
 
@@ -444,7 +417,7 @@ no `thinking` field in agent Markdown. Precedence: your setup override > the
 role default, then the model clamp. There is no separate vision mode — assign
 a multimodal model and name the image paths in the task.
 
-Every dispatch, resume, retry, and fallback snapshots the parent's active tools,
+Every dispatch, startup retry, and model fallback snapshots the parent's active tools,
 and all `subagent*` tools are removed so children remain leaves. A role without
 an explicit list inherits that snapshot; an explicit list is a strict
 intersection, so active extension tools are available only when named. A declared
@@ -471,8 +444,12 @@ search snippets, records material dates/versions, and marks uncertainty.
 `/subagents-setup` opens the original settings menu: enable or disable roles,
 configure one enabled role's model and thinking level, or walk through a full
 re-setup. `Esc` moves back through the menu stack, and model lists support fuzzy
-search. Built-in and previously configured custom roles remain available in the
-enable menu. Other settings live in
+search. The enable menu discovers built-ins and actual custom role files in the configured
+scope, including roles never configured before. Project files require Pi's project trust.
+Config-only names are not role definitions and never appear in the enable or configure
+picker. Saving an enable selection or full setup discards unavailable role names and their
+model/thinking settings; no retired-name aliases or configuration migration are applied.
+To start over, remove `pi-subagents.json` and run `/subagents-setup` again. Other settings live in
 `~/.pi/agent/pi-subagents.json` (following `PI_CODING_AGENT_DIR`):
 
 ```json
@@ -490,7 +467,7 @@ enable menu. Other settings live in
 | Field                 | Meaning |
 | --------------------- | ------- |
 | `enabledAgents`       | Agents available for discovery and delegation. `[]` disables all. |
-| `knownAgents`         | Roles already surfaced by setup; retains disabled custom roles and tracks built-in adoption. |
+| `knownAgents`         | Catalog shown by setup; tracks built-in adoption, but cannot define a custom role without a file. |
 | `agentModels`         | Optional model per agent; missing means the current main model. |
 | `agentThinkingLevels` | Optional setup override per agent; missing means the role default. |
 | `maxResultLines`      | Lines kept in a completion message before the artifact takes over. Default `40`. |
@@ -502,9 +479,9 @@ automatically. `enabledAgents` is authoritative after catalog adoption: a newly
 shipped built-in is appended once, then `knownAgents` records that it was surfaced
 so a deliberate later disable remains disabled. `sentinel` returns through that
 rule: a config written by 4.3.5–4.3.7, which removed it, enables it once on the next
-load; turn it off in `/subagents-setup` and it stays off. Custom roles and other
-known-agent entries remain intact. Invalid known fields fall back safely, and unknown
-fields are dropped when canonical config is persisted.
+load; turn it off in `/subagents-setup` and it stays off. Available custom roles remain
+selectable even when disabled. Invalid known fields fall back safely, and unknown fields
+are dropped when canonical config is persisted.
 
 At session start, model overrides that pi no longer reports are removed with a
 one-time notice. If pi's own session compaction fails mid-thread, a notice surfaces
@@ -546,7 +523,7 @@ that removes it, so this directory does not grow without bound:
 | `pi-subagents.json`                        | Your configuration                                   | Never — it is yours                                              |
 | `ferris-pi-subagents/pi-subagents-recovery.json` | Worktree integration and cleanup failures | When the retained patch or worktree it points at is gone |
 | `ferris-pi-subagents/<project>/pi-subagents-threads.json` | One record per interrupted thread     | When the thread settles, or after 30 days                        |
-| `ferris-pi-subagents/<project>/sessions/`  | Retained child sessions that a resume continues from | When the thread settles or its retained record is removed        |
+| `ferris-pi-subagents/<project>/sessions/`  | Child sessions for in-run fallback and manual recovery | When the owning session ends and no recovery record claims them |
 | `ferris-pi-subagents/<project>/worktrees/` | Isolated checkouts for parallel writers              | On integration, or when no thread/recovery record claims them  |
 | `ferris-pi-subagents/<project>/results/`   | Full text of truncated results                       | After 7 days, or beyond 50 per project                           |
 | `ferris-pi-subagents/<project>/tmp/`       | Child prompt copies and the no-retry policy shim     | When its owning process exits                                    |
@@ -554,7 +531,7 @@ that removes it, so this directory does not grow without bound:
 
 Cleanup runs at session start and is deliberately conservative. A directory goes
 away only when the process that created it is gone and no valid manifest record still
-claims it, so a live sibling pi instance never loses state and parked or recovery-owned
+claims it, so a live sibling pi instance never loses state and interrupted or recovery-owned
 work outlives its own process by design. Thread and recovery references always beat an
 age rule.
 
@@ -570,6 +547,12 @@ no bundled runtime dependencies; pi and TypeBox are peers. The source is
 grouped by responsibility under `src/`: configuration, delegation, execution, isolation,
 lifecycle, and presentation. Thread restoration, shared lifecycle coordination, RPC control,
 and Git command execution live in focused modules rather than oversized catch-all files.
+
+The test runner uses Node 22 or 24; Node 26 removed `--experimental-transform-types`.
+Pi 0.85.0's unbundled SDK and CLI import `@earendil-works/pi-server` without declaring
+it. This project declares the official server package as a peer (and a development
+dependency), so npm can resolve it alongside the SDK in consumer installations.
+It is not bundled into the extension, and no replacement RPC server is introduced.
 
 ## Changelog
 

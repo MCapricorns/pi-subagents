@@ -3,8 +3,7 @@
  *
  * Layout contract:
  * - Aligned identity columns: `icon  #id  agent` pad to the widest displayed
- *   id and agent so every label starts at the same column; a resumed thread
- *   carries a dim `↻` inside the agent column.
+ *   id and agent so every label starts at the same column.
  * - A live run owns two lines. Line 1 is what it is: identity, task label,
  *   then the telemetry flow (worktree, wait state, token flow in the pi-footer
  *   vocabulary `↑in ↓out R/W cache`, cost, `provider/model`, effective
@@ -51,7 +50,7 @@ const ACTIVITY_MIN_WIDTH = 6;
 interface ColumnLayout {
 	/** Display width of the widest `#id` among rendered roots. */
 	idWidth: number;
-	/** Display width of the widest agent name (plus resume marker) among them. */
+	/** Display width of the widest agent name among rendered runs. */
 	agentWidth: number;
 }
 
@@ -80,8 +79,7 @@ export function waitWord(run: Pick<RunView, "waitReason">): string {
 
 /** Worktree-group badge shown on the row that owns the isolated worktree: the
  * short group identity plus its integration state, so a run visibly moves
- * through applying → applied (or retained) and a continuation worktree (new
- * identity) is distinguishable from the original one. */
+ * through applying → applied (or retained). */
 function worktreeBadge(run: RunView): string {
 	const id = run.worktreeId ?? "?";
 	switch (run.integrationStatus) {
@@ -105,21 +103,13 @@ function composeTail(parts: Array<string | undefined>, budget: number): string {
 	return present.join(SEPARATOR);
 }
 
-/** Marker text that shares the agent column so alignment survives resumes. */
-function agentColumnText(run: RunView): string {
-	return run.continuationKind ? `${run.agent} ↻` : run.agent;
-}
-
-/** `icon  #id  agent` in fixed columns — never truncated. The id is
- * right-aligned and the agent column is padded so every label starts at the
- * same x; a resumed thread carries a dim `↻` inside the agent column. */
+/** Fixed identity columns; labels begin at the same display column. */
 function identitySegment(run: RunView, theme: Theme, layout: ColumnLayout): string {
 	const icon = statusIcon(run.status, theme);
 	const id = `#${run.id}`.padStart(layout.idWidth);
 	const name = theme.fg("accent", theme.bold(run.agent));
-	const resumed = run.continuationKind ? ` ${theme.fg("dim", "↻")}` : "";
-	const pad = " ".repeat(Math.max(0, layout.agentWidth - visibleWidth(agentColumnText(run))));
-	return `${icon} ${theme.fg("dim", id)} ${name}${resumed}${pad}`;
+	const pad = " ".repeat(Math.max(0, layout.agentWidth - visibleWidth(run.agent)));
+	return `${icon} ${theme.fg("dim", id)} ${name}${pad}`;
 }
 
 /** One footer-style usage part: token flow plus accrued cost, dropped as a
@@ -198,7 +188,7 @@ export function formatActiveRunLines(
 	const active = runs.filter((run) => isRunActiveStatus(run.status));
 	const layout: ColumnLayout = {
 		idWidth: Math.max(...active.map((run) => visibleWidth(`#${run.id}`)), 0),
-		agentWidth: Math.max(...active.map((run) => visibleWidth(agentColumnText(run))), 0),
+		agentWidth: Math.max(...active.map((run) => visibleWidth(run.agent)), 0),
 	};
 	const lines: string[] = [];
 	let shown = 0;
