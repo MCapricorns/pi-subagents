@@ -343,6 +343,7 @@ export function createBackgroundDispatcher(options: BackgroundDispatcherOptions)
 						? `${formatCompletionBlock(result, runConfig.maxResultLines, { resultRoot: projectResultsRoot(runtime.configPath, result.projectCwd ?? originalCwd) })}\n\n${modelLevelTakeoverNote(result)}`
 						: formatCompletionBlock(result, runConfig.maxResultLines, { resultRoot: projectResultsRoot(runtime.configPath, result.projectCwd ?? originalCwd) }),
 					usage: result.usage,
+					model: result.model,
 				};
 				if (modelLevel) {
 					const detail = result.errorMessage?.trim() || "model unavailable or broken";

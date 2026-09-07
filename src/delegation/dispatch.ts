@@ -6,7 +6,7 @@
  * completion ownership live in thread-lifecycle.ts.
  */
 
-import { StringEnum, type Usage } from "@earendil-works/pi-ai";
+import { StringEnum } from "@earendil-works/pi-ai";
 import { resolve } from "node:path";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { Text } from "@earendil-works/pi-tui";
@@ -20,7 +20,6 @@ import {
 	monitor,
 	statusIcon,
 	statusLabel,
-	sumUsage,
 	type RunWaitReason,
 } from "../presentation/monitor.ts";
 import { findDuplicateDispatch, formatParallelScopeAdmissionNote, formatPhaseLeaseReceipt } from "./prompt.ts";
@@ -227,30 +226,10 @@ function parallelAdmissionConflict(
 	return undefined;
 }
 
-/** Map the child's own usage tally onto pi's tool-result `Usage`, so sub-agent
- * token spend lands in the parent's footer, /session, and RPC session totals
- * instead of being invisible. Only the total cost is known here: a child
- * reports one cost number, not a per-bucket split. */
-function toToolUsage(stats: UsageStats): Usage {
-	return {
-		input: stats.input,
-		output: stats.output,
-		cacheRead: stats.cacheRead,
-		cacheWrite: stats.cacheWrite,
-		totalTokens: stats.input + stats.output + stats.cacheRead + stats.cacheWrite,
-		cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: stats.cost },
-	};
-}
-
-/** Usage of the runs awaited in-turn. Omitted entirely in the background path:
- * those children have not finished when the tool returns, so any number there
- * would be a fabrication. */
-function toolUsage(runtime: SubagentRuntime, runIds: number[]): { usage?: Usage } {
-	const parts = runIds
-		.map((id) => runtime.settledRuns.get(id)?.usage)
-		.filter((usage): usage is UsageStats => usage !== undefined);
-	return parts.length > 0 ? { usage: toToolUsage(sumUsage(parts)) } : {};
-}
+/** Awaited children report their usage per run and per model in the result
+ * blocks below; nothing is attached to the tool result itself, because pi
+ * folds tool-result usage into one session total — that merged every
+ * model's spend into the main window's consumption line. */
 
 /** In-turn wait for a fresh dispatch. Registration resolves it without a model-chosen
  * timer; parent abort or removal ends the wait without losing background delivery. */
@@ -631,7 +610,6 @@ export function registerSubagentTool(pi: ExtensionAPI, runtime: SubagentRuntime)
 					return {
 						content: [{ type: "text", text }],
 						details: makeDetails("parallel", true)(results),
-						...toolUsage(runtime, startedIds),
 					};
 				}
 				const text = [
@@ -686,7 +664,6 @@ export function registerSubagentTool(pi: ExtensionAPI, runtime: SubagentRuntime)
 				return {
 					content: [{ type: "text", text: blocks }],
 					details: makeDetails("single", true)([result]),
-					...toolUsage(runtime, [result.runId]),
 				};
 			}
 			return {

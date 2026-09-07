@@ -12,10 +12,11 @@ once and your main agent delegates on its own.
 
 ## What's new
 
-**4.3.11** — simplifies delegation and role prompts using GPT-6 Astra guidance:
-clear outcomes, task-sized research and verification, and optional cleanup/review
-instead of fixed routines. Existing permission boundaries, required project checks,
-one-shot ownership, and runtime safety mechanisms remain unchanged.
+**4.3.12** — per-model accounting: the main window's consumption line becomes a
+per-model cost footer (token flow, cost, context share, and live `tok/s` per
+`provider/model`), awaited children's usage is no longer folded into the parent
+session total, and parallel completion totals are grouped per model instead of
+summed across them.
 
 See [CHANGELOG.md](./CHANGELOG.md).
 
@@ -367,6 +368,29 @@ RPC hosts as well as the TUI. Settled counts stay on the line only while a
 sibling is still live (`2 running · 3 done`); the line disappears once nothing
 is active.
 
+### Per-model cost footer
+
+In TUI sessions the extension replaces pi's built-in consumption line with a
+per-model tally of the main window's own spend, directly under the
+current-project line. Models are never merged: each `provider/model` keeps its
+own token flow, cost, and — for the current model — context share, effective
+thinking level, and live throughput (`~` marks the streaming estimate; the
+exact rate of the last completed message replaces it):
+
+```text
+~/projs/app (main)
+↑48.1k ↓112.7k R1.9M W302.4k $3.0812 · 41.2%/200.0k · ~58.3 tok/s     zhipu/glm-4.7 • high
+anthropic/claude-sonnet-4 ↑12.0k ↓31.2k R410.0k $0.9104
+```
+
+Settled models rank by spend and cap at three rows (`… +N more models`);
+under width pressure a settled row drops its token flow before truncating, so
+`model $cost` always survives. Sub-agent spend is deliberately not folded in:
+children report their own usage per run when they settle, and pi would
+otherwise attribute it to one session total — exactly the cross-model merge
+this footer exists to avoid. The ledger reseeds from the session file on
+reload, so the tally survives restarts.
+
 Completions resume the main agent on their own, with a compact block of at most 40
 lines by default; longer output lands unchanged in a Markdown artifact whose path
 comes with the message, stated as how much was actually cut (`40 of 137 lines
@@ -381,11 +405,19 @@ Delivery is held while a context compaction is in flight and released once it
 settles — on failure and abort too — so a result a child spent minutes producing
 is never swallowed by the summary that replaces the history.
 
-A `wait: true` dispatch streams its progress onto the tool card while it waits,
-and reports the awaited children's token spend as the tool call's own usage, so
-sub-agent cost lands in the footer, `/session`, and RPC session totals. A
-background dispatch returns before its children finish, so it reports no usage
-rather than a fabricated number.
+A `wait: true` dispatch streams its progress onto the tool card while it waits.
+Usage is no longer attached to the tool result: pi folds tool-result usage into
+one session total, which merged every model's spend into the main window's
+consumption line. Instead, each child reports its usage per run — with its full
+`provider/model` ref — when it settles, and a parallel group's footer totals
+are grouped per model, never summed across them:
+
+```text
+Totals: 3 runs · zhipu/glm-4.7: ↓300 $0.0500 · anthropic/claude-sonnet-4: ↓4.0k $1.5000
+```
+
+A background dispatch returns before its children finish; their usage arrives
+with the completion message instead.
 
 ## Models, thinking, and tools
 
@@ -543,7 +575,9 @@ It is not bundled into the extension, and no replacement RPC server is introduce
 
 ## Changelog
 
-See [CHANGELOG.md](./CHANGELOG.md) for published release notes.
+See [CHANGELOG.md](./CHANGELOG.md) for the latest release notes. Every
+published version is preserved as a GitHub Release; older entries are trimmed
+from the file.
 
 ## Release
 

@@ -6,6 +6,8 @@ import { FIRST_RUN_SETUP_HINT, loadConfig, saveConfig } from "../configuration/c
 import { availableModelsInScope, filterUnavailableModelOverrides } from "../configuration/models.ts";
 import { announceRecoveryRecords, relocateRecoveryManifest } from "../isolation/recovery.ts";
 import type { SubagentRuntime } from "../lifecycle/runtime.ts";
+import { seedCostLedgerFromSession } from "./cost-ledger.ts";
+import { installCostFooter } from "./cost-footer.ts";
 import { installActiveRunsStatus } from "./status.ts";
 import { installActiveRunsWidget } from "./widget.ts";
 
@@ -50,10 +52,14 @@ export function registerAnnouncements(pi: ExtensionAPI, runtime: SubagentRuntime
 				"info",
 			);
 		}
-		// The footer status works in every UI host (TUI and RPC); the widget is TUI-only.
+		// The footer status works in every UI host (TUI and RPC); the widget and
+		// the per-model cost footer are TUI-only. Seeding first means the first
+		// footer render already carries the reloaded session's per-model spend.
 		installActiveRunsStatus(ctx);
 		if (ctx.mode !== "tui") return;
+		seedCostLedgerFromSession(ctx);
 		installActiveRunsWidget(ctx);
+		installCostFooter(ctx);
 	});
 
 	// Compaction failures are otherwise silent in long orchestration sessions

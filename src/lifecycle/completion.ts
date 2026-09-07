@@ -7,9 +7,8 @@
  * failure directly so it is never delayed.
  */
 
-import { formatUsageCompact, sumUsage, type RunWaitReason } from "../presentation/monitor.ts";
+import { formatUsageTokens, sumUsage, type RunWaitReason } from "../presentation/monitor.ts";
 import type { UsageStats } from "../execution/rpc-control.ts";
-
 export interface CompletionBatchTimings {
 	debounceMs: number;
 	maxWaitMs: number;
@@ -100,18 +99,40 @@ export interface CompletionMessageItem {
 	block: string;
 	/** Final usage of the underlying run (or chain); aggregated into the group totals. */
 	usage?: UsageStats;
+	/** Model ref that produced this run's usage; group totals stay per model
+	 * instead of summing different models' spend into one number. */
+	model?: string;
 }
 
-/** Keep the established single-result shape; add a group header and an aggregate
+/** Keep the established single-result shape; add a group header and a per-model
  * token/cost footer only for real groups. */
 export function formatCompletionMessage(items: readonly CompletionMessageItem[]): string {
 	if (items.length === 0) return "";
 	if (items.length === 1) return items[0].block;
 	const agents = items.map((item) => item.agent).join(", ");
-	const withUsage = items.filter((item) => item.usage !== undefined);
-	const totals = withUsage.length > 0 ? formatUsageCompact(sumUsage(withUsage.map((item) => item.usage!))) : "";
+	const totals = perModelTotals(items);
 	const footer = totals ? `\n\nTotals: ${items.length} runs · ${totals}` : "";
 	return `### Subagents completed (${items.length}): ${agents}\n\n${items.map((item) => item.block).join("\n\n")}${footer}`;
+}
+
+/** One `model ↑x ↓y $z` segment per model, first-seen order — models are never
+ * merged, because each model's spend comes out of its own budget. The cost is
+ * always present (even `$0.0000`) so every model line reads as a tally. */
+export function perModelTotals(items: readonly CompletionMessageItem[]): string {
+	const byModel = new Map<string, UsageStats[]>();
+	for (const item of items) {
+		if (item.usage === undefined) continue;
+		const key = item.model?.trim() || "unknown model";
+		byModel.set(key, [...(byModel.get(key) ?? []), item.usage]);
+	}
+	if (byModel.size === 0) return "";
+	return [...byModel.entries()]
+		.map(([model, parts]) => {
+			const total = sumUsage(parts);
+			const tokens = formatUsageTokens(total);
+			return `${model}: ${tokens ? `${tokens} ` : ""}$${total.cost.toFixed(4)}`;
+		})
+		.join(" · ");
 }
 
 /** Minimal shape of an active run, for the "others still running" footer. Kept
