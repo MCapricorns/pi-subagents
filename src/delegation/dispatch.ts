@@ -24,6 +24,7 @@ import {
 } from "../presentation/monitor.ts";
 import { findDuplicateDispatch, formatParallelScopeAdmissionNote, formatPhaseLeaseReceipt } from "./prompt.ts";
 import {
+	findActiveWriterLease,
 	findPhaseScopeOverlap,
 	findWriterLeaseScopeOverlap,
 	normalizePhaseId,
@@ -194,7 +195,23 @@ function parallelAdmissionConflict(
 			}
 		}
 	}
+	const sentinelTask = tasks.find((task) => task.agent === "sentinel");
+	if (sentinelTask) {
+		const batchWriter = tasks.find(
+			(task) => task !== sentinelTask && task.agent !== "sentinel" && task.writeCapable,
+		);
+		if (batchWriter) {
+			return `tasks[${sentinelTask.index}] (sentinel) reviews a completed diff, but tasks[${batchWriter.index}] (${batchWriter.agent}) writes in the same batch; review follows the writer's completion`;
+		}
+	}
 	const leases = [...threads];
+	if (sentinelTask) {
+		const activeWriter = findActiveWriterLease(leases);
+		if (activeWriter) {
+			const state = activeWriter.lifecycleOperation === "settle" ? "settling" : activeWriter.state;
+			return `tasks[${sentinelTask.index}] (sentinel) reviews a completed diff, but run #${activeWriter.id} (${activeWriter.agentName}, ${state}) is still writing`;
+		}
+	}
 	for (const task of tasks) {
 		const duplicate = findDuplicateDispatch(leases, task.task, task.cwd, task.phaseId);
 		if (duplicate?.kind === "active") {

@@ -244,14 +244,23 @@ launch receipt say `independence not verified`; that means the contract lacked e
 metadata, not that overlap was proved safe. Single calls never make a batch-independence
 claim. The existing shared-checkout writer lane remains the final serialization boundary.
 
+`sentinel` dispatch has its own admission gate: it is rejected while any write-capable run
+is active, interrupted, or settling — including a worktree writer whose edits are not in
+the shared checkout yet and a worktree finalization whose patch is still landing. Review
+targets the completed diff, so dispatching it earlier would review state the writer is
+about to change. A batch that mixes `sentinel` with a writer task is rejected whole, with
+zero starts; dispatch review after the writer's completion message arrives. Read-only
+roles such as `scout` do not trigger this gate.
+
 - Single tasks use your checkout. Every parallel write-capable agent (`artisan`,
   `steward`, and custom writers) defaults to a detached Git worktree, so
   parallel writers run at the same time. Worktree mode needs a committed `HEAD`;
   read-only roles such as scout stay on the shared checkout. `sentinel` always
   reviews the shared checkout, because the uncommitted diff it inspects does not
   exist in a detached worktree; an explicit `isolation: worktree` for it is
-  rejected. Its proving check makes it a shared-checkout lane holder, so it never
-  reviews a diff a shared writer is still changing.
+  rejected. Its proving check makes it a shared-checkout lane holder, and its
+  dispatch is rejected outright while any writer is still active, so it never
+  reviews a diff a writer is still changing.
 
 > **Security boundary:** worktree isolation isolates Git changes only; it is not a sandbox.
 Child tools, network access, and environment access retain the Pi process's privileges.

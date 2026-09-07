@@ -162,17 +162,31 @@ export interface WriterLeaseScopeOverlap {
 
 const SCOPE_ADMISSION_STATES = new Set<WriterScopeLease["state"]>(["queued", "running", "interrupting", "parked"]);
 
+/** An active, non-retired lease that may still change repository content. */
+function isActiveWriterLease(lease: WriterScopeLease): boolean {
+	const active = lease.lifecycleOperation === "settle" || SCOPE_ADMISSION_STATES.has(lease.state);
+	const writes = lease.writeCapable ?? lease.agentName !== "scout";
+	return active && !lease.retired && writes;
+}
+
 /** Compare absolute normalized claims against active writer leases across caller cwds. */
 export function findWriterLeaseScopeOverlap(
 	scope: PhaseScope,
 	leases: Iterable<WriterScopeLease>,
 ): WriterLeaseScopeOverlap | undefined {
 	for (const lease of leases) {
-		const active = lease.lifecycleOperation === "settle" || SCOPE_ADMISSION_STATES.has(lease.state);
-		const writes = lease.writeCapable ?? lease.agentName !== "scout";
-		if (!active || lease.retired || !writes || !lease.scope) continue;
+		if (!isActiveWriterLease(lease) || !lease.scope) continue;
 		const overlap = findPhaseScopeOverlap(scope, lease.scope);
 		if (overlap) return { lease, overlap };
+	}
+	return undefined;
+}
+
+/** First lease that may still change the diff a sentinel would review. Sentinel
+ * leases are excluded: a reviewer freezes the checkout lane but never writes. */
+export function findActiveWriterLease(leases: Iterable<WriterScopeLease>): WriterScopeLease | undefined {
+	for (const lease of leases) {
+		if (lease.agentName !== "sentinel" && isActiveWriterLease(lease)) return lease;
 	}
 	return undefined;
 }

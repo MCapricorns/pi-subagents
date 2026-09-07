@@ -6,6 +6,7 @@ import { describe, it } from "node:test";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { registerSubagentTool } from "../src/delegation/dispatch.ts";
 import {
+	findActiveWriterLease,
 	findPhaseScopeOverlap,
 	findWriterLeaseScopeOverlap,
 	normalizePhaseId,
@@ -344,6 +345,111 @@ describe("single scope admission", () => {
 				const text = result.content.map((part: { text?: string }) => part.text ?? "").join("\n");
 				assert.doesNotMatch(text, /independence|scope admission/iu);
 			}
+		} finally {
+			runtime.threads.clear();
+			release.resolve();
+			await runtime.shutdown();
+			monitor.clear();
+			await rm(root, { recursive: true, force: true });
+		}
+	});
+});
+
+describe("sentinel admission", () => {
+	it("finds active writers while ignoring sentinel and read-only leases", () => {
+		const cwd = resolve("scope-fixture");
+		const settling = activeWriter(80, cwd, "src");
+		settling.state = "completed";
+		settling.lifecycleOperation = "settle";
+		assert.equal(findActiveWriterLease([settling])?.id, 80, "a settling worktree apply still blocks review");
+		settling.lifecycleOperation = undefined;
+		assert.equal(findActiveWriterLease([settling]), undefined, "a settled writer no longer blocks review");
+		const reviewer = activeWriter(85, cwd, "src");
+		reviewer.agentName = "sentinel";
+		assert.equal(findActiveWriterLease([reviewer]), undefined, "a sentinel lease never blocks another review");
+		const read_only = activeWriter(86, cwd, "src");
+		read_only.agentName = "scout";
+		read_only.writeCapable = false;
+		assert.equal(findActiveWriterLease([read_only]), undefined, "a read-only lease never blocks review");
+	});
+
+	it("rejects a batch mixing sentinel with a writer sibling before any start", async () => {
+		const root = await mkdtemp(join(tmpdir(), "pi-subagents-sentinel-batch-"));
+		const { runtime, tool } = dispatchHarness(join(root, "config.json"));
+		try {
+			await assert.rejects(execute(tool, {
+				tasks: [
+					{ agent: "sentinel", task: "Review the parser diff", phaseId: "parser-review" },
+					{ agent: "artisan", task: "Edit parser", phaseId: "parser" },
+				],
+			}, root), /tasks\[0\].*sentinel.*completed diff.*tasks\[1\].*artisan.*same batch/i);
+			assert.equal(runtime.threads.size, 0);
+			assert.equal(monitor.getRuns().length, 0);
+		} finally {
+			await runtime.shutdown();
+			monitor.clear();
+			await rm(root, { recursive: true, force: true });
+		}
+	});
+
+	it("rejects a sentinel batch while an existing writer lease is active", async () => {
+		const root = await mkdtemp(join(tmpdir(), "pi-subagents-sentinel-lease-"));
+		const { runtime, tool } = dispatchHarness(join(root, "config.json"));
+		runtime.threads.set(73, activeWriter(73, root, "src"));
+		try {
+			await assert.rejects(execute(tool, {
+				tasks: [{ agent: "sentinel", task: "Review the diff", phaseId: "diff-review" }],
+			}, root), /tasks\[0\].*sentinel.*completed diff.*run #73.*still writing/i);
+			assert.equal(runtime.threads.size, 1);
+			assert.equal(monitor.getRuns().length, 0);
+		} finally {
+			runtime.threads.clear();
+			await runtime.shutdown();
+			monitor.clear();
+			await rm(root, { recursive: true, force: true });
+		}
+	});
+
+	it("rejects single sentinel dispatch while a writer is still writing", async () => {
+		const root = await mkdtemp(join(tmpdir(), "pi-subagents-sentinel-single-"));
+		const { runtime, tool } = dispatchHarness(join(root, "config.json"));
+		runtime.threads.set(77, activeWriter(77, root, "src"));
+		try {
+			await assert.rejects(execute(tool, {
+				agent: "sentinel",
+				task: "Review the current diff",
+				phaseId: "current-review",
+			}, root), /run #77 \(artisan, parked\) is still writing; sentinel reviews only a completed diff/i);
+			assert.equal(runtime.threads.size, 1);
+			assert.equal(monitor.getRuns().length, 0);
+		} finally {
+			runtime.threads.clear();
+			await runtime.shutdown();
+			monitor.clear();
+			await rm(root, { recursive: true, force: true });
+		}
+	});
+
+	it("starts sentinel once every writer has settled", async () => {
+		const root = await mkdtemp(join(tmpdir(), "pi-subagents-sentinel-settled-"));
+		const { runtime, tool } = dispatchHarness(join(root, "config.json"));
+		const settled = activeWriter(78, root, "src");
+		settled.state = "completed";
+		runtime.threads.set(78, settled);
+		const release = deferred();
+		for (let index = 0; index < runtime.backgroundQueue.capacity; index++) {
+			runtime.backgroundQueue.enqueue(async () => release.promise);
+		}
+		await new Promise<void>((resolve) => setImmediate(resolve));
+		try {
+			const result = await execute(tool, {
+				agent: "sentinel",
+				task: "Review the completed diff",
+				phaseId: "completed-review",
+			}, root);
+			const text = result.content.map((part: { text?: string }) => part.text ?? "").join("\n");
+			assert.doesNotMatch(text, /still writing/i);
+			assert.equal(runtime.threads.size, 2);
 		} finally {
 			runtime.threads.clear();
 			release.resolve();

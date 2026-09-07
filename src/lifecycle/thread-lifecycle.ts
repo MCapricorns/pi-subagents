@@ -14,7 +14,7 @@ import { loadConfig } from "../configuration/config.ts";
 import { dispatchFailedResult, failedStartResult, formatCompletionBlock, modelLevelTakeoverNote, queuedResult } from "../presentation/format.ts";
 import { monitor } from "../presentation/monitor.ts";
 import { findDuplicateDispatch } from "../delegation/prompt.ts";
-import { findWriterLeaseScopeOverlap, normalizePhaseId, normalizePhaseScope } from "../delegation/phase-scope.ts";
+import { findActiveWriterLease, findWriterLeaseScopeOverlap, normalizePhaseId, normalizePhaseScope } from "../delegation/phase-scope.ts";
 import { persistRecoveryRecords, recoveryRecordFromFinalization } from "../isolation/recovery.ts";
 import type { SubagentRuntime, SubagentThread, ThreadState } from "./runtime.ts";
 import {
@@ -119,6 +119,17 @@ export function createBackgroundDispatcher(options: BackgroundDispatcherOptions)
 			if (conflict) {
 				return failedStartResult(agentName, task,
 					`Declared writer scope ${conflict.overlap.left} overlaps active run #${conflict.lease.id} scope ${conflict.overlap.right}; no run was started.`);
+			}
+		}
+		// Sentinel reviews the caller's completed diff. A writer active in any
+		// isolation mode (worktree edits are not visible yet; a settling apply is
+		// still landing) would leave the review stale at integration time.
+		if (agent.name === "sentinel") {
+			const activeWriter = findActiveWriterLease(runtime.threads.values());
+			if (activeWriter) {
+				const state = activeWriter.lifecycleOperation === "settle" ? "settling" : activeWriter.state;
+				return failedStartResult(agentName, task,
+					`Run #${activeWriter.id} (${activeWriter.agentName}, ${state}) is still writing; sentinel reviews only a completed diff. Wait for its completion message, then dispatch review.`);
 			}
 		}
 		const projectRoot = getProjectRoot(runtime.configPath, originalCwd);
