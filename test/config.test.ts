@@ -1,8 +1,8 @@
-import { mkdtempSync, readFileSync, writeFileSync } from "node:fs";
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import assert from "node:assert/strict";
-import { describe, it } from "node:test";
+import { describe, it, type TestContext } from "node:test";
 import {
 	BUILTIN_AGENT_NAMES,
 	DEFAULT_ENABLED_AGENTS,
@@ -93,14 +93,20 @@ describe("normalizeConfig", () => {
 });
 
 describe("loadConfig", () => {
-	it("returns defaults when the file is missing", async () => {
+	function tempDir(t: TestContext): string {
 		const dir = mkdtempSync(join(tmpdir(), "pi-subagents-test-"));
+		t.after(() => rmSync(dir, { recursive: true, force: true }));
+		return dir;
+	}
+
+	it("returns defaults when the file is missing", async (t) => {
+		const dir = tempDir(t);
 		const config = await loadConfig(join(dir, "does-not-exist.json"));
 		assert.deepEqual(config.enabledAgents, [...DEFAULT_ENABLED_AGENTS]);
 	});
 
-	it("falls back to defaults on corrupt JSON instead of throwing", async () => {
-		const dir = mkdtempSync(join(tmpdir(), "pi-subagents-test-"));
+	it("falls back to defaults on corrupt JSON instead of throwing", async (t) => {
+		const dir = tempDir(t);
 		const path = join(dir, "corrupt.json");
 		writeFileSync(path, "{ not json", "utf8");
 		const config = await loadConfig(path);
@@ -108,8 +114,8 @@ describe("loadConfig", () => {
 		assert.equal(config.agentScope, "user");
 	});
 
-	it("persists the canonical supported fields without unknown keys", async () => {
-		const dir = mkdtempSync(join(tmpdir(), "pi-subagents-test-"));
+	it("persists the canonical supported fields without unknown keys", async (t) => {
+		const dir = tempDir(t);
 		const path = join(dir, "pi-subagents.json");
 		writeFileSync(path, JSON.stringify({
 			enabledAgents: ["artisan"],
@@ -129,8 +135,8 @@ describe("loadConfig", () => {
 		assert.ok(!("unknownKey" in saved));
 	});
 
-	it("adopts sentinel once for configs written before it shipped and keeps a deliberate disable", async () => {
-		const dir = mkdtempSync(join(tmpdir(), "pi-subagents-test-"));
+	it("adopts sentinel once for configs written before it shipped and keeps a deliberate disable", async (t) => {
+		const dir = tempDir(t);
 		const path = join(dir, "pi-subagents.json");
 		writeFileSync(path, JSON.stringify({
 			enabledAgents: ["scout", "custom-worker"],
@@ -152,8 +158,8 @@ describe("loadConfig", () => {
 		assert.ok(disabled.knownAgents.includes("sentinel"));
 	});
 
-	it("treats a config without adoption tracking as the original three-role catalog", async () => {
-		const dir = mkdtempSync(join(tmpdir(), "pi-subagents-test-"));
+	it("treats a config without adoption tracking as the original three-role catalog", async (t) => {
+		const dir = tempDir(t);
 		const path = join(dir, "pi-subagents.json");
 		writeFileSync(path, JSON.stringify({ enabledAgents: ["artisan"] }), "utf8");
 
@@ -162,8 +168,8 @@ describe("loadConfig", () => {
 		assert.deepEqual(config.knownAgents, ["scout", "artisan", "steward", "sentinel"]);
 	});
 
-	it("round-trips selected models and thinking preferences", async () => {
-		const dir = mkdtempSync(join(tmpdir(), "pi-subagents-test-"));
+	it("round-trips selected models and thinking preferences", async (t) => {
+		const dir = tempDir(t);
 		const path = join(dir, "pi-subagents.json");
 		const config = normalizeConfig({
 			enabledAgents: [...BUILTIN_AGENT_NAMES],

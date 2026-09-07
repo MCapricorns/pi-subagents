@@ -2,7 +2,7 @@ import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "nod
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import assert from "node:assert/strict";
-import { describe, it } from "node:test";
+import { describe, it, type TestContext } from "node:test";
 import type { Api, Model } from "@earendil-works/pi-ai";
 import type { ExtensionCommandContext, Theme } from "@earendil-works/pi-coding-agent";
 import {
@@ -66,8 +66,9 @@ function baseConfig(overrides: Partial<SubagentsConfig> = {}): SubagentsConfig {
 	};
 }
 
-function writeConfig(config: SubagentsConfig): string {
+function writeConfig(config: SubagentsConfig, t: TestContext): string {
 	const dir = mkdtempSync(join(tmpdir(), "pi-subagents-setup-"));
+	t.after(() => rmSync(dir, { recursive: true, force: true }));
 	const path = join(dir, "pi-subagents.json");
 	writeFileSync(path, `${JSON.stringify(config, null, 2)}\n`, "utf8");
 	return path;
@@ -84,8 +85,8 @@ function renderComponent(factory: PickerFactory, done: (value: unknown) => void)
 }
 
 describe("runSetup menu", () => {
-	it("opens the Git-era settings menu instead of a grid overlay", async () => {
-		const path = writeConfig(baseConfig());
+	it("opens the Git-era settings menu instead of a grid overlay", async (t) => {
+		const path = writeConfig(baseConfig(), t);
 		const reasoning = model("reasoning");
 		let selectCalls = 0;
 		let customCalls = 0;
@@ -114,13 +115,13 @@ describe("runSetup menu", () => {
 		assert.equal(customCalls, 0);
 	});
 
-	it("configures a custom role through the nested fuzzy model picker", async () => {
+	it("configures a custom role through the nested fuzzy model picker", async (t) => {
 		const path = writeConfig(baseConfig({
 			enabledAgents: ["scout", "artisan", "steward", "sentinel", "custom-worker"],
 			knownAgents: ["scout", "artisan", "steward", "sentinel", "custom-worker"],
 			agentModels: { "custom-worker": "test/reasoning" },
 			agentScope: "project",
-		}));
+		}), t);
 		writeAgent(path, "custom-worker");
 		const reasoning = model("reasoning");
 		const other = model("other");
@@ -169,11 +170,11 @@ describe("runSetup menu", () => {
 		assert.ok(!("custom-worker" in saved.agentThinkingLevels));
 	});
 
-	it("keeps disabled custom agents visible in the enable menu", async () => {
+	it("keeps disabled custom agents visible in the enable menu", async (t) => {
 		const path = writeConfig(baseConfig({
 			knownAgents: ["scout", "artisan", "steward", "sentinel", "dormant-custom"],
 			agentScope: "project",
-		}));
+		}), t);
 		writeAgent(path, "dormant-custom");
 		const reasoning = model("reasoning");
 		let customDisplay = "";
@@ -208,8 +209,7 @@ describe("runSetup menu", () => {
 
 	it("discovers unconfigured custom definitions only in a trusted project", async (t) => {
 		for (const trusted of [true, false]) {
-			const path = writeConfig(baseConfig({ agentScope: "project" }));
-			t.after(() => rmSync(dirname(path), { recursive: true, force: true }));
+			const path = writeConfig(baseConfig({ agentScope: "project" }), t);
 			writeAgent(path, "fresh-custom");
 			let display = "";
 			const context = {
@@ -249,8 +249,7 @@ for (const menu of ["Enable", "Configure"] as const) {
 			knownAgents: ["scout", "artisan", "steward", "sentinel", "explorer", "executor"],
 			agentModels: { explorer: "test/reasoning" },
 			agentThinkingLevels: { executor: "high" },
-		}));
-		t.after(() => rmSync(dirname(path), { recursive: true, force: true }));
+		}), t);
 		let menuCalls = 0;
 		let display = "";
 		const notifications: string[] = [];
