@@ -20,8 +20,8 @@ passes, finalize the work without waiting to be asked:
      does not raise the minor version merely because a change is labeled `feat`.
    - Use a minor bump only for an explicitly planned broader release or when the
      user requests it; use major only for intentional breaking changes.
-2. Commit the change and the version bump together (one logical change per
-   commit; `type(scope): imperative English`). Stage only paths from this task.
+2. Commit the change and the version bump together as one logical change,
+   following the commit conventions below.
 3. Push to the current branch's upstream. A version that lands on `main` is
    published by `.github/workflows/publish.yml` and tagged as a GitHub
    Release — do not `npm publish` locally.

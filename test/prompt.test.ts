@@ -68,8 +68,8 @@ describe("buildDelegationDirective", () => {
 		assert.match(directive, /Main takes over failed or incomplete work from partial edits and artifacts/u);
 		assert.match(directive, /different deliverable needs a new phase/u);
 		assert.match(directive, /`wait: true` for an immediate dependency or one-shot session/u);
-		assert.match(directive, /Completions arrive automatically; do not poll or sleep to wait/u);
-		assert.match(directive, /Finish only after runs settle or are stopped/u);
+		assert.match(directive, /completions arrive automatically and wake you; do not poll or sleep to wait/u);
+		assert.match(directive, /Conclude the overall task only after every run settles or is stopped/u);
 		assert.match(directive, /Report only checks actually run/u);
 		assert.match(directive, /repeat or broaden checks only for new changes, failures, or unresolved concerns/u);
 		assert.match(directive, /Read truncated artifacts only when excerpts are insufficient/u);
