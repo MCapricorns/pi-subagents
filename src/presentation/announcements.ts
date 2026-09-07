@@ -8,7 +8,6 @@ import { announceRecoveryRecords, relocateRecoveryManifest } from "../isolation/
 import type { SubagentRuntime } from "../lifecycle/runtime.ts";
 import { seedCostLedgerFromSession } from "./cost-ledger.ts";
 import { installCostFooter } from "./cost-footer.ts";
-import { installActiveRunsStatus } from "./status.ts";
 import { installActiveRunsWidget } from "./widget.ts";
 
 /** Drop unavailable model overrides back to dynamic main-model routing. */
@@ -52,10 +51,9 @@ export function registerAnnouncements(pi: ExtensionAPI, runtime: SubagentRuntime
 				"info",
 			);
 		}
-		// The footer status works in every UI host (TUI and RPC); the widget and
-		// the per-model cost footer are TUI-only. Seeding first means the first
-		// footer render already carries the reloaded session's per-model spend.
-		installActiveRunsStatus(ctx);
+		// The widget and the per-model cost footer are TUI-only. Seeding first
+		// means the first footer render already carries the reloaded session's
+		// per-model spend.
 		if (ctx.mode !== "tui") return;
 		seedCostLedgerFromSession(ctx);
 		installActiveRunsWidget(ctx);

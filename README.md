@@ -12,6 +12,10 @@ once and your main agent delegates on its own.
 
 ## What's new
 
+**4.3.13** — the footer is reserved for the per-model cost tally: the
+`subagents N running` activity-count line is gone, leaving the widget,
+completion notifications, and `subagent_status` for live progress.
+
 **4.3.12** — per-model accounting: the main window's consumption line becomes a
 per-model cost footer (token flow, cost, context share, and live `tok/s` per
 `provider/model`), awaited children's usage is no longer folded into the parent
@@ -354,19 +358,6 @@ what they actually wait for — `queued` for a free process slot, `repo lane`
 for shared-checkout write serialization, or `starting`. The widget is
 capped at ten lines: when many runs are live, extra runs collapse into a
 `… +N more` marker so the editor keeps its space.
-
-The widget is the detailed surface, but it only pays off while you are looking
-at it. A one-line roll-up in the always-visible footer answers "is anything
-still working?" without opening the widget or asking:
-
-```text
-subagents 2 running · 1 repo lane · 3 done
-```
-
-It is count-only, keeps the same wait vocabulary as the widget, and works in
-RPC hosts as well as the TUI. Settled counts stay on the line only while a
-sibling is still live (`2 running · 3 done`); the line disappears once nothing
-is active.
 
 ### Per-model cost footer
 

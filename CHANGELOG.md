@@ -3,6 +3,13 @@
 Release notes for `@ferris1225/pi-subagents`. Only the most recent releases
 are kept here; every published version is preserved as a GitHub Release.
 
+## 4.3.13
+
+- Remove the `subagents N running · …` activity-count line from the footer.
+  Live progress stays visible in the above-editor widget, per-run completion
+  notifications, and `subagent_status`; the footer is reserved for the
+  per-model cost tally.
+
 ## 4.3.12
 
 - Replace pi's built-in consumption line with a per-model cost footer for the

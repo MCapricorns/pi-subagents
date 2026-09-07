@@ -8,7 +8,8 @@
  *   - execution/     — process queue, RPC transport/control, and model handoff
  *   - lifecycle/     — durable threads, restoration, controls, and delivery
  *   - isolation/     — Git worktrees, recovery, and temporary-state hygiene
- *   - presentation/  — announcements, formatting, monitor, status, and widget
+ *   - presentation/  — announcements, cost footer/ledger, formatting, monitor,
+ *     and the active-run widget
  *
  * Also registers the `/subagents-setup` command and a `before_agent_start` hook
  * that injects a delegation directive into the parent system prompt so the main
@@ -34,7 +35,6 @@ import { registerAnnouncements } from "./src/presentation/announcements.ts";
 import { registerMainCostTracking } from "./src/presentation/cost-ledger.ts";
 import { clearCostFooter } from "./src/presentation/cost-footer.ts";
 import { matchRunIds } from "./src/presentation/format.ts";
-import { clearActiveRunsStatus } from "./src/presentation/status.ts";
 import { clearActiveRunsWidget } from "./src/presentation/widget.ts";
 
 export { matchRunIds };
@@ -66,7 +66,6 @@ export default function (pi: ExtensionAPI): void {
 	);
 
 	pi.on("session_shutdown", async (_event, ctx) => {
-		clearActiveRunsStatus(ctx);
 		clearActiveRunsWidget(ctx);
 		clearCostFooter(ctx);
 		await runtime.shutdown();

@@ -1,46 +1,8 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 import { formatCompletionBlock } from "../src/presentation/format.ts";
-import { formatRunStatusLine } from "../src/presentation/status.ts";
 import { RESULT_LINE_MAX, truncateResultOutput } from "../src/execution/spawn.ts";
 import { emptyUsage } from "../src/execution/rpc-control.ts";
-import type { RunView } from "../src/presentation/monitor.ts";
-
-function run(partial: Partial<RunView> & Pick<RunView, "id" | "status">): RunView {
-	return {
-		agent: "artisan",
-		task: "task",
-		usage: emptyUsage(),
-		elapsedMs: 0,
-		...partial,
-	};
-}
-
-describe("formatRunStatusLine", () => {
-	it("hides a done-only leftover and counts settled rows beside live siblings", () => {
-		assert.equal(formatRunStatusLine([run({ id: 1, status: "done" })]), undefined);
-		assert.equal(
-			formatRunStatusLine([
-				run({ id: 1, status: "running" }),
-				run({ id: 2, status: "running" }),
-				run({ id: 3, status: "done" }),
-				run({ id: 4, status: "done" }),
-				run({ id: 5, status: "done" }),
-			]),
-			"subagents 2 running · 3 done",
-		);
-	});
-
-	it("labels failed rows as stopped so mixed live+failed counts appear", () => {
-		assert.equal(
-			formatRunStatusLine([
-				run({ id: 1, status: "running" }),
-				run({ id: 2, status: "failed" }),
-			]),
-			"subagents 1 running · 1 stopped",
-		);
-	});
-});
 
 describe("truncateResultOutput", () => {
 	it("does not claim a line budget when only a long line was clipped", () => {
