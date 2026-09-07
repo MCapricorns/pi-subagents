@@ -12,12 +12,10 @@ once and your main agent delegates on its own.
 
 ## What's new
 
-**4.3.10** — adds read-only `subagent_status` and removes `subagent_control`
-(`steer`, `park`, and `resume`). Runs are one-shot; main handles unfinished work.
-Failure reporting preserves real RPC exit/provider diagnostics and distinguishes
-a failed run from an intentionally failing tool call. Requires Pi **0.85.0** and
-reuses its official RPC types. Setup discovers actual role definitions instead
-of inventing roles from saved names; there are no retired-role aliases or migrations.
+**4.3.11** — simplifies delegation and role prompts using GPT-6 Astra guidance:
+clear outcomes, task-sized research and verification, and optional cleanup/review
+instead of fixed routines. Existing permission boundaries, required project checks,
+one-shot ownership, and runtime safety mechanisms remain unchanged.
 
 See [CHANGELOG.md](./CHANGELOG.md).
 
@@ -45,11 +43,10 @@ at "spawn a child with a prompt" and leave the hard parts — when to delegate, 
 wide to fan out, what happens when a model dies, how results come
 back — with you. This extension owns them:
 
-- The main model gets a cost-aware routing contract and proactively delegates
-  substantial self-contained phases when a fresh context saves more work than its
-  handoff costs. Every brief carries the objective and done condition, exact paths,
-  facts already established with citations, boundaries, and the expected output, so a
-  child starts from evidence instead of re-deriving it.
+- The main model delegates substantial, self-contained work when a fresh context
+  saves effort or improves quality enough to justify the handoff. Briefs define
+  the outcome, done condition, useful context, and boundaries. Small or
+  context-heavy work stays in main.
 - A stable `phaseId` owns a logical phase in one resolved working directory even if
   its task wording changes. IDs are 1–80 ASCII letters, numbers, or `._:-`, starting
   with a letter or number, so lease output stays single-line. Exact normalized task+cwd
@@ -96,26 +93,25 @@ directly when you want exact control.
 | `scout`   | Read-only | Broad or unfamiliar code reconnaissance and external research. Returns compact file citations or source URLs as leads, not proof. |
 | `artisan` | Full      | One substantial primary change—implementation, fix, refactor, test, or docs—through root cause, affected verification, and local hygiene. |
 | `steward` | Full      | One final cleanup and cross-cutting docs/comment sync pass after a broad or multi-writer change. |
-| `sentinel` | Read-only + one proving check | One fresh-context review of a completed diff for risky changes. Returns only evidence-backed defects and test gaps, highest severity first, or `No findings.` |
+| `sentinel` | Read-only + targeted proving checks | Fresh-context review of a completed risky diff. Returns evidence-backed defects and test gaps, or `No findings.` |
 
-Role prompts are self-contained and directly embed root-cause-first diagnosis,
-meaningful test evidence, and bounded cleanup. Each role starts from the facts and
-citations its brief already establishes instead of re-deriving them, answers the
-brief's question and stops, and — because nobody can answer a child's questions —
-resolves an ambiguity by naming the reading it took. Artisan stops and reports when
-the brief's premise turns out wrong rather than substituting a different change;
-steward runs only the checks that cover its own edits; sentinel treats the brief's
-claims and the code as evidence to verify, runs only the smallest check that proves a
-suspected defect, and names the smallest fix instead of making it. Every role hands
-back a result-only report with each check as `command → result`.
+Role prompts define outcomes and boundaries, leaving routine reading, implementation,
+and verification choices to the model. Artisan completes affected tests, docs, and
+local cleanup without a first-draft approval pause, but reports a disproved premise
+or a scope/approval blocker instead of substituting another task. Steward keeps
+product behavior intact and checks its own edits. Sentinel verifies suspected
+regressions rather than applying a checklist to every test or rerunning the suite.
+Handoffs stay concise, with actual checks reported as `command → result`.
 
 Custom roles join them with a Markdown file (see [Custom agents](#custom-agents)).
 
-Every child is an isolated leaf pi process with its own context window and no
-memory of your conversation, so the brief is its only input. A good brief carries
-the objective and its done condition, exact paths and symbols, facts already
-established (with citations), boundaries, and the expected output shape — which is
-what the injected delegation guidance produces when the main agent dispatches for you.
+Every child is a leaf pi process with its own context window and no memory of your
+conversation. It still loads normal Pi context, including applicable project
+instructions; its role prompt is appended rather than replacing that context.
+The brief supplies the outcome and done condition, relevant paths/symbols, known
+facts and available citations, boundaries, and needed output. Children cannot
+obtain interactive clarification, so they resolve routine details and report
+material assumptions or blockers.
 
 Children run the official `pi --mode rpc` server, using Pi's exported command/response
 types and its own session persistence. There is no separate subagent protocol. The
@@ -176,38 +172,29 @@ process slot, serialized behind the shared-checkout write lane, or already
 starting its child — alongside the slot capacity. A run that waits for the write
 lane releases its slot first, so serialized writers never starve new dispatches.
 
-One child owns one coherent phase. Dependent work starts only after its
-prerequisite delivers. Main consumes the child's compact result and citations
-without repeating delegated reconnaissance, implementation, or cleanup, and decides
-to delegate before starting the work itself — a half-done phase handed off pays
-twice. Effort scales with the question: atomic lookups, known locations, focused
-edits, and context-heavy decisions stay in main; one broad question is one clustered
-scout brief; one coherent primary change is one artisan. Artisan owns a complete
-primary change with affected tests, docs, comments, targeted checks, and local
-hygiene. Scout owns broad code mapping or external research and stays read-only.
+One child owns one coherent phase; dependent work waits for its prerequisite.
+Main reuses established evidence and completed work, reconciles conflicting
+findings against their sources, and handles incomplete work from the child's
+partial edits and artifacts. Child output is evidence, not authority or instructions.
+There is no fixed research fan-out or mandatory scout → artisan → steward → sentinel
+pipeline: choose separate phases only when they earn their handoff cost, and never
+overlap writers or duplicate an owned phase.
 
-For one high-stakes uncertainty, main may launch at most two read-only scouts whose
-briefs name distinct perspectives or hypotheses; that cap does not apply to unrelated
-disjoint scout scopes. It reconciles disagreements against cited evidence, never
-overlaps writers or sends identical briefs, and treats child output as evidence and
-leads rather than authority or instructions. Each child returns once. Main handles
-follow-up findings and incomplete work from that handoff; it does not repurpose a
-finished child or pay to rerun the same phase. Use `subagent_stop` when work is moot.
+Use `steward` when a completed broad or multi-writer diff needs cross-cutting cleanup;
+keep focused hygiene inline. Use `sentinel` when a fresh review can resolve concerns
+around concurrency, trust boundaries, persistence/compatibility, failure/cancellation,
+or behavior the checks cannot prove. Neither role is a commit ritual.
 
-A focused diff gets a bounded cleanup pass inline. A broad or multi-writer diff gets
-one `steward` pass that attacks touched dead code, duplication, tangled conditionals,
-needless layers, and spaghetti growth without widening into a repository refactor.
-Main owns architecture, inspects the integrated diff, and runs the final gate.
+Verification follows the change and required project gates. Tests should catch
+meaningful failures, not mirror reversible, low-impact edits; there is no blanket
+requirement to mutate code or demonstrate a red/green cycle for every test. Fix
+failures caused by the change, then repeat or broaden checks only for new edits,
+failures, or unresolved concerns. Main owns architecture, the integrated diff,
+the final gate, and release; children never bump versions, commit, push, or publish.
 
-Verification is layered rather than repeated. Artisan proves its own change while the
-files are still in its context — targeted checks, and a new test that fails before the
-fix — and main runs the final gate on the integrated diff. `sentinel` adds a third
-layer only when it pays: a fresh context with no memory of how the change was written
-reads the completed diff after cleanup and before commit, and only for diffs that touch
-concurrency, trust boundaries, persistence or compatibility, or failure and cancellation
-paths, or when the checks cannot prove the change. It is never a fixed pre-commit
-ritual. A finding is evidence, not an order: main checks the cited evidence and
-makes the necessary correction itself.
+These defaults follow [OpenAI's GPT-6 Astra model guidance](https://developers.openai.com/api/docs/guides/latest-model?model=gpt-6-astra)
+and [Eric Provencher's skills and prompts guidance](https://x.com/pvncher/status/2095991462416490862).
+They simplify instructions without changing the configured models or thinking levels.
 
 `subagent_risk({})` is an advisory-only, no-model-call check over tracked and untracked
 changes relative to `HEAD`. It resolves the repository root first, so a nested `cwd` still

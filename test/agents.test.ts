@@ -25,6 +25,11 @@ describe("loadBuiltinAgents", () => {
 		for (const agent of agents) {
 			assert.equal(agent.model, undefined);
 			assert.ok(!("thinking" in agent));
+			assert.match(agent.systemPrompt, /loaded project instructions/u);
+			assert.match(agent.systemPrompt, /no .*interactive clarification/u);
+			if (agent.name !== "scout") {
+				assert.match(agent.systemPrompt, /do not dispatch agents, bump versions, commit, push, publish, tag, or release/u);
+			}
 		}
 	});
 
@@ -38,14 +43,9 @@ describe("loadBuiltinAgents", () => {
 		assert.ok(scout.systemPrompt.includes("untrusted data"));
 		assert.match(scout.systemPrompt, /primary sources/u);
 		assert.match(scout.systemPrompt, /URL/u);
-		assert.ok(scout.systemPrompt.includes("broad reconnaissance phase"));
-		assert.ok(scout.systemPrompt.includes("Atomic lookups and known locations stay with main"));
-		assert.ok(scout.systemPrompt.includes("Cluster related questions"));
-		assert.ok(scout.systemPrompt.includes("Start from what the brief already establishes"));
-		assert.ok(scout.systemPrompt.includes("Answer the brief's question, then stop"));
-		assert.ok(scout.systemPrompt.includes("nobody answers questions"));
-		assert.match(scout.systemPrompt, /draft code or patches/u);
-		assert.match(scout.systemPrompt, /\(inferred\)/u);
+		assert.match(scout.systemPrompt, /supplied facts.*then stop/u);
+		assert.match(scout.systemPrompt, /not patches or an implementation plan/u);
+		assert.match(scout.systemPrompt, /Distinguish inference from verified facts/u);
 		assert.ok(!isWriteCapableAgent(scout));
 	});
 
@@ -54,34 +54,29 @@ describe("loadBuiltinAgents", () => {
 		assert.ok(artisan);
 		assert.equal(artisan.tools, undefined);
 		assert.ok(isWriteCapableAgent(artisan));
-		assert.ok(artisan.systemPrompt.includes("confirm the defect before editing"));
-		assert.ok(artisan.systemPrompt.includes("root cause"));
-		assert.match(artisan.systemPrompt, /fail .*before.*pass/iu);
-		assert.ok(artisan.systemPrompt.includes("directly affected tests, README/docs, comments"));
-		assert.ok(artisan.systemPrompt.includes("local diff hygiene"));
-		assert.ok(artisan.systemPrompt.includes("cross-cutting pre-commit cleanup"));
-		assert.ok(artisan.systemPrompt.includes("do not dispatch agents"));
-		assert.ok(artisan.systemPrompt.includes("Start from the brief's cited lines and stated facts"));
-		assert.match(artisan.systemPrompt, /premise is wrong.*stop and report the conflict with evidence/u);
-		assert.ok(artisan.systemPrompt.includes("nobody answers questions"));
-		assert.match(artisan.systemPrompt, /each check as `command → result`/u);
-		assert.match(artisan.systemPrompt, /disproved assumptions, or out-of-scope follow-ups/u);
+		assert.match(artisan.systemPrompt, /confirm current behavior.*root cause/u);
+		assert.match(artisan.systemPrompt, /affected tests\/docs\/comments, local cleanup, and verification/u);
+		assert.match(artisan.systemPrompt, /without stopping for first-draft review/u);
+		assert.match(artisan.systemPrompt, /premise is disproved.*approval boundary.*report the blocker with evidence/u);
+		assert.match(artisan.systemPrompt, /Tests should catch the relevant failure/u);
+		assert.match(artisan.systemPrompt, /checks and gates required by the brief or project/u);
+		assert.match(artisan.systemPrompt, /repeat or broaden checks only for new edits, failures, or unresolved concerns/u);
+		assert.match(artisan.systemPrompt, /unrun checks and pre-existing failures accurately/u);
+		assert.match(artisan.systemPrompt, /checks as `command → result`/u);
 	});
 
 	it("keeps steward on final hygiene and cross-cutting docs", () => {
 		const steward = loadBuiltinAgents().find((agent) => agent.name === "steward");
 		assert.ok(steward);
 		assert.ok(isWriteCapableAgent(steward));
-		assert.ok(steward.systemPrompt.includes("final hygiene phase"));
-		assert.ok(steward.systemPrompt.includes("cross-cutting comments, README, examples, and user docs"));
-		assert.ok(steward.systemPrompt.includes("never repeat implementation or reconnaissance"));
-		assert.ok(steward.systemPrompt.includes("without changing product behavior"));
-		assert.ok(steward.systemPrompt.includes("dead or unreachable code"));
-		assert.ok(steward.systemPrompt.includes("tangled conditionals"));
-		assert.ok(!steward.systemPrompt.includes("Merging inputs"));
-		assert.ok(steward.systemPrompt.includes("nobody answers questions"));
-		assert.match(steward.systemPrompt, /narrowest checks that cover your own edits/u);
-		assert.match(steward.systemPrompt, /primary change's verification is not yours to repeat/u);
+		assert.match(steward.systemPrompt, /completed diff or Git range/u);
+		assert.match(steward.systemPrompt, /Stop and report if primary writing is still active/u);
+		assert.match(steward.systemPrompt, /stay within the assigned diff/u);
+		assert.match(steward.systemPrompt, /cross-cutting comments, README, examples, and user docs/u);
+		assert.match(steward.systemPrompt, /Prove deletions have no live consumers/u);
+		assert.match(steward.systemPrompt, /Preserve uncertain dynamic behavior, public APIs, persisted formats, compatibility, and product behavior/u);
+		assert.match(steward.systemPrompt, /Run the narrowest checks covering your edits/u);
+		assert.match(steward.systemPrompt, /Repeat primary verification only when new edits, failures, or unresolved concerns justify it/u);
 	});
 
 	it("keeps sentinel a read-only fresh-context reviewer on the shared checkout", () => {
@@ -94,15 +89,15 @@ describe("loadBuiltinAgents", () => {
 		assert.ok(!sentinel.tools?.includes("edit"));
 		assert.ok(!sentinel.tools?.includes("write"));
 		assert.ok(sentinel.systemPrompt.includes("no memory of how it was written"));
-		assert.ok(sentinel.systemPrompt.includes("nobody answers questions"));
+		assert.match(sentinel.systemPrompt, /Require a named completed scope/u);
+		assert.match(sentinel.systemPrompt, /Stop and report if primary writing is still active/u);
 		assert.ok(sentinel.systemPrompt.includes("Work read-only"));
 		assert.ok(sentinel.systemPrompt.includes("smallest targeted check needed to prove a suspected defect"));
-		assert.match(sentinel.systemPrompt, /whether each test would fail without the change/u);
-		assert.ok(sentinel.systemPrompt.includes("Fixes belong to the implementation owner and cleanup to `steward`"));
+		assert.match(sentinel.systemPrompt, /assess whether relevant tests would catch them/u);
+		assert.match(sentinel.systemPrompt, /Omit unverified suspicions/u);
+		assert.match(sentinel.systemPrompt, /Report fixes to main rather than making them/u);
 		assert.ok(sentinel.systemPrompt.includes("SEVERITY path:line"));
 		assert.ok(sentinel.systemPrompt.includes("No findings."));
-		assert.ok(sentinel.systemPrompt.includes("do not dispatch agents"));
-		assert.ok(!/ferris|Before every commit/u.test(sentinel.systemPrompt));
 		assert.ok(isWriteCapableAgent(sentinel), "a proving check takes the repository lane");
 	});
 

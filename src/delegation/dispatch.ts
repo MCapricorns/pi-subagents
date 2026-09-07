@@ -59,7 +59,7 @@ export { isWorktreeCapableAgent, runInManagedRepositoryLane };
 const NON_BLANK_TASK_OPTIONS = { minLength: 1, pattern: "\\S" } as const;
 
 const ISOLATION_DESCRIPTION =
-	"Filesystem isolation: shared uses the caller's working tree; worktree creates a detached temporary Git worktree (write-capable agents, including artisan and steward, only)";
+	"Git isolation (not a sandbox): shared uses the caller's checkout; worktree creates a detached temporary worktree for write-capable agents only.";
 
 const IsolationSchema = Type.Optional(
 	StringEnum(["shared", "worktree"] as const, { description: ISOLATION_DESCRIPTION }),
@@ -69,7 +69,7 @@ const PhaseIdSchema = Type.Optional(Type.String({
 	minLength: 1,
 	maxLength: PHASE_ID_MAX_LENGTH,
 	pattern: PHASE_ID_PATTERN_SOURCE,
-	description: "Stable logical phase id: 1-80 ASCII letters, numbers, or ._:- characters, starting with a letter or number. Reuse it when task wording changes so duplicate fresh dispatches are rejected.",
+	description: "Stable logical phase id. Reuse it when rewording the same phase; exact task+cwd is the fallback when omitted.",
 }));
 const ScopeSchema = Type.Optional(Type.Object({
 	paths: Type.Optional(Type.Array(Type.String({
@@ -90,7 +90,7 @@ const WaitSchema = Type.Optional(
 );
 
 const TASK_BRIEF_DESCRIPTION =
-	"Complete brief for one substantial self-contained phase; the child has no memory of this conversation. State the objective and done condition, exact paths/symbols, facts already established (with citations) so it starts there, boundaries, and the expected output shape.";
+	"Complete brief: objective and done condition, relevant paths/symbols, known facts with citations when available, boundaries, and needed output. The child has no parent conversation.";
 
 const TaskItem = Type.Object({
 	agent: Type.String({ description: "Name of the agent to invoke" }),
@@ -496,7 +496,7 @@ export function registerSubagentTool(pi: ExtensionAPI, runtime: SubagentRuntime)
 	pi.registerTool({
 		name: "subagent",
 		label: "Subagent",
-		description: "Start paid one-shot leaf runs for substantial self-contained work. phaseId is a stable logical identity; exact task+cwd is the fallback. scope declares write-conflict metadata, not permissions or a sandbox. Fresh writers are checked against active leases; parallel batches preflight duplicate phases and declared overlaps before allocation. Missing scope reports `independence not verified`; claims do not prove task independence. wait:true returns results in-turn; otherwise completions wake main. Inspect with subagent_status, cancel with subagent_stop; main handles failed or incomplete work.",
+		description: "Start one-shot leaf runs for substantial work. Duplicate phases and declared writer overlaps are rejected before allocation; scope does not prove independence or grant permissions. Parallel tasks without scope report `independence not verified`. Results arrive automatically, or in-turn with wait:true. Main handles incomplete work.",
 		parameters: SubagentParams,
 
 		async execute(_toolCallId, params, signal, onUpdate, ctx) {

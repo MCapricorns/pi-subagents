@@ -12,7 +12,7 @@
  *
  * Also registers the `/subagents-setup` command and a `before_agent_start` hook
  * that injects a delegation directive into the parent system prompt so the main
- * model uses the tool proactively.
+ * model can choose useful, self-contained work to delegate.
  *
  * The tool is not registered inside child sub-agent processes, which prevents
  * runaway recursion and keeps child context windows clean.

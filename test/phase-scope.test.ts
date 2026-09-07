@@ -137,14 +137,20 @@ describe("phase and scope normalization", () => {
 		}
 	});
 
-	it("publishes the same bounded phase id contract in single and parallel schemas", async () => {
+	it("publishes phase id constraints and self-contained briefs in both dispatch modes", async () => {
 		const { runtime, tool } = dispatchHarness(join(tmpdir(), `pi-subagents-phase-schema-${process.pid}.json`));
 		try {
-			const single = tool.parameters?.properties?.phaseId;
-			const parallel = tool.parameters?.properties?.tasks?.items?.properties?.phaseId;
+			const single = tool.parameters?.properties;
+			const parallel = tool.parameters?.properties?.tasks?.items?.properties;
 			for (const schema of [single, parallel]) {
-				assert.equal(schema?.maxLength, PHASE_ID_MAX_LENGTH);
-				assert.equal(schema?.pattern, PHASE_ID_PATTERN_SOURCE);
+				assert.equal(schema?.phaseId?.maxLength, PHASE_ID_MAX_LENGTH);
+				assert.equal(schema?.phaseId?.pattern, PHASE_ID_PATTERN_SOURCE);
+				const brief = schema?.task?.description ?? "";
+				assert.match(brief, /objective and done condition/u);
+				assert.match(brief, /paths\/symbols/u);
+				assert.match(brief, /known facts with citations/u);
+				assert.match(brief, /boundaries.*needed output/u);
+				assert.match(brief, /child has no parent conversation/u);
 			}
 		} finally {
 			await runtime.shutdown();

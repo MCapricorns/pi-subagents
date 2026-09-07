@@ -4,6 +4,21 @@ Published versions of `@ferris1225/pi-subagents`. Unpublished numbers
 (`4.2.3`, `4.2.6`, `4.2.9`–`4.2.11`) never shipped on npm; their changes
 landed in the next published release.
 
+## 4.3.11
+
+- Simplify parent delegation and built-in role prompts using OpenAI's GPT-6 Astra
+  guidance and Eric Provencher's prompting experience. Keep role descriptions in
+  the catalog and brief details in tool parameters instead of repeating both.
+- Replace fixed search routines, research fan-out, exhaustive cleanup itineraries,
+  and mandatory per-test red/green demonstrations with outcome-driven work and
+  change-appropriate verification. Required project gates and meaningful tests remain.
+- Clarify that children receive normal Pi project instructions in addition to their
+  brief. Let writers resolve routine implementation details and complete authorized
+  work, while preserving explicit scope/approval boundaries and read-only roles.
+- Retain one-shot phase ownership, tool restrictions, admission checks, isolation,
+  cancellation, and recovery. Make stop's destructive, non-resumable behavior explicit
+  in its own tool description. Model selection and thinking defaults are unchanged.
+
 ## 4.3.10
 
 - Add read-only `subagent_status`: list current-session runs or inspect an exact id,

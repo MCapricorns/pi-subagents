@@ -117,7 +117,7 @@ export function registerLookupTools(pi: ExtensionAPI, runtime: SubagentRuntime):
 	pi.registerTool({
 		name: "subagent_stop",
 		label: "Subagent Stop",
-		description: "Stop and retire one child thread by run id/prefix, or every active thread with all: true.",
+		description: "Destructively stop and retire one run by id/prefix, or all active runs with all: true. Delivers partial results; stopped runs cannot resume.",
 		parameters: SubagentStopParams,
 
 		async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
