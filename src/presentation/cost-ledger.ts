@@ -9,7 +9,7 @@
  * each model keeps its own tally — plus its live token throughput.
  */
 
-import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
+import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { modelRef } from "../configuration/models.ts";
 
 export interface ModelSpend {
@@ -198,28 +198,18 @@ export class CostLedger {
 
 export const costLedger = new CostLedger();
 
-/** Latest event context, so the footer renders against live session state
- * (context usage, cwd, session name) without holding a stale install-time ctx. */
-let latestContext: ExtensionContext | undefined;
-
 /** Wire the main window's own generation into the ledger: assistant messages
  * carry the serving model and exact usage, model switches re-key the current
  * row, and compaction calls land on the model that made them. */
 export function registerMainCostTracking(pi: ExtensionAPI): void {
-	const remember = (ctx: ExtensionContext): void => {
-		latestContext = ctx;
-	};
-
-	pi.on("message_start", async (event, ctx) => {
-		remember(ctx);
+	pi.on("message_start", async (event) => {
 		const message = (event as { message?: { role?: string } }).message;
 		if (message?.role !== "assistant") return;
 		const ref = messageModelRef(message as { provider?: string; model?: string });
 		if (ref) costLedger.noteStreamStart(ref);
 	});
 
-	pi.on("message_update", async (event, ctx) => {
-		remember(ctx);
+	pi.on("message_update", async (event) => {
 		const delta = (event as { assistantMessageEvent?: { type?: string; delta?: string } }).assistantMessageEvent;
 		if (delta?.type !== "text_delta" && delta?.type !== "thinking_delta") return;
 		// `message_start` does not always carry the model yet; the first delta
@@ -234,8 +224,7 @@ export function registerMainCostTracking(pi: ExtensionAPI): void {
 		costLedger.noteStreamDelta(delta.delta?.length ?? 0);
 	});
 
-	pi.on("message_end", async (event, ctx) => {
-		remember(ctx);
+	pi.on("message_end", async (event) => {
 		const message = (event as { message?: { role?: string; provider?: string; model?: string; usage?: UsageLike } }).message;
 		if (message?.role !== "assistant") return;
 		const ref = messageModelRef(message) ?? costLedger.getCurrentModel();
@@ -245,15 +234,13 @@ export function registerMainCostTracking(pi: ExtensionAPI): void {
 		costLedger.record(ref, usage);
 	});
 
-	pi.on("model_select", async (event, ctx) => {
-		remember(ctx);
+	pi.on("model_select", async (event) => {
 		costLedger.markCurrentModel(modelRef(event.model));
 	});
 
 	pi.on("session_compact", async (event, ctx) => {
-		remember(ctx);
 		const usage = (event as { compactionEntry?: { usage?: UsageLike } }).compactionEntry?.usage;
-		const ref = costLedger.getCurrentModel() ?? (latestContext?.model ? modelRef(latestContext.model) : undefined);
+		const ref = costLedger.getCurrentModel() ?? (ctx.model ? modelRef(ctx.model) : undefined);
 		if (usage && ref) costLedger.record(ref, finiteUsage(usage));
 	});
 }
@@ -279,8 +266,4 @@ export function seedCostLedgerFromSession(ctx: {
 			costLedger.record(current, finiteUsage(entry.usage));
 		}
 	}
-}
-
-export function latestTrackedContext(): ExtensionContext | undefined {
-	return latestContext;
 }

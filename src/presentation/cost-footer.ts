@@ -14,7 +14,7 @@ import type { ExtensionContext, Theme } from "@earendil-works/pi-coding-agent";
 import { truncateToWidth, visibleWidth } from "@earendil-works/pi-tui";
 import { isAbsolute, relative, resolve, sep } from "node:path";
 import { stripVTControlCharacters } from "node:util";
-import { costLedger, latestTrackedContext, type ModelSpendRow } from "./cost-ledger.ts";
+import { costLedger, type ModelSpendRow } from "./cost-ledger.ts";
 import { formatTokens, formatUsageTokens } from "./monitor.ts";
 import type { UsageStats } from "../execution/rpc-control.ts";
 
@@ -26,8 +26,7 @@ interface FooterData {
 	onBranchChange(callback: () => void): () => void;
 }
 
-/** Context pieces the footer renders against; falls back to the latest event
- * context so a fresh install still sees live session state. */
+/** Live context owned by the installed footer's session. */
 type RenderContext = Partial<Pick<ExtensionContext, "sessionManager" | "getContextUsage" | "model" | "thinkingLevel">>;
 
 /** Minimum gap between the stats left side and the right-aligned model. */
@@ -135,8 +134,7 @@ export function renderCostFooter(
 	footerData: FooterData | undefined,
 	ctx: RenderContext,
 ): string[] {
-	const live = latestTrackedContext() ?? ctx;
-	const sessionManager = live.sessionManager ?? ctx.sessionManager;
+	const sessionManager = ctx.sessionManager;
 	const lines: string[] = [];
 
 	let project = formatProjectPath(sessionManager?.getCwd() ?? "", process.env.HOME || process.env.USERPROFILE);
@@ -149,7 +147,7 @@ export function renderCostFooter(
 	const rows = costLedger.snapshot();
 	if (rows.length > 0) {
 		const current = rows.find((row) => row.current);
-		if (current) lines.push(currentModelLine(current, theme, width, live));
+		if (current) lines.push(currentModelLine(current, theme, width, ctx));
 		const settled = rows
 			.filter((row) => !row.current)
 			.sort((left, right) => right.spend.cost - left.spend.cost);
@@ -176,7 +174,8 @@ export function renderCostFooter(
 /**
  * Replace pi's built-in footer with the per-model cost footer. The factory
  * re-renders on ledger updates and git branch changes; context, model, and
- * thinking state come from the freshest event context available.
+ * thinking state use Pi's live getters for this session. Shutdown clears the
+ * footer before Pi invalidates its context.
  */
 export function installCostFooter(ctx: Pick<ExtensionContext, "mode" | "ui"> & RenderContext): void {
 	if (ctx.mode !== "tui") return;

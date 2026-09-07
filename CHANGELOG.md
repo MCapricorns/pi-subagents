@@ -3,6 +3,15 @@
 Release notes for `@ferris1225/pi-subagents`. Only the most recent releases
 are kept here; every published version is preserved as a GitHub Release.
 
+## 4.3.15
+
+- Fix the cost footer's stale-context crash after reload, new session, resume,
+  or fork. Remove the module-global event context cache and render against
+  the installed footer's own live session context. Existing shutdown cleanup
+  removes the footer and its subscriptions before that context is invalidated.
+- Cover replacement-session rendering with Pi's real context invalidation,
+  subscription cleanup, and live model/thinking/context/session-name updates.
+
 ## 4.3.13
 
 - Remove the `subagents N running · …` activity-count line from the footer.

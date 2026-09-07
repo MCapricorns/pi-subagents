@@ -12,6 +12,10 @@ once and your main agent delegates on its own.
 
 ## What's new
 
+**4.3.15** — fix the cost footer crash after `/reload`, `/new`, `/resume`, or
+`/fork`: each footer now reads only its own session's live context, never an
+event context retained from the previous session.
+
 **4.3.13** — the footer is reserved for the per-model cost tally: the
 `subagents N running` activity-count line is gone, leaving the widget,
 completion notifications, and `subagent_status` for live progress.
@@ -389,7 +393,9 @@ under width pressure a settled row drops its token flow before truncating, so
 children report their own usage per run when they settle, and pi would
 otherwise attribute it to one session total — exactly the cross-model merge
 this footer exists to avoid. The ledger reseeds from the session file on
-reload, so the tally survives restarts.
+reload or session replacement. The footer is removed at session shutdown and
+reinstalled with the new session's live context, so switching or reloading
+never reuses a stale context from the previous session.
 
 Completions resume the main agent on their own, with a compact block of at most 40
 lines by default; longer output lands unchanged in a Markdown artifact whose path

@@ -170,4 +170,17 @@ describe("registerMainCostTracking", () => {
 		assert.equal(rows[0]?.model, "zhipu/glm-4.7");
 		assert.equal(rows[0]?.spend.input, 9);
 	});
+
+	it("uses the compaction event's model when no current model is tracked", async () => {
+		const { pi, handlers } = makePi();
+		registerMainCostTracking(pi);
+		await handlers.get("session_compact")!(
+			{ compactionEntry: { usage: { input: 9, cost: { total: 0.01 } } } },
+			{ model: { provider: "test", id: "compactor" } },
+		);
+		const rows = costLedger.snapshot();
+		assert.equal(rows.length, 1);
+		assert.equal(rows[0]?.model, "test/compactor");
+		assert.equal(rows[0]?.spend.cost, 0.01);
+	});
 });
