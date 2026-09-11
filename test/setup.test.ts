@@ -60,6 +60,7 @@ function baseConfig(overrides: Partial<SubagentsConfig> = {}): SubagentsConfig {
 		agentModels: {},
 		agentThinkingLevels: {},
 		maxResultLines: 40,
+		maxConcurrentAgents: 0,
 		agentScope: "user",
 		idleTimeoutSec: 90,
 		...overrides,
@@ -113,6 +114,38 @@ describe("runSetup menu", () => {
 
 		assert.equal(selectCalls, 1);
 		assert.equal(customCalls, 0);
+	});
+
+	it("preserves explicit process capacity through full re-setup", async (t) => {
+		const path = writeConfig(baseConfig({ enabledAgents: ["scout"], maxConcurrentAgents: 2 }), t);
+		const reasoning = model("reasoning");
+		const notices: string[] = [];
+		let pickerCount = 0;
+		const context = {
+			mode: "tui",
+			cwd: dirname(path),
+			model: reasoning,
+			scopedModels: [],
+			modelRegistry: { getAvailable: () => [reasoning] },
+			ui: {
+				notify: (message: string) => notices.push(message),
+				select: async (title: string, options: string[]) => title === "pi-subagents settings"
+					? options.find((option) => option.startsWith("Full"))
+					: options[0],
+				custom: async (factory: PickerFactory) => new Promise((resolve) => {
+					pickerCount++;
+					const component = renderComponent(factory, resolve);
+					component.handleInput?.(KEY.enter);
+				}),
+			},
+		} as unknown as ExtensionCommandContext;
+
+		await runSetup(context, path);
+		assert.ok(!notices.some((message) => message.includes("failed")), notices.join("\n"));
+		assert.equal(pickerCount, 2);
+		const saved = JSON.parse(readFileSync(path, "utf8")) as SubagentsConfig;
+		assert.deepEqual(saved.enabledAgents, ["scout"]);
+		assert.equal(saved.maxConcurrentAgents, 2);
 	});
 
 	it("configures a custom role through the nested fuzzy model picker", async (t) => {

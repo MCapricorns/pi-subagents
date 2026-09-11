@@ -5,6 +5,8 @@ import { dirname, join, resolve } from "node:path";
 import { describe, it } from "node:test";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { registerSubagentTool } from "../src/delegation/dispatch.ts";
+import { normalizeConfig, saveConfig } from "../src/configuration/config.ts";
+import { resolveSubagentConcurrency } from "../src/execution/background.ts";
 import {
 	findActiveWriterLease,
 	findPhaseScopeOverlap,
@@ -155,6 +157,24 @@ describe("phase and scope normalization", () => {
 			}
 		} finally {
 			await runtime.shutdown();
+		}
+	});
+});
+
+describe("dispatch concurrency", () => {
+	it("applies saved limits on the next dispatch and restores automatic capacity", async (t) => {
+		const root = await mkdtemp(join(tmpdir(), "pi-subagents-dispatch-capacity-"));
+		t.after(() => rm(root, { recursive: true, force: true }));
+		const configPath = join(root, "config.json");
+		const { runtime, tool } = dispatchHarness(configPath);
+		t.after(() => runtime.shutdown());
+		const task = { agent: "missing-role", task: "No provider call should be made" };
+
+		for (const limit of [1, 2, 0]) {
+			await saveConfig(normalizeConfig({ maxConcurrentAgents: limit }), configPath);
+			await assert.rejects(execute(tool, task, root), /Unknown agent: "missing-role"/);
+			assert.equal(runtime.backgroundQueue.capacity, limit || resolveSubagentConcurrency());
+			assert.equal(runtime.threads.size, 0, "unknown roles must not start children");
 		}
 	});
 });

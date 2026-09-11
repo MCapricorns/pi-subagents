@@ -11,6 +11,7 @@
 import { mkdir, readFile, rename, rm, writeFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import { getAgentDir, withFileMutationQueue } from "@earendil-works/pi-coding-agent";
+import { MAX_SUBAGENT_CONCURRENCY } from "../execution/background.ts";
 
 /** Full catalog of agents shipped with the package (selectable in /subagents-setup). */
 export const BUILTIN_AGENT_NAMES = ["scout", "artisan", "steward", "sentinel"] as const;
@@ -64,8 +65,8 @@ export const AGENT_PROFILES: Record<(typeof BUILTIN_AGENT_NAMES)[number], AgentP
 		remark: "Owns a substantial implementation, fix, refactor, test, or docs change through root cause, affected verification, and local hygiene.",
 	},
 	steward: {
-		summary: "pre-commit finish",
-		remark: "Cleans a completed broad or multi-writer diff and synchronizes cross-cutting docs/comments without changing behavior.",
+		summary: "cross-cutting cleanup",
+		remark: "Handles remaining cross-cutting cleanup in a completed broad or multi-writer diff; local hygiene stays with the implementer.",
 	},
 	sentinel: {
 		summary: "fresh-context review",
@@ -112,6 +113,9 @@ export interface SubagentsConfig {
 	 * is included in the message. Default: 40.
 	 */
 	maxResultLines: number;
+	/** Maximum simultaneous child processes. 0 keeps automatic host capacity
+	 * (4–6); 1–6 selects an explicit limit, applied at the next dispatch. */
+	maxConcurrentAgents: number;
 	/** Which agent directories to discover from. Default: "user". */
 	agentScope: AgentScope;
 	/**
@@ -128,6 +132,7 @@ export const DEFAULT_CONFIG: SubagentsConfig = {
 	agentModels: {},
 	agentThinkingLevels: {},
 	maxResultLines: DEFAULT_MAX_RESULT_LINES,
+	maxConcurrentAgents: 0,
 	agentScope: "user",
 	idleTimeoutSec: DEFAULT_IDLE_TIMEOUT_SEC,
 };
@@ -209,6 +214,10 @@ export function normalizeConfig(raw: unknown): SubagentsConfig {
 
 	const maxResultLines = clampCount(raw.maxResultLines, MAX_RESULT_LINES_LIMIT);
 	if (maxResultLines !== undefined) config.maxResultLines = maxResultLines;
+
+	if (typeof raw.maxConcurrentAgents === "number" && Number.isFinite(raw.maxConcurrentAgents)) {
+		config.maxConcurrentAgents = Math.max(0, Math.min(MAX_SUBAGENT_CONCURRENCY, Math.round(raw.maxConcurrentAgents)));
+	}
 
 	if (isAgentScope(raw.agentScope)) {
 		config.agentScope = raw.agentScope;

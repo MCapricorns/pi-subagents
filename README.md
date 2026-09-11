@@ -6,11 +6,16 @@
 ![platform](https://img.shields.io/badge/platform-Windows%20%7C%20macOS%20%7C%20Linux-lightgrey)
 ![pi](https://img.shields.io/badge/pi-extension-orange)
 
-A managed engineering team for [pi](https://github.com/earendil-works/pi): four
-focused sub-agents, durable threads, and Git worktree isolation. You install it
-once and your main agent delegates on its own.
+On-demand delegation for [pi](https://github.com/earendil-works/pi): four
+focused roles, durable threads, and Git worktree isolation. Main handles work by
+default and delegates when an independent child has a concrete advantage.
 
 ## What's new
+
+**4.3.18** — main-first delegation: keep known-context local changes in main,
+use cleanup and review roles only where they add value, and configure process
+capacity with `maxConcurrentAgents`. See [Evaluate delegation](#evaluate-delegation)
+to compare quality, elapsed time, and complete task cost on your own workload.
 
 **4.3.15** — fix the cost footer crash after `/reload`, `/new`, `/resume`, or
 `/fork`: each footer now reads only its own session's live context, never an
@@ -39,6 +44,7 @@ See [CHANGELOG.md](./CHANGELOG.md).
 - [Live status and results](#live-status-and-results)
 - [Models, thinking, and tools](#models-thinking-and-tools)
 - [Configuration](#configuration)
+- [Evaluate delegation](#evaluate-delegation)
 - [Custom agents](#custom-agents)
 - [Storage and cleanup](#storage-and-cleanup)
 - [Development](#development)
@@ -52,10 +58,11 @@ at "spawn a child with a prompt" and leave the hard parts — when to delegate, 
 wide to fan out, what happens when a model dies, how results come
 back — with you. This extension owns them:
 
-- The main model delegates substantial, self-contained work when a fresh context
-  saves effort or improves quality enough to justify the handoff. Briefs define
-  the outcome, done condition, useful context, and boundaries. Small or
-  context-heavy work stays in main.
+- Main handles small, context-heavy, and already-understood local changes itself.
+  It delegates substantial, bounded work when fresh context, independent
+  exploration, or parallel execution offers enough benefit to justify the
+  briefing, verification, and integration cost. Briefs define the outcome, done
+  condition, useful context, and boundaries.
 - A stable `phaseId` owns a logical phase in one resolved working directory even if
   its task wording changes. IDs are 1–80 ASCII letters, numbers, or `._:-`, starting
   with a letter or number, so lease output stays single-line. Exact normalized task+cwd
@@ -100,9 +107,9 @@ directly when you want exact control.
 | Agent     | Access    | Owns |
 | --------- | --------- | ---- |
 | `scout`   | Read-only | Broad or unfamiliar code reconnaissance and external research. Returns compact file citations or source URLs as leads, not proof. |
-| `artisan` | Full      | One substantial primary change—implementation, fix, refactor, test, or docs—through root cause, affected verification, and local hygiene. |
-| `steward` | Full      | One final cleanup and cross-cutting docs/comment sync pass after a broad or multi-writer change. |
-| `sentinel` | Read-only + targeted proving checks | Fresh-context review of a completed risky diff. Returns evidence-backed defects and test gaps, or `No findings.` |
+| `artisan` | Full      | One substantial, independently verifiable change—implementation, fix, refactor, test, or docs—through root cause, affected verification, and local hygiene. |
+| `steward` | Full      | Remaining cross-cutting cleanup and docs/comment sync after a broad or multi-writer change. |
+| `sentinel` | Read-only + targeted proving checks | Fresh-context verification of concrete concerns in a completed diff. Returns evidence-backed defects and test gaps, or `No findings.` |
 
 Role prompts define outcomes and boundaries, leaving routine reading, implementation,
 and verification choices to the model. Artisan completes affected tests, docs, and
@@ -113,6 +120,8 @@ regressions rather than applying a checklist to every test or rerunning the suit
 Handoffs stay concise, with actual checks reported as `command → result`.
 
 Custom roles join them with a Markdown file (see [Custom agents](#custom-agents)).
+Enabled roles form the available catalog; enabling four roles does not launch
+four children or require using every role on a task.
 
 Every child is a leaf pi process with its own context window and no memory of your
 conversation. It still loads normal Pi context, including applicable project
@@ -161,10 +170,13 @@ subagent({
 });
 ```
 
-Breadth is the main agent's call, not a configured task cap: put every genuinely
-independent unit in one `tasks` array. The runtime paces execution instead, running
-half the machine's cores with a 4–6 child-process bound; wider batches queue and
-start automatically as slots free.
+Main chooses the smallest set of independently useful subtasks; available roles
+and free process slots are never a reason to create more work. Put independent
+phases that each justify delegation in one `tasks` array. The runtime paces
+execution: `maxConcurrentAgents: 0` (the default) keeps automatic capacity at half
+the machine's cores, bounded to 4–6 child processes. Set `maxConcurrentAgents` to
+1–6 for an explicit capacity. Wider batches queue and start as slots free.
+This setting limits simultaneous processes, not total tasks or total token cost.
 
 A run leases its stable, single-line `phaseId` in the resolved working directory.
 Rewording the task with the same `phaseId` is rejected and names the existing run.
@@ -189,8 +201,9 @@ There is no fixed research fan-out or mandatory scout → artisan → steward �
 pipeline: choose separate phases only when they earn their handoff cost, and never
 overlap writers or duplicate an owned phase.
 
-Use `steward` when a completed broad or multi-writer diff needs cross-cutting cleanup;
-keep focused hygiene inline. Use `sentinel` when a fresh review can resolve concerns
+Use `steward` only for remaining cross-cutting cleanup in a completed broad or
+multi-writer diff; local hygiene belongs to the primary owner and completed
+verification is reused. Use `sentinel` when fresh verification can resolve concrete concerns
 around concurrency, trust boundaries, persistence/compatibility, failure/cancellation,
 or behavior the checks cannot prove. Neither role is a commit ritual.
 
@@ -484,6 +497,7 @@ To start over, remove `pi-subagents.json` and run `/subagents-setup` again. Othe
   "agentModels": { "scout": "anthropic/claude-haiku-4-5" },
   "agentThinkingLevels": { "artisan": "high" },
   "maxResultLines": 40,
+  "maxConcurrentAgents": 0,
   "agentScope": "user",
   "idleTimeoutSec": 90
 }
@@ -496,8 +510,15 @@ To start over, remove `pi-subagents.json` and run `/subagents-setup` again. Othe
 | `agentModels`         | Optional model per agent; missing means the current main model. |
 | `agentThinkingLevels` | Optional setup override per agent; missing means the role default. |
 | `maxResultLines`      | Lines kept in a completion message before the artifact takes over. Default `40`. |
+| `maxConcurrentAgents` | Simultaneous child-process limit: `0` keeps automatic capacity (4–6); `1`–`6` sets an explicit capacity. Default `0`. |
 | `agentScope`          | Discover `user`, `project`, or `both` agent directories. Default `user`. |
 | `idleTimeoutSec`      | Seconds without child RPC output before termination; `0` disables. Default `90`. |
+
+Concurrency changes apply at the next `subagent` dispatch. Lowering the limit
+lets active children finish before queued work acquires the reduced pool;
+increasing it releases queued work in its existing order. Set it back to `0`
+to restore automatic capacity. Setup preserves this setting when reconfiguring
+roles or models; edit it in the JSON configuration file.
 
 When at least one role is enabled, the cost-aware delegation directive is injected
 automatically. `enabledAgents` is authoritative after catalog adoption: a newly
@@ -511,6 +532,39 @@ are dropped when canonical config is persisted.
 At session start, model overrides that pi no longer reports are removed with a
 one-time notice. If pi's own session compaction fails mid-thread, a notice surfaces
 the error and automatic retry instead of failing quietly.
+
+## Evaluate delegation
+
+Choose delegation settings from your workload. The extension records execution
+facts, but its tests do not establish a quality or cost advantage over solo Pi.
+
+1. Select representative tasks: a localized fix with a known cause, unfamiliar
+   code exploration, independently verifiable module changes, and a tightly
+   coupled debugging task. Define acceptance checks before running them.
+2. Use fresh sessions and separate clean checkouts at the same starting commit.
+   Keep task prompts, models, thinking levels, tools, and project instructions
+   fixed. Keep results from earlier attempts out of later prompts; alternate
+   execution order and repeat each comparison several times.
+3. Compare main alone (`enabledAgents: []`, with `knownAgents` retaining the
+   current built-in catalog) against the same enabled-role catalog with
+   `maxConcurrentAgents` set to `1`, `2`, and `4`. These are concurrency limits:
+   a pool of one can still launch several children sequentially. Record actual
+   child counts and roles as well, and do not require filling the pool.
+4. Measure final acceptance and regressions, elapsed time through integration,
+   and rework. Record main plus every child's token usage and cost, retaining
+   model identities and including failed attempts, review, integration, and
+   retries. A child's successful exit or quick first patch is not final success.
+5. Compare quality under matched total-cost budgets and matched wall-clock
+   limits as separate experiments. Include failed or unfinished runs. The
+   concurrency setting is not a spending cap, and `idleTimeoutSec` only detects
+   a silent child; enforce experiment-wide budgets in your evaluation process.
+
+The [BOAD coding study](https://arxiv.org/html/2512.23631v2) found a useful small
+expert set but declining results when adding more roles; its role-count result
+does not prescribe a concurrency limit. A broader
+[2026 agent-system study](https://www.nature.com/articles/s42256-026-01268-y)
+also found that coordination outcomes depend on the task and single-agent
+baseline. These motivate measuring your own workflow, not a universal team size.
 
 ## Custom agents
 

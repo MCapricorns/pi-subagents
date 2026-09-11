@@ -3,6 +3,20 @@
 Release notes for `@ferris1225/pi-subagents`. Only the most recent releases
 are kept here; every published version is preserved as a GitHub Release.
 
+## 4.3.18
+
+- Keep known-context local changes in main and delegate only substantial,
+  bounded work with a concrete context, exploration, or parallelism benefit.
+  Available roles and process slots are capacity rather than a team-size target.
+- Reserve Steward for remaining cross-cutting cleanup and Sentinel for fresh
+  verification of concrete concerns. Reuse completed local hygiene and checks.
+- Add `maxConcurrentAgents`: `0` preserves automatic host capacity (4–6), and
+  `1`–`6` selects an explicit process limit. Apply changes at the next dispatch;
+  lowering capacity drains active work without aborting it. Existing queue,
+  write-scope, leaf, and recovery protections remain in force.
+- Document controlled workload comparisons that include final acceptance,
+  parent and child costs, integration, failed attempts, and rework.
+
 ## 4.3.15
 
 - Fix the cost footer's stale-context crash after reload, new session, resume,
