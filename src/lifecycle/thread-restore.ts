@@ -16,12 +16,14 @@ import { monitor } from "../presentation/monitor.ts";
 import { emptyUsage } from "../execution/rpc-control.ts";
 import type { SubagentRuntime, SubagentThread, ThreadState } from "./runtime.ts";
 import {
+	getProjectRoot,
 	getSubagentsRoot,
 	RpcRunControl,
 	sessionExists,
 	sweepProjectResultArtifacts,
 	type SingleResult,
 } from "../execution/spawn.ts";
+import { samePath } from "../isolation/managed-paths.ts";
 import { isProcessAlive, killProcessTree, sweepProjectDurableDirs, sweepProjectTempDirs } from "../isolation/temp-hygiene.ts";
 import { readRecoveryRecords, referencedRecoveryPaths } from "../isolation/recovery.ts";
 import {
@@ -78,13 +80,21 @@ function createRestoredThread(
 	return thread;
 }
 
-/** Rebuild interrupted records for manual recovery after reload. Orphaned children
- * are stopped first; missing session files do not discard isolated edits. Already-
- * settled records from older versions are removed with their managed artifacts. */
-export async function restoreDurableThreads(runtime: SubagentRuntime): Promise<number[]> {
+function belongsToSessionProject(configPath: string, cwd: string, record: ThreadRecord): boolean {
+	return samePath(getProjectRoot(configPath, record.cwd), getProjectRoot(configPath, cwd));
+}
+
+/** Rebuild interrupted records for this session's checkout after reload.
+ * Other projects' parked threads stay on disk for their own window; this process
+ * must not restore them or kill their children. Orphaned children of *this*
+ * checkout are stopped first; missing session files do not discard isolated
+ * edits. Already-settled records from older versions are removed with their
+ * managed artifacts. */
+export async function restoreDurableThreads(runtime: SubagentRuntime, cwd: string): Promise<number[]> {
 	const records = await readThreadRecords(runtime.configPath);
 	const restoredIds: number[] = [];
 	for (const record of records) {
+		if (!belongsToSessionProject(runtime.configPath, cwd, record)) continue;
 		if (runtime.threads.has(record.runId) || monitor.findRun(record.runId)) continue;
 		if (record.state !== "parked") {
 			await discardRestoredRecord(runtime, record);
@@ -182,10 +192,10 @@ export async function restoreDurableThreads(runtime: SubagentRuntime): Promise<n
  * so callers that must see restored threads await that pass alone and never the
  * hygiene sweeps behind it. Hygiene still runs after restore: pruning decides
  * what to delete from the records restore has already claimed. */
-export function bootstrapDurableState(runtime: SubagentRuntime): Promise<void> {
+export function bootstrapDurableState(runtime: SubagentRuntime, cwd: string): Promise<void> {
 	const restore = (async () => {
 		try {
-			runtime.restoredRunIds = await restoreDurableThreads(runtime);
+			runtime.restoredRunIds = await restoreDurableThreads(runtime, cwd);
 		} catch {
 			/* restore is best-effort */
 		}

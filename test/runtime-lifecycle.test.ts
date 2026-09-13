@@ -189,7 +189,7 @@ describe("durable worktree restoration", () => {
 		try {
 			await upsertThreadRecord(configPath, record);
 			const runtime = createRuntime(fakePi([]), configPath);
-			const restored = await restoreDurableThreads(runtime);
+			const restored = await restoreDurableThreads(runtime, cwd);
 			assert.deepEqual(restored, []);
 			const thread = runtime.threads.get(41);
 			assert.ok(thread);

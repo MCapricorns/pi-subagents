@@ -5,8 +5,8 @@ import { existsSync } from "node:fs";
 import { mkdir, readFile, rename, rm, writeFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import { stripVTControlCharacters } from "node:util";
-import { getSubagentsRoot } from "../execution/spawn.ts";
-import { managedRecoveryGroup } from "./managed-paths.ts";
+import { getProjectRoot, getSubagentsRoot } from "../execution/spawn.ts";
+import { managedRecoveryGroup, samePath } from "./managed-paths.ts";
 import { removeWorktreeGroup, type WorktreeFinalization } from "./worktree.ts";
 
 export const RECOVERY_MANIFEST_FILE_NAME = "pi-subagents-recovery.json";
@@ -170,25 +170,37 @@ export function recoveryRecordFromFinalization(
 	};
 }
 
-/** Show retained recovery paths on every later session start until the user
- * removes the artifacts. Records whose changes already landed only need the
- * worktree group deleted — the step whose failure retained them — so each
- * session start retries that removal first and forgets records it completes.
- * Stale records are pruned automatically. */
+function recoveryBelongsToSession(
+	configPath: string,
+	cwd: string,
+	groupDir: string,
+): boolean {
+	return samePath(dirname(dirname(groupDir)), getProjectRoot(configPath, cwd));
+}
+
+/** Show retained recovery paths on later session starts in the same project
+ * until the user removes the artifacts. A sibling pi window in another checkout
+ * must not retry cleanup or surface another project's worktree. Records whose
+ * changes already landed only need the worktree group deleted — the step whose
+ * failure retained them — so that project's next session retries that removal
+ * first and forgets records it completes. Stale records are pruned automatically. */
 export async function announceRecoveryRecords(
 	configPath: string,
 	ctx: {
 		hasUI?: boolean;
+		cwd: string;
 		ui: { notify(message: string, kind: "info" | "warning" | "error"): void };
 	},
 ): Promise<void> {
 	if (ctx.hasUI === false) return;
 	const records = await readRecoveryRecords(configPath);
 	if (records.length === 0) return;
+	const local = new Set<RecoveryRecord>();
 	for (const record of records) {
-		if (!record.integrated || !record.worktreePath) continue;
 		const groupDir = await managedRecoveryGroup(configPath, record);
-		if (!groupDir) continue;
+		if (!groupDir || !recoveryBelongsToSession(configPath, ctx.cwd, groupDir)) continue;
+		local.add(record);
+		if (!record.integrated || !record.worktreePath) continue;
 		if (!existsSync(record.worktreePath) && !(record.patchPath ? existsSync(record.patchPath) : false)) continue;
 		await removeWorktreeGroup({
 			worktreePath: record.worktreePath,
@@ -204,6 +216,7 @@ export async function announceRecoveryRecords(
 		await withFileMutationQueue(path, () => writeManifest(path, live)).catch(() => undefined);
 	}
 	for (const record of live) {
+		if (!local.has(record)) continue;
 		const paths = [
 			record.worktreePath ? `worktree ${stripVTControlCharacters(record.worktreePath)}` : undefined,
 			record.patchPath ? `patch ${stripVTControlCharacters(record.patchPath)}` : undefined,

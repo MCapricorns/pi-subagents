@@ -132,7 +132,7 @@ describe("interrupted work without a retained session", () => {
 			try {
 				await writeThreadManifest(configPath, cwd, [record]);
 				assert.equal((await readThreadRecords(configPath)).length, 1, "the recovery record must pass path validation");
-				const restored = await restoreDurableThreads(runtime);
+				const restored = await restoreDurableThreads(runtime, cwd);
 				assert.equal(existsSync(pendingFile), true, "a missing session must not delete unintegrated edits");
 				assert.deepEqual(restored, [71]);
 				const thread = runtime.threads.get(71)!;
@@ -166,7 +166,7 @@ describe("durable thread path validation", () => {
 			})]);
 
 			const runtime = createRuntime(fakePi(), configPath);
-			assert.deepEqual(await restoreDurableThreads(runtime), []);
+			assert.deepEqual(await restoreDurableThreads(runtime, cwd), []);
 			assert.equal(runtime.threads.has(71), false);
 			assert.equal(existsSync(sentinel), true);
 			assert.deepEqual(await readThreadRecords(configPath), []);
@@ -229,7 +229,7 @@ describe("durable thread path validation", () => {
 			})]);
 
 			const runtime = createRuntime(fakePi(), configPath);
-			assert.deepEqual(await restoreDurableThreads(runtime), []);
+			assert.deepEqual(await restoreDurableThreads(runtime, cwd), []);
 			assert.equal(runtime.threads.has(71), false);
 			assert.equal(existsSync(join(externalSession, `2026-01-01T00-00-00.000Z_${sessionId}.jsonl`)), true);
 		});
@@ -272,7 +272,7 @@ describe("durable thread path validation", () => {
 			await writeThreadManifest(configPath, cwd, records);
 
 			const runtime = createRuntime(fakePi(), configPath);
-			assert.deepEqual(await restoreDurableThreads(runtime), []);
+			assert.deepEqual(await restoreDurableThreads(runtime, cwd), []);
 			assert.equal(runtime.threads.has(72), false);
 			assert.equal(runtime.threads.has(73), false);
 			for (const runId of [72, 73]) {
@@ -298,7 +298,7 @@ describe("durable thread path validation", () => {
 			})]);
 
 			const runtime = createRuntime(fakePi(), configPath);
-			assert.deepEqual(await restoreDurableThreads(runtime), [74]);
+			assert.deepEqual(await restoreDurableThreads(runtime, cwd), [74]);
 			assert.equal(runtime.threads.has(74), true);
 			await runtime.shutdown();
 		});
@@ -326,7 +326,7 @@ describe("recovery manifest path validation and retention", () => {
 				}],
 			}, null, 2)}\n`, "utf8");
 
-			await announceRecoveryRecords(configPath, { hasUI: true, ui: { notify: () => undefined } });
+			await announceRecoveryRecords(configPath, { hasUI: true, cwd: process.cwd(), ui: { notify: () => undefined } });
 			assert.equal(existsSync(sentinel), true);
 			assert.deepEqual(await readRecoveryRecords(configPath), []);
 		});
@@ -357,7 +357,7 @@ describe("recovery manifest path validation and retention", () => {
 				}],
 			}, null, 2)}\n`, "utf8");
 
-			await announceRecoveryRecords(configPath, { hasUI: true, ui: { notify: () => undefined } });
+			await announceRecoveryRecords(configPath, { hasUI: true, cwd: process.cwd(), ui: { notify: () => undefined } });
 			assert.equal(existsSync(sentinel), true);
 			assert.equal(existsSync(join(projectRoot, "worktrees")), true);
 			assert.deepEqual(await readRecoveryRecords(configPath), []);
@@ -372,7 +372,7 @@ describe("recovery manifest path validation and retention", () => {
 			await persistRecoveryRecords(configPath, [record]);
 
 			const runtime = createRuntime(fakePi(), configPath);
-			await bootstrapDurableState(runtime);
+			await bootstrapDurableState(runtime, cwd);
 			assert.equal(existsSync(group), true);
 			assert.equal(await readFile(join(group, "changes.patch"), "utf8"), "retained patch\n");
 		});
@@ -388,6 +388,85 @@ describe("recovery manifest path validation and retention", () => {
 			const removed = await pruneStaleProjectRoots(configPath, { now: future });
 			assert.deepEqual(removed, []);
 			assert.equal(existsSync(group), true);
+		});
+	});
+});
+
+describe("cross-project session isolation", () => {
+	it("does not announce or clean another project's retained worktree", async () => {
+		await withFixture(async (root, configPath) => {
+			const projectA = await createRepository(join(root, "a"));
+			const projectB = await createRepository(join(root, "b"));
+			const { group, record } = await createManagedRecovery(configPath, projectA.cwd, 9);
+			await persistRecoveryRecords(configPath, [record]);
+			const notices: string[] = [];
+			const notify = (message: string) => {
+				notices.push(message);
+			};
+
+			await announceRecoveryRecords(configPath, { hasUI: true, cwd: projectB.cwd, ui: { notify } });
+			assert.deepEqual(notices, []);
+			assert.equal(existsSync(group), true);
+			assert.equal(await readFile(join(group, "changes.patch"), "utf8"), "retained patch\n");
+			assert.equal((await readRecoveryRecords(configPath)).length, 1);
+
+			await announceRecoveryRecords(configPath, { hasUI: true, cwd: projectA.cwd, ui: { notify } });
+			assert.equal(notices.length, 1);
+			assert.match(notices[0]!, /recovery for run #9: integration failed/);
+			assert.match(notices[0]!, /retained worktree/);
+			assert.equal(existsSync(group), true);
+		});
+	});
+
+	it("does not retry leftover cleanup for another project's integrated worktree", async () => {
+		await withFixture(async (root, configPath) => {
+			const projectA = await createRepository(join(root, "a"));
+			const projectB = await createRepository(join(root, "b"));
+			const { group, record } = await createManagedRecovery(configPath, projectA.cwd, 9);
+			await persistRecoveryRecords(configPath, [{ ...record, integrated: true }]);
+
+			await announceRecoveryRecords(configPath, {
+				hasUI: true,
+				cwd: projectB.cwd,
+				ui: { notify: () => undefined },
+			});
+			assert.equal(existsSync(join(group, "worktree")), true);
+			assert.equal((await readRecoveryRecords(configPath)).length, 1);
+		});
+	});
+
+	it("does not restore another project's parked thread into this session", async () => {
+		await withFixture(async (root, configPath) => {
+			const projectA = await createRepository(join(root, "a"));
+			const projectB = await createRepository(join(root, "b"));
+			const sessionId = "project-a-session";
+			const sessionDir = join(getProjectRoot(configPath, projectA.cwd), "sessions", "pi-subagent-session-a");
+			await mkdir(sessionDir, { recursive: true });
+			await writeFile(join(sessionDir, `2026-01-01T00-00-00.000Z_${sessionId}.jsonl`), "{}\n", "utf8");
+			await writeThreadManifest(configPath, projectA.cwd, [threadRecord(projectA.cwd, {
+				runId: 9,
+				sessionId,
+				sessionDir,
+			})]);
+
+			const runtimeB = createRuntime(fakePi(), configPath);
+			try {
+				assert.deepEqual(await restoreDurableThreads(runtimeB, projectB.cwd), []);
+				assert.equal(runtimeB.threads.has(9), false);
+				assert.equal((await readThreadRecords(configPath)).length, 1);
+			} finally {
+				await runtimeB.shutdown();
+				monitor.clear();
+			}
+
+			const runtimeA = createRuntime(fakePi(), configPath);
+			try {
+				assert.deepEqual(await restoreDurableThreads(runtimeA, projectA.cwd), [9]);
+				assert.equal(runtimeA.threads.has(9), true);
+			} finally {
+				await runtimeA.shutdown();
+				monitor.clear();
+			}
 		});
 	});
 });

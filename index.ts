@@ -83,8 +83,8 @@ export default function (pi: ExtensionAPI): void {
 		},
 	});
 
-	pi.on("session_start", async () => {
-		await bootstrapDurableState(runtime);
+	pi.on("session_start", async (_event, ctx) => {
+		await bootstrapDurableState(runtime, ctx.cwd);
 	});
 	registerAnnouncements(pi, runtime);
 

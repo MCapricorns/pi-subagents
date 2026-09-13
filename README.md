@@ -12,6 +12,10 @@ once and your main agent delegates on its own.
 
 ## What's new
 
+**4.3.18** — session-start restore and recovery notices stay inside the current
+project. A second pi window no longer surfaces another checkout's retained
+worktree or restores (and would otherwise stop) that project's interrupted runs.
+
 **4.3.15** — fix the cost footer crash after `/reload`, `/new`, `/resume`, or
 `/fork`: each footer now reads only its own session's live context, never an
 event context retained from the previous session.
@@ -285,9 +289,10 @@ Third-party Pi packages execute as trusted code and must be reviewed accordingly
   as a lane wait, not as slot queueing, and its process slot is already released.
 - Setup and integration failures keep the useful patch and worktree, and record
   where they are in `~/.pi/agent/ferris-pi-subagents/pi-subagents-recovery.json`.
-  start repeats that notice until you remove the artifacts. When the changes had
-  already been applied and only the cleanup failed, the next session start
-  removes the retained copy itself and clears the notice.
+  Later session starts in that same project repeat the notice until you remove
+  the artifacts. A different project's pi window does not show or retry them.
+  When the changes had already been applied and only the cleanup failed, the next
+  session start in that project removes the retained copy itself and clears the notice.
 
 ## Runs: status and stop
 
@@ -333,9 +338,10 @@ attempt. Worktree integration failures keep their recovery artifacts.
 
 Interrupted work retains a durable record and any session/worktree artifacts for
 manual recovery after reload or crash. Missing session files no longer discard
-isolated edits. Restore runs at session start; lookup tools, prompt injection, and
-fresh dispatch wait for that pass so an existing id cannot be reported missing or
-reused. Missing recorded worktrees surface as failures without discarding the
+isolated edits. Restore for this checkout runs at session start; lookup tools,
+prompt injection, and fresh dispatch wait for that pass so an existing id cannot
+be reported missing or reused. A sibling window in another project leaves those
+records untouched. Missing recorded worktrees surface as failures without discarding the
 remaining recovery evidence.
 
 Canonical managed-path and repository validation remains in place. Invalid records
@@ -558,7 +564,8 @@ Cleanup runs at session start and is deliberately conservative. A directory goes
 away only when the process that created it is gone and no valid manifest record still
 claims it, so a live sibling pi instance never loses state and interrupted or recovery-owned
 work outlives its own process by design. Thread and recovery references always beat an
-age rule.
+age rule. Restore and recovery notices themselves are scoped to the current checkout:
+opening pi in another project does not restore, announce, or stop the first project's runs.
 
 ## Development
 

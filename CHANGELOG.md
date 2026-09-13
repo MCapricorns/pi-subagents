@@ -3,6 +3,15 @@
 Release notes for `@ferris1225/pi-subagents`. Only the most recent releases
 are kept here; every published version is preserved as a GitHub Release.
 
+## 4.3.18
+
+- Scope session-start thread restore and recovery notices to the current
+  checkout. A second pi window in another project no longer announces the first
+  project's retained worktree, retries its leftover cleanup, or restores and
+  stops its interrupted children.
+- Cover sibling-window isolation with recovery announcement, leftover-cleanup,
+  and parked-thread restore checks across two checkouts that share one agent dir.
+
 ## 4.3.15
 
 - Fix the cost footer's stale-context crash after reload, new session, resume,
