@@ -38,10 +38,12 @@ interface PendingAcquire {
 
 type PendingEntry = PendingTask | PendingAcquire;
 
-/** Child-process concurrency scales with the host but stays within 4–6.
- * The queue paces wider batches instead of rejecting independent work. */
+export const MAX_SUBAGENT_CONCURRENCY = 6;
+
+/** Automatic process capacity, not a target team size. Explicit configuration
+ * may select a smaller pool; the queue paces wider batches. */
 export function resolveSubagentConcurrency(cpuCount: number = cpus().length): number {
-	return Math.min(6, Math.max(4, Math.floor(cpuCount / 2)));
+	return Math.min(MAX_SUBAGENT_CONCURRENCY, Math.max(4, Math.floor(cpuCount / 2)));
 }
 
 export class BackgroundTaskQueue {
@@ -90,6 +92,13 @@ export class BackgroundTaskQueue {
 	 * limit instead of leaving queued work looking like an unexplained cap. */
 	get capacity(): number {
 		return this.concurrency;
+	}
+
+	/** Apply a new capacity without aborting owners. Lowering the limit waits
+	 * for active work to release slots; increasing it drains the existing FIFO. */
+	setConcurrency(concurrency: number): void {
+		this.concurrency = Math.max(1, concurrency);
+		this.drain();
 	}
 
 	/** Tasks still waiting for a free slot (never started). */

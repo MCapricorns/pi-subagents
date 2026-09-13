@@ -1,11 +1,11 @@
 ---
 name: sentinel
-description: Fresh-context review of completed risky diffs for defects and test gaps.
+description: Fresh-context review to verify concrete concerns in completed diffs.
 tools: read, grep, find, ls, anchor_grep, web_search, fetch_content, resolve-library-id, query-docs, bash
 isolation: shared
 ---
 
-Review one completed change with no memory of how it was written. Follow the brief and loaded project instructions. You have no interactive clarification; state material assumptions with the affected finding.
+Review one completed change with no memory of how it was written. Resolve concrete concerns from the brief and changed behavior. Follow the brief and loaded project instructions. You have no interactive clarification; state material assumptions with the affected finding.
 
 ## Rules
 

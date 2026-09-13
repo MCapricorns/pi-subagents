@@ -81,6 +81,19 @@ describe("normalizeConfig", () => {
 		assert.equal(normalizeConfig({ agentScope: "everywhere" }).agentScope, "user");
 	});
 
+	it("defaults to automatic concurrency and normalizes explicit limits", () => {
+		assert.equal(normalizeConfig({}).maxConcurrentAgents, 0);
+		for (const limit of [0, 1, 2, 6]) {
+			assert.equal(normalizeConfig({ maxConcurrentAgents: limit }).maxConcurrentAgents, limit);
+		}
+		assert.equal(normalizeConfig({ maxConcurrentAgents: 99 }).maxConcurrentAgents, 6);
+		assert.equal(normalizeConfig({ maxConcurrentAgents: 2.4 }).maxConcurrentAgents, 2);
+		assert.equal(normalizeConfig({ maxConcurrentAgents: -1 }).maxConcurrentAgents, 0);
+		for (const invalid of ["2", null, NaN, Infinity]) {
+			assert.equal(normalizeConfig({ maxConcurrentAgents: invalid }).maxConcurrentAgents, 0);
+		}
+	});
+
 	it("defaults idleTimeoutSec to 90 and clamps to [0, 600]", () => {
 		assert.equal(DEFAULT_IDLE_TIMEOUT_SEC, 90);
 		assert.equal(normalizeConfig({}).idleTimeoutSec, 90);
@@ -168,17 +181,19 @@ describe("loadConfig", () => {
 		assert.deepEqual(config.knownAgents, ["scout", "artisan", "steward", "sentinel"]);
 	});
 
-	it("round-trips selected models and thinking preferences", async (t) => {
+	it("round-trips selected models, thinking preferences, and concurrency", async (t) => {
 		const dir = tempDir(t);
 		const path = join(dir, "pi-subagents.json");
 		const config = normalizeConfig({
 			enabledAgents: [...BUILTIN_AGENT_NAMES],
 			agentModels: { artisan: "anthropic/primary" },
 			agentThinkingLevels: { artisan: "high" },
+			maxConcurrentAgents: 2,
 		});
 		await saveConfig(config, path);
 		const loaded = await loadConfig(path);
 		assert.deepEqual(loaded.agentModels, { artisan: "anthropic/primary" });
 		assert.deepEqual(loaded.agentThinkingLevels, { artisan: "high" });
+		assert.equal(loaded.maxConcurrentAgents, 2);
 	});
 });

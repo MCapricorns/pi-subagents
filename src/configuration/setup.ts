@@ -2,7 +2,7 @@
  * Interactive configuration wizard for /subagents-setup.
  *
  * The top-level menu exposes enabled roles, per-agent model and thinking choices,
- * and a full setup pass. Everything else (agent scope, idle timeout, result lines)
+ * and a full setup pass. Everything else (scope, concurrency, timeout, result lines)
  * is config-file-only.
  */
 
@@ -88,7 +88,7 @@ async function pickEnabledAgents(
 	const names = setupAgentNames(ctx, config);
 	return promptSelectMany(
 		ctx,
-		"Which agents should run?",
+		"Which roles should be available?",
 		"Each line is a role and its job. Space toggles • Enter confirms • Esc back",
 		agentPickerItems(names),
 		config.enabledAgents.filter((name) => names.includes(name)),
@@ -294,6 +294,7 @@ async function runFullSetup(ctx: ExtensionCommandContext, configPath: string, ba
 		agentModels,
 		agentThinkingLevels: keepAgentEntries(base.agentThinkingLevels, enabled),
 		maxResultLines: base.maxResultLines,
+		maxConcurrentAgents: base.maxConcurrentAgents,
 		agentScope: base.agentScope,
 		idleTimeoutSec: base.idleTimeoutSec,
 	};

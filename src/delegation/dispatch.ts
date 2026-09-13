@@ -13,6 +13,7 @@ import { Text } from "@earendil-works/pi-tui";
 import { Type } from "typebox";
 import { discoverAgents, isWriteCapableAgent, type AgentConfig } from "./agents.ts";
 import { loadConfig } from "../configuration/config.ts";
+import { resolveSubagentConcurrency } from "../execution/background.ts";
 import { formatCompletionBlock, formatUsage } from "../presentation/format.ts";
 import {
 	formatTaskSummary,
@@ -508,6 +509,7 @@ export function registerSubagentTool(pi: ExtensionAPI, runtime: SubagentRuntime)
 			await runtime.durableRestore;
 			monitor.beginTurn();
 			const config = await loadConfig(runtime.configPath);
+			runtime.backgroundQueue.setConcurrency(config.maxConcurrentAgents || resolveSubagentConcurrency());
 
 			const discovery = discoverAgents(ctx.cwd, {
 				scope: config.agentScope,

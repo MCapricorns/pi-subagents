@@ -46,6 +46,57 @@ describe("resolveSubagentConcurrency", () => {
 });
 
 describe("BackgroundTaskQueue slot ownership", () => {
+	it("lowers the limit without aborting active work and keeps pending work queued", async () => {
+		const queue = new BackgroundTaskQueue(2);
+		const firstDone = deferred();
+		const secondDone = deferred();
+		const started: number[] = [];
+		const first = queue.enqueue(async () => { started.push(1); await firstDone.promise; });
+		const second = queue.enqueue(async () => { started.push(2); await secondDone.promise; });
+		const third = queue.enqueue(async () => { started.push(3); });
+
+		queue.setConcurrency(1);
+		assert.equal(queue.capacity, 1);
+		assert.equal(first.signal.aborted, false);
+		assert.equal(second.signal.aborted, false);
+		assert.deepEqual(started, [1, 2]);
+		firstDone.resolve();
+		await queue.waitForTask(first);
+		assert.deepEqual(started, [1, 2], "one active task still owns the only slot");
+		secondDone.resolve();
+		await Promise.all([queue.waitForTask(second), queue.waitForTask(third)]);
+		assert.deepEqual(started, [1, 2, 3]);
+		assert.equal(queue.activeCount, 0);
+	});
+
+	it("increases the limit immediately and preserves FIFO order for slot reacquisition", async () => {
+		const queue = new BackgroundTaskQueue(1);
+		const laneGranted = deferred();
+		const releaseOther = deferred();
+		const releaseThird = deferred();
+		const order: string[] = [];
+		const writer = queue.enqueue(async (_signal, controller) => {
+			queue.suspend(controller);
+			await laneGranted.promise;
+			assert.equal(await queue.acquire(controller), true);
+			order.push("writer");
+		});
+		const other = queue.enqueue(async () => { order.push("other"); await releaseOther.promise; });
+		const third = queue.enqueue(async () => { order.push("third"); await releaseThird.promise; });
+		laneGranted.resolve();
+		await Promise.resolve();
+
+		queue.setConcurrency(2);
+		assert.deepEqual(order, ["other", "third"]);
+		assert.equal(queue.activeCount, 2);
+		releaseThird.resolve();
+		await Promise.all([queue.waitForTask(third), queue.waitForTask(writer)]);
+		assert.deepEqual(order, ["other", "third", "writer"]);
+		releaseOther.resolve();
+		await queue.waitForIdle();
+		await queue.waitForTask(other);
+	});
+
 	it("makes a suspended lane waiter reacquire a slot before child work", async () => {
 		const queue = new BackgroundTaskQueue(1);
 		const laneGranted = deferred();
