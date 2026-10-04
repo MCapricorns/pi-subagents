@@ -12,6 +12,14 @@ default and delegates when an independent child has a concrete advantage.
 
 ## What's new
 
+**4.3.20** — Pi 1.0 prompt sections and tool exposure. The delegation contract
+is a `<subagents>` section, and live leases are a separate `<subagent_leases>`
+section, so an unchanged turn keeps the cached system prefix. Orchestration
+tools stay declared to the model and cannot be called from codemode scripts.
+Dispatch and stop run sequentially so one assistant message cannot race
+admission. Child processes still force provider `maxRetries: 0`, using the
+1.0 registration that requires an `api`.
+
 **4.3.19** — session-start restore and recovery notices stay inside the current
 project. A second pi window no longer surfaces another checkout's retained
 worktree or restores (and would otherwise stop) that project's interrupted runs.
@@ -84,7 +92,7 @@ back — with you. This extension owns them:
 
 ## Install
 
-Requires **pi >= 0.85.0** and **Node.js >= 22.19.0**.
+Requires **pi >= 1.0.0** and **Node.js >= 22.19.0**.
 
 ```bash
 pi install npm:@ferris1225/pi-subagents
@@ -137,9 +145,9 @@ material assumptions or blockers.
 
 Children run the official `pi --mode rpc` server, using Pi's exported command/response
 types and its own session persistence. There is no separate subagent protocol. The
-host transport remains local because Pi 0.85.0's `RpcClient` cannot attach to our
-child process or provide process-tree shutdown, bounded abort coordination, and
-cancellation of child extension dialogs.
+host transport remains local. Pi 1.0.2's `RpcClient` still spawns its own `node`
+process, signals only that process, and does not provide process-tree shutdown,
+bounded abort coordination, or cancellation of child extension dialogs.
 
 ## Dispatching work
 
@@ -526,9 +534,13 @@ increasing it releases queued work in its existing order. Set it back to `0`
 to restore automatic capacity. Setup preserves this setting when reconfiguring
 roles or models; edit it in the JSON configuration file.
 
-When at least one role is enabled, the cost-aware delegation directive is injected
-automatically. `enabledAgents` is authoritative after catalog adoption: a newly
-shipped built-in is appended once, then `knownAgents` records that it was surfaced
+When at least one role is enabled, the delegation directive is installed as a
+`<subagents>` prompt section. Active leases go in `<subagent_leases>`. Pi 1.0
+appends a section delta only when that text changes, so idle turns keep the
+cached system prefix. Hosts without a section map still receive the same
+contract appended to the system prompt. `enabledAgents` is authoritative after
+catalog adoption: a newly shipped built-in is appended once, then `knownAgents`
+records that it was surfaced
 so a deliberate later disable remains disabled. `sentinel` returns through that
 rule: a config written by 4.3.5–4.3.7, which removed it, enables it once on the next
 load; turn it off in `/subagents-setup` and it stays off. Available custom roles remain
@@ -635,10 +647,10 @@ lifecycle, and presentation. Thread restoration, shared lifecycle coordination, 
 and Git command execution live in focused modules rather than oversized catch-all files.
 
 The test runner uses Node 22 or 24; Node 26 removed `--experimental-transform-types`.
-Pi 0.85.0's unbundled SDK and CLI import `@earendil-works/pi-server` without declaring
-it. This project declares the official server package as a peer (and a development
-dependency), so npm can resolve it alongside the SDK in consumer installations.
-It is not bundled into the extension, and no replacement RPC server is introduced.
+Pi 1.0 declares `@earendil-works/pi-server`. This project still lists that package
+as a peer and a development dependency so `npm run check` typechecks against the
+same SDK the tests import. It is not bundled into the extension, and no
+replacement RPC server is introduced.
 
 ## Changelog
 

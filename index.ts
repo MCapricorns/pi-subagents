@@ -12,8 +12,8 @@
  *     and the active-run widget
  *
  * Also registers the `/subagents-setup` command and a `before_agent_start` hook
- * that injects a delegation directive into the parent system prompt so the main
- * model can choose useful, self-contained work to delegate.
+ * that installs the delegation directive as replaceable prompt sections so the
+ * main model can choose useful, self-contained work to delegate.
  *
  * The tool is not registered inside child sub-agent processes, which prevents
  * runaway recursion and keeps child context windows clean.
@@ -26,7 +26,7 @@ import { runSetup } from "./src/configuration/setup.ts";
 import { discoverAgents } from "./src/delegation/agents.ts";
 import { registerSubagentTool } from "./src/delegation/dispatch.ts";
 import { registerSubagentRiskTool } from "./src/delegation/risk.ts";
-import { buildDelegationDirective } from "./src/delegation/prompt.ts";
+import { buildDelegationDirective, installDelegationSections } from "./src/delegation/prompt.ts";
 import { currentSubagentDepth } from "./src/execution/spawn.ts";
 import { createRuntime } from "./src/lifecycle/runtime.ts";
 import { bootstrapDurableState } from "./src/lifecycle/thread-restore.ts";
@@ -88,7 +88,8 @@ export default function (pi: ExtensionAPI): void {
 	});
 	registerAnnouncements(pi, runtime);
 
-	// Inject the routing contract plus bounded live phase leases into each parent turn.
+	// Install the routing contract as prompt sections when the host can diff them.
+	// A full systemPrompt return forces an opaque prompt and invalidates the cache.
 	pi.on("before_agent_start", async (event, ctx) => {
 		await runtime.durableRestore;
 		const config = await loadConfig(configPath);
@@ -97,7 +98,13 @@ export default function (pi: ExtensionAPI): void {
 			enabledNames: config.enabledAgents,
 			projectTrusted: ctx.isProjectTrusted?.() === true,
 		});
-		const directive = buildDelegationDirective(agents, runtime.threads.values());
+		const sources = [...runtime.threads.values()];
+		const sections = event.systemPromptOptions?.sections;
+		if (sections) {
+			installDelegationSections(sections, agents, sources);
+			return undefined;
+		}
+		const directive = buildDelegationDirective(agents, sources);
 		if (!directive) return undefined;
 		return { systemPrompt: `${event.systemPrompt}\n${directive}` };
 	});

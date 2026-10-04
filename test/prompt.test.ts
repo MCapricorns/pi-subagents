@@ -4,7 +4,10 @@ import type { AgentConfig } from "../src/delegation/agents.ts";
 import { loadBuiltinAgents } from "../src/delegation/agents.ts";
 import {
 	buildDelegationDirective,
+	DELEGATION_LEASE_SECTION,
+	DELEGATION_SECTION,
 	formatPhaseLeaseReceipt,
+	installDelegationSections,
 	type PhaseLeaseSource,
 } from "../src/delegation/prompt.ts";
 
@@ -81,6 +84,27 @@ describe("buildDelegationDirective", () => {
 		const directive = buildDelegationDirective([agent("artisan")]);
 		assert.match(directive, /- artisan: artisan description/u);
 		assert.doesNotMatch(directive, /\bscout\b|\bsteward\b|\bsentinel\b/u);
+	});
+
+	it("keeps the stable contract cached when only leases change", () => {
+		const sections: Record<string, string> = {};
+		installDelegationSections(sections, loadBuiltinAgents(), []);
+		assert.match(sections[DELEGATION_SECTION] ?? "", /Start in main/u);
+		assert.equal(sections[DELEGATION_LEASE_SECTION], undefined);
+
+		installDelegationSections(sections, loadBuiltinAgents(), [lease({ id: 3 })]);
+		const stable = sections[DELEGATION_SECTION];
+		assert.match(stable ?? "", /Start in main/u);
+		assert.doesNotMatch(stable ?? "", /Active phase leases/u);
+		assert.match(sections[DELEGATION_LEASE_SECTION] ?? "", /#3 broad reconnaissance/u);
+
+		installDelegationSections(sections, loadBuiltinAgents(), [lease({ id: 3, task: "Map a different entry point" })]);
+		assert.equal(sections[DELEGATION_SECTION], stable);
+		assert.match(sections[DELEGATION_LEASE_SECTION] ?? "", /Map a different entry point/u);
+
+		installDelegationSections(sections, [], []);
+		assert.equal(sections[DELEGATION_SECTION], undefined);
+		assert.equal(sections[DELEGATION_LEASE_SECTION], undefined);
 	});
 
 	it("renders only bounded active and settling leases", () => {

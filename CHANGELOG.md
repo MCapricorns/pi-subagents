@@ -3,6 +3,22 @@
 Release notes for `@ferris1225/pi-subagents`. Only the most recent releases
 are kept here; every published version is preserved as a GitHub Release.
 
+## 4.3.20
+
+- Install the delegation contract as a `<subagents>` prompt section and live
+  phase leases as `<subagent_leases>`. Pi 1.0 appends a section delta only when
+  that text changes, so an unchanged turn keeps the cached system prefix.
+  Hosts without a section map still append the combined directive.
+- Declare `subagent`, `subagent_status`, `subagent_stop`, and `subagent_risk`
+  as `model-only`, with read-only or destructive annotations. Codemode scripts
+  cannot call them, and they stay declared even when codemode hides `direct`
+  tools. Dispatch and stop run sequentially so one assistant message cannot
+  race phase admission.
+- Register the child no-retry provider override with the model's `api`. Pi 1.0
+  rejects a `streamSimple` registration that omits it, which left provider
+  retries at the user's setting.
+- Require Pi 1.0.0. Development dependencies track 1.0.2.
+
 ## 4.3.19
 
 - Scope session-start thread restore and recovery notices to the current

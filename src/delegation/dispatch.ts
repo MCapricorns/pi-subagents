@@ -494,6 +494,16 @@ export function registerSubagentTool(pi: ExtensionAPI, runtime: SubagentRuntime)
 		name: "subagent",
 		label: "Subagent",
 		description: "Start one-shot leaf runs for substantial work. Duplicate phases and declared writer overlaps are rejected before allocation; scope does not prove independence or grant permissions. Parallel tasks without scope report `independence not verified`. Results arrive automatically, or in-turn with wait:true. Main handles incomplete work.",
+		// Declared to the model, never callable from codemode scripts. Dispatch shares
+		// the in-memory lease table, so a batch that includes it runs one tool at a time.
+		exposure: "model-only",
+		executionMode: "sequential",
+		annotations: {
+			readOnlyHint: false,
+			destructiveHint: true,
+			idempotentHint: false,
+			openWorldHint: true,
+		},
 		parameters: SubagentParams,
 
 		async execute(_toolCallId, params, signal, onUpdate, ctx) {
@@ -614,8 +624,9 @@ export function registerSubagentTool(pi: ExtensionAPI, runtime: SubagentRuntime)
 					];
 				});
 				if (started === 0) {
-					// Pi marks custom-tool failures only when execute throws; returning an
-					// `isError` property is still a successful AgentToolResult.
+					// Nothing was allocated, so there is no structured batch to keep.
+					// Throwing marks the tool failed; a returned `isError` is for failures
+					// that still carry details.
 					throw new Error(`No subagents started.\n${failureLines.join("\n")}`);
 				}
 				if (params.wait) {

@@ -134,6 +134,37 @@ interface ChildRetryPolicyExtension {
 	filePath: string;
 }
 
+/** Child extension source. Pi 1.0 rejects `streamSimple` registrations that
+ * omit `api`, and only routes models whose api matches that field. The wrapper
+ * forwards the normalized transcript and request options, then forces
+ * provider retries off so the parent can hand off a failed child model. */
+export function renderChildRetryPolicySource(modelRef?: string): string {
+	const slash = modelRef?.indexOf("/") ?? -1;
+	const selectedProvider = slash > 0 ? modelRef!.slice(0, slash) : undefined;
+	return `import { getApiProvider } from "@earendil-works/pi-ai/compat";\n`
+		+ `const selectedProvider = ${JSON.stringify(selectedProvider)};\n`
+		+ `let installedFor;\n`
+		+ `export default function noProviderRetries(pi) {\n`
+		+ `  pi.on("before_provider_request", (_event, ctx) => {\n`
+		+ `    const model = ctx.model;\n`
+		+ `    const providerId = model?.provider ?? selectedProvider;\n`
+		+ `    const api = model?.api;\n`
+		+ `    if (!providerId || !api) return;\n`
+		+ `    const key = providerId + "\\0" + api;\n`
+		+ `    if (installedFor === key) return;\n`
+		+ `    pi.registerProvider(providerId, {\n`
+		+ `      api,\n`
+		+ `      streamSimple(requestModel, context, options) {\n`
+		+ `        const implementation = getApiProvider(requestModel.api);\n`
+		+ `        if (!implementation) throw new Error(\`No API stream implementation is registered for \${requestModel.api}.\`);\n`
+		+ `        return implementation.streamSimple(requestModel, context, { ...options, maxRetries: 0 });\n`
+		+ `      },\n`
+		+ `    });\n`
+		+ `    installedFor = key;\n`
+		+ `  });\n`
+		+ `}\n`;
+}
+
 /** Build a child-only Pi extension that replaces the selected provider's
  * stream adapter with its registered API implementation while forcing
  * maxRetries=0. It uses Pi's public extension and pi-ai compatibility APIs, so
@@ -146,23 +177,7 @@ export async function writeChildRetryPolicyExtension(
 	const dir = await mkdtemp(join(scratchRoot, "pi-subagents-policy-"));
 	writeTempOwnerMarker(dir);
 	const filePath = join(dir, "no-provider-retries.mjs");
-	const slash = modelRef?.indexOf("/") ?? -1;
-	const selectedProvider = slash > 0 ? modelRef!.slice(0, slash) : undefined;
-	const source = `import { getApiProvider } from "@earendil-works/pi-ai/compat";\n`
-		+ `const selectedProvider = ${JSON.stringify(selectedProvider)};\n`
-		+ `export default function noProviderRetries(pi) {\n`
-		+ `  pi.on("before_provider_request", (_event, ctx) => {\n`
-		+ `    const providerId = ctx.model?.provider ?? selectedProvider;\n`
-		+ `    if (!providerId) return;\n`
-		+ `    pi.registerProvider(providerId, {\n`
-		+ `      streamSimple(model, context, options) {\n`
-		+ `        const api = getApiProvider(model.api);\n`
-		+ `        if (!api) throw new Error(\`No API stream implementation is registered for \${model.api}.\`);\n`
-		+ `        return api.streamSimple(model, context, { ...options, maxRetries: 0 });\n`
-		+ `      },\n`
-		+ `    });\n`
-		+ `  });\n`
-		+ `}\n`;
+	const source = renderChildRetryPolicySource(modelRef);
 	try {
 		await writeFile(filePath, source, "utf8");
 		return { dir, filePath };

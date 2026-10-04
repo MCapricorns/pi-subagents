@@ -131,6 +131,14 @@ export function registerSubagentRiskTool(pi: ExtensionAPI): void {
 		name: "subagent_risk",
 		label: "Subagent Risk",
 		description: "Advisory-only, no-model-call inspection of repository-root-relative tracked and untracked changes from HEAD, even when called from a nested cwd. Applies fixed path rules for concurrency, trust-boundary, persistence-compatibility, and failure-cancellation risk, and reports whether a fresh Sentinel review is suggested. It never dispatches a child or blocks work.",
+		exposure: "model-only",
+		executionMode: "parallel",
+		annotations: {
+			readOnlyHint: true,
+			destructiveHint: false,
+			idempotentHint: true,
+			openWorldHint: false,
+		},
 		parameters: Type.Object({
 			cwd: Type.Optional(Type.String({ description: "Repository working directory; defaults to the current caller cwd." })),
 		}),

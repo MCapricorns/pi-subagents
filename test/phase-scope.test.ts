@@ -28,6 +28,9 @@ import { createRuntime, type SubagentRuntime, type SubagentThread } from "../src
 import { monitor } from "../src/presentation/monitor.ts";
 
 type RegisteredTool = {
+	exposure?: string;
+	executionMode?: string;
+	annotations?: { destructiveHint?: boolean; openWorldHint?: boolean };
 	parameters?: any;
 	execute: (
 		toolCallId: string,
@@ -143,6 +146,10 @@ describe("phase and scope normalization", () => {
 	it("publishes phase id constraints and self-contained briefs in both dispatch modes", async () => {
 		const { runtime, tool } = dispatchHarness(join(tmpdir(), `pi-subagents-phase-schema-${process.pid}.json`));
 		try {
+			assert.equal(tool.exposure, "model-only");
+			assert.equal(tool.executionMode, "sequential");
+			assert.equal(tool.annotations?.destructiveHint, true);
+			assert.equal(tool.annotations?.openWorldHint, true);
 			const single = tool.parameters?.properties;
 			const parallel = tool.parameters?.properties?.tasks?.items?.properties;
 			for (const schema of [single, parallel]) {
