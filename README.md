@@ -8,9 +8,14 @@
 
 On-demand delegation for [pi](https://github.com/earendil-works/pi): a lightweight
 reader and an implementer, durable threads, and Git worktree isolation. Main
-prefers those two roles when the work fits, and keeps small understood edits itself.
+uses a subagent when the work can run independently in parallel, the boundary
+is clear, and delegation will actually reduce cost or improve completion quality.
 
 ## What's new
+
+**4.3.22** — use a subagent when the work can run independently in parallel, its
+boundary is clear, and delegation will actually reduce cost or improve
+completion quality. Role choice stays with scout and artisan.
 
 **4.3.21** — two built-in roles. `scout` is the lightweight read-only researcher
 and `artisan` implements one substantial change. Steward and sentinel are no
@@ -77,11 +82,13 @@ at "spawn a child with a prompt" and leave the hard parts — when to delegate, 
 wide to fan out, what happens when a model dies, how results come
 back — with you. This extension owns them:
 
-- Main prefers `scout` for unfamiliar code or external facts and `artisan` for
-  one substantial change. Independent phases go out together. A small edit
-  already understood in the current context stays in main, and a free process
-  slot is not a reason to invent another phase. Briefs define the outcome, done
-  condition, useful context, and boundaries.
+- Main uses a subagent when the work can run independently in parallel, its
+  boundary is clear, and delegation will actually reduce cost or improve
+  completion quality. `scout` covers unfamiliar code or external facts;
+  `artisan` covers one substantial change. A small edit already understood in
+  the current context stays in main, and a free process slot is not a reason
+  to invent another phase. Briefs define the outcome, done condition, useful
+  context, and boundaries.
 - A stable `phaseId` owns a logical phase in one resolved working directory even if
   its task wording changes. IDs are 1–80 ASCII letters, numbers, or `._:-`, starting
   with a letter or number, so lease output stays single-line. Exact normalized task+cwd
@@ -185,9 +192,11 @@ subagent({
 });
 ```
 
-Main prefers scout or artisan when that role fits, and puts independent phases
-in one `tasks` array. It keeps a small, already-understood edit itself. A free
-process slot is not a reason to invent another phase. The runtime paces
+Main uses a subagent when the work can run independently in parallel, its
+boundary is clear, and delegation will actually reduce cost or improve
+completion quality. It puts those independent phases in one `tasks` array and
+keeps a small, already-understood edit itself. A free process slot is not a
+reason to invent another phase. The runtime paces
 execution: `maxConcurrentAgents: 0` (the default) keeps automatic capacity at half
 the machine's cores, bounded to 4–6 child processes. Set `maxConcurrentAgents` to
 1–6 for an explicit capacity. Wider batches queue and start as slots free.

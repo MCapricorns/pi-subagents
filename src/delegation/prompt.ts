@@ -149,7 +149,7 @@ function preferredRoleUse(agents: readonly AgentConfig[]): string | undefined {
 	}
 	if (uses.length === 0) return undefined;
 	const preference = uses.length === 1 ? `Prefer ${uses[0]}` : `Prefer ${uses[0]}, and ${uses[1]}`;
-	return `${preference}. Delegate that work instead of doing it in main when a fresh context or an independent parallel phase would help. Keep a small edit already understood in the current context in main. Do not open a phase that repeats owned work, splits one tightly coupled change, or exists only to fill a free slot.`;
+	return `${preference}. Keep a small edit already understood in the current context in main. Do not open a phase that repeats owned work, splits one tightly coupled change, or exists only to fill a free slot.`;
 }
 
 function delegationBody(agents: AgentConfig[]): string {
@@ -160,6 +160,7 @@ function delegationBody(agents: AgentConfig[]): string {
 
 	const dispatchRules = [
 		"The user's task sets the outcome. If it conflicts with this section, follow the task. Admission still rejects duplicate phases and overlapping writers.",
+		"Use a subagent when the work can run independently in parallel, its boundary is clear, and delegation will actually reduce cost or improve completion quality.",
 		...(preferred ? [preferred] : []),
 		"Give each phase one owner, a stable `phaseId`, and exact writer `scope`. Parallelize independent phases in one call; never overlap writers or duplicate an owned phase. Dependent phases wait for prerequisites. Scope is conflict metadata, not permissions or a sandbox.",
 		"Children have no parent conversation; send a self-contained brief and reuse established evidence.",

@@ -3,6 +3,12 @@
 Release notes for `@ferris1225/pi-subagents`. Only the most recent releases
 are kept here; every published version is preserved as a GitHub Release.
 
+## 4.3.22
+
+- Use a subagent when the work can run independently in parallel, its boundary
+  is clear, and delegation will actually reduce cost or improve completion
+  quality. Role choice still prefers scout or artisan when that gate is met.
+
 ## 4.3.21
 
 - Ship `scout` and `artisan` only. Scout is the lightweight read-only researcher;

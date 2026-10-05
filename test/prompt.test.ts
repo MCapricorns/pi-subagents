@@ -38,8 +38,8 @@ describe("buildDelegationDirective", () => {
 
 	it("prefers the two built-in roles without inventing extra phases", () => {
 		const directive = buildDelegationDirective(loadBuiltinAgents());
+		assert.match(directive, /Use a subagent when the work can run independently in parallel, its boundary is clear, and delegation will actually reduce cost or improve completion quality/u);
 		assert.match(directive, /Prefer `scout` for unfamiliar code, a wide lookup, or an external fact, and `artisan` for one substantial implementation/u);
-		assert.match(directive, /Delegate that work instead of doing it in main when a fresh context or an independent parallel phase would help/u);
 		assert.match(directive, /Keep a small edit already understood in the current context in main/u);
 		assert.match(directive, /Do not open a phase that repeats owned work, splits one tightly coupled change, or exists only to fill a free slot/u);
 		assert.match(directive, /one owner, a stable `phaseId`, and exact writer `scope`/u);
