@@ -3,6 +3,14 @@
 Release notes for `@ferris1225/pi-subagents`. Only the most recent releases
 are kept here; every published version is preserved as a GitHub Release.
 
+## 4.3.23
+
+- Track Pi 1.0.3. The extension API, RPC command types, and the child
+  `registerProvider` path are unchanged. Pi renamed the Azure provider from
+  `azure-openai-responses` to `azure`; a stored agent model override follows
+  whichever of those ids the live catalog still lists, and is rewritten to
+  `azure/<id>` once that is the one Pi reports.
+
 ## 4.3.22
 
 - Use a subagent when the work can run independently in parallel, its boundary

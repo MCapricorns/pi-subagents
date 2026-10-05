@@ -13,6 +13,11 @@ is clear, and delegation will actually reduce cost or improve completion quality
 
 ## What's new
 
+**4.3.23** — Pi 1.0.3. Development dependencies track that release. A stored
+agent model that still names `azure-openai-responses/<id>` keeps working: it
+follows the live catalog, and is saved as `azure/<id>` once that is the id Pi
+reports.
+
 **4.3.22** — use a subagent when the work can run independently in parallel, its
 boundary is clear, and delegation will actually reduce cost or improve
 completion quality. Role choice stays with scout and artisan.
@@ -155,7 +160,7 @@ material assumptions or blockers.
 
 Children run the official `pi --mode rpc` server, using Pi's exported command/response
 types and its own session persistence. There is no separate subagent protocol. The
-host transport remains local. Pi 1.0.2's `RpcClient` still spawns its own `node`
+host transport remains local. Pi 1.0.3's `RpcClient` still spawns its own `node`
 process, signals only that process, and does not provide process-tree shutdown,
 bounded abort coordination, or cancellation of child extension dialogs.
 

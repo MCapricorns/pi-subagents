@@ -1,6 +1,6 @@
 {
   "name": "@ferris1225/pi-subagents",
-  "version": "4.3.22",
+  "version": "4.3.23",
   "description": "A managed sub-agent team for pi: lightweight scout research and artisan implementation, one-shot runs, read-only status, and Git worktree isolation.",
   "type": "module",
   "license": "MIT",
@@ -49,11 +49,11 @@
     "typebox": "*"
   },
   "devDependencies": {
-    "@earendil-works/pi-agent-core": "^1.0.2",
-    "@earendil-works/pi-ai": "^1.0.2",
-    "@earendil-works/pi-coding-agent": "^1.0.2",
-    "@earendil-works/pi-server": "^1.0.2",
-    "@earendil-works/pi-tui": "^1.0.2",
+    "@earendil-works/pi-agent-core": "^1.0.3",
+    "@earendil-works/pi-ai": "^1.0.3",
+    "@earendil-works/pi-coding-agent": "^1.0.3",
+    "@earendil-works/pi-server": "^1.0.3",
+    "@earendil-works/pi-tui": "^1.0.3",
     "@types/node": "^22.10.0",
     "typebox": "^1.3.27",
     "typescript": "^5.9.0"
