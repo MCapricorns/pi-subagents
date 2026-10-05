@@ -19,14 +19,15 @@ const SCOUT_READ_ONLY_TOOLS = [
 ] as const;
 
 describe("loadBuiltinAgents", () => {
-	it("ships scout, artisan, steward, and sentinel without frontmatter thinking", () => {
+	it("ships scout and artisan without frontmatter thinking", () => {
 		const agents = loadBuiltinAgents();
-		assert.deepEqual(agents.map((agent) => agent.name).sort(), ["artisan", "scout", "sentinel", "steward"]);
+		assert.deepEqual(agents.map((agent) => agent.name).sort(), ["artisan", "scout"]);
 		for (const agent of agents) {
 			assert.equal(agent.model, undefined);
 			assert.ok(!("thinking" in agent));
 			assert.match(agent.systemPrompt, /loaded project instructions/u);
-			assert.match(agent.systemPrompt, /no .*interactive clarification/u);
+			assert.match(agent.systemPrompt, /no interactive clarification/u);
+			assert.match(agent.systemPrompt, /Priority is the brief/u);
 			if (agent.name !== "scout") {
 				assert.match(agent.systemPrompt, /do not dispatch agents, bump versions, commit, push, publish, tag, or release/u);
 			}
@@ -37,68 +38,34 @@ describe("loadBuiltinAgents", () => {
 		const scout = loadBuiltinAgents().find((agent) => agent.name === "scout");
 		assert.ok(scout);
 		assert.deepEqual(scout.tools, SCOUT_READ_ONLY_TOOLS);
-		assert.match(scout.description, /external research/u);
+		assert.match(scout.description, /external facts/u);
 		assert.ok(scout.systemPrompt.includes("retrieval lead"));
 		assert.ok(scout.systemPrompt.includes("Stay read-only"));
 		assert.ok(scout.systemPrompt.includes("untrusted data"));
 		assert.match(scout.systemPrompt, /primary sources/u);
 		assert.match(scout.systemPrompt, /URL/u);
 		assert.match(scout.systemPrompt, /supplied facts.*then stop/u);
-		assert.match(scout.systemPrompt, /not patches or an implementation plan/u);
+		assert.match(scout.systemPrompt, /read-only boundary still wins/u);
 		assert.match(scout.systemPrompt, /Distinguish inference from verified facts/u);
 		assert.ok(!isWriteCapableAgent(scout));
 	});
 
-	it("keeps artisan on the complete primary change and out of final cleanup", () => {
+	it("keeps artisan on one complete change through verification", () => {
 		const artisan = loadBuiltinAgents().find((agent) => agent.name === "artisan");
 		assert.ok(artisan);
 		assert.equal(artisan.tools, undefined);
 		assert.ok(isWriteCapableAgent(artisan));
 		assert.match(artisan.systemPrompt, /confirm current behavior.*root cause/u);
-		assert.match(artisan.systemPrompt, /affected tests\/docs\/comments, local cleanup, and verification/u);
-		assert.match(artisan.systemPrompt, /without stopping for first-draft review/u);
+		assert.match(artisan.systemPrompt, /affected tests, docs, comments, local cleanup, and verification/u);
+		assert.match(artisan.systemPrompt, /Do not stop at a plan or a first draft/u);
 		assert.match(artisan.systemPrompt, /premise is disproved.*approval boundary.*report the blocker with evidence/u);
 		assert.match(artisan.systemPrompt, /Tests should catch the relevant failure/u);
-		assert.match(artisan.systemPrompt, /checks and gates required by the brief or project/u);
-		assert.match(artisan.systemPrompt, /repeat or broaden checks only for new edits, failures, or unresolved concerns/u);
+		assert.match(artisan.systemPrompt, /checks and gates the brief or project requires/u);
+		assert.match(artisan.systemPrompt, /reversible, low-impact edit/u);
+		assert.match(artisan.systemPrompt, /Repeat or broaden checks only for new edits, failures, or unresolved concerns/u);
 		assert.match(artisan.systemPrompt, /unrun checks and pre-existing failures accurately/u);
 		assert.match(artisan.systemPrompt, /checks as `command → result`/u);
-	});
-
-	it("keeps steward on final hygiene and cross-cutting docs", () => {
-		const steward = loadBuiltinAgents().find((agent) => agent.name === "steward");
-		assert.ok(steward);
-		assert.ok(isWriteCapableAgent(steward));
-		assert.match(steward.systemPrompt, /completed diff or Git range/u);
-		assert.match(steward.systemPrompt, /Stop and report if primary writing is still active/u);
-		assert.match(steward.systemPrompt, /stay within the assigned diff/u);
-		assert.match(steward.systemPrompt, /cross-cutting comments, README, examples, and user docs/u);
-		assert.match(steward.systemPrompt, /Prove deletions have no live consumers/u);
-		assert.match(steward.systemPrompt, /Preserve uncertain dynamic behavior, public APIs, persisted formats, compatibility, and product behavior/u);
-		assert.match(steward.systemPrompt, /Run the narrowest checks covering your edits/u);
-		assert.match(steward.systemPrompt, /Repeat primary verification only when new edits, failures, or unresolved concerns justify it/u);
-	});
-
-	it("keeps sentinel a read-only fresh-context reviewer on the shared checkout", () => {
-		const sentinel = loadBuiltinAgents().find((agent) => agent.name === "sentinel");
-		assert.ok(sentinel);
-		assert.equal(sentinel.isolation, "shared");
-		assert.match(sentinel.description, /fresh-context review/iu);
-		assert.ok(sentinel.tools?.includes("bash"));
-		assert.ok(sentinel.tools?.includes("query-docs"));
-		assert.ok(!sentinel.tools?.includes("edit"));
-		assert.ok(!sentinel.tools?.includes("write"));
-		assert.ok(sentinel.systemPrompt.includes("no memory of how it was written"));
-		assert.match(sentinel.systemPrompt, /Require a named completed scope/u);
-		assert.match(sentinel.systemPrompt, /Stop and report if primary writing is still active/u);
-		assert.ok(sentinel.systemPrompt.includes("Work read-only"));
-		assert.ok(sentinel.systemPrompt.includes("smallest targeted check needed to prove a suspected defect"));
-		assert.match(sentinel.systemPrompt, /assess whether relevant tests would catch them/u);
-		assert.match(sentinel.systemPrompt, /Omit unverified suspicions/u);
-		assert.match(sentinel.systemPrompt, /Report fixes to main rather than making them/u);
-		assert.ok(sentinel.systemPrompt.includes("SEVERITY path:line"));
-		assert.ok(sentinel.systemPrompt.includes("No findings."));
-		assert.ok(isWriteCapableAgent(sentinel), "a proving check takes the repository lane");
+		assert.match(artisan.systemPrompt, /leaf boundary below still wins/u);
 	});
 
 	it("keeps shell guidance portable", () => {

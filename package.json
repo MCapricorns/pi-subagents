@@ -1,7 +1,7 @@
 {
   "name": "@ferris1225/pi-subagents",
-  "version": "4.3.20",
-  "description": "A managed sub-agent team for pi: scout, artisan, steward, and sentinel roles, one-shot runs, read-only status, and Git worktree isolation.",
+  "version": "4.3.21",
+  "description": "A managed sub-agent team for pi: lightweight scout research and artisan implementation, one-shot runs, read-only status, and Git worktree isolation.",
   "type": "module",
   "license": "MIT",
   "repository": {
@@ -20,9 +20,7 @@
     "pi-extension",
     "subagent",
     "sub-agent",
-    "delegation",
-    "code-cleanup",
-    "dead-code"
+    "delegation"
   ],
   "files": [
     "index.ts",

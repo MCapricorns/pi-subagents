@@ -18,16 +18,14 @@ import {
 } from "../src/configuration/config.ts";
 
 describe("catalog", () => {
-	it("ships four built-ins and enables them by default", () => {
-		assert.deepEqual(BUILTIN_AGENT_NAMES, ["scout", "artisan", "steward", "sentinel"]);
+	it("ships scout and artisan and enables them by default", () => {
+		assert.deepEqual(BUILTIN_AGENT_NAMES, ["scout", "artisan"]);
 		assert.deepEqual(DEFAULT_ENABLED_AGENTS, [...BUILTIN_AGENT_NAMES]);
 	});
 
 	it("assigns a role thinking default and leaves custom names on medium", () => {
 		assert.equal(roleThinkingLevel("scout"), "low");
 		assert.equal(roleThinkingLevel("artisan"), "high");
-		assert.equal(roleThinkingLevel("steward"), "medium");
-		assert.equal(roleThinkingLevel("sentinel"), "high");
 		assert.equal(roleThinkingLevel("custom"), "medium");
 	});
 
@@ -148,7 +146,7 @@ describe("loadConfig", () => {
 		assert.ok(!("unknownKey" in saved));
 	});
 
-	it("adopts sentinel once for configs written before it shipped and keeps a deliberate disable", async (t) => {
+	it("does not re-adopt retired built-ins missing from the shipped catalog", async (t) => {
 		const dir = tempDir(t);
 		const path = join(dir, "pi-subagents.json");
 		writeFileSync(path, JSON.stringify({
@@ -158,17 +156,12 @@ describe("loadConfig", () => {
 		}), "utf8");
 
 		const adopted = await loadConfig(path);
-		assert.deepEqual(adopted.enabledAgents, ["scout", "custom-worker", "sentinel"]);
-		assert.deepEqual(adopted.knownAgents, ["scout", "artisan", "steward", "custom-worker", "sentinel"]);
+		assert.deepEqual(adopted.enabledAgents, ["scout", "custom-worker"]);
+		assert.deepEqual(adopted.knownAgents, ["scout", "artisan", "steward", "custom-worker"]);
 		assert.deepEqual(adopted.agentModels, { "custom-worker": "anthropic/custom" });
 		const saved = JSON.parse(readFileSync(path, "utf8")) as SubagentsConfig;
 		assert.deepEqual(saved.enabledAgents, adopted.enabledAgents);
 		assert.deepEqual(saved.knownAgents, adopted.knownAgents);
-
-		await saveConfig({ ...adopted, enabledAgents: ["scout", "custom-worker"] }, path);
-		const disabled = await loadConfig(path);
-		assert.deepEqual(disabled.enabledAgents, ["scout", "custom-worker"]);
-		assert.ok(disabled.knownAgents.includes("sentinel"));
 	});
 
 	it("treats a config without adoption tracking as the original three-role catalog", async (t) => {
@@ -177,8 +170,8 @@ describe("loadConfig", () => {
 		writeFileSync(path, JSON.stringify({ enabledAgents: ["artisan"] }), "utf8");
 
 		const config = await loadConfig(path);
-		assert.deepEqual(config.enabledAgents, ["artisan", "sentinel"]);
-		assert.deepEqual(config.knownAgents, ["scout", "artisan", "steward", "sentinel"]);
+		assert.deepEqual(config.enabledAgents, ["artisan"]);
+		assert.deepEqual(config.knownAgents, ["scout", "artisan", "steward"]);
 	});
 
 	it("round-trips selected models, thinking preferences, and concurrency", async (t) => {

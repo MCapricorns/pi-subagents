@@ -20,7 +20,7 @@ export interface SubagentRiskAdvisory {
 	changedPaths: string[];
 	categories: SubagentRiskCategory[];
 	matches: Partial<Record<SubagentRiskCategory, string[]>>;
-	recommendSentinel: boolean;
+	elevated: boolean;
 	unavailableReason?: string;
 }
 
@@ -52,7 +52,7 @@ function normalizedGitPath(path: string): string {
 
 export function classifyRiskPaths(paths: readonly string[]): Pick<
 	SubagentRiskAdvisory,
-	"categories" | "matches" | "recommendSentinel"
+	"categories" | "matches" | "elevated"
 > {
 	const normalized = [...new Set(paths.map(normalizedGitPath).filter(Boolean))].sort();
 	const matches: Partial<Record<SubagentRiskCategory, string[]>> = {};
@@ -63,7 +63,7 @@ export function classifyRiskPaths(paths: readonly string[]): Pick<
 		categories.push(rule.category);
 		matches[rule.category] = matching;
 	}
-	return { categories, matches, recommendSentinel: categories.length > 0 };
+	return { categories, matches, elevated: categories.length > 0 };
 }
 
 const RISK_GIT_TIMEOUT_MS = 30_000;
@@ -120,7 +120,7 @@ export async function analyzeSubagentRisk(
 			changedPaths: [],
 			categories: [],
 			matches: {},
-			recommendSentinel: false,
+			elevated: false,
 			unavailableReason: error instanceof Error ? error.message : String(error),
 		};
 	}
@@ -130,7 +130,7 @@ export function registerSubagentRiskTool(pi: ExtensionAPI): void {
 	pi.registerTool({
 		name: "subagent_risk",
 		label: "Subagent Risk",
-		description: "Advisory-only, no-model-call inspection of repository-root-relative tracked and untracked changes from HEAD, even when called from a nested cwd. Applies fixed path rules for concurrency, trust-boundary, persistence-compatibility, and failure-cancellation risk, and reports whether a fresh Sentinel review is suggested. It never dispatches a child or blocks work.",
+		description: "Advisory-only, no-model-call inspection of repository-root-relative tracked and untracked changes from HEAD, even when called from a nested cwd. Applies fixed path rules for concurrency, trust-boundary, persistence-compatibility, and failure-cancellation risk, and reports whether those paths look elevated for main to inspect. It never dispatches a child or blocks work.",
 		exposure: "model-only",
 		executionMode: "parallel",
 		annotations: {
@@ -152,7 +152,7 @@ export function registerSubagentRiskTool(pi: ExtensionAPI): void {
 				return {
 					content: [{
 						type: "text",
-						text: `Sentinel risk advisory unavailable: ${advisory.unavailableReason ?? "Git could not inspect the working tree"}. Advisory only; no child was dispatched and work was not blocked.`,
+						text: `Risk advisory unavailable: ${advisory.unavailableReason ?? "Git could not inspect the working tree"}. Advisory only; no child was dispatched and work was not blocked.`,
 					}],
 					details: advisory,
 				};
@@ -161,9 +161,9 @@ export function registerSubagentRiskTool(pi: ExtensionAPI): void {
 				? advisory.changedPaths.map((path) => `- ${path}`).join("\n")
 				: "- (none)";
 			const categories = advisory.categories.length > 0 ? advisory.categories.join(", ") : "none";
-			const recommendation = advisory.recommendSentinel
-				? "Sentinel suggested by fixed path rules. Dispatch remains the main agent's decision."
-				: "Sentinel not suggested by fixed path rules.";
+			const recommendation = advisory.elevated
+				? "Elevated path risk. Main inspects these paths in the integrated diff."
+				: "No elevated path risk from the fixed rules.";
 			return {
 				content: [{
 					type: "text",

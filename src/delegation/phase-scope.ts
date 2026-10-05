@@ -182,11 +182,3 @@ export function findWriterLeaseScopeOverlap(
 	return undefined;
 }
 
-/** First lease that may still change the diff a sentinel would review. Sentinel
- * leases are excluded: a reviewer freezes the checkout lane but never writes. */
-export function findActiveWriterLease(leases: Iterable<WriterScopeLease>): WriterScopeLease | undefined {
-	for (const lease of leases) {
-		if (lease.agentName !== "sentinel" && isActiveWriterLease(lease)) return lease;
-	}
-	return undefined;
-}

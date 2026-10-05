@@ -56,12 +56,12 @@ function dispatcher(threads: PhaseLeaseSource[]) {
 }
 
 describe("isolation policy", () => {
-	it("keeps sentinel on the shared checkout whose uncommitted diff it reviews", () => {
-		const sentinel = loadBuiltinAgents().find((agent) => agent.name === "sentinel");
-		assert.ok(sentinel);
-		assert.equal(isWorktreeCapableAgent(sentinel), false);
+	it("keeps the lightweight reader on the shared checkout", () => {
+		const scout = loadBuiltinAgents().find((agent) => agent.name === "scout");
+		assert.ok(scout);
+		assert.equal(isWorktreeCapableAgent(scout), false);
 		assert.equal(
-			defaultIsolationMode("parallel", sentinel.name, undefined, isWorktreeCapableAgent(sentinel), sentinel.isolation),
+			defaultIsolationMode("parallel", scout.name, undefined, isWorktreeCapableAgent(scout), scout.isolation),
 			"shared",
 		);
 	});
@@ -86,9 +86,9 @@ describe("fresh write capability", () => {
 		assert.equal(runtime.runControllers.size, 0);
 	});
 
-	it("rejects explicit sentinel worktree isolation before allocation", async () => {
-		const sentinel = loadBuiltinAgents().find((agent) => agent.name === "sentinel");
-		assert.ok(sentinel);
+	it("rejects explicit scout worktree isolation before allocation", async () => {
+		const scout = loadBuiltinAgents().find((agent) => agent.name === "scout");
+		assert.ok(scout);
 		const pi = {
 			on: () => undefined,
 			getActiveTools: () => ["read", "grep", "bash"],
@@ -100,14 +100,14 @@ describe("fresh write capability", () => {
 			getEnvironment: () => ({
 				ctx: { cwd: process.cwd() } as ExtensionContext,
 				config: {} as SubagentsConfig,
-				agents: [sentinel],
+				agents: [scout],
 			}),
 			finishRun: () => undefined,
 			makeLiveHandler: () => () => undefined,
 			makeDetails: (mode, background = false) => (results) => ({ mode, background, results }),
 		});
 		try {
-			const result = await start("sentinel", "Review the completed diff", process.cwd(), "worktree");
+			const result = await start("scout", "Map the dispatch path", process.cwd(), "worktree");
 			assert.equal(result.exitCode, 1);
 			assert.match(result.errorMessage ?? result.stderr, /worktree isolation/i);
 			assert.equal(runtime.threads.size, 0);

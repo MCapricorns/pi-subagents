@@ -14,7 +14,7 @@ import { getAgentDir, withFileMutationQueue } from "@earendil-works/pi-coding-ag
 import { MAX_SUBAGENT_CONCURRENCY } from "../execution/background.ts";
 
 /** Full catalog of agents shipped with the package (selectable in /subagents-setup). */
-export const BUILTIN_AGENT_NAMES = ["scout", "artisan", "steward", "sentinel"] as const;
+export const BUILTIN_AGENT_NAMES = ["scout", "artisan"] as const;
 
 // Historical catalog for configs written before built-in adoption tracking.
 // Keep this frozen so future built-ins are still recognized as new.
@@ -38,10 +38,7 @@ export function roleThinkingLevel(agentName: string): ThinkingLevel {
 		case "scout":
 			return "low";
 		case "artisan":
-		case "sentinel":
 			return "high";
-		case "steward":
-			return "medium";
 		default:
 			return DEFAULT_THINKING_LEVEL;
 	}
@@ -57,20 +54,12 @@ export interface AgentProfile {
 
 export const AGENT_PROFILES: Record<(typeof BUILTIN_AGENT_NAMES)[number], AgentProfile> = {
 	scout: {
-		summary: "recon / research",
-		remark: "Maps unfamiliar code or external facts read-only, returning decisive file or source citations as leads, never proof.",
+		summary: "lightweight research",
+		remark: "Use for unfamiliar code, a wide lookup, or external facts. Read-only; returns citations.",
 	},
 	artisan: {
-		summary: "primary change",
-		remark: "Owns a substantial implementation, fix, refactor, test, or docs change through root cause, affected verification, and local hygiene.",
-	},
-	steward: {
-		summary: "cross-cutting cleanup",
-		remark: "Handles remaining cross-cutting cleanup in a completed broad or multi-writer diff; local hygiene stays with the implementer.",
-	},
-	sentinel: {
-		summary: "fresh-context review",
-		remark: "Reviews a completed diff read-only with no memory of how it was written and reports only evidence-backed defects and test gaps; dispatched for risky diffs, never as a commit ritual.",
+		summary: "implement the change",
+		remark: "Use for one substantial implementation, fix, refactor, test, or docs change, including its checks.",
 	},
 };
 
@@ -139,7 +128,7 @@ export const DEFAULT_CONFIG: SubagentsConfig = {
 
 export const FIRST_RUN_SETUP_HINT =
 	"Run /subagents-setup to choose enabled roles, models, and thinking levels. " +
-	"Scout maps code or researches external sources, artisan owns the primary change, steward cleans broad final diffs, and sentinel reviews risky diffs with fresh eyes.";
+	"Scout does lightweight read-only research. Artisan implements one substantial change.";
 
 export function getConfigPath(agentDir: string = getAgentDir()): string {
 	return join(agentDir, CONFIG_FILE_NAME);

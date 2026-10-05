@@ -177,7 +177,7 @@ describe("runSetup menu", () => {
 					const component = renderComponent(factory, resolve);
 					customCall++;
 					if (customCall === 1) {
-						for (let index = 0; index < 4; index++) component.handleInput?.(KEY.down);
+						for (const character of "custom-worker") component.handleInput?.(character);
 						assert.match(component.render(120).join("\n"), /custom-worker \(custom\)/);
 						component.handleInput?.(KEY.enter);
 					} else if (customCall === 2) {
@@ -224,8 +224,8 @@ describe("runSetup menu", () => {
 					options.find((option) => option.startsWith("Enable")),
 				custom: async (factory: PickerFactory) => new Promise((resolve) => {
 					const component = renderComponent(factory, resolve);
+					for (const character of "dormant") component.handleInput?.(character);
 					customDisplay = component.render(120).join("\n");
-					for (let index = 0; index < 4; index++) component.handleInput?.(KEY.down);
 					component.handleInput?.(" ");
 					component.handleInput?.(KEY.enter);
 				}),
@@ -267,10 +267,10 @@ describe("runSetup menu", () => {
 			const saved = JSON.parse(readFileSync(path, "utf8")) as SubagentsConfig;
 			if (trusted) {
 				assert.match(display, /fresh-custom \(custom\)/u);
-				assert.deepEqual(saved.knownAgents, ["scout", "artisan", "steward", "sentinel", "fresh-custom"]);
+				assert.deepEqual(saved.knownAgents, ["scout", "artisan", "fresh-custom"]);
 			} else {
 				assert.doesNotMatch(display, /fresh-custom/u);
-				assert.deepEqual(saved.knownAgents, ["scout", "artisan", "steward", "sentinel"]);
+				assert.deepEqual(saved.knownAgents, ["scout", "artisan"]);
 			}
 		}
 	});
@@ -310,7 +310,7 @@ for (const menu of ["Enable", "Configure"] as const) {
 		if (menu === "Enable") {
 			const saved = JSON.parse(readFileSync(path, "utf8")) as SubagentsConfig;
 			assert.deepEqual(saved.enabledAgents, ["scout", "artisan"]);
-			assert.deepEqual(saved.knownAgents, ["scout", "artisan", "steward", "sentinel"]);
+			assert.deepEqual(saved.knownAgents, ["scout", "artisan"]);
 			assert.deepEqual(saved.agentModels, {});
 			assert.deepEqual(saved.agentThinkingLevels, {});
 		}

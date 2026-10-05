@@ -25,7 +25,6 @@ import {
 } from "../presentation/monitor.ts";
 import { findDuplicateDispatch, formatParallelScopeAdmissionNote, formatPhaseLeaseReceipt } from "./prompt.ts";
 import {
-	findActiveWriterLease,
 	findPhaseScopeOverlap,
 	findWriterLeaseScopeOverlap,
 	normalizePhaseId,
@@ -121,7 +120,7 @@ const SubagentParams = Type.Object({
 /** Roles that default to worktree isolation in parallel dispatches even when
  * the live catalog cannot be consulted (render-only call sites). Custom
  * worktree-capable agents join them via the live catalog on the execute path. */
-const WORKTREE_DEFAULT_AGENTS = new Set(["artisan", "steward"]);
+const WORKTREE_DEFAULT_AGENTS = new Set(["artisan"]);
 
 /** Resolve the default isolation for a dispatch. Precedence: an explicit
  * per-call request, then the role's own frontmatter declaration (`worktree`
@@ -196,23 +195,7 @@ function parallelAdmissionConflict(
 			}
 		}
 	}
-	const sentinelTask = tasks.find((task) => task.agent === "sentinel");
-	if (sentinelTask) {
-		const batchWriter = tasks.find(
-			(task) => task !== sentinelTask && task.agent !== "sentinel" && task.writeCapable,
-		);
-		if (batchWriter) {
-			return `tasks[${sentinelTask.index}] (sentinel) reviews a completed diff, but tasks[${batchWriter.index}] (${batchWriter.agent}) writes in the same batch; review follows the writer's completion`;
-		}
-	}
 	const leases = [...threads];
-	if (sentinelTask) {
-		const activeWriter = findActiveWriterLease(leases);
-		if (activeWriter) {
-			const state = activeWriter.lifecycleOperation === "settle" ? "settling" : activeWriter.state;
-			return `tasks[${sentinelTask.index}] (sentinel) reviews a completed diff, but run #${activeWriter.id} (${activeWriter.agentName}, ${state}) is still writing`;
-		}
-	}
 	for (const task of tasks) {
 		const duplicate = findDuplicateDispatch(leases, task.task, task.cwd, task.phaseId);
 		if (duplicate?.kind === "active") {

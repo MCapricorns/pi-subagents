@@ -3,6 +3,19 @@
 Release notes for `@ferris1225/pi-subagents`. Only the most recent releases
 are kept here; every published version is preserved as a GitHub Release.
 
+## 4.3.21
+
+- Ship `scout` and `artisan` only. Scout is the lightweight read-only researcher;
+  artisan implements one substantial change. Remove the built-in steward and
+  sentinel roles, their setup profiles, and the sentinel review gate.
+- Rewrite the role prompts and the parent delegation section for GPT-6 Astra:
+  the brief outranks role text, authorized work finishes without a first-draft
+  pause, and checks stay proportional to the change.
+- Ask main to prefer scout and artisan when a fresh context or an independent
+  parallel phase would help, and to keep small understood edits. Free slots are
+  not a reason to open another phase.
+- Report `subagent_risk` as elevated path risk for main to inspect.
+
 ## 4.3.20
 
 - Install the delegation contract as a `<subagents>` prompt section and live

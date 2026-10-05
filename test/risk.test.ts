@@ -48,7 +48,7 @@ describe("subagent risk advisory", () => {
 			"persistence-compatibility",
 			"failure-cancellation",
 		]);
-		assert.equal(classification.recommendSentinel, true);
+		assert.equal(classification.elevated, true);
 		assert.deepEqual(classification.matches["trust-boundary"], ["src/auth/permissions.ts"]);
 	});
 
@@ -68,7 +68,7 @@ describe("subagent risk advisory", () => {
 			assert.equal(advisory.available, true);
 			assert.deepEqual(advisory.changedPaths, ["auth-policy.ts", "queue.ts"]);
 			assert.deepEqual(advisory.categories, ["concurrency", "trust-boundary"]);
-			assert.equal(advisory.recommendSentinel, true);
+			assert.equal(advisory.elevated, true);
 		} finally {
 			await rm(root, { recursive: true, force: true });
 		}
@@ -105,7 +105,7 @@ describe("subagent risk advisory", () => {
 		assert.equal(advisory.available, false);
 		assert.deepEqual(advisory.changedPaths, []);
 		assert.deepEqual(advisory.categories, []);
-		assert.equal(advisory.recommendSentinel, false);
+		assert.equal(advisory.elevated, false);
 		assert.match(advisory.unavailableReason ?? "", /git executable was not found/i);
 	});
 
