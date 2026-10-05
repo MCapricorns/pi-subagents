@@ -15,7 +15,6 @@ import type { SubagentsConfig } from "../src/configuration/config.ts";
 import { runSetup } from "../src/configuration/setup.ts";
 
 const KEY = {
-	down: "\x1b[B",
 	enter: "\r",
 	escape: "\x1b",
 } as const;
