@@ -47,8 +47,6 @@ const READ_ONLY_TOOL_NAMES = new Set([
 	"anchor_grep",
 	"web_search",
 	"fetch_content",
-	"resolve-library-id",
-	"query-docs",
 ]);
 export const SUBAGENT_TOOL_NAMES = [
 	"subagent",

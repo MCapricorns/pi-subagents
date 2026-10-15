@@ -480,8 +480,8 @@ shell slot follows the parent's active shell on non-scout roles.
 
 `scout` is a hard read-only boundary even when a project override omits or
 overstates its tool list. Its known-safe set includes `read`, `grep`, `find`,
-`ls`, `anchor_grep`, `web_search`, `fetch_content`, `resolve-library-id`, and
-`query-docs`; tools not installed or active in Main are simply omitted. Scout
+`ls`, `anchor_grep`, `web_search`, and `fetch_content`; tools not installed or
+active in Main are simply omitted. Scout
 receives no shell, local mutation tool, or unknown custom tool. Unknown tools
 declared by other roles are conservatively treated as write-capable when
 isolation is chosen. An empty resolved snapshot starts the child with
