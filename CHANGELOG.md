@@ -3,6 +3,15 @@
 Release notes for `@ferris1225/pi-subagents`. Only the most recent releases
 are kept here; every published version is preserved as a GitHub Release.
 
+## 4.3.19
+
+- Remove the live `tok/s` throughput figure from the per-model cost footer.
+  Dividing the message's output tokens by wall-clock stream time could not be
+  made trustworthy across providers (reasoning tokens, time-to-first-token,
+  and per-chunk usage semantics differ), and no mainstream agent CLI ships a
+  comparable live rate. The footer keeps exactly-reported facts only: per-model
+  token flow, cost, context share, and thinking level.
+
 ## 4.3.18
 
 - Keep known-context local changes in main and delegate only substantial,

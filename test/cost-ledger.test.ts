@@ -56,27 +56,11 @@ describe("CostLedger", () => {
 		assert.equal(rows[0]?.current, true);
 	});
 
-	it("tracks live estimate and the exact final rate", () => {
-		const ledger = new CostLedger();
-		ledger.noteStreamStart("openai/gpt-5");
-		ledger.noteStreamDelta(400);
-		const live = ledger.speed();
-		assert.equal(live?.streaming, true);
-		assert.ok((live?.tokensPerSecond ?? 0) > 0);
-		ledger.noteStreamEnd("openai/gpt-5", 120);
-		const exact = ledger.speed();
-		assert.equal(exact?.streaming, false);
-		assert.ok((exact?.tokensPerSecond ?? 0) > 0);
-		assert.ok(!ledger.isStreaming());
-	});
-
-	it("reset clears spend and stream state", () => {
+	it("reset clears spend state", () => {
 		const ledger = new CostLedger();
 		ledger.record("openai/gpt-5", { cost: 1 });
-		ledger.noteStreamStart("openai/gpt-5");
 		ledger.reset();
 		assert.equal(ledger.snapshot().length, 0);
-		assert.equal(ledger.speed(), undefined);
 	});
 });
 
@@ -143,22 +127,11 @@ describe("registerMainCostTracking", () => {
 		assert.equal(rows[0]?.current, true);
 	});
 
-	it("ignores non-assistant messages and starts the stream lazily on the first delta", async () => {
+	it("ignores non-assistant messages", async () => {
 		const { pi, handlers } = makePi();
 		registerMainCostTracking(pi);
-		await handlers.get("message_start")!({ message: { role: "user", content: [] } }, ctx);
-		assert.ok(!costLedger.isStreaming());
-		await handlers.get("message_update")!(
-			{
-				message: { role: "assistant", provider: "zhipu", model: "glm-4.7" },
-				assistantMessageEvent: { type: "text_delta", delta: "hello world" },
-			},
-			ctx,
-		);
-		assert.ok(costLedger.isStreaming());
-		const live = costLedger.speed();
-		assert.equal(live?.model, "zhipu/glm-4.7");
-		assert.equal(live?.streaming, true);
+		await handlers.get("message_end")!({ message: { role: "user", content: [] } }, ctx);
+		assert.equal(costLedger.snapshot().length, 0);
 	});
 
 	it("attributes compaction usage to the current model", async () => {

@@ -1,9 +1,9 @@
 /**
  * Persistent cost footer: replaces pi's built-in consumption line with a
  * per-model tally of the main window's own spend, so models are never summed
- * into one number — each `provider/model` keeps its own token flow, cost,
- * context share, and live throughput. The current-project line stays first,
- * exactly where pi put it; extension statuses stay last.
+ * into one number — each `provider/model` keeps its own token flow, cost, and
+ * context share. The current-project line stays first, exactly where pi put
+ * it; extension statuses stay last.
  *
  * Sub-agent spend is intentionally absent: children report per-run usage with
  * their model ref when they settle, and injecting it here (or into the parent
@@ -61,11 +61,6 @@ function contextPart(theme: Theme, usage: { percent?: number | null; contextWind
 	return display;
 }
 
-function speedPart(speed: { tokensPerSecond: number; streaming: boolean } | undefined): string {
-	if (!speed || speed.tokensPerSecond <= 0) return "";
-	return `${speed.streaming ? "~" : ""}${speed.tokensPerSecond.toFixed(1)} tok/s`;
-}
-
 function spendUsage(spend: ModelSpendRow["spend"]): UsageStats {
 	return { ...spend, contextTokens: 0, turns: 0 };
 }
@@ -88,11 +83,6 @@ function currentModelLine(
 	const parts = [spendPart(row.spend)];
 	const context = contextPart(theme, ctx.getContextUsage?.());
 	if (context) parts.push(context);
-	const speed = costLedger.speed();
-	if (speed && speed.model === row.model) {
-		const part = speedPart(speed);
-		if (part) parts.push(part);
-	}
 	let left = parts.join(" ");
 	if (visibleWidth(left) > width) left = truncateToWidth(left, width, "…");
 
@@ -124,7 +114,7 @@ function settledModelLine(row: ModelSpendRow, theme: Theme, width: number): stri
 }
 
 /** Render the replacement footer: project line first, one line per model the
- * main window spent on (current model with context + throughput), extension
+ * main window spent on (current model with context share), extension
  * statuses last — the same slots the built-in footer used. Settled models are
  * ranked by spend and capped, so a session that switched through many models
  * never grows the footer without bound. */

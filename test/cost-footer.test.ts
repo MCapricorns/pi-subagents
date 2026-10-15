@@ -61,16 +61,6 @@ describe("renderCostFooter", () => {
 		costLedger.reset();
 	});
 
-	it("shows the live throughput with ~ while streaming", () => {
-		costLedger.reset();
-		costLedger.markCurrentModel("zhipu/glm-4.7");
-		costLedger.noteStreamStart("zhipu/glm-4.7");
-		costLedger.noteStreamDelta(4000);
-		const line = stripVTControlCharacters(renderCostFooter(160, plainTheme, footerData, makeCtx())[1]!);
-		assert.match(line, /~\d+(\.\d+)? tok\/s/u);
-		costLedger.reset();
-	});
-
 	it("drops the context share when no context usage is known", () => {
 		costLedger.reset();
 		costLedger.markCurrentModel("zhipu/glm-4.7");

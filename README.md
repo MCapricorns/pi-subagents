@@ -12,6 +12,11 @@ default and delegates when an independent child has a concrete advantage.
 
 ## What's new
 
+**4.3.19** — the per-model cost footer drops the live `tok/s` throughput
+figure: measured rates could not be trusted across providers, so the footer
+sticks to what pi reports exactly — per-model token flow, cost, context share,
+and thinking level.
+
 **4.3.18** — main-first delegation: keep known-context local changes in main,
 use cleanup and review roles only where they add value, and configure process
 capacity with `maxConcurrentAgents`. See [Evaluate delegation](#evaluate-delegation)
@@ -390,13 +395,12 @@ capped at ten lines: when many runs are live, extra runs collapse into a
 In TUI sessions the extension replaces pi's built-in consumption line with a
 per-model tally of the main window's own spend, directly under the
 current-project line. Models are never merged: each `provider/model` keeps its
-own token flow, cost, and — for the current model — context share, effective
-thinking level, and live throughput (`~` marks the streaming estimate; the
-exact rate of the last completed message replaces it):
+own token flow, cost, and — for the current model — context share and
+effective thinking level:
 
 ```text
 ~/projs/app (main)
-↑48.1k ↓112.7k R1.9M W302.4k $3.0812 · 41.2%/200.0k · ~58.3 tok/s     zhipu/glm-4.7 • high
+↑48.1k ↓112.7k R1.9M W302.4k $3.0812 · 41.2%/200.0k     zhipu/glm-4.7 • high
 anthropic/claude-sonnet-4 ↑12.0k ↓31.2k R410.0k $0.9104
 ```
 

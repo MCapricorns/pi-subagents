@@ -6,7 +6,7 @@
  * per-model completion totals), so mixing its live spend into the parent's
  * footer would just re-create the cross-model sum this ledger exists to
  * avoid. The ledger covers the main window only — across `/model` switches,
- * each model keeps its own tally — plus its live token throughput.
+ * each model keeps its own tally.
  */
 
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
@@ -27,23 +27,6 @@ export interface ModelSpendRow {
 	current: boolean;
 	spend: ModelSpend;
 }
-
-export interface MainStreamSpeed {
-	model: string;
-	tokensPerSecond: number;
-	/** True while the assistant is still streaming (value is an estimate). */
-	streaming: boolean;
-}
-
-interface StreamState {
-	model: string;
-	startedAt: number;
-	estimatedChars: number;
-}
-
-/** Rough chars-per-token for the live estimate; the exact rate replaces it at
- * `message_end`, where real output tokens are known. */
-const ESTIMATED_CHARS_PER_TOKEN = 4;
 
 /** pi Usage shape: numeric token buckets plus a cost that is either already a
  * number (child tallies) or the provider object with a `total`. */
@@ -84,8 +67,6 @@ export class CostLedger {
 	/** First-seen order, so row order is stable between notifications. */
 	private order: string[] = [];
 	private currentModel: string | undefined;
-	private stream: StreamState | undefined;
-	private lastSpeed: MainStreamSpeed | undefined;
 	private subscribers = new Set<() => void>();
 
 	record(model: string, spend: UsageLike | undefined): void {
@@ -133,8 +114,6 @@ export class CostLedger {
 		this.rows.clear();
 		this.order = [];
 		this.currentModel = undefined;
-		this.stream = undefined;
-		this.lastSpeed = undefined;
 		this.notify();
 	}
 
@@ -143,46 +122,6 @@ export class CostLedger {
 		return () => {
 			this.subscribers.delete(cb);
 		};
-	}
-
-	noteStreamStart(model: string): void {
-		this.stream = { model, startedAt: Date.now(), estimatedChars: 0 };
-		this.lastSpeed = undefined;
-		this.notify();
-	}
-
-	noteStreamDelta(chars: number): void {
-		if (!this.stream || chars <= 0) return;
-		this.stream.estimatedChars += chars;
-		this.notify();
-	}
-
-	isStreaming(): boolean {
-		return this.stream !== undefined;
-	}
-
-	noteStreamEnd(model: string, outputTokens: number): void {
-		const stream = this.stream;
-		this.stream = undefined;
-		if (stream && outputTokens > 0) {
-			const seconds = Math.max(0.001, (Date.now() - stream.startedAt) / 1_000);
-			this.lastSpeed = { model, tokensPerSecond: outputTokens / seconds, streaming: false };
-		}
-		this.notify();
-	}
-
-	/** Live estimate while streaming, exact rate of the last completed
-	 * assistant message afterwards; undefined before any generation. */
-	speed(): MainStreamSpeed | undefined {
-		if (this.stream) {
-			const seconds = Math.max(0.001, (Date.now() - this.stream.startedAt) / 1_000);
-			return {
-				model: this.stream.model,
-				tokensPerSecond: this.stream.estimatedChars / ESTIMATED_CHARS_PER_TOKEN / seconds,
-				streaming: true,
-			};
-		}
-		return this.lastSpeed;
 	}
 
 	private notify(): void {
@@ -202,35 +141,12 @@ export const costLedger = new CostLedger();
  * carry the serving model and exact usage, model switches re-key the current
  * row, and compaction calls land on the model that made them. */
 export function registerMainCostTracking(pi: ExtensionAPI): void {
-	pi.on("message_start", async (event) => {
-		const message = (event as { message?: { role?: string } }).message;
-		if (message?.role !== "assistant") return;
-		const ref = messageModelRef(message as { provider?: string; model?: string });
-		if (ref) costLedger.noteStreamStart(ref);
-	});
-
-	pi.on("message_update", async (event) => {
-		const delta = (event as { assistantMessageEvent?: { type?: string; delta?: string } }).assistantMessageEvent;
-		if (delta?.type !== "text_delta" && delta?.type !== "thinking_delta") return;
-		// `message_start` does not always carry the model yet; the first delta
-		// of the stream is just as good a clock start.
-		if (!costLedger.isStreaming()) {
-			const partial = (event as { message?: { role?: string } }).message;
-			if (partial?.role === "assistant") {
-				const ref = messageModelRef(partial as { provider?: string; model?: string });
-				if (ref) costLedger.noteStreamStart(ref);
-			}
-		}
-		costLedger.noteStreamDelta(delta.delta?.length ?? 0);
-	});
-
 	pi.on("message_end", async (event) => {
 		const message = (event as { message?: { role?: string; provider?: string; model?: string; usage?: UsageLike } }).message;
 		if (message?.role !== "assistant") return;
 		const ref = messageModelRef(message) ?? costLedger.getCurrentModel();
 		if (!ref) return;
 		const usage = finiteUsage(message.usage);
-		costLedger.noteStreamEnd(ref, usage.output);
 		costLedger.record(ref, usage);
 	});
 
