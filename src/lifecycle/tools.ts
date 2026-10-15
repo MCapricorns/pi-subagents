@@ -30,6 +30,14 @@ export function registerLookupTools(pi: ExtensionAPI, runtime: SubagentRuntime):
 		name: "subagent_status",
 		label: "Subagent Status",
 		description: "Read current-session run states without waiting or changing execution. Omit id to list runs, or pass an exact numeric id for progress, elapsed time, failure diagnostics, and retained result/recovery paths. Completions arrive automatically; use this for inspection, not a polling loop.",
+		exposure: "model-only",
+		executionMode: "parallel",
+		annotations: {
+			readOnlyHint: true,
+			destructiveHint: false,
+			idempotentHint: true,
+			openWorldHint: false,
+		},
 		parameters: Type.Object({
 			id: Type.Optional(Type.Integer({ minimum: 1, description: "Exact run id; omit to list all runs in this parent session." })),
 		}),
@@ -118,6 +126,14 @@ export function registerLookupTools(pi: ExtensionAPI, runtime: SubagentRuntime):
 		name: "subagent_stop",
 		label: "Subagent Stop",
 		description: "Destructively stop and retire one run by id/prefix, or all active runs with all: true. Delivers partial results; stopped runs cannot resume.",
+		exposure: "model-only",
+		executionMode: "sequential",
+		annotations: {
+			readOnlyHint: false,
+			destructiveHint: true,
+			idempotentHint: true,
+			openWorldHint: false,
+		},
 		parameters: SubagentStopParams,
 
 		async execute(_toolCallId, params, _signal, _onUpdate, ctx) {

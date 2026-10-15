@@ -11,6 +11,9 @@ import { formatCompletionBlock } from "../src/presentation/format.ts";
 import { monitor } from "../src/presentation/monitor.ts";
 
 type RegisteredTool = {
+	exposure?: string;
+	executionMode?: string;
+	annotations?: { readOnlyHint?: boolean; destructiveHint?: boolean; idempotentHint?: boolean; openWorldHint?: boolean };
 	execute: (toolCallId: string, params: any, signal: AbortSignal, onUpdate: (update: unknown) => void, ctx: any) => Promise<any>;
 };
 
@@ -78,6 +81,16 @@ describe("subagent_status", () => {
 		const { runtime, tools } = harness();
 		try {
 			assert.deepEqual([...tools.keys()].sort(), ["subagent_status", "subagent_stop"]);
+			const status = tools.get("subagent_status")!;
+			assert.equal(status.exposure, "model-only");
+			assert.equal(status.executionMode, "parallel");
+			assert.equal(status.annotations?.readOnlyHint, true);
+			assert.equal(status.annotations?.destructiveHint, false);
+			const stop = tools.get("subagent_stop")!;
+			assert.equal(stop.exposure, "model-only");
+			assert.equal(stop.executionMode, "sequential");
+			assert.equal(stop.annotations?.destructiveHint, true);
+			assert.equal(stop.annotations?.readOnlyHint, false);
 		} finally { await shutdown(runtime); }
 	});
 

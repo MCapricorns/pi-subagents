@@ -3,7 +3,7 @@
 Release notes for `@ferris1225/pi-subagents`. Only the most recent releases
 are kept here; every published version is preserved as a GitHub Release.
 
-## 4.3.19
+## 4.3.24
 
 - Remove the live `tok/s` throughput figure from the per-model cost footer.
   Dividing the message's output tokens by wall-clock stream time could not be
@@ -11,6 +11,58 @@ are kept here; every published version is preserved as a GitHub Release.
   and per-chunk usage semantics differ), and no mainstream agent CLI ships a
   comparable live rate. The footer keeps exactly-reported facts only: per-model
   token flow, cost, context share, and thinking level.
+
+## 4.3.23
+
+- Track Pi 1.0.3. The extension API, RPC command types, and the child
+  `registerProvider` path are unchanged. Pi renamed the Azure provider from
+  `azure-openai-responses` to `azure`; a stored agent model override follows
+  whichever of those ids the live catalog still lists, and is rewritten to
+  `azure/<id>` once that is the one Pi reports.
+
+## 4.3.22
+
+- Use a subagent when the work can run independently in parallel, its boundary
+  is clear, and delegation will actually reduce cost or improve completion
+  quality. Role choice still prefers scout or artisan when that gate is met.
+
+## 4.3.21
+
+- Ship `scout` and `artisan` only. Scout is the lightweight read-only researcher;
+  artisan implements one substantial change. Remove the built-in steward and
+  sentinel roles, their setup profiles, and the sentinel review gate.
+- Rewrite the role prompts and the parent delegation section for GPT-6 Astra:
+  the brief outranks role text, authorized work finishes without a first-draft
+  pause, and checks stay proportional to the change.
+- Ask main to prefer scout and artisan when a fresh context or an independent
+  parallel phase would help, and to keep small understood edits. Free slots are
+  not a reason to open another phase.
+- Report `subagent_risk` as elevated path risk for main to inspect.
+
+## 4.3.20
+
+- Install the delegation contract as a `<subagents>` prompt section and live
+  phase leases as `<subagent_leases>`. Pi 1.0 appends a section delta only when
+  that text changes, so an unchanged turn keeps the cached system prefix.
+  Hosts without a section map still append the combined directive.
+- Declare `subagent`, `subagent_status`, `subagent_stop`, and `subagent_risk`
+  as `model-only`, with read-only or destructive annotations. Codemode scripts
+  cannot call them, and they stay declared even when codemode hides `direct`
+  tools. Dispatch and stop run sequentially so one assistant message cannot
+  race phase admission.
+- Register the child no-retry provider override with the model's `api`. Pi 1.0
+  rejects a `streamSimple` registration that omits it, which left provider
+  retries at the user's setting.
+- Require Pi 1.0.0. Development dependencies track 1.0.2.
+
+## 4.3.19
+
+- Scope session-start thread restore and recovery notices to the current
+  checkout. A second pi window in another project no longer announces the first
+  project's retained worktree, retries its leftover cleanup, or restores and
+  stops its interrupted children.
+- Cover sibling-window isolation with recovery announcement, leftover-cleanup,
+  and parked-thread restore checks across two checkouts that share one agent dir.
 
 ## 4.3.18
 

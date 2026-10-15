@@ -25,7 +25,6 @@ import {
 } from "../presentation/monitor.ts";
 import { findDuplicateDispatch, formatParallelScopeAdmissionNote, formatPhaseLeaseReceipt } from "./prompt.ts";
 import {
-	findActiveWriterLease,
 	findPhaseScopeOverlap,
 	findWriterLeaseScopeOverlap,
 	normalizePhaseId,
@@ -121,7 +120,7 @@ const SubagentParams = Type.Object({
 /** Roles that default to worktree isolation in parallel dispatches even when
  * the live catalog cannot be consulted (render-only call sites). Custom
  * worktree-capable agents join them via the live catalog on the execute path. */
-const WORKTREE_DEFAULT_AGENTS = new Set(["artisan", "steward"]);
+const WORKTREE_DEFAULT_AGENTS = new Set(["artisan"]);
 
 /** Resolve the default isolation for a dispatch. Precedence: an explicit
  * per-call request, then the role's own frontmatter declaration (`worktree`
@@ -196,23 +195,7 @@ function parallelAdmissionConflict(
 			}
 		}
 	}
-	const sentinelTask = tasks.find((task) => task.agent === "sentinel");
-	if (sentinelTask) {
-		const batchWriter = tasks.find(
-			(task) => task !== sentinelTask && task.agent !== "sentinel" && task.writeCapable,
-		);
-		if (batchWriter) {
-			return `tasks[${sentinelTask.index}] (sentinel) reviews a completed diff, but tasks[${batchWriter.index}] (${batchWriter.agent}) writes in the same batch; review follows the writer's completion`;
-		}
-	}
 	const leases = [...threads];
-	if (sentinelTask) {
-		const activeWriter = findActiveWriterLease(leases);
-		if (activeWriter) {
-			const state = activeWriter.lifecycleOperation === "settle" ? "settling" : activeWriter.state;
-			return `tasks[${sentinelTask.index}] (sentinel) reviews a completed diff, but run #${activeWriter.id} (${activeWriter.agentName}, ${state}) is still writing`;
-		}
-	}
 	for (const task of tasks) {
 		const duplicate = findDuplicateDispatch(leases, task.task, task.cwd, task.phaseId);
 		if (duplicate?.kind === "active") {
@@ -494,6 +477,16 @@ export function registerSubagentTool(pi: ExtensionAPI, runtime: SubagentRuntime)
 		name: "subagent",
 		label: "Subagent",
 		description: "Start one-shot leaf runs for substantial work. Duplicate phases and declared writer overlaps are rejected before allocation; scope does not prove independence or grant permissions. Parallel tasks without scope report `independence not verified`. Results arrive automatically, or in-turn with wait:true. Main handles incomplete work.",
+		// Declared to the model, never callable from codemode scripts. Dispatch shares
+		// the in-memory lease table, so a batch that includes it runs one tool at a time.
+		exposure: "model-only",
+		executionMode: "sequential",
+		annotations: {
+			readOnlyHint: false,
+			destructiveHint: true,
+			idempotentHint: false,
+			openWorldHint: true,
+		},
 		parameters: SubagentParams,
 
 		async execute(_toolCallId, params, signal, onUpdate, ctx) {
@@ -614,8 +607,9 @@ export function registerSubagentTool(pi: ExtensionAPI, runtime: SubagentRuntime)
 					];
 				});
 				if (started === 0) {
-					// Pi marks custom-tool failures only when execute throws; returning an
-					// `isError` property is still a successful AgentToolResult.
+					// Nothing was allocated, so there is no structured batch to keep.
+					// Throwing marks the tool failed; a returned `isError` is for failures
+					// that still carry details.
 					throw new Error(`No subagents started.\n${failureLines.join("\n")}`);
 				}
 				if (params.wait) {

@@ -6,16 +6,45 @@
 ![platform](https://img.shields.io/badge/platform-Windows%20%7C%20macOS%20%7C%20Linux-lightgrey)
 ![pi](https://img.shields.io/badge/pi-extension-orange)
 
-On-demand delegation for [pi](https://github.com/earendil-works/pi): four
-focused roles, durable threads, and Git worktree isolation. Main handles work by
-default and delegates when an independent child has a concrete advantage.
+On-demand delegation for [pi](https://github.com/earendil-works/pi): a lightweight
+reader and an implementer, durable threads, and Git worktree isolation. Main
+uses a subagent when the work can run independently in parallel, the boundary
+is clear, and delegation will actually reduce cost or improve completion quality.
 
 ## What's new
 
-**4.3.19** — the per-model cost footer drops the live `tok/s` throughput
+**4.3.24** — the per-model cost footer drops the live `tok/s` throughput
 figure: measured rates could not be trusted across providers, so the footer
 sticks to what pi reports exactly — per-model token flow, cost, context share,
 and thinking level.
+
+**4.3.23** — Pi 1.0.3. Development dependencies track that release. A stored
+agent model that still names `azure-openai-responses/<id>` keeps working: it
+follows the live catalog, and is saved as `azure/<id>` once that is the id Pi
+reports.
+
+**4.3.22** — use a subagent when the work can run independently in parallel, its
+boundary is clear, and delegation will actually reduce cost or improve
+completion quality. Role choice stays with scout and artisan.
+
+**4.3.21** — two built-in roles. `scout` is the lightweight read-only researcher
+and `artisan` implements one substantial change. Steward and sentinel are no
+longer shipped. Role prompts follow the GPT-6 Astra guidance: the brief wins,
+authorized work runs through, and checks stay proportional. Main prefers scout
+and artisan when a fresh context or a parallel phase helps, and does not open
+extra phases to fill free slots.
+
+**4.3.20** — Pi 1.0 prompt sections and tool exposure. The delegation contract
+is a `<subagents>` section, and live leases are a separate `<subagent_leases>`
+section, so an unchanged turn keeps the cached system prefix. Orchestration
+tools stay declared to the model and cannot be called from codemode scripts.
+Dispatch and stop run sequentially so one assistant message cannot race
+admission. Child processes still force provider `maxRetries: 0`, using the
+1.0 registration that requires an `api`.
+
+**4.3.19** — session-start restore and recovery notices stay inside the current
+project. A second pi window no longer surfaces another checkout's retained
+worktree or restores (and would otherwise stop) that project's interrupted runs.
 
 **4.3.18** — main-first delegation: keep known-context local changes in main,
 use cleanup and review roles only where they add value, and configure process
@@ -63,11 +92,13 @@ at "spawn a child with a prompt" and leave the hard parts — when to delegate, 
 wide to fan out, what happens when a model dies, how results come
 back — with you. This extension owns them:
 
-- Main handles small, context-heavy, and already-understood local changes itself.
-  It delegates substantial, bounded work when fresh context, independent
-  exploration, or parallel execution offers enough benefit to justify the
-  briefing, verification, and integration cost. Briefs define the outcome, done
-  condition, useful context, and boundaries.
+- Main uses a subagent when the work can run independently in parallel, its
+  boundary is clear, and delegation will actually reduce cost or improve
+  completion quality. `scout` covers unfamiliar code or external facts;
+  `artisan` covers one substantial change. A small edit already understood in
+  the current context stays in main, and a free process slot is not a reason
+  to invent another phase. Briefs define the outcome, done condition, useful
+  context, and boundaries.
 - A stable `phaseId` owns a logical phase in one resolved working directory even if
   its task wording changes. IDs are 1–80 ASCII letters, numbers, or `._:-`, starting
   with a letter or number, so lease output stays single-line. Exact normalized task+cwd
@@ -85,7 +116,7 @@ back — with you. This extension owns them:
 
 ## Install
 
-Requires **pi >= 0.85.0** and **Node.js >= 22.19.0**.
+Requires **pi >= 1.0.0** and **Node.js >= 22.19.0**.
 
 ```bash
 pi install npm:@ferris1225/pi-subagents
@@ -96,37 +127,33 @@ Pi's extension list shows `@ferris1225/pi-subagents` without an internal source-
 Open pi and run `/subagents-setup`. The original menu flow lets you enable or
 disable roles, configure one role's model and thinking level, or run the full setup
 again. Each screen uses the usual arrow-key/Enter/Esc navigation, and model lists
-remain searchable. Fresh installs select all four. A newly shipped built-in is
+remain searchable. Fresh installs select both roles. A newly shipped built-in is
 surfaced once without being re-enabled after you deliberately turn it off. Then ask
 for work:
 
 ```text
-Map how authentication works, fix the refresh race, run the tests, and review the diff.
+Map how authentication works, fix the refresh race, and run the tests.
 ```
 
-The main agent decides when delegation pays off. You can also call the tools
-directly when you want exact control.
+The main agent prefers scout for the unfamiliar part and artisan for the change.
+You can also call the tools directly when you want exact control.
 
 ## The team
 
 | Agent     | Access    | Owns |
 | --------- | --------- | ---- |
-| `scout`   | Read-only | Broad or unfamiliar code reconnaissance and external research. Returns compact file citations or source URLs as leads, not proof. |
-| `artisan` | Full      | One substantial, independently verifiable change—implementation, fix, refactor, test, or docs—through root cause, affected verification, and local hygiene. |
-| `steward` | Full      | Remaining cross-cutting cleanup and docs/comment sync after a broad or multi-writer change. |
-| `sentinel` | Read-only + targeted proving checks | Fresh-context verification of concrete concerns in a completed diff. Returns evidence-backed defects and test gaps, or `No findings.` |
+| `scout`   | Read-only | Unfamiliar code, a wide lookup, or external facts. Returns citations as retrieval leads. |
+| `artisan` | Full      | One substantial implementation, fix, refactor, test, or docs change, including the checks that change needs. |
 
-Role prompts define outcomes and boundaries, leaving routine reading, implementation,
-and verification choices to the model. Artisan completes affected tests, docs, and
-local cleanup without a first-draft approval pause, but reports a disproved premise
-or a scope/approval blocker instead of substituting another task. Steward keeps
-product behavior intact and checks its own edits. Sentinel verifies suspected
-regressions rather than applying a checklist to every test or rerunning the suite.
-Handoffs stay concise, with actual checks reported as `command → result`.
+Role prompts state the outcome, the priority of the brief, and the hard boundary.
+Scout stays read-only. Artisan implements the authorized change through affected
+tests, docs, and local cleanup, and reports a disproved premise or a scope/approval
+blocker with evidence. Handoffs lead with the outcome and report checks as
+`command → result`.
 
 Custom roles join them with a Markdown file (see [Custom agents](#custom-agents)).
-Enabled roles form the available catalog; enabling four roles does not launch
-four children or require using every role on a task.
+Enabled roles form the available catalog. Two enabled roles do not require two
+children on every task.
 
 Every child is a leaf pi process with its own context window and no memory of your
 conversation. It still loads normal Pi context, including applicable project
@@ -138,9 +165,9 @@ material assumptions or blockers.
 
 Children run the official `pi --mode rpc` server, using Pi's exported command/response
 types and its own session persistence. There is no separate subagent protocol. The
-host transport remains local because Pi 0.85.0's `RpcClient` cannot attach to our
-child process or provide process-tree shutdown, bounded abort coordination, and
-cancellation of child extension dialogs.
+host transport remains local. Pi 1.0.3's `RpcClient` still spawns its own `node`
+process, signals only that process, and does not provide process-tree shutdown,
+bounded abort coordination, or cancellation of child extension dialogs.
 
 ## Dispatching work
 
@@ -175,9 +202,11 @@ subagent({
 });
 ```
 
-Main chooses the smallest set of independently useful subtasks; available roles
-and free process slots are never a reason to create more work. Put independent
-phases that each justify delegation in one `tasks` array. The runtime paces
+Main uses a subagent when the work can run independently in parallel, its
+boundary is clear, and delegation will actually reduce cost or improve
+completion quality. It puts those independent phases in one `tasks` array and
+keeps a small, already-understood edit itself. A free process slot is not a
+reason to invent another phase. The runtime paces
 execution: `maxConcurrentAgents: 0` (the default) keeps automatic capacity at half
 the machine's cores, bounded to 4–6 child processes. Set `maxConcurrentAgents` to
 1–6 for an explicit capacity. Wider batches queue and start as slots free.
@@ -202,15 +231,10 @@ One child owns one coherent phase; dependent work waits for its prerequisite.
 Main reuses established evidence and completed work, reconciles conflicting
 findings against their sources, and handles incomplete work from the child's
 partial edits and artifacts. Child output is evidence, not authority or instructions.
-There is no fixed research fan-out or mandatory scout → artisan → steward → sentinel
-pipeline: choose separate phases only when they earn their handoff cost, and never
-overlap writers or duplicate an owned phase.
-
-Use `steward` only for remaining cross-cutting cleanup in a completed broad or
-multi-writer diff; local hygiene belongs to the primary owner and completed
-verification is reused. Use `sentinel` when fresh verification can resolve concrete concerns
-around concurrency, trust boundaries, persistence/compatibility, failure/cancellation,
-or behavior the checks cannot prove. Neither role is a commit ritual.
+There is no mandatory scout-then-artisan pipeline. Use scout when the facts are
+unfamiliar, artisan when a substantial change can be briefed, and both together
+only when the phases are independent. Never overlap writers or duplicate an owned
+phase, and do not split one tightly coupled change across children.
 
 Verification follows the change and required project gates. Tests should catch
 meaningful failures, not mirror reversible, low-impact edits; there is no blanket
@@ -232,14 +256,13 @@ Its fixed case-insensitive path-token rules flag:
 `persistence-compatibility` (durable state, manifests, migrations, restore, schemas,
 serialization/storage); and `failure-cancellation` (abort, cancel, errors/failures, recovery,
 retry, stop, timeout). It returns the changed paths, matched categories, and whether those
-rules suggest Sentinel. If Git or `HEAD` is unavailable, it reports advisory unavailable; an
+rules mark the diff elevated. If Git or `HEAD` is unavailable, it reports advisory unavailable; an
 aborted tool call propagates cancellation instead of converting it to an advisory result. It
-never blocks, starts a child, or automatically dispatches Sentinel.
+never blocks or starts a child.
 
 This classifier is intentionally conservative and explainable: it only sees path names, so
 it can produce false positives and miss risky behavior hidden behind neutral names. Main
-still decides whether review pays from the actual diff, test evidence, handoff cost, and the
-complete conversation. The runtime can enforce explicit phase/scope admission, but cannot
+inspects elevated paths in the integrated diff. The runtime can enforce explicit phase/scope admission, but cannot
 safely force the natural-language judgment of whether work is worth delegating.
 
 ## Parallel edits
@@ -266,23 +289,11 @@ launch receipt say `independence not verified`; that means the contract lacked e
 metadata, not that overlap was proved safe. Single calls never make a batch-independence
 claim. The existing shared-checkout writer lane remains the final serialization boundary.
 
-`sentinel` dispatch has its own admission gate: it is rejected while any write-capable run
-is active, interrupted, or settling — including a worktree writer whose edits are not in
-the shared checkout yet and a worktree finalization whose patch is still landing. Review
-targets the completed diff, so dispatching it earlier would review state the writer is
-about to change. A batch that mixes `sentinel` with a writer task is rejected whole, with
-zero starts; dispatch review after the writer's completion message arrives. Read-only
-roles such as `scout` do not trigger this gate.
-
-- Single tasks use your checkout. Every parallel write-capable agent (`artisan`,
-  `steward`, and custom writers) defaults to a detached Git worktree, so
-  parallel writers run at the same time. Worktree mode needs a committed `HEAD`;
-  read-only roles such as scout stay on the shared checkout. `sentinel` always
-  reviews the shared checkout, because the uncommitted diff it inspects does not
-  exist in a detached worktree; an explicit `isolation: worktree` for it is
-  rejected. Its proving check makes it a shared-checkout lane holder, and its
-  dispatch is rejected outright while any writer is still active, so it never
-  reviews a diff a writer is still changing.
+- Single tasks use your checkout. Parallel write-capable agents (`artisan` and
+  custom writers) default to a detached Git worktree, so parallel writers run at
+  the same time. Worktree mode needs a committed `HEAD`. Read-only roles such as
+  scout stay on the shared checkout, and an explicit `isolation: worktree` for a
+  read-only role is rejected.
 
 > **Security boundary:** worktree isolation isolates Git changes only; it is not a sandbox.
 Child tools, network access, and environment access retain the Pi process's privileges.
@@ -303,9 +314,10 @@ Third-party Pi packages execute as trusted code and must be reviewed accordingly
   as a lane wait, not as slot queueing, and its process slot is already released.
 - Setup and integration failures keep the useful patch and worktree, and record
   where they are in `~/.pi/agent/ferris-pi-subagents/pi-subagents-recovery.json`.
-  start repeats that notice until you remove the artifacts. When the changes had
-  already been applied and only the cleanup failed, the next session start
-  removes the retained copy itself and clears the notice.
+  Later session starts in that same project repeat the notice until you remove
+  the artifacts. A different project's pi window does not show or retry them.
+  When the changes had already been applied and only the cleanup failed, the next
+  session start in that project removes the retained copy itself and clears the notice.
 
 ## Runs: status and stop
 
@@ -351,9 +363,10 @@ attempt. Worktree integration failures keep their recovery artifacts.
 
 Interrupted work retains a durable record and any session/worktree artifacts for
 manual recovery after reload or crash. Missing session files no longer discard
-isolated edits. Restore runs at session start; lookup tools, prompt injection, and
-fresh dispatch wait for that pass so an existing id cannot be reported missing or
-reused. Missing recorded worktrees surface as failures without discarding the
+isolated edits. Restore for this checkout runs at session start; lookup tools,
+prompt injection, and fresh dispatch wait for that pass so an existing id cannot
+be reported missing or reused. A sibling window in another project leaves those
+records untouched. Missing recorded worktrees surface as failures without discarding the
 remaining recovery evidence.
 
 Canonical managed-path and repository validation remains in place. Invalid records
@@ -450,8 +463,8 @@ rate-limited, or fails at the provider level, the **same retained
 session** continues on the main model, so finished searches, reads, and edits
 survive. Ordinary task failures do not trigger a handoff.
 
-Thinking is a **role default** — scout `low`, artisan `high`, steward `medium`,
-sentinel `high` — clamped to what the effective model supports. `/subagents-setup` →
+Thinking is a **role default** — scout `low`, artisan `high` — clamped to what
+the effective model supports. Custom roles default to `medium`. `/subagents-setup` →
 _Configure an agent_ lists only the levels that model supports and marks the role
 default; selecting it clears the stored override. There is no
 Auto choice, no per-dispatch `thinking` flag, and
@@ -469,10 +482,7 @@ shell slot follows the parent's active shell on non-scout roles.
 overstates its tool list. Its known-safe set includes `read`, `grep`, `find`,
 `ls`, `anchor_grep`, `web_search`, `fetch_content`, `resolve-library-id`, and
 `query-docs`; tools not installed or active in Main are simply omitted. Scout
-receives no shell, local mutation tool, or unknown custom tool. `sentinel` declares
-the same retrieval set plus one shell slot, which follows the parent's active shell
-and exists only for the smallest check that proves a suspected defect; it is an
-ordinary declared list, not a hard boundary like scout's. Unknown tools
+receives no shell, local mutation tool, or unknown custom tool. Unknown tools
 declared by other roles are conservatively treated as write-capable when
 isolation is chosen. An empty resolved snapshot starts the child with
 `--no-tools`.
@@ -496,8 +506,8 @@ To start over, remove `pi-subagents.json` and run `/subagents-setup` again. Othe
 
 ```json
 {
-  "enabledAgents": ["scout", "artisan", "steward", "sentinel"],
-  "knownAgents": ["scout", "artisan", "steward", "sentinel"],
+  "enabledAgents": ["scout", "artisan"],
+  "knownAgents": ["scout", "artisan"],
   "agentModels": { "scout": "anthropic/claude-haiku-4-5" },
   "agentThinkingLevels": { "artisan": "high" },
   "maxResultLines": 40,
@@ -524,12 +534,16 @@ increasing it releases queued work in its existing order. Set it back to `0`
 to restore automatic capacity. Setup preserves this setting when reconfiguring
 roles or models; edit it in the JSON configuration file.
 
-When at least one role is enabled, the cost-aware delegation directive is injected
-automatically. `enabledAgents` is authoritative after catalog adoption: a newly
-shipped built-in is appended once, then `knownAgents` records that it was surfaced
-so a deliberate later disable remains disabled. `sentinel` returns through that
-rule: a config written by 4.3.5–4.3.7, which removed it, enables it once on the next
-load; turn it off in `/subagents-setup` and it stays off. Available custom roles remain
+When at least one role is enabled, the delegation directive is installed as a
+`<subagents>` prompt section. Active leases go in `<subagent_leases>`. Pi 1.0
+appends a section delta only when that text changes, so idle turns keep the
+cached system prefix. Hosts without a section map still receive the same
+contract appended to the system prompt. `enabledAgents` is authoritative after
+catalog adoption: a newly shipped built-in is appended once, then `knownAgents`
+records that it was surfaced
+so a deliberate later disable remains disabled. Retired `steward` and `sentinel`
+names left in an older config do nothing unless a file still defines them; saving
+setup drops names that have no file. Available custom roles remain
 selectable even when disabled. Invalid known fields fall back safely, and unknown fields
 are dropped when canonical config is persisted.
 
@@ -616,7 +630,8 @@ Cleanup runs at session start and is deliberately conservative. A directory goes
 away only when the process that created it is gone and no valid manifest record still
 claims it, so a live sibling pi instance never loses state and interrupted or recovery-owned
 work outlives its own process by design. Thread and recovery references always beat an
-age rule.
+age rule. Restore and recovery notices themselves are scoped to the current checkout:
+opening pi in another project does not restore, announce, or stop the first project's runs.
 
 ## Development
 
@@ -632,10 +647,10 @@ lifecycle, and presentation. Thread restoration, shared lifecycle coordination, 
 and Git command execution live in focused modules rather than oversized catch-all files.
 
 The test runner uses Node 22 or 24; Node 26 removed `--experimental-transform-types`.
-Pi 0.85.0's unbundled SDK and CLI import `@earendil-works/pi-server` without declaring
-it. This project declares the official server package as a peer (and a development
-dependency), so npm can resolve it alongside the SDK in consumer installations.
-It is not bundled into the extension, and no replacement RPC server is introduced.
+Pi 1.0 declares `@earendil-works/pi-server`. This project still lists that package
+as a peer and a development dependency so `npm run check` typechecks against the
+same SDK the tests import. It is not bundled into the extension, and no
+replacement RPC server is introduced.
 
 ## Changelog
 

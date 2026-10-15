@@ -3,7 +3,7 @@ import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, it } from "node:test";
-import { runRpcAgentAttempt } from "../src/execution/rpc-run.ts";
+import { renderChildRetryPolicySource, runRpcAgentAttempt } from "../src/execution/rpc-run.ts";
 import { getResultOutput, isFailedResult, isModelLevelFailure, isRetryableStartupFailure, runSingleAgentWithMainFallback } from "../src/execution/spawn.ts";
 import { RpcRunControl } from "../src/execution/rpc-control.ts";
 
@@ -63,6 +63,18 @@ createInterface({ input: process.stdin }).on("line", (line) => {
 		await rm(root, { recursive: true, force: true });
 	}
 }
+
+describe("child provider retry policy", () => {
+	it("registers a Pi 1.0 stream override for the selected provider api", () => {
+		const source = renderChildRetryPolicySource("anthropic/claude-sonnet");
+		assert.match(source, /const selectedProvider = "anthropic";/u);
+		assert.match(source, /const api = model\?\.api;/u);
+		assert.match(source, /pi\.registerProvider\(providerId, \{\s*api,/u);
+		assert.match(source, /maxRetries: 0/u);
+		assert.match(source, /getApiProvider\(requestModel\.api\)/u);
+		assert.equal(renderChildRetryPolicySource(undefined).includes("const selectedProvider = undefined;"), true);
+	});
+});
 
 describe("RPC terminal failure reporting", () => {
 	it("preserves safe silent startup retries before any prompt was sent", async () => {

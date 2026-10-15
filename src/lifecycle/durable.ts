@@ -293,8 +293,8 @@ function projectManifestPaths(durableRoot: string): string[] {
 	}
 }
 
-/** Every parked record across all projects, for restore and the state-root
- * sweeps that must see references from anywhere. */
+/** Every parked record across all projects. Session restore filters to the
+ * current checkout; state-root sweeps still need references from anywhere. */
 export async function readThreadRecords(configPath: string): Promise<ThreadRecord[]> {
 	const manifests = await Promise.all(
 		projectManifestPaths(getSubagentsRoot(configPath))

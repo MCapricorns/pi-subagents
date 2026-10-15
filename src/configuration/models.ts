@@ -54,6 +54,32 @@ function cleanModelRef(ref: string | undefined): string | undefined {
 	return trimmed || undefined;
 }
 
+/**
+ * Provider ids Pi renamed while keeping the model id. Pi 1.0.3 renamed
+ * `azure-openai-responses` to `azure`. The old id stays valid on earlier 1.0
+ * hosts, so a stored override follows whichever id the live catalog still has.
+ */
+const RENAMED_PROVIDER_IDS: Readonly<Record<string, string>> = {
+	"azure-openai-responses": "azure",
+};
+
+/** Stored ref plus the renamed provider id, when Pi published one. */
+export function modelRefAliases(ref: string): readonly string[] {
+	const normalized = ref.trim();
+	const slash = normalized.indexOf("/");
+	if (slash <= 0 || slash >= normalized.length - 1) return [normalized];
+	const renamed = RENAMED_PROVIDER_IDS[normalized.slice(0, slash)];
+	if (!renamed) return [normalized];
+	return [normalized, `${renamed}${normalized.slice(slash)}`];
+}
+
+/** Prefer the alias that the live catalog actually lists. */
+function resolveLiveModelRef(ref: string, liveRefs: ReadonlySet<string> | undefined): string | undefined {
+	const aliases = modelRefAliases(ref);
+	if (!liveRefs) return aliases[0];
+	return aliases.find((candidate) => liveRefs.has(candidate));
+}
+
 export function modelRef(model: { provider: string; id: string }): string {
 	return `${model.provider}/${model.id}`;
 }
@@ -82,7 +108,9 @@ export function findModelByRef(
 	ref: string | undefined,
 ): Model<Api> | undefined {
 	const normalized = cleanModelRef(ref);
-	return normalized ? models.find((model) => modelRef(model) === normalized) : undefined;
+	if (!normalized) return undefined;
+	const aliases = new Set(modelRefAliases(normalized));
+	return models.find((model) => aliases.has(modelRef(model)));
 }
 
 /** Split persisted agent model overrides into the ones Pi still reports as
@@ -95,7 +123,10 @@ export function filterUnavailableModelOverrides(
 	const kept: Record<string, string> = {};
 	const dropped: Array<{ agent: string; ref: string }> = [];
 	for (const [agent, ref] of Object.entries(agentModels)) {
-		if (findModelByRef(models, ref)) kept[agent] = ref;
+		const model = findModelByRef(models, ref);
+		// Persist the id the live catalog uses, so a renamed provider does not
+		// stay stored under the id Pi no longer registers.
+		if (model) kept[agent] = modelRef(model);
 		else dropped.push({ agent, ref });
 	}
 	return { kept, dropped };
@@ -116,8 +147,9 @@ export function resolveAgentModelRoute(input: AgentModelRouteInput): ResolvedAge
 	const available = input.availableRefs
 		? new Set(input.availableRefs.map((ref) => ref.trim()).filter(Boolean))
 		: undefined;
-	const selectedAvailable = !selectedRef || !available || available.has(selectedRef);
-	const usableSelectedRef = selectedAvailable ? selectedRef : undefined;
+	const resolvedSelectedRef = selectedRef ? resolveLiveModelRef(selectedRef, available) : undefined;
+	const selectedAvailable = !selectedRef || resolvedSelectedRef !== undefined;
+	const usableSelectedRef = selectedAvailable ? resolvedSelectedRef : undefined;
 	const primaryRef = usableSelectedRef ?? mainRef;
 	const ordered = [primaryRef, usableSelectedRef && usableSelectedRef !== mainRef ? mainRef : undefined];
 	const candidateRefs = [...new Set(ordered.filter((ref): ref is string => Boolean(ref)))];
@@ -155,18 +187,21 @@ export function buildModelPickerItems(options: {
 	configuredRef?: string;
 	mainRef?: string;
 }): ModelPickerItem[] {
-	const configuredRef = cleanModelRef(options.configuredRef);
 	const mainRef = cleanModelRef(options.mainRef);
 	const byRef = new Map<string, ModelListEntry>();
 	for (const model of options.models) {
 		const ref = modelRef(model);
 		if (!byRef.has(ref)) byRef.set(ref, model);
 	}
+	const configuredRef = cleanModelRef(options.configuredRef);
+	const liveConfiguredRef = configuredRef
+		? resolveLiveModelRef(configuredRef, new Set(byRef.keys())) ?? configuredRef
+		: undefined;
 
 	const refs = [...byRef.keys()]
 		.sort((left, right) => {
-			const leftRank = left === configuredRef ? 0 : left === mainRef ? 1 : 2;
-			const rightRank = right === configuredRef ? 0 : right === mainRef ? 1 : 2;
+			const leftRank = left === liveConfiguredRef ? 0 : left === mainRef ? 1 : 2;
+			const rightRank = right === liveConfiguredRef ? 0 : right === mainRef ? 1 : 2;
 			return leftRank - rightRank || left.localeCompare(right);
 		});
 
@@ -178,7 +213,7 @@ export function buildModelPickerItems(options: {
 	const items: ModelPickerItem[] = [dynamic];
 	for (const ref of refs) {
 		const model = byRef.get(ref)!;
-		const tags = [ref === configuredRef ? "configured" : "", ref === mainRef ? "current main" : ""]
+		const tags = [ref === liveConfiguredRef ? "configured" : "", ref === mainRef ? "current main" : ""]
 			.filter(Boolean);
 		const name = model.name.trim() && model.name !== model.id ? model.name.trim() : undefined;
 		items.push({

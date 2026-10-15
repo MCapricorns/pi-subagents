@@ -107,7 +107,7 @@ export function isWriteCapableAgent(
 	agent: Pick<AgentConfig, "name" | "tools">,
 ): boolean {
 	if (agent.name === "scout") return false;
-	if (agent.name === "artisan" || agent.name === "steward") return true;
+	if (agent.name === "artisan") return true;
 	if (!agent.tools) return true;
 	return agent.tools.some((tool) => !READ_ONLY_TOOL_NAMES.has(tool));
 }

@@ -5,9 +5,11 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { promisify } from "node:util";
 import { describe, it } from "node:test";
+import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import {
 	analyzeSubagentRisk,
 	classifyRiskPaths,
+	registerSubagentRiskTool,
 	type GitRiskRunner,
 } from "../src/delegation/risk.ts";
 
@@ -18,6 +20,20 @@ async function git(cwd: string, ...args: string[]): Promise<void> {
 }
 
 describe("subagent risk advisory", () => {
+	it("stays a read-only model tool and out of codemode scripts", () => {
+		const tools = new Map<string, { exposure?: string; executionMode?: string; annotations?: { readOnlyHint?: boolean } }>();
+		const pi = {
+			registerTool: (tool: { name: string; exposure?: string; executionMode?: string; annotations?: { readOnlyHint?: boolean } }) => {
+				tools.set(tool.name, tool);
+			},
+		} as unknown as ExtensionAPI;
+		registerSubagentRiskTool(pi);
+		const tool = tools.get("subagent_risk");
+		assert.equal(tool?.exposure, "model-only");
+		assert.equal(tool?.executionMode, "parallel");
+		assert.equal(tool?.annotations?.readOnlyHint, true);
+	});
+
 	it("classifies fixed explainable path categories", () => {
 		const classification = classifyRiskPaths([
 			"src/execution/background.ts",
@@ -32,7 +48,7 @@ describe("subagent risk advisory", () => {
 			"persistence-compatibility",
 			"failure-cancellation",
 		]);
-		assert.equal(classification.recommendSentinel, true);
+		assert.equal(classification.elevated, true);
 		assert.deepEqual(classification.matches["trust-boundary"], ["src/auth/permissions.ts"]);
 	});
 
@@ -52,7 +68,7 @@ describe("subagent risk advisory", () => {
 			assert.equal(advisory.available, true);
 			assert.deepEqual(advisory.changedPaths, ["auth-policy.ts", "queue.ts"]);
 			assert.deepEqual(advisory.categories, ["concurrency", "trust-boundary"]);
-			assert.equal(advisory.recommendSentinel, true);
+			assert.equal(advisory.elevated, true);
 		} finally {
 			await rm(root, { recursive: true, force: true });
 		}
@@ -89,7 +105,7 @@ describe("subagent risk advisory", () => {
 		assert.equal(advisory.available, false);
 		assert.deepEqual(advisory.changedPaths, []);
 		assert.deepEqual(advisory.categories, []);
-		assert.equal(advisory.recommendSentinel, false);
+		assert.equal(advisory.elevated, false);
 		assert.match(advisory.unavailableReason ?? "", /git executable was not found/i);
 	});
 
