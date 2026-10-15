@@ -1,6 +1,10 @@
 import assert from "node:assert/strict";
-import { describe, it } from "node:test";
+import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { describe, it, type TestContext } from "node:test";
 import {
+	discoverAgents,
 	isWriteCapableAgent,
 	loadBuiltinAgents,
 	resolveAgentTools,
@@ -76,6 +80,24 @@ describe("loadBuiltinAgents", () => {
 				assert.ok(agent.systemPrompt.includes("PowerShell"), `${agent.name} assumes one shell flavor`);
 			}
 		}
+	});
+});
+
+describe("discoverAgents", () => {
+	it("orders builtins canonically ahead of customs regardless of file order", (t: TestContext) => {
+		const dir = mkdtempSync(join(tmpdir(), "pi-subagents-agents-"));
+		t.after(() => rmSync(dir, { recursive: true, force: true }));
+		const write = (name: string) =>
+			writeFileSync(join(dir, `${name}.md`), `---\nname: ${name}\ndescription: test\n---\nbody\n`, "utf8");
+		// Written in deliberately non-canonical order; readdir order must not leak out.
+		for (const name of ["zeta", "artisan", "scout", "alpha"]) write(name);
+
+		const scope = { scope: "project" as const, builtinDir: dir };
+		const discovered = discoverAgents(dir, scope);
+		assert.deepEqual(discovered.agents.map((agent) => agent.name), ["scout", "artisan", "alpha", "zeta"]);
+
+		const filtered = discoverAgents(dir, { ...scope, enabledNames: ["zeta", "scout"] });
+		assert.deepEqual(filtered.agents.map((agent) => agent.name), ["scout", "zeta"]);
 	});
 });
 

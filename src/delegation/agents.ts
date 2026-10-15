@@ -15,7 +15,7 @@ import { type Dirent, existsSync, readdirSync, readFileSync, statSync } from "no
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { CONFIG_DIR_NAME, getAgentDir, parseFrontmatter } from "@earendil-works/pi-coding-agent";
-import { type AgentScope } from "../configuration/config.ts";
+import { type AgentScope, BUILTIN_AGENT_NAMES } from "../configuration/config.ts";
 import type { IsolationMode } from "../isolation/worktree.ts";
 
 export type AgentSource = "builtin" | "user" | "project";
@@ -209,6 +209,10 @@ export interface DiscoverOptions {
 /**
  * Discover agents across scopes and apply the enabled-name filter.
  * Override priority for the same name: project > user > builtin.
+ *
+ * The returned order is canonical — built-ins in BUILTIN_AGENT_NAMES order,
+ * then custom agents by name — so every catalog the user sees (setup rows,
+ * system-prompt list) renders the same regardless of readdir or toggle order.
  */
 export function discoverAgents(cwd: string, options: DiscoverOptions = {}): { agents: AgentConfig[] } {
 	const scope = options.scope ?? "user";
@@ -235,7 +239,15 @@ export function discoverAgents(cwd: string, options: DiscoverOptions = {}): { ag
 		agents = agents.filter((agent) => enabled.has(agent.name));
 	}
 
-	return { agents };
+	const builtinRank = new Map<string, number>(BUILTIN_AGENT_NAMES.map((name, index) => [name, index]));
+	return {
+		agents: agents.sort(
+			(left, right) =>
+				(builtinRank.get(left.name) ?? BUILTIN_AGENT_NAMES.length) -
+					(builtinRank.get(right.name) ?? BUILTIN_AGENT_NAMES.length) ||
+				left.name.localeCompare(right.name),
+		),
+	};
 }
 
 /** One-line catalog entry for system-prompt injection and error messages. */

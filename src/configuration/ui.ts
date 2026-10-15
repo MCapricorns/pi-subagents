@@ -139,9 +139,12 @@ class Picker implements Component, Focusable {
 			this.cursor = Math.max(0, this.cursor - PAGE_SIZE);
 		} else if (kb.matches(data, "tui.select.pageDown")) {
 			this.cursor = Math.min(Math.max(0, this.filtered.length - 1), this.cursor + PAGE_SIZE);
-		} else if (kb.matches(data, "tui.select.confirm")) {
-			if (this.multi) this.cb.onConfirm?.([...this.selected]);
-			else {
+			} else if (kb.matches(data, "tui.select.confirm")) {
+				if (this.multi) {
+					// Confirm in listed order, not toggle order: callers persist this
+					// sequence and re-render it as the saved role order.
+					this.cb.onConfirm?.(this.items.filter((item) => this.selected.has(item.value)).map((item) => item.value));
+				} else {
 				const item = this.filtered[this.cursor];
 				if (item) this.cb.onSelect?.(item.value);
 			}

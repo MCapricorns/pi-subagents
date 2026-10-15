@@ -209,8 +209,9 @@ async function configureOneAgent(
 	ctx: ExtensionCommandContext,
 	config: SubagentsConfig,
 ): Promise<ConfiguredAgentChoice | undefined> {
+	// Canonical order (built-ins first), whatever order the config file saved.
 	const available = setupAgentNames(ctx, config);
-	const enabled = config.enabledAgents.filter((name) => available.includes(name));
+	const enabled = available.filter((name) => config.enabledAgents.includes(name));
 	while (true) {
 		const name = await pickAgentToConfigure(ctx, enabled);
 		if (name === undefined) return undefined;

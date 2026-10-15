@@ -13,6 +13,7 @@ import {
 } from "@earendil-works/pi-tui";
 import type { SubagentsConfig } from "../src/configuration/config.ts";
 import { runSetup } from "../src/configuration/setup.ts";
+import { promptSelectMany } from "../src/configuration/ui.ts";
 
 const KEY = {
 	enter: "\r",
@@ -83,6 +84,34 @@ function writeAgent(configPath: string, name: string): void {
 function renderComponent(factory: PickerFactory, done: (value: unknown) => void): Component {
 	return factory(tui, theme, keybindings, done) as Component;
 }
+
+describe("promptSelectMany", () => {
+	it("confirms in listed order, not toggle order", async () => {
+		const confirmed = await promptSelectMany(
+			{
+				mode: "tui",
+				ui: {
+					custom: async (factory: PickerFactory) =>
+						new Promise((resolve) => {
+							const component = renderComponent(factory, resolve);
+							// Toggle scout off and back on: insertion order would put artisan first.
+							component.handleInput?.(" ");
+							component.handleInput?.(" ");
+							component.handleInput?.(KEY.enter);
+						}),
+				},
+			} as unknown as ExtensionCommandContext,
+			"Which roles?",
+			"hint",
+			[
+				{ value: "scout", label: "scout" },
+				{ value: "artisan", label: "artisan" },
+			],
+			["scout", "artisan"],
+		);
+		assert.deepEqual(confirmed, ["scout", "artisan"]);
+	});
+});
 
 describe("runSetup menu", () => {
 	it("opens the Git-era settings menu instead of a grid overlay", async (t) => {
@@ -274,7 +303,32 @@ describe("runSetup menu", () => {
 		}
 	});
 
-for (const menu of ["Enable", "Configure"] as const) {
+	it("lists configured roles in canonical order regardless of saved order", async (t) => {
+		const path = writeConfig(baseConfig({ enabledAgents: ["artisan", "scout"] }), t);
+		let menuCalls = 0;
+		let display = "";
+		const context = {
+			mode: "tui",
+			cwd: dirname(path),
+			ui: {
+				notify() {},
+				select: async (_title: string, options: string[]) =>
+					menuCalls++ === 0 ? options.find((option) => option.startsWith("Configure")) : undefined,
+				custom: async (factory: PickerFactory) => new Promise((resolve) => {
+					const component = renderComponent(factory, resolve);
+					display = component.render(120).join("\n");
+					component.handleInput?.(KEY.escape);
+				}),
+			},
+		} as unknown as ExtensionCommandContext;
+
+		await runSetup(context, path);
+
+		assert.ok(display.includes("scout") && display.includes("artisan"), display);
+		assert.ok(display.indexOf("scout") < display.indexOf("artisan"), display);
+	});
+
+	for (const menu of ["Enable", "Configure"] as const) {
 	it(`does not offer retired config-only roles in the ${menu.toLowerCase()} picker`, async (t) => {
 		const path = writeConfig(baseConfig({
 			enabledAgents: ["scout", "artisan", "explorer", "executor"],
