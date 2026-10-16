@@ -479,7 +479,8 @@ shell slot follows the parent's active shell on non-scout roles.
 
 `scout` is a hard read-only boundary even when a project override omits or
 overstates its tool list. Its known-safe set includes `read`, `grep`, `find`,
-`ls`, `anchor_grep`, `web_search`, and `fetch_content`; tools not installed or
+`ls`, `anchor_grep`, the web-retrieval pairs `web_search`/`fetch_content` and
+`anysearch`/`anysearch_extract`; tools not installed or
 active in Main are simply omitted. Scout
 receives no shell, local mutation tool, or unknown custom tool. Unknown tools
 declared by other roles are conservatively treated as write-capable when
@@ -512,7 +513,7 @@ To start over, remove `pi-subagents.json` and run `/subagents-setup` again. Othe
   "maxResultLines": 40,
   "maxConcurrentAgents": 0,
   "agentScope": "user",
-  "idleTimeoutSec": 90
+  "idleTimeoutSec": 1800
 }
 ```
 
@@ -525,7 +526,7 @@ To start over, remove `pi-subagents.json` and run `/subagents-setup` again. Othe
 | `maxResultLines`      | Lines kept in a completion message before the artifact takes over. Default `40`. |
 | `maxConcurrentAgents` | Simultaneous child-process limit: `0` keeps automatic capacity (4–6); `1`–`6` sets an explicit capacity. Default `0`. |
 | `agentScope`          | Discover `user`, `project`, or `both` agent directories. Default `user`. |
-| `idleTimeoutSec`      | Seconds without child RPC output before termination; `0` disables. Default `90`. |
+| `idleTimeoutSec`      | Seconds without child RPC output before termination; `0` disables. Default `1800`. |
 
 Concurrency changes apply at the next `subagent` dispatch. Lowering the limit
 lets active children finish before queued work acquires the reduced pool;

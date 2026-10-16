@@ -47,6 +47,8 @@ const READ_ONLY_TOOL_NAMES = new Set([
 	"anchor_grep",
 	"web_search",
 	"fetch_content",
+	"anysearch",
+	"anysearch_extract",
 ]);
 export const SUBAGENT_TOOL_NAMES = [
 	"subagent",

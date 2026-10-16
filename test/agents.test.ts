@@ -18,6 +18,8 @@ const SCOUT_READ_ONLY_TOOLS = [
 	"anchor_grep",
 	"web_search",
 	"fetch_content",
+	"anysearch",
+	"anysearch_extract",
 ] as const;
 
 describe("loadBuiltinAgents", () => {

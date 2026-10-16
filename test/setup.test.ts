@@ -62,7 +62,7 @@ function baseConfig(overrides: Partial<SubagentsConfig> = {}): SubagentsConfig {
 		maxResultLines: 40,
 		maxConcurrentAgents: 0,
 		agentScope: "user",
-		idleTimeoutSec: 90,
+		idleTimeoutSec: 1800,
 		...overrides,
 	};
 }

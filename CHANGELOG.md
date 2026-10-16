@@ -3,6 +3,18 @@
 Release notes for `@ferris1225/pi-subagents`. Only the most recent releases
 are kept here; every published version is preserved as a GitHub Release.
 
+## 4.3.27
+
+- Let `scout` use the `anysearch`/`anysearch_extract` web-retrieval tools. The
+  role's known-safe read-only set already carried one search extension's tool
+  ids (`web_search`/`fetch_content`); adding the AnySearch pair lets scout
+  search and read decisive pages on installs that run that extension instead.
+  Both tools stay behind the strict intersection with Main's active tools.
+- Raise the idle-watchdog default from 90 to 1800 seconds (clamp ceiling 600 →
+  3600). A child that goes silent on a long fetch or slow provider is no longer
+  terminated mid-work; a saved config with the old `idleTimeoutSec` value keeps
+  overriding the default until edited.
+
 ## 4.3.26
 
 - Track Pi 1.3.0 development dependencies. Pi 1.2.0 fires `before_agent_start`

@@ -92,12 +92,12 @@ describe("normalizeConfig", () => {
 		}
 	});
 
-	it("defaults idleTimeoutSec to 90 and clamps to [0, 600]", () => {
-		assert.equal(DEFAULT_IDLE_TIMEOUT_SEC, 90);
-		assert.equal(normalizeConfig({}).idleTimeoutSec, 90);
+	it("defaults idleTimeoutSec to 1800 and clamps to [0, 3600]", () => {
+		assert.equal(DEFAULT_IDLE_TIMEOUT_SEC, 1800);
+		assert.equal(normalizeConfig({}).idleTimeoutSec, 1800);
 		assert.equal(normalizeConfig({ idleTimeoutSec: 0 }).idleTimeoutSec, 0);
 		assert.equal(normalizeConfig({ idleTimeoutSec: 120 }).idleTimeoutSec, 120);
-		assert.equal(normalizeConfig({ idleTimeoutSec: 999 }).idleTimeoutSec, IDLE_TIMEOUT_SEC_LIMIT);
+		assert.equal(normalizeConfig({ idleTimeoutSec: 9999 }).idleTimeoutSec, IDLE_TIMEOUT_SEC_LIMIT);
 		assert.equal(normalizeConfig({ idleTimeoutSec: 45.6 }).idleTimeoutSec, 46);
 		assert.equal(normalizeConfig({ idleTimeoutSec: "off" }).idleTimeoutSec, DEFAULT_IDLE_TIMEOUT_SEC);
 	});

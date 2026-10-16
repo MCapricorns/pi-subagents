@@ -79,11 +79,11 @@ const CONFIG_FILE_NAME = "pi-subagents.json";
 /**
  * Default idle timeout in seconds: a sub-agent whose stdout (JSON event stream)
  * goes silent for this long is terminated; a selected model then hands the
- * retained session to current main. 0 disables the watchdog. Default: 90.
+ * retained session to current main. 0 disables the watchdog. Default: 1800.
  */
-export const DEFAULT_IDLE_TIMEOUT_SEC = 90;
+export const DEFAULT_IDLE_TIMEOUT_SEC = 1800;
 /** Upper bound accepted for idleTimeoutSec (defensive clamp). 0 disables. */
-export const IDLE_TIMEOUT_SEC_LIMIT = 600;
+export const IDLE_TIMEOUT_SEC_LIMIT = 3600;
 
 export interface SubagentsConfig {
 	/** Agent names that are discoverable and injected. Fresh-install default: every built-in agent. */
@@ -110,7 +110,7 @@ export interface SubagentsConfig {
 	/**
 	 * Idle timeout in seconds: a sub-agent whose stdout (JSON event stream) goes
 	 * silent for this long is terminated; a configured agent model then hands
-	 * off to the current main model. 0 disables the idle watchdog. Default: 90.
+	 * off to the current main model. 0 disables the idle watchdog. Default: 1800.
 	 */
 	idleTimeoutSec: number;
 }
