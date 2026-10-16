@@ -128,7 +128,7 @@ export function formatCompletionBlock(
 		if (result.integrationError) lines.push(`Integration error: ${result.integrationError}`);
 		lines.push("");
 	}
-	lines.push(text);
+	if (!truncated) lines.push(text);
 	// Failed-tool diagnostics ride along only when the run itself failed: they
 	// explain the failure, while on a successful run a transient failed call
 	// (no-match grep, rejected edit) is noise the agent already worked around.
@@ -140,17 +140,21 @@ export function formatCompletionBlock(
 		);
 	}
 	if (truncated) {
-		// The full text lives on disk so the main agent can read it on demand.
+		// No inline copy at all: a truncated dump reads as complete while
+		// hiding the rest, and the parent re-reads the full text from the file
+		// anyway, paying for the same content twice. The notice only routes it.
 		const artifact = options.resultRoot
 			? writeResultArtifact(output, result.agent, options.resultRoot)
 			: "(result root unavailable)";
 		if (options.resultRoot) result.resultFile = artifact;
-		// State the real loss and condition the read: handing the parent both a
-		// summary and a full-text entrance invites the same content twice.
-		const lineLoss = shownLines < totalLines ? `${shownLines} of ${totalLines} lines shown` : `${shownLines} line${shownLines === 1 ? "" : "s"} shown`;
-		const widthLoss = widthClipped ? `clipped to ${RESULT_LINE_MAX} characters` : undefined;
-		const loss = widthLoss ? `${lineLoss}, ${widthLoss}` : lineLoss;
-		lines.push("", `(${loss}; full result ${artifact} — read only if these are insufficient)`);
+		const loss = [
+			shownLines < totalLines ? `${totalLines} lines` : undefined,
+			widthClipped ? `lines wider than ${RESULT_LINE_MAX} characters` : undefined,
+		].filter(Boolean).join(" · ");
+		lines.push(
+			"",
+			`⚠ The child's answer (${loss}) is not inlined here, so it is delivered exactly once. Read the complete result file \`${artifact}\`; it holds the full, untruncated output.`,
+		);
 	}
 	return lines.join("\n");
 }

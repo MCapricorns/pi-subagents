@@ -62,6 +62,9 @@ export interface RunView {
 	usage: UsageStats;
 	/** Concise current activity ("thinking", "read src/index.ts"); last writer wins. */
 	activity?: string;
+	/** Newest-last rolling window of recent activity lines, so a progress query
+	 * answers "what has it been doing" without reading child artifacts. */
+	recentActivity?: string[];
 	/** Epoch ms when this logical run first started executing. */
 	startedAt?: number;
 	/** Epoch ms when the current active segment started. */
@@ -380,6 +383,10 @@ function shortTarget(value: unknown): string {
 	return chars.length > ACTIVITY_TARGET_MAX ? `${chars.slice(0, ACTIVITY_TARGET_MAX - 1).join("")}…` : oneLine;
 }
 
+/** Newest-last rolling window of what a run has been doing, surfaced to the
+ * parent model as a progress trail. */
+export const RECENT_ACTIVITY_MAX = 6;
+
 /** Concise "what is it doing" text for a tool call: the tool name plus its single
  * most telling argument (path, command, pattern, ...) — never a raw JSON blob. */
 export function formatToolActivity(toolName: string, args: unknown): string {
@@ -554,7 +561,9 @@ export class MonitorStore {
 	setActivity(id: number, text: string): void {
 		const run = this.find(id);
 		if (!run) return;
-		run.activity = sanitizeActivityText(text) || undefined;
+		const safe = sanitizeActivityText(text) || undefined;
+		run.activity = safe;
+		if (safe) this.pushRecentActivity(run, safe);
 		this.notify();
 	}
 
@@ -563,7 +572,9 @@ export class MonitorStore {
 		const run = this.find(id);
 		if (!run) return;
 		const safeToolName = sanitizeActivityText(toolName) || "tool";
-		run.activity = sanitizeActivityText(activity) || safeToolName;
+		const safeActivity = sanitizeActivityText(activity) || safeToolName;
+		run.activity = safeActivity;
+		this.pushRecentActivity(run, safeActivity);
 		this.notify();
 	}
 
@@ -572,7 +583,11 @@ export class MonitorStore {
 	recordToolEnd(id: number, toolName: string, isError: boolean): void {
 		const run = this.find(id);
 		if (!run) return;
-		if (isError) run.activity = `✗ ${sanitizeActivityText(toolName) || "tool"} failed`;
+		if (isError) {
+			const failed = `✗ ${sanitizeActivityText(toolName) || "tool"} failed`;
+			run.activity = failed;
+			this.pushRecentActivity(run, failed);
+		}
 		this.notify();
 	}
 
@@ -643,6 +658,14 @@ export class MonitorStore {
 
 	private find(id: number): RunView | undefined {
 		return this.runs.find((r) => r.id === id);
+	}
+
+	/** Newest-last rolling activity window; consecutive duplicates collapse. */
+	private pushRecentActivity(run: RunView, text: string): void {
+		const recent = run.recentActivity ?? [];
+		if (recent[recent.length - 1] !== text) recent.push(text);
+		if (recent.length > RECENT_ACTIVITY_MAX) recent.splice(0, recent.length - RECENT_ACTIVITY_MAX);
+		run.recentActivity = recent;
 	}
 
 	private notify(): void {

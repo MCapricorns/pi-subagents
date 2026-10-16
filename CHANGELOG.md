@@ -3,6 +3,28 @@
 Release notes for `@ferris1225/pi-subagents`. Only the most recent releases
 are kept here; every published version is preserved as a GitHub Release.
 
+## 4.3.26
+
+- Track Pi 1.3.0 development dependencies. Pi 1.2.0 fires `before_agent_start`
+  for runs triggered by `sendMessage` too, which this extension already handles
+  idempotently, and fixes Pi 1.0.x dropping extension-installed system prompt
+  sections after the first tool call of such a run.
+- Narrow `scout` to search only. Its role file and the parent routing line now
+  say read-only code, documentation, and web lookup with no shell; work that
+  needs execution stays in main instead of being briefed to a child that cannot
+  run commands.
+- Deliver long results exactly once. A completion that exceeds
+  `maxResultLines` (or has lines wider than 200 characters) no longer inlines a
+  truncated copy: the notice states the true size and routes main to the full
+  Markdown artifact, so the same content never enters the main context twice.
+- `subagent_status` answers progress with an activity trail of what each run
+  has been doing, and no longer dangles child session paths in the
+  model-facing text. Actionable paths — a truncated run's full-result file and
+  retained worktree/patch artifacts — remain.
+- Remove the advisory `subagent_risk` tool. A path-name classifier cannot
+  out-judge main reading the integrated diff, and the tool added a call without
+  adding evidence.
+
 ## 4.3.24
 
 - Remove the live `tok/s` throughput figure from the per-model cost footer.

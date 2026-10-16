@@ -103,7 +103,7 @@ describe("resolveAgentTools", () => {
 	it("enforces the scout read-only boundary", () => {
 		const scout = loadBuiltinAgents().find((agent) => agent.name === "scout");
 		assert.ok(scout);
-		const resolved = resolveAgentTools(scout, [...SCOUT_READ_ONLY_TOOLS, "query-docs", "resolve-library-id", "bash", "edit", "write", "subagent", "subagent_risk"]);
+		const resolved = resolveAgentTools(scout, [...SCOUT_READ_ONLY_TOOLS, "query-docs", "resolve-library-id", "bash", "edit", "write", "subagent", "subagent_status"]);
 		assert.deepEqual(resolved.tools, SCOUT_READ_ONLY_TOOLS);
 		const inherited = resolveAgentTools({ ...scout, tools: undefined }, [
 			"read",
@@ -138,11 +138,11 @@ describe("resolveAgentTools", () => {
 		const resolved = resolveAgentTools({
 			name: "reviewer",
 			description: "review",
-			tools: ["read", "review_db", "subagent_risk"],
+			tools: ["read", "review_db", "subagent_stop"],
 			systemPrompt: "review",
 			source: "project",
 			filePath: "reviewer.md",
-		}, ["read", "review_db", "repository_mutator", "subagent_risk"]);
+		}, ["read", "review_db", "repository_mutator", "subagent_stop"]);
 		assert.deepEqual(resolved.tools, ["read", "review_db"]);
 	});
 });

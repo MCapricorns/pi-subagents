@@ -13,6 +13,16 @@ is clear, and delegation will actually reduce cost or improve completion quality
 
 ## What's new
 
+**4.3.26** — scout is search-only, completions stop double-delivering, and
+progress no longer routes through files. Scout's role is now exactly code and
+documentation search plus web lookup; it has no shell, and work that needs
+execution stays in main. A result that exceeds the inline limit is no longer
+dumped truncated into the completion: none of it is inlined, and the notice
+points at the full Markdown artifact, so the content enters the main context
+exactly once. `subagent_status` answers progress with an activity trail
+(what each run has been doing) instead of child session paths, and the
+advisory `subagent_risk` tool is gone. Development dependencies track Pi 1.3.0.
+
 **4.3.24** — the per-model cost footer drops the live `tok/s` throughput
 figure: measured rates could not be trusted across providers, so the footer
 sticks to what pi reports exactly — per-model token flow, cost, context share,
@@ -94,7 +104,8 @@ back — with you. This extension owns them:
 
 - Main uses a subagent when the work can run independently in parallel, its
   boundary is clear, and delegation will actually reduce cost or improve
-  completion quality. `scout` covers unfamiliar code or external facts;
+  completion quality. `scout` covers read-only code, documentation, and web
+  lookup only — it has no shell, so work that needs execution stays in main;
   `artisan` covers one substantial change. A small edit already understood in
   the current context stays in main, and a free process slot is not a reason
   to invent another phase. Briefs define the outcome, done condition, useful
@@ -111,8 +122,9 @@ back — with you. This extension owns them:
   Worktree setup obeys the bounded queue; final integration releases its process slot.
 - Interrupted work retains artifacts for manual recovery after reload or crash.
   Within a run, a configured child-model failure can still hand off to the main model.
-- Failure notifications include available reasons, and status keeps terminal facts
-  and retained recovery paths queryable for the current parent session.
+- Failure notifications include available reasons, and status answers live
+  progress with an activity trail and keeps terminal facts and retained
+  recovery paths queryable for the current parent session.
 
 ## Install
 
@@ -142,7 +154,7 @@ You can also call the tools directly when you want exact control.
 
 | Agent     | Access    | Owns |
 | --------- | --------- | ---- |
-| `scout`   | Read-only | Unfamiliar code, a wide lookup, or external facts. Returns citations as retrieval leads. |
+| `scout`   | Read-only | Searching code and documentation, and looking up external facts on the web. Returns citations as retrieval leads. No shell — it cannot run commands, tests, or builds. |
 | `artisan` | Full      | One substantial implementation, fix, refactor, test, or docs change, including the checks that change needs. |
 
 Role prompts state the outcome, the priority of the brief, and the hard boundary.
@@ -165,7 +177,7 @@ material assumptions or blockers.
 
 Children run the official `pi --mode rpc` server, using Pi's exported command/response
 types and its own session persistence. There is no separate subagent protocol. The
-host transport remains local. Pi 1.0.3's `RpcClient` still spawns its own `node`
+host transport remains local. Pi's `RpcClient` still spawns its own `node`
 process, signals only that process, and does not provide process-tree shutdown,
 bounded abort coordination, or cancellation of child extension dialogs.
 
@@ -247,24 +259,6 @@ These defaults follow [OpenAI's GPT-6 Astra model guidance](https://developers.o
 and [Eric Provencher's skills and prompts guidance](https://x.com/pvncher/status/2095991462416490862).
 They simplify instructions without changing the configured models or thinking levels.
 
-`subagent_risk({})` is an advisory-only, no-model-call check over tracked and untracked
-changes relative to `HEAD`. It resolves the repository root first, so a nested `cwd` still
-returns repository-root-relative paths, including untracked files outside that subdirectory.
-Its fixed case-insensitive path-token rules flag:
-`concurrency` (`thread`, `queue`, `parallel`, `dispatch`, locks/races and related tokens);
-`trust-boundary` (`auth`, credentials, permissions, policy, secrets, sandbox, security, trust, tokens);
-`persistence-compatibility` (durable state, manifests, migrations, restore, schemas,
-serialization/storage); and `failure-cancellation` (abort, cancel, errors/failures, recovery,
-retry, stop, timeout). It returns the changed paths, matched categories, and whether those
-rules mark the diff elevated. If Git or `HEAD` is unavailable, it reports advisory unavailable; an
-aborted tool call propagates cancellation instead of converting it to an advisory result. It
-never blocks or starts a child.
-
-This classifier is intentionally conservative and explainable: it only sees path names, so
-it can produce false positives and miss risky behavior hidden behind neutral names. Main
-inspects elevated paths in the integrated diff. The runtime can enforce explicit phase/scope admission, but cannot
-safely force the natural-language judgment of whether work is worth delegating.
-
 ## Parallel edits
 
 `scope` is declarative admission metadata for expected writes, not access control. `paths`
@@ -328,7 +322,7 @@ deliverable needs a new phase and brief, not a recycled thread.
 
 | Tool | What it does |
 | ---- | ------------ |
-| `subagent_status` | Read-only inspection. Omit `id` to list this parent session's runs, or pass an exact numeric `id` to inspect one. |
+| `subagent_status` | Read-only progress check. Omit `id` to list this parent session's runs, or pass an exact numeric `id` to inspect one. |
 | `subagent_stop` | Destructively cancel/retire a run by id/prefix, or all active runs with `all: true`. Delivers partial output and finalizes isolated changes. |
 
 ```ts
@@ -338,8 +332,12 @@ subagent_stop({ id: "7" });
 ```
 
 Status reads runtime state without starting, stopping, continuing, or waiting for a
-child to finish. It includes the phase/task summary, activity, elapsed time, model,
-usage, terminal diagnostics, and available result/session/recovery paths. States
+child to finish. The model-facing answer is the progress view: state, elapsed time,
+and an activity trail of what the run has been doing (for example
+`activity: read src/config.ts · grep "cacheKey" · thinking`), plus failure
+diagnostics and any actionable paths (a truncated run's full-result file, retained
+worktree/patch artifacts). Child session directories are not dangled in front of
+the model; they stay in the structured details. States
 distinguish `queued`, `running`, `interrupting`, `settling` (Git finalization),
 `completed`, `failed`, `stopped`, and `interrupted` (recovered unfinished work).
 Queued runs report their actual wait reason. Settled runs remain queryable in the
@@ -428,11 +426,12 @@ reinstalled with the new session's live context, so switching or reloading
 never reuses a stale context from the previous session.
 
 Completions resume the main agent on their own, with a compact block of at most 40
-lines by default; longer output lands unchanged in a Markdown artifact whose path
-comes with the message, stated as how much was actually cut (`40 of 137 lines
-shown`, or a 200-character clip when a short result has a long line) and
-conditioned on the shown lines being insufficient, so the same
-content does not enter the main context twice. Roles write result-only handoffs — outcome, paths,
+lines by default. Longer output (or lines wider than 200 characters) is not inlined
+at all: the notice states the true size — `137 lines`, or a 200-character clip when
+a short result has a long line — and points at the unchanged Markdown artifact
+holding the full output, and main is told to read that file. The content therefore
+enters the main context exactly once, never first as a truncated copy the model
+cannot trust and then again as the file read. Roles write result-only handoffs — outcome, paths,
 verification, unresolved blockers — and the main agent is told to add its
 conclusion rather than restate what you already read. A failed run adds its
 failed-tool diagnostics.

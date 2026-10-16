@@ -42,7 +42,7 @@ describe("formatCompletionBlock", () => {
 		assert.match(block, /Provider unavailable/);
 	});
 
-	it("states a width clip without inventing a 40-of-2 line loss", () => {
+	it("inlines no output copy on a width-only clip and still routes to the full file", () => {
 		const long = "x".repeat(RESULT_LINE_MAX + 5);
 		const block = formatCompletionBlock({
 			agent: "steward",
@@ -52,8 +52,24 @@ describe("formatCompletionBlock", () => {
 			stderr: "",
 			usage: emptyUsage(),
 		}, 40);
-		assert.ok(block.includes("1 line shown"));
-		assert.ok(block.includes(`clipped to ${RESULT_LINE_MAX} characters`));
+		assert.ok(!block.includes(long), "a truncated result must not appear inline");
+		assert.ok(block.includes(`lines wider than ${RESULT_LINE_MAX} characters`));
+		assert.match(block, /read the complete result file/i);
 		assert.ok(!block.includes("40 of"));
+	});
+
+	it("inlines no output copy when lines were dropped, and names the true total", () => {
+		const output = ["one", "two", "three", "four", "five"].join("\n");
+		const block = formatCompletionBlock({
+			agent: "scout",
+			task: "survey modules",
+			exitCode: 0,
+			messages: [{ role: "assistant", content: [{ type: "text", text: output }], stopReason: "stop" } as never],
+			stderr: "",
+			usage: emptyUsage(),
+		}, 2);
+		assert.ok(!block.includes("three"), "dropped lines must not appear inline");
+		assert.ok(block.includes("5 lines"));
+		assert.match(block, /read the complete result file/i);
 	});
 });

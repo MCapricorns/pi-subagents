@@ -39,7 +39,7 @@ describe("buildDelegationDirective", () => {
 	it("prefers the two built-in roles without inventing extra phases", () => {
 		const directive = buildDelegationDirective(loadBuiltinAgents());
 		assert.match(directive, /Use a subagent when the work can run independently in parallel, its boundary is clear, and delegation will actually reduce cost or improve completion quality/u);
-		assert.match(directive, /Prefer `scout` for unfamiliar code, a wide lookup, or an external fact, and `artisan` for one substantial implementation/u);
+		assert.match(directive, /Prefer `scout` for read-only code, documentation, and web lookup only \(no shell — it cannot run commands, tests, or builds; execution stays in main\), and `artisan` for one substantial implementation/u);
 		assert.match(directive, /Keep a small edit already understood in the current context in main/u);
 		assert.match(directive, /Do not open a phase that repeats owned work, splits one tightly coupled change, or exists only to fill a free slot/u);
 		assert.match(directive, /one owner, a stable `phaseId`, and exact writer `scope`/u);
@@ -76,7 +76,7 @@ describe("buildDelegationDirective", () => {
 		assert.match(directive, /Conclude the overall task only after every run settles or is stopped/u);
 		assert.match(directive, /Report only checks actually run/u);
 		assert.match(directive, /repeat or broaden checks only for new changes, failures, or unresolved concerns/u);
-		assert.match(directive, /Read truncated artifacts only when excerpts are insufficient/u);
+		assert.match(directive, /A truncated completion carries no inline copy; read the full result file it names/u);
 	});
 
 	it("shows routing only for enabled roles", () => {

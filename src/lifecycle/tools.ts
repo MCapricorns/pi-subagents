@@ -8,7 +8,7 @@ import { DEFAULT_MAX_RESULT_LINES, loadConfig } from "../configuration/config.ts
 import { removeThreadRecord } from "./durable.ts";
 import { formatCompletionBlock, matchRunIds } from "../presentation/format.ts";
 import { emptyUsage } from "../execution/rpc-control.ts";
-import { formatDuration, formatTaskSummary, monitor } from "../presentation/monitor.ts";
+import { formatDuration, formatTaskSummary, monitor, runWaitLabel } from "../presentation/monitor.ts";
 import { persistRecoveryRecords, recoveryRecordFromFinalization } from "../isolation/recovery.ts";
 import type { SubagentRuntime, SubagentThread } from "./runtime.ts";
 import { CONTROL_QUIESCE_TIMEOUT_MS, projectResultsRoot, quiesced } from "./thread-shared.ts";
@@ -29,7 +29,7 @@ export function registerLookupTools(pi: ExtensionAPI, runtime: SubagentRuntime):
 	pi.registerTool({
 		name: "subagent_status",
 		label: "Subagent Status",
-		description: "Read current-session run states without waiting or changing execution. Omit id to list runs, or pass an exact numeric id for progress, elapsed time, failure diagnostics, and retained result/recovery paths. Completions arrive automatically; use this for inspection, not a polling loop.",
+		description: "Check live subagent progress without waiting or changing execution: state, elapsed time, an activity trail (what the run has been doing), and failure diagnostics. Omit id to list runs. Results arrive automatically in completion messages; use this to inspect progress, not as a polling loop.",
 		exposure: "model-only",
 		executionMode: "parallel",
 		annotations: {
@@ -64,6 +64,7 @@ export function registerLookupTools(pi: ExtensionAPI, runtime: SubagentRuntime):
 					state,
 					waitReason: state === "queued" ? live?.waitReason : undefined,
 					activity: live?.activity,
+					recentActivity: live?.recentActivity ?? [],
 					elapsedMs: monitor.getElapsedMs(thread.id) ?? thread.elapsedMs,
 					model: live?.model ?? result?.model,
 					thinking: live?.thinking ?? result?.thinking ?? thread.thinkingLevel,
@@ -83,17 +84,24 @@ export function registerLookupTools(pi: ExtensionAPI, runtime: SubagentRuntime):
 			const text = runs.length === 0
 				? params.id === undefined ? "No subagent runs in this parent session." : `No subagent run matches #${params.id}.`
 				: runs.map((run) => {
-					const parts = [`#${run.id} ${run.agent}`, run.state, formatDuration(run.elapsedMs)];
-					if (run.waitReason) parts.push(`wait: ${run.waitReason}`);
-					if (run.activity) parts.push(run.activity);
-					if (run.errorMessage) parts.push(formatTaskSummary(run.errorMessage, 300, false));
+					const wait = run.waitReason ? ` — ${runWaitLabel({ status: "queued", waitReason: run.waitReason })}` : "";
+					const lines = [`#${run.id} ${run.agent} · ${run.state} · ${formatDuration(run.elapsedMs)}${wait}`, `  task: ${run.taskSummary}`];
+					// The trail is the progress answer: what the run has been doing,
+					// newest last. It replaces pointing the parent at child session
+					// files, which it cannot usefully read mid-run.
+					const trail = [...run.recentActivity];
+					if (run.activity && trail[trail.length - 1] !== run.activity) trail.push(run.activity);
+					if (trail.length > 0) lines.push(`  activity: ${trail.slice(-4).join(" · ")}`);
+					if (run.errorMessage) lines.push(`  error: ${formatTaskSummary(run.errorMessage, 300, false)}`);
+					// Only actionable paths: the full-result file (set when the
+					// completion was truncated) and retained recovery artifacts.
 					const paths = [
-						run.resultFile ? `Result: ${run.resultFile}` : undefined,
-						run.sessionDir ? `Session: ${run.sessionDir}` : undefined,
-						run.integrationWorktreePath ? `Retained worktree: ${run.integrationWorktreePath}` : undefined,
-						run.integrationPatchPath ? `Retained patch: ${run.integrationPatchPath}` : undefined,
+						run.resultFile ? `full result: ${run.resultFile}` : undefined,
+						run.integrationWorktreePath ? `retained worktree: ${run.integrationWorktreePath}` : undefined,
+						run.integrationPatchPath ? `retained patch: ${run.integrationPatchPath}` : undefined,
 					].filter(Boolean);
-					return `${parts.join(" · ")}\n  ${run.taskSummary}${paths.length ? `\n  ${paths.join("\n  ")}` : ""}`;
+					if (paths.length > 0) lines.push(`  ${paths.join("\n  ")}`);
+					return lines.join("\n");
 				}).join("\n");
 			return {
 				content: [{ type: "text", text }],
