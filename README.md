@@ -13,6 +13,12 @@ is clear, and delegation will actually reduce cost or improve completion quality
 
 ## What's new
 
+**4.3.28** — a child's final answer is delivered whole even when it spans
+several text blocks, child stderr is kept to a bounded tail with one-line error
+toasts, and model handoffs keep a multi-line objective intact. Streaming
+activity no longer re-renders the widget per token, and the durable manifest is
+no longer rewritten on every child turn.
+
 **4.3.26** — scout is search-only, completions stop double-delivering, and
 progress no longer routes through files. Scout's role is now exactly code and
 documentation search plus web lookup; it has no shell, and work that needs

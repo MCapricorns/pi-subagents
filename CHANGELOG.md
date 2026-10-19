@@ -3,6 +3,28 @@
 Release notes for `@ferris1225/pi-subagents`. Only the most recent releases
 are kept here; every published version is preserved as a GitHub Release.
 
+## 4.3.28
+
+- Deliver a child's whole final answer. When the last assistant message split
+  its answer into several text blocks (for example around interleaved
+  thinking), only the first block reached main; every block is now joined.
+- Keep only the newest 32k characters of a child's stderr. A chatty or
+  crash-looping child no longer grows parent memory without bound, and error
+  toasts are capped to one line; completion blocks and result files still carry
+  the diagnostic tail.
+- Model handoff prompts put the objective in its own block, so a multi-line
+  brief stays intact instead of being spliced mid-sentence.
+- The routing contract's preference line no longer restates the scout and
+  artisan catalog descriptions word for word.
+- Performance: RPC stdout framing is linear in the chunk size, identical
+  streamed thinking/text deltas no longer re-render the widget, the durable
+  manifest is rewritten only when a run's session or child pids change instead
+  of on every child turn, and session-start hygiene validates manifests once.
+- Session-start sweeps fail closed: an unreadable manifest skips the deleting
+  sweeps instead of treating every directory as unclaimed.
+- Internal cleanup: one shared process-tree terminator, a single result-row
+  renderer, and shared usage formatting.
+
 ## 4.3.27
 
 - Let `scout` use the `anysearch`/`anysearch_extract` web-retrieval tools. The
