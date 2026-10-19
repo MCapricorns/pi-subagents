@@ -562,6 +562,9 @@ export class MonitorStore {
 		const run = this.find(id);
 		if (!run) return;
 		const safe = sanitizeActivityText(text) || undefined;
+		// Every streamed thinking/text delta reports the same activity; skip the
+		// notification (and the widget re-render it triggers) when nothing changed.
+		if (run.activity === safe) return;
 		run.activity = safe;
 		if (safe) this.pushRecentActivity(run, safe);
 		this.notify();
@@ -604,7 +607,6 @@ export class MonitorStore {
 		if (worktreeId) run.worktreeId = worktreeId;
 		this.notify();
 	}
-
 
 	getElapsedMs(id: number, now: number = Date.now()): number | undefined {
 		const run = this.find(id);

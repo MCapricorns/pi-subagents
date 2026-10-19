@@ -433,7 +433,8 @@ export function restoredResultFromSummary(record: ThreadRecord): SingleResult | 
 	};
 }
 
-async function discardRecordArtifacts(record: ThreadRecord): Promise<void> {
+/** Remove a record's managed session and any worktree it still holds. */
+export async function discardRecordArtifacts(record: ThreadRecord): Promise<void> {
 	if (record.sessionDir) {
 		await rm(record.sessionDir, { recursive: true, force: true }).catch(() => undefined);
 	}
@@ -486,6 +487,19 @@ export function referencedDurablePaths(records: readonly ThreadRecord[]): Set<st
 	return paths;
 }
 
+/** Every durable path a valid thread or recovery manifest still claims.
+ * Validation resolves repositories through Git, so callers that need the set
+ * for several sweeps compute it once and pass it along. A read failure throws
+ * instead of yielding an empty set: sweeps fail closed, never deleting claimed
+ * work because its manifest was momentarily unreadable. */
+export async function readReferencedDurablePaths(configPath: string): Promise<Set<string>> {
+	const records = await readThreadRecords(configPath);
+	const recoveryRecords = await readRecoveryRecords(configPath);
+	const referenced = referencedDurablePaths(records);
+	for (const path of await referencedRecoveryPaths(configPath, recoveryRecords)) referenced.add(path);
+	return referenced;
+}
+
 /** Whether everything under root was last modified before `cutoffMs` — the only
  * question the age rule asks. Returns false the moment one fresh entry turns up,
  * so a project still in use costs a few stats instead of a full walk of its
@@ -527,12 +541,12 @@ function isIdleSince(root: string, cutoffMs: number, now: number): boolean {
  * been idle past PROJECT_ROOT_MAX_AGE_MS. A directory containing any path a valid
  * thread or recovery manifest still references is never touched. Returns the removed
  * directory names. */
-export async function pruneStaleProjectRoots(configPath: string, options: { now?: number } = {}): Promise<string[]> {
+export async function pruneStaleProjectRoots(
+	configPath: string,
+	options: { now?: number; referenced?: ReadonlySet<string> } = {},
+): Promise<string[]> {
 	const now = options.now ?? Date.now();
-	const records = await readThreadRecords(configPath).catch(() => [] as ThreadRecord[]);
-	const recoveryRecords = await readRecoveryRecords(configPath).catch(() => []);
-	const referenced = referencedDurablePaths(records);
-	for (const path of await referencedRecoveryPaths(configPath, recoveryRecords)) referenced.add(path);
+	const referenced = options.referenced ?? await readReferencedDurablePaths(configPath);
 	const root = getSubagentsRoot(configPath);
 	let projects: Dirent[];
 	try {

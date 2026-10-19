@@ -8,7 +8,7 @@
 
 import { StringEnum } from "@earendil-works/pi-ai";
 import { resolve } from "node:path";
-import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
+import type { ExtensionAPI, Theme } from "@earendil-works/pi-coding-agent";
 import { Text } from "@earendil-works/pi-tui";
 import { Type } from "typebox";
 import { discoverAgents, isWriteCapableAgent, type AgentConfig } from "./agents.ts";
@@ -227,6 +227,19 @@ function parallelAdmissionConflict(
 	return undefined;
 }
 
+/** One compact tool-card row: status, run id, agent, model route, thinking,
+ * isolation, and usage. Shared by the single and parallel layouts. */
+function formatResultRow(r: SingleResult, theme: Theme): string {
+	const pending = r.exitCode === -1;
+	const icon = statusIcon(pending ? "running" : isFailedResult(r) ? "failed" : "done", theme);
+	const usage = formatUsage(r.usage);
+	const model = `${r.model ?? "?"}${r.modelFallbackFrom ? ` (main after ${r.modelFallbackFrom} failed)` : ""}`;
+	const isolation = r.isolation === "worktree" ? ` · worktree ${r.integrationStatus ?? "active"}` : "";
+	const runId = r.runId === undefined ? "" : `${theme.fg("dim", `#${r.runId}`)} `;
+	const meta = `· ${model}${r.thinking ? ` · thinking ${r.thinking}` : ""}${isolation}${pending ? " · background" : ""}${usage ? ` · ${usage}` : ""}`;
+	return `${icon} ${runId}${theme.fg("accent", r.agent)} ${theme.fg("dim", meta)}`;
+}
+
 /** Awaited children report their usage per run and per model in the result
  * blocks below; nothing is attached to the tool result itself, because pi
  * folds tool-result usage into one session total — that merged every
@@ -367,9 +380,11 @@ export function registerSubagentTool(pi: ExtensionAPI, runtime: SubagentRuntime)
 	// "read src/index.ts", ...), never a raw args blob. The live handler
 	// only updates monitor state; the queue task owns terminal removal,
 	// notification, and lifecycle decisions.
-	const makeLiveHandler =
-		(runId: number, generation?: number) =>
-		(e: SubagentLiveEvent): void => {
+	const makeLiveHandler = (runId: number, generation?: number) => {
+		// Every child turn reports "running"; the manifest is rewritten only when
+		// what it records for recovery (session path, child pids) actually changed.
+		let checkpointKey: string | undefined;
+		return (e: SubagentLiveEvent): void => {
 			if (generation !== undefined && runtime.threads.get(runId)?.generation !== generation) return;
 			switch (e.kind) {
 				case "status":
@@ -379,7 +394,11 @@ export function registerSubagentTool(pi: ExtensionAPI, runtime: SubagentRuntime)
 					if (e.status === "running") {
 						const thread = runtime.threads.get(runId);
 						if (thread?.sessionId && thread.sessionDir) {
-							persistThreadCheckpoint(runtime, thread, "parked");
+							const key = `${thread.sessionDir}\0${thread.control.getChildPids().join(",")}`;
+							if (key !== checkpointKey) {
+								checkpointKey = key;
+								persistThreadCheckpoint(runtime, thread, "parked");
+							}
 						}
 					}
 					break;
@@ -415,6 +434,7 @@ export function registerSubagentTool(pi: ExtensionAPI, runtime: SubagentRuntime)
 					break;
 			}
 		};
+	};
 
 	const makeDetails =
 		(mode: "single" | "parallel", background = false) =>
@@ -692,11 +712,11 @@ export function registerSubagentTool(pi: ExtensionAPI, runtime: SubagentRuntime)
 		renderCall(args, theme) {
 			if (args.tasks && args.tasks.length > 0) {
 				let text = `${theme.fg("toolTitle", theme.bold("subagent "))}${theme.fg("accent", `parallel (${args.tasks.length})`)}`;
-			for (const t of args.tasks.slice(0, 4)) {
-				const preview = formatTaskSummary(t.task, 48);
-				const isolation = defaultIsolationMode("parallel", t.agent, t.isolation) === "worktree" ? " [worktree]" : "";
-				text += `\n  ${theme.fg("accent", t.agent)}${theme.fg("dim", isolation)} ${theme.fg("dim", preview)}`;
-			}
+				for (const t of args.tasks.slice(0, 4)) {
+					const preview = formatTaskSummary(t.task, 48);
+					const isolation = defaultIsolationMode("parallel", t.agent, t.isolation) === "worktree" ? " [worktree]" : "";
+					text += `\n  ${theme.fg("accent", t.agent)}${theme.fg("dim", isolation)} ${theme.fg("dim", preview)}`;
+				}
 				if (args.tasks.length > 4) text += `\n  ${theme.fg("dim", `… +${args.tasks.length - 4} more`)}`;
 				return new Text(text, 0, 0);
 			}
@@ -714,31 +734,15 @@ export function registerSubagentTool(pi: ExtensionAPI, runtime: SubagentRuntime)
 			const details = result.details as SubagentDetails | undefined;
 			if (!details || details.results.length === 0) return new Text(theme.fg("dim", "(no output)"), 0, 0);
 
+			const title = theme.fg("toolTitle", theme.bold("subagent "));
 			if (details.mode === "single") {
-				const r = details.results[0];
-				const pending = r.exitCode === -1;
-				const icon = statusIcon(pending ? "running" : isFailedResult(r) ? "failed" : "done", theme);
-				const usage = formatUsage(r.usage);
-				const model = `${r.model ?? "?"}${r.modelFallbackFrom ? ` (main after ${r.modelFallbackFrom} failed)` : ""}`;
-				const isolation = r.isolation === "worktree" ? ` · worktree ${r.integrationStatus ?? "active"}` : "";
-				const runId = r.runId === undefined ? "" : `${theme.fg("dim", `#${r.runId}`)} `;
-				const line = `${theme.fg("toolTitle", theme.bold("subagent "))}${icon} ${runId}${theme.fg("accent", r.agent)} ${theme.fg("dim", `· ${model}${r.thinking ? ` · thinking ${r.thinking}` : ""}${isolation}${pending ? " · background" : ""}${usage ? ` · ${usage}` : ""}`)}`;
-				return new Text(line, 0, 0);
+				return new Text(`${title}${formatResultRow(details.results[0]!, theme)}`, 0, 0);
 			}
-
 			// Parallel mode: header + one compact line per agent
-			const lines: string[] = [
-				`${theme.fg("toolTitle", theme.bold("subagent "))}${theme.fg("accent", `parallel (${details.results.length})`)}`,
+			const lines = [
+				`${title}${theme.fg("accent", `parallel (${details.results.length})`)}`,
+				...details.results.map((r) => `  ${formatResultRow(r, theme)}`),
 			];
-			for (const r of details.results) {
-				const pending = r.exitCode === -1;
-				const icon = statusIcon(pending ? "running" : isFailedResult(r) ? "failed" : "done", theme);
-				const usage = formatUsage(r.usage);
-				const model = `${r.model ?? "?"}${r.modelFallbackFrom ? ` (main after ${r.modelFallbackFrom} failed)` : ""}`;
-				const isolation = r.isolation === "worktree" ? ` · worktree ${r.integrationStatus ?? "active"}` : "";
-				const runId = r.runId === undefined ? "" : `${theme.fg("dim", `#${r.runId}`)} `;
-				lines.push(`  ${icon} ${runId}${theme.fg("accent", r.agent)} ${theme.fg("dim", `· ${model}${r.thinking ? ` · thinking ${r.thinking}` : ""}${isolation}${pending ? " · background" : ""}${usage ? ` · ${usage}` : ""}`)}`);
-			}
 			return new Text(lines.join("\n"), 0, 0);
 		},
 	});

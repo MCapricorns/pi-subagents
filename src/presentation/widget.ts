@@ -21,14 +21,13 @@ import { truncateToWidth, visibleWidth } from "@earendil-works/pi-tui";
 import {
 	formatElapsed,
 	formatTaskSummary,
-	formatUsageTokens,
+	formatUsageCompact,
 	isRunActiveStatus,
 	monitor,
 	shrinkRunLabel,
 	statusIcon,
 	type RunView,
 } from "./monitor.ts";
-import type { UsageStats } from "../execution/rpc-control.ts";
 
 export const SUBAGENTS_WIDGET_ID = "pi-subagents";
 
@@ -112,12 +111,6 @@ function identitySegment(run: RunView, theme: Theme, layout: ColumnLayout): stri
 	return `${icon} ${theme.fg("dim", id)} ${name}${pad}`;
 }
 
-/** One footer-style usage part: token flow plus accrued cost, dropped as a
- * unit before the model under width pressure. */
-function usagePart(usage: UsageStats | undefined): string | undefined {
-	return [formatUsageTokens(usage), usage?.cost ? `$${usage.cost.toFixed(4)}` : undefined].filter(Boolean).join(" ") || undefined;
-}
-
 /** Telemetry tail parts of a run row: badge and wait word first (dropped first
  * under pressure), then usage, model, effective thinking strength, and the
  * always-surviving elapsed time. */
@@ -131,7 +124,8 @@ function telemetryTailParts(run: RunView, now: number): Array<string | undefined
 	const wait = run.status === "queued" ? waitWord(run) : undefined;
 	// Drop order under pressure: badge, wait word, usage, model, thinking; elapsed
 	// survives every width the identity leaves room for.
-	return [badge, wait, usagePart(run.usage), modelPart, thinkingPart, formatElapsed(run, now) || undefined];
+	// Token flow plus accrued cost drop as one unit before the model.
+	return [badge, wait, formatUsageCompact(run.usage) || undefined, modelPart, thinkingPart, formatElapsed(run, now) || undefined];
 }
 
 /** Two lines for a live run. Line 1 is what the run is: identity, task label,

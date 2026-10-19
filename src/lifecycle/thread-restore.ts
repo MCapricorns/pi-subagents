@@ -1,13 +1,13 @@
 /** Durable restoration and startup hygiene for logical sub-agent threads. */
 
-import { rm } from "node:fs/promises";
 import { type ThinkingLevel } from "../configuration/config.ts";
 import {
+	discardRecordArtifacts,
 	isCurrentBoot,
 	pruneStaleProjectRoots,
 	pruneThreadRecords,
+	readReferencedDurablePaths,
 	readThreadRecords,
-	referencedDurablePaths,
 	removeThreadRecord,
 	restoredResultFromSummary,
 	type ThreadRecord,
@@ -25,7 +25,6 @@ import {
 } from "../execution/spawn.ts";
 import { samePath } from "../isolation/managed-paths.ts";
 import { isProcessAlive, killProcessTree, sweepProjectDurableDirs, sweepProjectTempDirs } from "../isolation/temp-hygiene.ts";
-import { readRecoveryRecords, referencedRecoveryPaths } from "../isolation/recovery.ts";
 import {
 	isPathInside,
 	restoreWorktreeIsolation,
@@ -36,14 +35,8 @@ import { installThreadLifecycle } from "./thread-lifecycle.ts";
 
 /** Release managed artifacts belonging to a discarded, already-settled record. */
 async function discardRestoredRecord(runtime: SubagentRuntime, record: ThreadRecord): Promise<void> {
-	if (record.sessionDir) {
-		await rm(record.sessionDir, { recursive: true, force: true }).catch(() => undefined);
-		runtime.sessionDirs.delete(record.sessionDir);
-	}
-	if (record.worktree && (record.worktree.state === "active" || record.worktree.state === "retained")) {
-		const worktree = await restoreWorktreeIsolation(record.worktree).catch(() => undefined);
-		await worktree?.discard().catch(() => undefined);
-	}
+	await discardRecordArtifacts(record);
+	if (record.sessionDir) runtime.sessionDirs.delete(record.sessionDir);
 	await removeThreadRecord(runtime.configPath, record.runId, record.cwd).catch(() => undefined);
 }
 
@@ -214,19 +207,27 @@ export function bootstrapDurableState(runtime: SubagentRuntime, cwd: string): Pr
 		} catch {
 			/* temp hygiene is best-effort */
 		}
+		// Both deleting sweeps below honor the same manifest claims. Reading them
+		// validates every record (Git resolution included), so it runs once; an
+		// unreadable manifest skips both sweeps rather than deleting claimed work.
+		let referenced: Set<string> | undefined;
 		try {
-			// Sessions and worktrees outlive their process on purpose, so only
-			// ownership separates a live Pi's state from artifacts a crash
-			// abandoned. Valid thread and recovery records always keep their paths.
-			const records = await readThreadRecords(runtime.configPath);
-			const recoveryRecords = await readRecoveryRecords(runtime.configPath);
-			const referenced = [...referencedDurablePaths(records)];
-			referenced.push(...await referencedRecoveryPaths(runtime.configPath, recoveryRecords));
-			sweepProjectDurableDirs(projectRoots, {
-				keep: (path) => referenced.some((claimed) => isPathInside(path, claimed)),
-			});
+			referenced = await readReferencedDurablePaths(runtime.configPath);
 		} catch {
 			/* durable-state hygiene is best-effort */
+		}
+		if (referenced) {
+			const claimed = [...referenced];
+			try {
+				// Sessions and worktrees outlive their process on purpose, so only
+				// ownership separates a live Pi's state from artifacts a crash
+				// abandoned. Valid thread and recovery records always keep their paths.
+				sweepProjectDurableDirs(projectRoots, {
+					keep: (path) => claimed.some((claim) => isPathInside(path, claim)),
+				});
+			} catch {
+				/* durable-state hygiene is best-effort */
+			}
 		}
 		try {
 			// Result excerpts are bounded on write, which never reaches a project
@@ -235,10 +236,12 @@ export function bootstrapDurableState(runtime: SubagentRuntime, cwd: string): Pr
 		} catch {
 			/* result retention is best-effort */
 		}
-		try {
-			await pruneStaleProjectRoots(runtime.configPath);
-		} catch {
-			/* project-root hygiene is best-effort */
+		if (referenced) {
+			try {
+				await pruneStaleProjectRoots(runtime.configPath, { referenced });
+			} catch {
+				/* project-root hygiene is best-effort */
+			}
 		}
 	})();
 }

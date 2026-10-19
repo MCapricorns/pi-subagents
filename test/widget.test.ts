@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 import type { Theme } from "@earendil-works/pi-coding-agent";
-import type { RunView } from "../src/presentation/monitor.ts";
+import { MonitorStore, type RunView } from "../src/presentation/monitor.ts";
 import { emptyUsage } from "../src/execution/rpc-control.ts";
 import { formatActiveRunLines } from "../src/presentation/widget.ts";
 
@@ -29,5 +29,20 @@ describe("formatActiveRunLines", () => {
 		const lines = formatActiveRunLines([run], plainTheme, 160, now);
 		assert.equal(lines.length, 1);
 		assert.match(lines[0], /think:high/u);
+	});
+});
+
+describe("MonitorStore activity notifications", () => {
+	it("notifies once for a run of identical streamed activity deltas", () => {
+		const store = new MonitorStore();
+		const id = store.addRun("scout", "Map src/index.ts");
+		let notifications = 0;
+		store.subscribe(() => notifications++);
+		for (let index = 0; index < 50; index++) store.setActivity(id, "thinking");
+		assert.equal(notifications, 1);
+		store.setActivity(id, "responding");
+		store.setActivity(id, "thinking");
+		assert.equal(notifications, 3);
+		assert.deepEqual(store.findRun(id)?.recentActivity, ["thinking", "responding", "thinking"]);
 	});
 });

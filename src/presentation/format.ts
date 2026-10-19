@@ -5,7 +5,7 @@
  */
 
 import type { AgentConfig } from "../delegation/agents.ts";
-import { runLabel, shrinkRunLabel } from "./monitor.ts";
+import { formatUsageCompact, runLabel, shrinkRunLabel } from "./monitor.ts";
 import { emptyUsage } from "../execution/rpc-control.ts";
 import {
 	RESULT_LINE_MAX,
@@ -58,21 +58,9 @@ export function dispatchFailedResult(agent: AgentConfig, task: string, error: un
 	};
 }
 
-function formatTokens(count: number): string {
-	if (count >= 1_000_000) return `${(count / 1_000_000).toFixed(1)}M`;
-	if (count >= 1_000) return `${(count / 1_000).toFixed(1)}k`;
-	return String(count);
-}
-
 export function formatUsage(usage: UsageStats): string {
-	const parts: string[] = [];
-	if (usage.turns) parts.push(`${usage.turns} turn${usage.turns > 1 ? "s" : ""}`);
-	if (usage.input) parts.push(`↑${formatTokens(usage.input)}`);
-	if (usage.output) parts.push(`↓${formatTokens(usage.output)}`);
-	if (usage.cacheRead) parts.push(`R${formatTokens(usage.cacheRead)}`);
-	if (usage.cacheWrite) parts.push(`W${formatTokens(usage.cacheWrite)}`);
-	if (usage.cost) parts.push(`$${usage.cost.toFixed(4)}`);
-	return parts.join(" ");
+	const turns = usage.turns ? `${usage.turns} turn${usage.turns > 1 ? "s" : ""}` : undefined;
+	return [turns, formatUsageCompact(usage)].filter(Boolean).join(" ");
 }
 
 export interface CompletionFormatOptions {

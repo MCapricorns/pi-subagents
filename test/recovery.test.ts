@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { existsSync } from "node:fs";
 import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join, resolve } from "node:path";
 import { describe, it } from "node:test";
 import { getProjectRoot } from "../src/execution/spawn.ts";
 import {
@@ -12,6 +12,7 @@ import {
 	relocateRecoveryManifest,
 	type RecoveryRecord,
 } from "../src/isolation/recovery.ts";
+import { isPathInside } from "../src/isolation/worktree.ts";
 
 function record(configPath: string, runId: number, error: string): RecoveryRecord {
 	const group = join(getProjectRoot(configPath, process.cwd()), "worktrees", `pi-subagent-worktree-${runId}`);
@@ -46,5 +47,16 @@ describe("recovery manifest storage", () => {
 		} finally {
 			await rm(root, { recursive: true, force: true });
 		}
+	});
+});
+
+describe("isPathInside", () => {
+	it("treats a dot-dot-prefixed child name as inside the root", () => {
+		const root = resolve("repo");
+		assert.equal(isPathInside(root, root), true);
+		assert.equal(isPathInside(root, join(root, "..cache", "file")), true);
+		assert.equal(isPathInside(root, join(root, "src")), true);
+		assert.equal(isPathInside(root, resolve("other")), false);
+		assert.equal(isPathInside(root, dirname(root)), false);
 	});
 });

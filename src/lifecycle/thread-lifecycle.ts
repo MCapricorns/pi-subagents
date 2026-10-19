@@ -12,7 +12,7 @@ import { isWriteCapableAgent, resolveAgentTools, type AgentConfig } from "../del
 import type { CompletionMessageItem } from "./completion.ts";
 import { loadConfig } from "../configuration/config.ts";
 import { dispatchFailedResult, failedStartResult, formatCompletionBlock, modelLevelTakeoverNote, queuedResult } from "../presentation/format.ts";
-import { monitor } from "../presentation/monitor.ts";
+import { formatTaskSummary, monitor } from "../presentation/monitor.ts";
 import { findDuplicateDispatch } from "../delegation/prompt.ts";
 import { findWriterLeaseScopeOverlap, normalizePhaseId, normalizePhaseScope } from "../delegation/phase-scope.ts";
 import { persistRecoveryRecords, recoveryRecordFromFinalization } from "../isolation/recovery.ts";
@@ -46,6 +46,12 @@ import {
 	type WorktreeFinalization,
 	type WorktreeIsolation,
 } from "../isolation/worktree.ts";
+
+/** One-line toast detail. Error messages can embed a child's whole stderr
+ * tail; the completion block and its result file carry the full text. */
+function notifyDetail(errorMessage: string | undefined, fallback: string): string {
+	return formatTaskSummary(errorMessage?.trim() || fallback, 300, false);
+}
 
 interface BackgroundDispatcherOptions {
 	runtime: SubagentRuntime;
@@ -193,125 +199,125 @@ export function createBackgroundDispatcher(options: BackgroundDispatcherOptions)
 		// is write serialization, not pool pacing.
 		const reserveManagedLane = isolation === "shared" && writeCapable;
 		const runGeneration = async (backgroundSignal: AbortSignal, controller: AbortController): Promise<void> => {
-				if (runtime.threads.get(runId)?.generation !== generation) return;
-				if (isolation === "worktree" && !worktree) {
-					const prepared = await createWorktreeIsolation(originalCwd, { tempBaseDir: worktreesRoot });
-					if (runtime.threads.get(runId)?.generation !== generation || backgroundSignal.aborted) {
-						await prepared.discard().catch(() => undefined);
-						return;
-					}
-					worktree = prepared;
-					executionCwd = prepared.cwd;
-					worktreeGroup = worktreeGroupId(prepared);
-					thread.worktree = prepared;
-					thread.executionCwd = executionCwd;
-					monitor.setIsolation(runId, "worktree", "pending", worktreeGroup);
-					installCurrentLifecycle();
+			if (runtime.threads.get(runId)?.generation !== generation) return;
+			if (isolation === "worktree" && !worktree) {
+				const prepared = await createWorktreeIsolation(originalCwd, { tempBaseDir: worktreesRoot });
+				if (runtime.threads.get(runId)?.generation !== generation || backgroundSignal.aborted) {
+					await prepared.discard().catch(() => undefined);
+					return;
 				}
-				// The generation body owns a process slot from here (a lane wait, if
-				// any, was granted above). Recording the transition synchronously keeps
-				// every "queued" surface truthful: only runs still pending in the pool
-				// or behind the lane report a wait.
-				monitor.setWaitReason(runId, "starting");
-				// Model/thinking config may have changed while this generation sat
-				// queued behind the concurrency limit. Re-resolve the route at actual
-				// start so /subagents-setup edits apply to not-yet-started runs.
-				let activeRoute = route;
-				let activeIdleTimeoutMs = runConfig.idleTimeoutSec * 1000;
-				try {
-					const startConfig = await loadConfig(runtime.configPath);
-					const resolvedStart = resolveDispatchModelRoute(agent, startConfig, runCtx);
-					activeRoute = isolation === "worktree"
-						? { ...resolvedStart, agent: withWorktreeSystemPrompt(resolvedStart.agent) }
-						: resolvedStart;
-					activeIdleTimeoutMs = startConfig.idleTimeoutSec * 1000;
-					monitor.setModel(runId, activeRoute.agent.model);
-					monitor.setThinking(runId, activeRoute.thinkingLevel);
-				} catch {
-					/* keep the dispatch-time route when fresh config is unavailable */
-				}
-				let result: SingleResult;
-				try {
-					result = await runSingleAgentWithMainFallback(
-						{
-							defaultCwd: executionCwd,
-							agent: activeRoute.agent,
-							resolveAgentForAttempt: resolveLiveAgentTools,
-							agentName,
-							task,
-							cwd: executionCwd,
-							thinkingLevel: activeRoute.thinkingLevel,
-							thinkingLevelForModel: activeRoute.thinkingLevelForModel,
-							signal: backgroundSignal,
-							onLive,
-							control,
-							makeDetails: makeDetails("single", true),
-							idleTimeoutMs: activeIdleTimeoutMs,
-							sessionRoot: sessionsRoot,
-							scratchRoot,
-						},
-						activeRoute.mainFallbackRef,
-					);
-				} catch (error) {
-					const errorMessage = error instanceof Error ? error.message : String(error);
-					result = {
-						...pending,
-						task: control.getObjective(),
-						exitCode: 1,
-						stderr: errorMessage,
-						stopReason: backgroundSignal.aborted ? "aborted" : "error",
-						errorMessage,
-						dispatchFailed: true,
-					};
-				}
+				worktree = prepared;
+				executionCwd = prepared.cwd;
+				worktreeGroup = worktreeGroupId(prepared);
+				thread.worktree = prepared;
+				thread.executionCwd = executionCwd;
+				monitor.setIsolation(runId, "worktree", "pending", worktreeGroup);
+				installCurrentLifecycle();
+			}
+			// The generation body owns a process slot from here (a lane wait, if
+			// any, was granted above). Recording the transition synchronously keeps
+			// every "queued" surface truthful: only runs still pending in the pool
+			// or behind the lane report a wait.
+			monitor.setWaitReason(runId, "starting");
+			// Model/thinking config may have changed while this generation sat
+			// queued behind the concurrency limit. Re-resolve the route at actual
+			// start so /subagents-setup edits apply to not-yet-started runs.
+			let activeRoute = route;
+			let activeIdleTimeoutMs = runConfig.idleTimeoutSec * 1000;
+			try {
+				const startConfig = await loadConfig(runtime.configPath);
+				const resolvedStart = resolveDispatchModelRoute(agent, startConfig, runCtx);
+				activeRoute = isolation === "worktree"
+					? { ...resolvedStart, agent: withWorktreeSystemPrompt(resolvedStart.agent) }
+					: resolvedStart;
+				activeIdleTimeoutMs = startConfig.idleTimeoutSec * 1000;
+				monitor.setModel(runId, activeRoute.agent.model);
+				monitor.setThinking(runId, activeRoute.thinkingLevel);
+			} catch {
+				/* keep the dispatch-time route when fresh config is unavailable */
+			}
+			let result: SingleResult;
+			try {
+				result = await runSingleAgentWithMainFallback(
+					{
+						defaultCwd: executionCwd,
+						agent: activeRoute.agent,
+						resolveAgentForAttempt: resolveLiveAgentTools,
+						agentName,
+						task,
+						cwd: executionCwd,
+						thinkingLevel: activeRoute.thinkingLevel,
+						thinkingLevelForModel: activeRoute.thinkingLevelForModel,
+						signal: backgroundSignal,
+						onLive,
+						control,
+						makeDetails: makeDetails("single", true),
+						idleTimeoutMs: activeIdleTimeoutMs,
+						sessionRoot: sessionsRoot,
+						scratchRoot,
+					},
+					activeRoute.mainFallbackRef,
+				);
+			} catch (error) {
+				const errorMessage = error instanceof Error ? error.message : String(error);
+				result = {
+					...pending,
+					task: control.getObjective(),
+					exitCode: 1,
+					stderr: errorMessage,
+					stopReason: backgroundSignal.aborted ? "aborted" : "error",
+					errorMessage,
+					dispatchFailed: true,
+				};
+			}
 
-				// Stale work from a retired parent owns no publication or monitor updates.
-				if (runtime.threads.get(runId)?.generation !== generation) return;
-				result.runId = runId;
-				result.projectCwd = originalCwd;
-				result.isolation = isolation;
-				thread.task = result.task;
-				thread.sessionId = result.sessionId;
-				thread.sessionDir = result.sessionDir;
-				thread.lastResult = result;
-				runtime.retainSession(result);
-				monitor.setModel(runId, result.model, result.modelFallbackFrom);
-				monitor.setThinking(runId, result.thinking);
-				// Checkpoint the session location durably: a crash or reload before
-				// settlement still restores this thread with its retained context.
-				if (result.sessionId && result.sessionDir) {
-					persistThreadCheckpoint(runtime, thread, "parked");
-				}
+			// Stale work from a retired parent owns no publication or monitor updates.
+			if (runtime.threads.get(runId)?.generation !== generation) return;
+			result.runId = runId;
+			result.projectCwd = originalCwd;
+			result.isolation = isolation;
+			thread.task = result.task;
+			thread.sessionId = result.sessionId;
+			thread.sessionDir = result.sessionDir;
+			thread.lastResult = result;
+			runtime.retainSession(result);
+			monitor.setModel(runId, result.model, result.modelFallbackFrom);
+			monitor.setThinking(runId, result.thinking);
+			// Checkpoint the session location durably: a crash or reload before
+			// settlement still restores this thread with its retained context.
+			if (result.sessionId && result.sessionDir) {
+				persistThreadCheckpoint(runtime, thread, "parked");
+			}
 
-				const lifecycleInterrupted = (): boolean =>
-					thread.lifecycleOperation === "stop" || thread.state === "stopped";
-				// Stop owns publication once it claims the lifecycle. Leave the partial
-				// result on the thread for that owner to finalize and deliver once.
-				if (lifecycleInterrupted()) return;
+			const lifecycleInterrupted = (): boolean =>
+				thread.lifecycleOperation === "stop" || thread.state === "stopped";
+			// Stop owns publication once it claims the lifecycle. Leave the partial
+			// result on the thread for that owner to finalize and deliver once.
+			if (lifecycleInterrupted()) return;
 
-				// A shutdown can win in the microtask gap after the child RPC
-				// settles. Never replace the stable top-level session with an
-				// aborted partial.
-				if (backgroundSignal.aborted || !runtime.sessionActive) return;
+			// A shutdown can win in the microtask gap after the child RPC
+			// settles. Never replace the stable top-level session with an
+			// aborted partial.
+			if (backgroundSignal.aborted || !runtime.sessionActive) return;
 
-				if (thread.retireOnSettle) runtime.retireThreadSession(thread);
-				// Claim terminal settlement synchronously before the first slow await.
-				// Park therefore either wins while RPC is still active, or is rejected
-				// once settlement owns the generation. Destructive stop may supersede
-				// this reservation; publication is revalidated after Git finalization.
-				const settlementVersion = ++thread.lifecycleVersion;
-				thread.lifecycleOperation = "settle";
-				const ownsSettlement = (): boolean =>
-					runtime.threads.get(runId) === thread &&
-					thread.generation === generation &&
-					thread.lifecycleVersion === settlementVersion &&
-					thread.lifecycleOperation === "settle" &&
-					!thread.retired;
-				try {
-					// The child process has exited. Isolated Git finalization remains
-					// lifecycle-owned and awaited, but no longer consumes a process slot.
-					if (isolation === "worktree") runtime.backgroundQueue.suspend(controller);
-					await thread.finalizeIsolation(generation, result);
+			if (thread.retireOnSettle) runtime.retireThreadSession(thread);
+			// Claim terminal settlement synchronously before the first slow await.
+			// Park therefore either wins while RPC is still active, or is rejected
+			// once settlement owns the generation. Destructive stop may supersede
+			// this reservation; publication is revalidated after Git finalization.
+			const settlementVersion = ++thread.lifecycleVersion;
+			thread.lifecycleOperation = "settle";
+			const ownsSettlement = (): boolean =>
+				runtime.threads.get(runId) === thread &&
+				thread.generation === generation &&
+				thread.lifecycleVersion === settlementVersion &&
+				thread.lifecycleOperation === "settle" &&
+				!thread.retired;
+			try {
+				// The child process has exited. Isolated Git finalization remains
+				// lifecycle-owned and awaited, but no longer consumes a process slot.
+				if (isolation === "worktree") runtime.backgroundQueue.suspend(controller);
+				await thread.finalizeIsolation(generation, result);
 				if (!ownsSettlement()) return;
 
 				const failed = isFailedResult(result);
@@ -337,25 +343,26 @@ export function createBackgroundDispatcher(options: BackgroundDispatcherOptions)
 				);
 				runtime.registerRunResult(runId, result);
 
+				const block = formatCompletionBlock(result, runConfig.maxResultLines, {
+					resultRoot: projectResultsRoot(runtime.configPath, result.projectCwd ?? originalCwd),
+				});
 				const completion: CompletionMessageItem = {
 					agent: result.agent,
-					block: modelLevel
-						? `${formatCompletionBlock(result, runConfig.maxResultLines, { resultRoot: projectResultsRoot(runtime.configPath, result.projectCwd ?? originalCwd) })}\n\n${modelLevelTakeoverNote(result)}`
-						: formatCompletionBlock(result, runConfig.maxResultLines, { resultRoot: projectResultsRoot(runtime.configPath, result.projectCwd ?? originalCwd) }),
+					block: modelLevel ? `${block}\n\n${modelLevelTakeoverNote(result)}` : block,
 					usage: result.usage,
 					model: result.model,
 				};
 				if (modelLevel) {
-					const detail = result.errorMessage?.trim() || "model unavailable or broken";
+					const detail = notifyDetail(result.errorMessage, "model unavailable or broken");
 					runCtx.ui.notify(`✗ ${result.agent} dispatch failed: ${detail} — task handed to the main window`, "error");
 				} else if (dispatchFailed) {
-					runCtx.ui.notify(`✗ ${result.agent} dispatch failed: ${result.errorMessage ?? "dispatch crashed"}`, "error");
+					runCtx.ui.notify(`✗ ${result.agent} dispatch failed: ${notifyDetail(result.errorMessage, "dispatch crashed")}`, "error");
 				}
 				runtime.publishRunCompletion(runId, completion, failed);
-				} finally {
-					if (ownsSettlement()) thread.lifecycleOperation = undefined;
-				}
-			};
+			} finally {
+				if (ownsSettlement()) thread.lifecycleOperation = undefined;
+			}
+		};
 		const queuedGeneration = reserveManagedLane
 			? async (backgroundSignal: AbortSignal, controller: AbortController): Promise<void> => {
 					// Waiting for repository serialization must not consume a process
@@ -442,7 +449,7 @@ export function createBackgroundDispatcher(options: BackgroundDispatcherOptions)
 					thread.queueController = undefined;
 					if (!runtime.sessionActive || !ownsSettlement()) return;
 					try {
-						runCtx.ui.notify(`✗ ${crashed.agent} dispatch failed: ${crashed.errorMessage}`, "error");
+						runCtx.ui.notify(`✗ ${crashed.agent} dispatch failed: ${notifyDetail(crashed.errorMessage, "dispatch crashed")}`, "error");
 						runtime.publishRunCompletion(runId, {
 							agent: crashed.agent,
 							block: formatCompletionBlock(crashed, runConfig.maxResultLines, { resultRoot: projectResultsRoot(runtime.configPath, crashed.projectCwd ?? originalCwd) }),
@@ -473,7 +480,7 @@ export function installThreadLifecycle(thread: SubagentThread, deps: ThreadLifec
 	thread.notifyIsolationFailure = (finalization) => {
 		const paths = [finalization.worktreePath, finalization.patchPath].filter(Boolean).join(" · ");
 		deps.runCtx?.ui.notify(
-			`✗ ${thread.agentName} worktree ${finalization.integrated ? "cleanup" : "integration"} failed${paths ? ` · retained ${paths}` : ""}: ${finalization.error ?? "unknown Git integration error"}`,
+			`✗ ${thread.agentName} worktree ${finalization.integrated ? "cleanup" : "integration"} failed${paths ? ` · retained ${paths}` : ""}: ${notifyDetail(finalization.error, "unknown Git integration error")}`,
 			"error",
 		);
 	};

@@ -10,7 +10,7 @@
 
 import { existsSync, symlinkSync } from "node:fs";
 import { copyFile, mkdir, mkdtemp, realpath, rm, stat, writeFile } from "node:fs/promises";
-import { isAbsolute, join, relative, resolve } from "node:path";
+import { isAbsolute, join, relative, resolve, sep } from "node:path";
 import {
 	GIT_COMMAND_TIMEOUT_MS,
 	GIT_OUTPUT_MAX_BYTES,
@@ -170,7 +170,8 @@ async function runGit(
 /** True only when candidate is root itself or a descendant (cross-platform). */
 export function isPathInside(root: string, candidate: string): boolean {
 	const rel = relative(root, candidate);
-	return rel === "" || (!rel.startsWith("..") && !isAbsolute(rel));
+	// Compare the first segment, not the prefix: `..cache` is a real child.
+	return rel === "" || (rel !== ".." && !rel.startsWith(`..${sep}`) && !isAbsolute(rel));
 }
 
 /** Delete one isolated worktree group: Git's own removal keeps metadata
