@@ -234,8 +234,14 @@ describe("internal model handoff prompts", () => {
 		assert.match(prompt, /resuming an earlier sub-agent session after the selected model failed/u);
 		assert.match(prompt, /Do not redo searches, reads, or edits that already succeeded/u);
 		assert.match(prompt, /workspace may have changed.*re-read it unless you read it during this continuation/u);
-		assert.match(prompt, /Current objective: Fix the cache race/u);
+		assert.match(prompt, /\n\nCurrent objective:\nFix the cache race\n\nPick up exactly where you left off/u);
 		assert.match(prompt, /result-only handoff/u);
+	});
+
+	it("keeps a multi-line objective intact without doubling its final period", () => {
+		const prompt = buildResumePrompt("Fix the cache race.\n- keep the API stable.\n", "a handoff");
+		assert.match(prompt, /Current objective:\nFix the cache race\.\n- keep the API stable\.\n\nPick up/u);
+		assert.doesNotMatch(prompt, /\.\./u);
 	});
 
 });

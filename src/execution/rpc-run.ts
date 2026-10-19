@@ -7,7 +7,7 @@
  * runtime for in-run model fallback and manual recovery.
  */
 
-import { spawn, type ChildProcess } from "node:child_process";
+import { spawn } from "node:child_process";
 import { existsSync, readdirSync } from "node:fs";
 import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { basename, join } from "node:path";
@@ -17,6 +17,7 @@ import type { RpcCommand, RpcExtensionUIResponse, RpcResponse } from "@earendil-
 import { SUBAGENT_TOOL_NAMES, type AgentConfig } from "../delegation/agents.ts";
 import type { ThinkingLevel } from "../configuration/config.ts";
 import { writeTempOwnerMarker } from "../isolation/temp-hygiene.ts";
+import { terminateProcessTree } from "./process-tree.ts";
 import {
 	asPlainTextRpcPrompt,
 	emptyUsage,
@@ -27,7 +28,7 @@ import {
 	type SubagentLiveEvent,
 } from "./rpc-control.ts";
 
-export { asPlainTextRpcPrompt };
+export { asPlainTextRpcPrompt, terminateProcessTree };
 
 export const DEPTH_ENV_VAR = "PI_SUBAGENT_DEPTH";
 export const SUBAGENT_KILL_GRACE_MS = 5_000;
@@ -40,6 +41,32 @@ const RPC_CLEAR_QUEUE_TIMEOUT_MS = 2_000;
 /** Time allowed for the child to boot and answer get_state. */
 export const RPC_READY_TIMEOUT_MS = 60_000;
 export const RPC_ABORT_SETTLE_TIMEOUT_MS = 5_000;
+/** Retained stderr tail. A chatty or crash-looping child must not grow parent
+ * memory without bound, and the tail carries the decisive diagnostic. */
+export const RPC_STDERR_MAX_CHARS = 32_000;
+
+/** Protocol events that prove the child reached the agent loop. */
+const RPC_ACTIVITY_EVENTS = new Set([
+	"agent_start",
+	"agent_end",
+	"turn_start",
+	"turn_end",
+	"message_start",
+	"message_update",
+	"message_end",
+	"tool_execution_start",
+	"tool_execution_update",
+	"tool_execution_end",
+	"auto_retry_start",
+	"auto_retry_end",
+	"agent_settled",
+]);
+
+/** Append child stderr while keeping only the newest bounded tail. */
+export function appendBoundedStderr(current: string, chunk: string, maxChars = RPC_STDERR_MAX_CHARS): string {
+	const next = current + chunk;
+	return next.length <= maxChars ? next : next.slice(next.length - maxChars);
+}
 
 export function isRpcCommandTimeoutError(message?: string): boolean {
 	return typeof message === "string" && message.includes("Timed out waiting for RPC response");
@@ -71,41 +98,6 @@ export function getPiInvocation(args: string[]): { command: string; args: string
 	const isGenericRuntime = /^(node|bun)(\.exe)?$/.test(execName);
 	if (!isGenericRuntime) return { command: process.execPath, args };
 	return { command: "pi", args };
-}
-
-/** Terminate the child and every tool process in its process tree. */
-export function terminateProcessTree(proc: ChildProcess, force: boolean, processGroup = false): void {
-	if (process.platform === "win32" && proc.pid !== undefined) {
-		const killer = spawn("taskkill", ["/pid", String(proc.pid), "/t", "/f"], {
-			stdio: "ignore",
-			windowsHide: true,
-		});
-		const fallback = (): void => {
-			try {
-				proc.kill(force ? "SIGKILL" : "SIGTERM");
-			} catch {
-				/* process may already be gone */
-			}
-		};
-		killer.on("error", fallback);
-		killer.on("close", (code) => {
-			if (code !== 0) fallback();
-		});
-		return;
-	}
-
-	try {
-		if (processGroup && proc.pid !== undefined) {
-			// RPC children are spawned as POSIX process-group leaders. Signalling the
-			// negative pid reaches Pi and non-detached tool descendants; Pi's SIGTERM
-			// handler cleans its own tracked detached children before the hard fallback.
-			process.kill(-proc.pid, force ? "SIGKILL" : "SIGTERM");
-		} else {
-			proc.kill(force ? "SIGKILL" : "SIGTERM");
-		}
-	} catch {
-		/* process may already be gone */
-	}
 }
 
 export function extractToolErrorText(content: unknown): string {
@@ -367,6 +359,7 @@ export async function runRpcAgentAttempt(options: RunRpcAttemptOptions): Promise
 	let lastActivityAt = Date.now();
 	let idleTimer: ReturnType<typeof setInterval> | undefined;
 	let forceKillTimer: ReturnType<typeof setTimeout> | undefined;
+	let terminationRequested = false;
 	let abortHandler: (() => void) | undefined;
 	let abortSettlement: Deferred<void> | undefined;
 	let droppedQueuedCount = 0;
@@ -429,6 +422,10 @@ export async function runRpcAgentAttempt(options: RunRpcAttemptOptions): Promise
 
 	const terminate = (force = false): void => {
 		if (closed) return;
+		// Failure paths and the final cleanup each request a graceful stop; one
+		// signal (one taskkill on Windows) plus the hard-kill timer is enough.
+		if (!force && terminationRequested) return;
+		terminationRequested = true;
 		terminateProcessTree(proc, force, usePosixProcessGroup);
 		if (!force && !forceKillTimer) {
 			forceKillTimer = setTimeout(() => {
@@ -605,25 +602,7 @@ export async function runRpcAgentAttempt(options: RunRpcAttemptOptions): Promise
 		}
 		if (finished) return;
 
-		if (
-			[
-				"agent_start",
-				"agent_end",
-				"turn_start",
-				"turn_end",
-				"message_start",
-				"message_update",
-				"message_end",
-				"tool_execution_start",
-				"tool_execution_update",
-				"tool_execution_end",
-				"auto_retry_start",
-				"auto_retry_end",
-				"agent_settled",
-			].includes(event.type)
-		) {
-			result.rpcActivity = true;
-		}
+		if (RPC_ACTIVITY_EVENTS.has(event.type)) result.rpcActivity = true;
 
 		// Let Pi's outer turn retry run. Grok/xAI long streams commonly drop with
 		// a retryable `terminated` mid-turn; aborting that retry was misread as
@@ -644,8 +623,8 @@ export async function runRpcAgentAttempt(options: RunRpcAttemptOptions): Promise
 
 		if (event.type === "agent_start") {
 			resolveInitialPrompt(true);
+			// Also publishes the live "running" status.
 			setAttemptPhase("running");
-			emit({ kind: "status", status: "running" });
 		}
 		if (event.type === "turn_start") {
 			setAttemptPhase("running");
@@ -717,17 +696,18 @@ export async function runRpcAgentAttempt(options: RunRpcAttemptOptions): Promise
 	proc.stdout?.on("data", (chunk: Buffer | string) => {
 		lastActivityAt = Date.now();
 		stdoutBuffer += typeof chunk === "string" ? chunk : stdoutDecoder.write(chunk);
-		while (true) {
-			const lf = stdoutBuffer.indexOf("\n");
-			if (lf === -1) break;
-			const line = stdoutBuffer.slice(0, lf);
-			stdoutBuffer = stdoutBuffer.slice(lf + 1);
-			processLine(line);
+		// Scan with a cursor and cut the buffer once per chunk: streaming
+		// message_update records are large, and re-slicing per line is quadratic.
+		let start = 0;
+		for (let lf = stdoutBuffer.indexOf("\n"); lf !== -1; lf = stdoutBuffer.indexOf("\n", start)) {
+			processLine(stdoutBuffer.slice(start, lf));
+			start = lf + 1;
 		}
+		if (start > 0) stdoutBuffer = stdoutBuffer.slice(start);
 	});
 
 	proc.stderr?.on("data", (chunk: Buffer | string) => {
-		result.stderr += typeof chunk === "string" ? chunk : stderrDecoder.write(chunk);
+		result.stderr = appendBoundedStderr(result.stderr, typeof chunk === "string" ? chunk : stderrDecoder.write(chunk));
 	});
 
 	proc.stdin?.on("error", (error) => {
@@ -757,7 +737,7 @@ export async function runRpcAgentAttempt(options: RunRpcAttemptOptions): Promise
 		resolveInitialPrompt(false, new Error(`Subagent RPC process exited before the initial prompt was accepted (${disposition}).`));
 		if (forceKillTimer) clearTimeout(forceKillTimer);
 		stdoutBuffer += stdoutDecoder.end();
-		result.stderr += stderrDecoder.end();
+		result.stderr = appendBoundedStderr(result.stderr, stderrDecoder.end());
 		if (stdoutBuffer.length > 0) processLine(stdoutBuffer);
 		const exitError = new Error(
 			`Subagent RPC process exited before settling (${disposition}).${result.stderr ? ` ${result.stderr.trim()}` : ""}`,

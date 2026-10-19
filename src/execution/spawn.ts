@@ -77,14 +77,15 @@ export interface SubagentDetails {
 	background?: boolean;
 }
 
+/** Text of the newest assistant message that has any. A final answer may be
+ * split into several text blocks (for example around interleaved thinking);
+ * returning only the first block silently dropped the rest of the result. */
 export function getFinalOutput(messages: Message[]): string {
 	for (let i = messages.length - 1; i >= 0; i--) {
 		const msg = messages[i];
-		if (msg.role === "assistant") {
-			for (const part of msg.content) {
-				if (part.type === "text") return part.text;
-			}
-		}
+		if (msg.role !== "assistant") continue;
+		const texts = msg.content.flatMap((part) => (part.type === "text" && part.text.trim() ? [part.text] : []));
+		if (texts.length > 0) return texts.join("\n\n");
 	}
 	return "";
 }
@@ -220,7 +221,6 @@ export function writeResultArtifact(output: string, agentName: string, resultsRo
 }
 
 export function isFailedResult(result: SingleResult): boolean {
-
 	return result.exitCode !== 0 || result.stopReason === "error" || result.stopReason === "aborted";
 }
 
@@ -357,8 +357,10 @@ export function getResultOutput(result: SingleResult): string {
 const RESUME_CONTINUATION_RULES =
 	"Your earlier work — searches, reads, edits, and reasoning — is preserved in this session's history above; review it before acting. Do not redo searches, reads, or edits that already succeeded. The workspace may have changed while this thread was inactive: before editing a file, re-read it unless you read it during this continuation. Finish with the result-only handoff your role requires.";
 
+/** The objective is a multi-line brief, so it gets its own block instead of
+ * being spliced mid-sentence (where a trailing period also doubled up). */
 export function buildResumePrompt(task: string, reason: string): string {
-	return `You are resuming an earlier sub-agent session after ${reason}. ${RESUME_CONTINUATION_RULES} Current objective: ${task}. Pick up exactly where you left off and finish it. Continue now.`;
+	return `You are resuming an earlier sub-agent session after ${reason}. ${RESUME_CONTINUATION_RULES}\n\nCurrent objective:\n${task.trim()}\n\nPick up exactly where you left off and finish it. Continue now.`;
 }
 
 /** Create a fresh private session directory under the given root. The owner

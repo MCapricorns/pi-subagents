@@ -3,7 +3,7 @@ import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, it } from "node:test";
-import { renderChildRetryPolicySource, runRpcAgentAttempt } from "../src/execution/rpc-run.ts";
+import { appendBoundedStderr, renderChildRetryPolicySource, RPC_STDERR_MAX_CHARS, runRpcAgentAttempt } from "../src/execution/rpc-run.ts";
 import { getResultOutput, isFailedResult, isModelLevelFailure, isRetryableStartupFailure, runSingleAgentWithMainFallback } from "../src/execution/spawn.ts";
 import { RpcRunControl } from "../src/execution/rpc-control.ts";
 
@@ -76,6 +76,14 @@ describe("child provider retry policy", () => {
 	});
 });
 
+describe("bounded stderr retention", () => {
+	it("keeps short output whole and trims long output to its newest tail", () => {
+		assert.equal(appendBoundedStderr("ab", "cd", 10), "abcd");
+		assert.equal(appendBoundedStderr("abcdef", "ghij", 5), "fghij");
+		assert.equal(appendBoundedStderr("", "0123456789", 4), "6789");
+	});
+});
+
 describe("RPC terminal failure reporting", () => {
 	it("preserves safe silent startup retries before any prompt was sent", async () => {
 		await withChild("", (result) => {
@@ -144,6 +152,27 @@ send({ type: "agent_settled" });`, (result) => {
 			assert.equal(result.errorMessage, undefined);
 			assert.equal(result.failedTools?.length, 1);
 			assert.match(getResultOutput(result), /regression now passes/);
+		});
+	});
+
+	it("frames records split across chunks and keeps every text block of the final answer", async () => {
+		await withChild(`
+const record = JSON.stringify({ type: "message_end", message: { role: "assistant",
+  content: [{ type: "text", text: "First half." }, { type: "thinking", thinking: "x" }, { type: "text", text: "Second half." }],
+  stopReason: "stop" } }) + "\\n";
+process.stdout.write(record.slice(0, 17));
+setTimeout(() => process.stdout.write(record.slice(17) + JSON.stringify({ type: "agent_settled" }) + "\\n"), 20);`, (result) => {
+			assert.equal(isFailedResult(result), false);
+			assert.equal(result.usage.turns, 1);
+			assert.equal(getResultOutput(result), "First half.\n\nSecond half.");
+		});
+	});
+
+	it("keeps only the newest bounded stderr tail of a chatty child", async () => {
+		await withChild(`process.stderr.write("x".repeat(${RPC_STDERR_MAX_CHARS * 2}) + "LAST-LINE\\n", () => process.exit(9));`, (result) => {
+			assert.equal(isFailedResult(result), true);
+			assert.ok(result.stderr.length <= RPC_STDERR_MAX_CHARS, `stderr is ${result.stderr.length} characters`);
+			assert.match(result.stderr, /LAST-LINE\n$/u);
 		});
 	});
 

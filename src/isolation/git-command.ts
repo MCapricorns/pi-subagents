@@ -1,6 +1,7 @@
 /** Bounded, abortable process runner used by Git isolation operations. */
 
-import { spawn, type ChildProcess } from "node:child_process";
+import { spawn } from "node:child_process";
+import { terminateProcessTree } from "../execution/process-tree.ts";
 
 export interface CommandRunOptions {
 	cwd: string;
@@ -30,38 +31,6 @@ export const GIT_COMMAND_KILL_GRACE_MS = 2_000;
 export const GIT_OUTPUT_MAX_BYTES = 64 * 1024 * 1024;
 export const WORKTREE_PATCH_MAX_BYTES = GIT_OUTPUT_MAX_BYTES;
 
-/** Terminate the complete spawned process tree so checkout filters cannot
- * survive an abort or timeout. */
-function terminateCommandTree(child: ChildProcess, force: boolean, processGroup: boolean): void {
-	if (process.platform === "win32" && child.pid !== undefined) {
-		const fallback = (): void => {
-			try {
-				child.kill(force ? "SIGKILL" : "SIGTERM");
-			} catch {
-				/* process may already be gone */
-			}
-		};
-		const killer = spawn("taskkill", ["/pid", String(child.pid), "/t", "/f"], {
-			stdio: "ignore",
-			windowsHide: true,
-		});
-		killer.once("error", fallback);
-		killer.once("close", (code) => {
-			if (code !== 0) fallback();
-		});
-		return;
-	}
-	try {
-		if (processGroup && child.pid !== undefined) {
-			process.kill(-child.pid, force ? "SIGKILL" : "SIGTERM");
-		} else {
-			child.kill(force ? "SIGKILL" : "SIGTERM");
-		}
-	} catch {
-		/* process may already be gone */
-	}
-}
-
 /** Default argument-safe runner. Output is bounded before binary patches enter
  * memory, and timeout/abort terminates the complete checkout-filter process tree. */
 export const runCommand: CommandRunner = (command, args, options) =>
@@ -89,10 +58,10 @@ export const runCommand: CommandRunner = (command, args, options) =>
 		let forceKillTimer: ReturnType<typeof setTimeout> | undefined;
 
 		const terminate = (): void => {
-			terminateCommandTree(child, false, usePosixProcessGroup);
+			terminateProcessTree(child, false, usePosixProcessGroup);
 			if (!forceKillTimer) {
 				forceKillTimer = setTimeout(
-					() => terminateCommandTree(child, true, usePosixProcessGroup),
+					() => terminateProcessTree(child, true, usePosixProcessGroup),
 					GIT_COMMAND_KILL_GRACE_MS,
 				);
 				if (typeof forceKillTimer.unref === "function") forceKillTimer.unref();
