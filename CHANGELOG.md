@@ -3,6 +3,14 @@
 Release notes for `@ferris1225/pi-subagents`. Only the most recent releases
 are kept here; every published version is preserved as a GitHub Release.
 
+## 4.3.29
+
+- Remove the leftover `steward` and `sentinel` routing. Those roles are no
+  longer shipped, yet a custom file with either name still received a special
+  routing rule and lease label; it is now an ordinary custom role, listed by
+  its catalog line only. Configs without adoption tracking now assume the
+  shipped two-role catalog.
+
 ## 4.3.28
 
 - Deliver a child's whole final answer. When the last assistant message split

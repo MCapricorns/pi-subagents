@@ -16,9 +16,9 @@ import { MAX_SUBAGENT_CONCURRENCY } from "../execution/background.ts";
 /** Full catalog of agents shipped with the package (selectable in /subagents-setup). */
 export const BUILTIN_AGENT_NAMES = ["scout", "artisan"] as const;
 
-// Historical catalog for configs written before built-in adoption tracking.
+// Catalog assumed for configs written before built-in adoption tracking.
 // Keep this frozen so future built-ins are still recognized as new.
-const INITIAL_AGENT_NAMES = ["scout", "artisan", "steward"] as const;
+const INITIAL_AGENT_NAMES = ["scout", "artisan"] as const;
 
 /** Agents enabled out of the box on a fresh install. */
 export const DEFAULT_ENABLED_AGENTS: readonly string[] = [...BUILTIN_AGENT_NAMES];

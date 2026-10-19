@@ -164,14 +164,14 @@ describe("loadConfig", () => {
 		assert.deepEqual(saved.knownAgents, adopted.knownAgents);
 	});
 
-	it("treats a config without adoption tracking as the original three-role catalog", async (t) => {
+	it("treats a config without adoption tracking as the original two-role catalog", async (t) => {
 		const dir = tempDir(t);
 		const path = join(dir, "pi-subagents.json");
 		writeFileSync(path, JSON.stringify({ enabledAgents: ["artisan"] }), "utf8");
 
 		const config = await loadConfig(path);
 		assert.deepEqual(config.enabledAgents, ["artisan"]);
-		assert.deepEqual(config.knownAgents, ["scout", "artisan", "steward"]);
+		assert.deepEqual(config.knownAgents, ["scout", "artisan"]);
 	});
 
 	it("round-trips selected models, thinking preferences, and concurrency", async (t) => {

@@ -13,6 +13,9 @@ is clear, and delegation will actually reduce cost or improve completion quality
 
 ## What's new
 
+**4.3.29** — the retired `steward` and `sentinel` roles lose their leftover
+routing rules: a custom file with either name is now an ordinary custom role.
+
 **4.3.28** — a child's final answer is delivered whole even when it spans
 several text blocks, child stderr is kept to a bounded tail with one-line error
 toasts, and model handoffs keep a multi-line objective intact. Streaming
@@ -547,9 +550,9 @@ cached system prefix. Hosts without a section map still receive the same
 contract appended to the system prompt. `enabledAgents` is authoritative after
 catalog adoption: a newly shipped built-in is appended once, then `knownAgents`
 records that it was surfaced
-so a deliberate later disable remains disabled. Retired `steward` and `sentinel`
-names left in an older config do nothing unless a file still defines them; saving
-setup drops names that have no file. Available custom roles remain
+so a deliberate later disable remains disabled. Role names left in an older
+config do nothing unless a file still defines them; saving setup drops names
+that have no file. Available custom roles remain
 selectable even when disabled. Invalid known fields fall back safely, and unknown fields
 are dropped when canonical config is persisted.
 
