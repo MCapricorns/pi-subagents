@@ -141,11 +141,13 @@ export function formatPhaseLeaseReceipt(
 function preferredRoleUse(agents: readonly AgentConfig[]): string | undefined {
 	const names = new Set(agents.map((agent) => agent.name));
 	const uses: string[] = [];
+	// The catalog above already carries each role's full description; this line
+	// adds only the routing preference and the boundary that most often misroutes.
 	if (names.has("scout")) {
-		uses.push("`scout` for read-only code, documentation, and web lookup only (no shell — it cannot run commands, tests, or builds; execution stays in main)");
+		uses.push("`scout` for read-only lookups (no shell — commands, tests, and builds stay in main)");
 	}
 	if (names.has("artisan")) {
-		uses.push("`artisan` for one substantial implementation, fix, refactor, test, or docs change, including its checks");
+		uses.push("`artisan` for one substantial change with its checks");
 	}
 	if (uses.length === 0) return undefined;
 	const preference = uses.length === 1 ? `Prefer ${uses[0]}` : `Prefer ${uses[0]}, and ${uses[1]}`;

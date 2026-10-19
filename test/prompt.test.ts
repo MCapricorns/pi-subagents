@@ -39,7 +39,11 @@ describe("buildDelegationDirective", () => {
 	it("prefers the two built-in roles without inventing extra phases", () => {
 		const directive = buildDelegationDirective(loadBuiltinAgents());
 		assert.match(directive, /Use a subagent when the work can run independently in parallel, its boundary is clear, and delegation will actually reduce cost or improve completion quality/u);
-		assert.match(directive, /Prefer `scout` for read-only code, documentation, and web lookup only \(no shell — it cannot run commands, tests, or builds; execution stays in main\), and `artisan` for one substantial implementation/u);
+		assert.match(directive, /Prefer `scout` for read-only lookups \(no shell — commands, tests, and builds stay in main\), and `artisan` for one substantial change with its checks/u);
+		// The preference line must not restate the catalog descriptions.
+		for (const role of loadBuiltinAgents()) {
+			assert.equal(directive.split(role.description).length - 1, 1);
+		}
 		assert.match(directive, /Keep a small edit already understood in the current context in main/u);
 		assert.match(directive, /Do not open a phase that repeats owned work, splits one tightly coupled change, or exists only to fill a free slot/u);
 		assert.match(directive, /one owner, a stable `phaseId`, and exact writer `scope`/u);
@@ -82,7 +86,7 @@ describe("buildDelegationDirective", () => {
 	it("shows routing only for enabled roles", () => {
 		const directive = buildDelegationDirective([agent("artisan")]);
 		assert.match(directive, /- artisan: artisan description/u);
-		assert.match(directive, /Prefer `artisan` for one substantial/u);
+		assert.match(directive, /Prefer `artisan` for one substantial change/u);
 		assert.doesNotMatch(directive, /\bscout\b|\bsteward\b|\bsentinel\b/u);
 	});
 
