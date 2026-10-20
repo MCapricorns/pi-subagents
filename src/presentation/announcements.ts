@@ -2,12 +2,11 @@
 
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { existsSync } from "node:fs";
-import { FIRST_RUN_SETUP_HINT, loadConfig, saveConfig } from "../configuration/config.ts";
+import { loadConfig, saveConfig } from "../configuration/config.ts";
 import { availableModelsInScope, filterUnavailableModelOverrides } from "../configuration/models.ts";
+import { offerFirstRunSetup } from "../configuration/setup.ts";
 import { announceRecoveryRecords, relocateRecoveryManifest } from "../isolation/recovery.ts";
 import type { SubagentRuntime } from "../lifecycle/runtime.ts";
-import { seedCostLedgerFromSession } from "./cost-ledger.ts";
-import { installCostFooter } from "./cost-footer.ts";
 import { installActiveRunsWidget } from "./widget.ts";
 
 /** Drop unavailable model overrides back to dynamic main-model routing. */
@@ -36,9 +35,7 @@ async function removeUnavailableAgentModels(
 
 export function registerAnnouncements(pi: ExtensionAPI, runtime: SubagentRuntime): void {
 	pi.on("session_start", async (_event, ctx) => {
-		if (!existsSync(runtime.configPath)) {
-			ctx.ui.notify(`pi-subagents: ${FIRST_RUN_SETUP_HINT}`, "info");
-		}
+		const firstRun = !existsSync(runtime.configPath);
 		await relocateRecoveryManifest(runtime.configPath);
 		await announceRecoveryRecords(runtime.configPath, ctx);
 		await removeUnavailableAgentModels(ctx, runtime);
@@ -53,13 +50,10 @@ export function registerAnnouncements(pi: ExtensionAPI, runtime: SubagentRuntime
 				"info",
 			);
 		}
-		// The widget and the per-model cost footer are TUI-only. Seeding first
-		// means the first footer render already carries the reloaded session's
-		// per-model spend.
+		// The active-run widget is TUI-only.
 		if (ctx.mode !== "tui") return;
-		seedCostLedgerFromSession(ctx);
 		installActiveRunsWidget(ctx);
-		installCostFooter(ctx);
+		if (firstRun) await offerFirstRunSetup(ctx, runtime.configPath);
 	});
 
 	// Compaction failures are otherwise silent in long orchestration sessions

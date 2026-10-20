@@ -3,6 +3,18 @@
 Release notes for `@ferris1225/pi-subagents`. Only the most recent releases
 are kept here; every published version is preserved as a GitHub Release.
 
+## 4.3.30
+
+- Restore pi's own footer. The extension no longer replaces the built-in
+  consumption line with a per-model cost footer, so session spend is shown
+  exactly as pi reports it.
+- Ask for configuration on a fresh install. When `pi-subagents.json` does not
+  exist, session start announces `/subagents-setup` and offers to open the
+  wizard immediately instead of only printing a hint.
+- The full setup asks each enabled role's thinking level right after its model,
+  the same model-then-thinking order as _Configure an agent_, instead of leaving
+  the role default unexamined.
+
 ## 4.3.29
 
 - Remove the leftover `steward` and `sentinel` routing. Those roles are no

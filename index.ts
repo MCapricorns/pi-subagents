@@ -8,8 +8,8 @@
  *   - execution/     — process queue, RPC transport/control, and model handoff
  *   - lifecycle/     — durable threads, restoration, controls, and delivery
  *   - isolation/     — Git worktrees, recovery, and temporary-state hygiene
- *   - presentation/  — announcements, cost footer/ledger, formatting, monitor,
- *     and the active-run widget
+ *   - presentation/  — announcements, formatting, monitor, and the active-run
+ *     widget
  *
  * Also registers the `/subagents-setup` command and a `before_agent_start` hook
  * that installs the delegation directive as replaceable prompt sections so the
@@ -31,8 +31,6 @@ import { createRuntime } from "./src/lifecycle/runtime.ts";
 import { bootstrapDurableState } from "./src/lifecycle/thread-restore.ts";
 import { registerLookupTools } from "./src/lifecycle/tools.ts";
 import { registerAnnouncements } from "./src/presentation/announcements.ts";
-import { registerMainCostTracking } from "./src/presentation/cost-ledger.ts";
-import { clearCostFooter } from "./src/presentation/cost-footer.ts";
 import { matchRunIds } from "./src/presentation/format.ts";
 import { clearActiveRunsWidget } from "./src/presentation/widget.ts";
 
@@ -66,13 +64,11 @@ export default function (pi: ExtensionAPI): void {
 
 	pi.on("session_shutdown", async (_event, ctx) => {
 		clearActiveRunsWidget(ctx);
-		clearCostFooter(ctx);
 		await runtime.shutdown();
 	});
 
 	registerSubagentTool(pi, runtime);
 	registerLookupTools(pi, runtime);
-	registerMainCostTracking(pi);
 
 	pi.registerCommand("subagents-setup", {
 		description: "Configure pi-subagents: agents, models, and per-role thinking",

@@ -1,10 +1,11 @@
 import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import assert from "node:assert/strict";
 import { describe, it, type TestContext } from "node:test";
 import type { Api, Model } from "@earendil-works/pi-ai";
-import type { ExtensionCommandContext, Theme } from "@earendil-works/pi-coding-agent";
+import type { ExtensionCommandContext, ExtensionContext, Theme } from "@earendil-works/pi-coding-agent";
 import {
 	KeybindingsManager,
 	TUI_KEYBINDINGS,
@@ -12,7 +13,7 @@ import {
 	type TUI,
 } from "@earendil-works/pi-tui";
 import type { SubagentsConfig } from "../src/configuration/config.ts";
-import { runSetup } from "../src/configuration/setup.ts";
+import { offerFirstRunSetup, runSetup } from "../src/configuration/setup.ts";
 import { promptSelectMany } from "../src/configuration/ui.ts";
 
 const KEY = {
@@ -170,10 +171,12 @@ describe("runSetup menu", () => {
 
 		await runSetup(context, path);
 		assert.ok(!notices.some((message) => message.includes("failed")), notices.join("\n"));
-		assert.equal(pickerCount, 2);
+		// Enable picker, then a model and its thinking level for the one role.
+		assert.equal(pickerCount, 3);
 		const saved = JSON.parse(readFileSync(path, "utf8")) as SubagentsConfig;
 		assert.deepEqual(saved.enabledAgents, ["scout"]);
 		assert.equal(saved.maxConcurrentAgents, 2);
+		assert.deepEqual(saved.agentThinkingLevels, {});
 	});
 
 	it("configures a custom role through the nested fuzzy model picker", async (t) => {
@@ -369,4 +372,69 @@ describe("runSetup menu", () => {
 		}
 	});
 }
+});
+
+describe("first install", () => {
+	function freshConfigPath(t: TestContext): string {
+		const dir = mkdtempSync(join(tmpdir(), "pi-subagents-first-run-"));
+		t.after(() => rmSync(dir, { recursive: true, force: true }));
+		return join(dir, "pi-subagents.json");
+	}
+
+	it("announces /subagents-setup and asks before opening the wizard", async (t) => {
+		const path = freshConfigPath(t);
+		const notices: string[] = [];
+		let confirmCalls = 0;
+		const context = {
+			mode: "tui",
+			ui: {
+				notify: (message: string) => notices.push(message),
+				confirm: async () => {
+					confirmCalls++;
+					return false;
+				},
+			},
+		} as unknown as ExtensionContext;
+
+		await offerFirstRunSetup(context, path);
+
+		assert.equal(confirmCalls, 1);
+		assert.ok(notices.some((message) => message.includes("/subagents-setup")), notices.join("\n"));
+		assert.ok(!existsSync(path));
+	});
+
+	it("asks for each role's thinking level right after its model", async (t) => {
+		const path = freshConfigPath(t);
+		const reasoning = model("reasoning");
+		const notices: string[] = [];
+		const titles: string[] = [];
+		const context = {
+			mode: "tui",
+			cwd: dirname(path),
+			model: reasoning,
+			scopedModels: [],
+			modelRegistry: { getAvailable: () => [reasoning] },
+			ui: {
+				notify: (message: string) => notices.push(message),
+				confirm: async () => true,
+				select: async (_title: string, options: string[]) => options[0],
+				custom: async (factory: PickerFactory) => new Promise((resolve) => {
+					const component = renderComponent(factory, resolve);
+					titles.push(component.render(120)[1] ?? "");
+					component.handleInput?.(KEY.enter);
+				}),
+			},
+		} as unknown as ExtensionContext;
+
+		await offerFirstRunSetup(context, path);
+
+		assert.ok(notices.some((message) => message.includes("/subagents-setup")), notices.join("\n"));
+		assert.match(titles[1] ?? "", /Model for scout/u);
+		assert.match(titles[2] ?? "", /Thinking for scout/u);
+		assert.match(titles[3] ?? "", /Model for artisan/u);
+		assert.match(titles[4] ?? "", /Thinking for artisan/u);
+		const saved = JSON.parse(readFileSync(path, "utf8")) as SubagentsConfig;
+		assert.deepEqual(saved.enabledAgents, ["scout", "artisan"]);
+		assert.deepEqual(saved.agentThinkingLevels, {});
+	});
 });

@@ -13,6 +13,11 @@ is clear, and delegation will actually reduce cost or improve completion quality
 
 ## What's new
 
+**4.3.30** — pi's own footer is back: the per-model cost footer is removed, so
+pi's built-in consumption line shows unchanged. On a fresh install pi-subagents
+announces `/subagents-setup` and asks whether to configure now; the wizard then
+asks each role's model and immediately its thinking level.
+
 **4.3.29** — the retired `steward` and `sentinel` roles lose their leftover
 routing rules: a custom file with either name is now an ordinary custom role.
 
@@ -148,9 +153,11 @@ Pi's extension list shows `@ferris1225/pi-subagents` without an internal source-
 Open pi and run `/subagents-setup`. The original menu flow lets you enable or
 disable roles, configure one role's model and thinking level, or run the full setup
 again. Each screen uses the usual arrow-key/Enter/Esc navigation, and model lists
-remain searchable. Fresh installs select both roles. A newly shipped built-in is
-surfaced once without being re-enabled after you deliberately turn it off. Then ask
-for work:
+remain searchable. A fresh install announces the command at session start and
+offers to open the wizard right away; the full setup asks each enabled role's
+model, then its thinking level. Fresh installs select both roles. A newly shipped
+built-in is surfaced once without being re-enabled after you deliberately turn it
+off. Then ask for work:
 
 ```text
 Map how authentication works, fix the refresh race, and run the tests.
@@ -388,7 +395,7 @@ The TUI widget renders one line per active run in fixed identity columns —
 status icon, right-aligned `#id`, padded agent name, then the task label — so
 every label starts at the same column, with the live activity dimmed after
 `↳` on its own line and the rest of the telemetry flowing inline after ` · `: the
-worktree badge, wait state, token flow in the footer vocabulary (`↑` input, `↓`
+worktree badge, wait state, token flow in pi's footer vocabulary (`↑` input, `↓`
 output, `R`/`W` cache read/write), cost, full `provider/model`, current effective
 `think:<level>`, and seconds-precision elapsed. A live run renders
 two lines: what it is — agent, task, usage, model, thinking, elapsed —
@@ -410,30 +417,6 @@ for shared-checkout write serialization, or `starting`. The widget is
 capped at ten lines: when many runs are live, extra runs collapse into a
 `… +N more` marker so the editor keeps its space.
 
-### Per-model cost footer
-
-In TUI sessions the extension replaces pi's built-in consumption line with a
-per-model tally of the main window's own spend, directly under the
-current-project line. Models are never merged: each `provider/model` keeps its
-own token flow, cost, and — for the current model — context share and
-effective thinking level:
-
-```text
-~/projs/app (main)
-↑48.1k ↓112.7k R1.9M W302.4k $3.0812 · 41.2%/200.0k     zhipu/glm-4.7 • high
-anthropic/claude-sonnet-4 ↑12.0k ↓31.2k R410.0k $0.9104
-```
-
-Settled models rank by spend and cap at three rows (`… +N more models`);
-under width pressure a settled row drops its token flow before truncating, so
-`model $cost` always survives. Sub-agent spend is deliberately not folded in:
-children report their own usage per run when they settle, and pi would
-otherwise attribute it to one session total — exactly the cross-model merge
-this footer exists to avoid. The ledger reseeds from the session file on
-reload or session replacement. The footer is removed at session shutdown and
-reinstalled with the new session's live context, so switching or reloading
-never reuses a stale context from the previous session.
-
 Completions resume the main agent on their own, with a compact block of at most 40
 lines by default. Longer output (or lines wider than 200 characters) is not inlined
 at all: the notice states the true size — `137 lines`, or a 200-character clip when
@@ -453,7 +436,7 @@ A `wait: true` dispatch streams its progress onto the tool card while it waits.
 Usage is no longer attached to the tool result: pi folds tool-result usage into
 one session total, which merged every model's spend into the main window's
 consumption line. Instead, each child reports its usage per run — with its full
-`provider/model` ref — when it settles, and a parallel group's footer totals
+`provider/model` ref — when it settles, and a parallel group's totals
 are grouped per model, never summed across them:
 
 ```text
@@ -504,7 +487,8 @@ search snippets, records material dates/versions, and marks uncertainty.
 
 `/subagents-setup` opens the original settings menu: enable or disable roles,
 configure one enabled role's model and thinking level, or walk through a full
-re-setup. `Esc` moves back through the menu stack, and model lists support fuzzy
+re-setup. A full re-setup asks each role's model and then its thinking level, in
+that order. `Esc` moves back through the menu stack, and model lists support fuzzy
 search. The enable menu discovers built-ins and actual custom role files in the configured
 scope, including roles never configured before. Project files require Pi's project trust.
 Config-only names are not role definitions and never appear in the enable or configure

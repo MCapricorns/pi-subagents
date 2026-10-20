@@ -127,7 +127,7 @@ export const DEFAULT_CONFIG: SubagentsConfig = {
 };
 
 export const FIRST_RUN_SETUP_HINT =
-	"Run /subagents-setup to choose enabled roles, models, and thinking levels. " +
+	"Run /subagents-setup to pick each role's model and thinking level. " +
 	"Scout does lightweight read-only research. Artisan implements one substantial change.";
 
 export function getConfigPath(agentDir: string = getAgentDir()): string {
