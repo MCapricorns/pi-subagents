@@ -1,5 +1,4 @@
 import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
-import { existsSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import assert from "node:assert/strict";
@@ -13,7 +12,7 @@ import {
 	type TUI,
 } from "@earendil-works/pi-tui";
 import type { SubagentsConfig } from "../src/configuration/config.ts";
-import { offerFirstRunSetup, runSetup } from "../src/configuration/setup.ts";
+import { ensureDefaultConfig, runSetup } from "../src/configuration/setup.ts";
 import { promptSelectMany } from "../src/configuration/ui.ts";
 
 const KEY = {
@@ -381,26 +380,28 @@ describe("first install", () => {
 		return join(dir, "pi-subagents.json");
 	}
 
-	it("announces /subagents-setup and asks before opening the wizard", async (t) => {
+	it("writes the default config once and announces /subagents-setup", async (t) => {
 		const path = freshConfigPath(t);
 		const notices: string[] = [];
-		let confirmCalls = 0;
 		const context = {
 			mode: "tui",
 			ui: {
 				notify: (message: string) => notices.push(message),
-				confirm: async () => {
-					confirmCalls++;
-					return false;
-				},
 			},
 		} as unknown as ExtensionContext;
 
-		await offerFirstRunSetup(context, path);
+		await ensureDefaultConfig(context, path);
 
-		assert.equal(confirmCalls, 1);
-		assert.ok(notices.some((message) => message.includes("/subagents-setup")), notices.join("\n"));
-		assert.ok(!existsSync(path));
+		const saved = JSON.parse(readFileSync(path, "utf8")) as SubagentsConfig;
+		assert.deepEqual(saved.enabledAgents, ["scout", "artisan"]);
+		assert.deepEqual(saved.knownAgents, ["scout", "artisan"]);
+		assert.deepEqual(saved.agentModels, {}, "no override keeps both roles on the main model");
+		assert.deepEqual(saved.agentThinkingLevels, {});
+		assert.equal(notices.length, 1, notices.join("\n"));
+		assert.match(notices[0] ?? "", /\/subagents-setup/u);
+
+		await ensureDefaultConfig(context, path);
+		assert.equal(notices.length, 1, "the existing file keeps later sessions silent");
 	});
 
 	it("asks for each role's thinking level right after its model", async (t) => {
@@ -426,9 +427,8 @@ describe("first install", () => {
 			},
 		} as unknown as ExtensionContext;
 
-		await offerFirstRunSetup(context, path);
+		await runSetup(context, path);
 
-		assert.ok(notices.some((message) => message.includes("/subagents-setup")), notices.join("\n"));
 		assert.match(titles[1] ?? "", /Model for scout/u);
 		assert.match(titles[2] ?? "", /Thinking for scout/u);
 		assert.match(titles[3] ?? "", /Model for artisan/u);

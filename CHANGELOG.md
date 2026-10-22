@@ -3,6 +3,14 @@
 Release notes for `@ferris1225/pi-subagents`. Only the most recent releases
 are kept here; every published version is preserved as a GitHub Release.
 
+## 4.3.31
+
+- Write the config on first start instead of prompting. A missing
+  `pi-subagents.json` is created with both roles enabled and no model overrides,
+  so scout and artisan follow the main model immediately. Session start announces
+  `/subagents-setup` once; the file's presence keeps later sessions silent. The
+  first-run confirm dialog is gone.
+
 ## 4.3.30
 
 - Restore pi's own footer. The extension no longer replaces the built-in

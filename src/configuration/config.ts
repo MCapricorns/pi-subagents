@@ -126,10 +126,6 @@ export const DEFAULT_CONFIG: SubagentsConfig = {
 	idleTimeoutSec: DEFAULT_IDLE_TIMEOUT_SEC,
 };
 
-export const FIRST_RUN_SETUP_HINT =
-	"Run /subagents-setup to pick each role's model and thinking level. " +
-	"Scout does lightweight read-only research. Artisan implements one substantial change.";
-
 export function getConfigPath(agentDir: string = getAgentDir()): string {
 	return join(agentDir, CONFIG_FILE_NAME);
 }

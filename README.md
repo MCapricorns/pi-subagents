@@ -13,10 +13,14 @@ is clear, and delegation will actually reduce cost or improve completion quality
 
 ## What's new
 
+**4.3.31** — a first start writes `pi-subagents.json` instead of prompting. Both
+roles are enabled with no model overrides, so scout and artisan follow the main
+model immediately; session start announces `/subagents-setup` once, and later
+sessions stay silent because the file itself is the marker.
+
 **4.3.30** — pi's own footer is back: the per-model cost footer is removed, so
-pi's built-in consumption line shows unchanged. On a fresh install pi-subagents
-announces `/subagents-setup` and asks whether to configure now; the wizard then
-asks each role's model and immediately its thinking level.
+pi's built-in consumption line shows unchanged. The wizard asks each role's model
+and immediately its thinking level.
 
 **4.3.29** — the retired `steward` and `sentinel` roles lose their leftover
 routing rules: a custom file with either name is now an ordinary custom role.
@@ -153,9 +157,9 @@ Pi's extension list shows `@ferris1225/pi-subagents` without an internal source-
 Open pi and run `/subagents-setup`. The original menu flow lets you enable or
 disable roles, configure one role's model and thinking level, or run the full setup
 again. Each screen uses the usual arrow-key/Enter/Esc navigation, and model lists
-remain searchable. A fresh install announces the command at session start and
-offers to open the wizard right away; the full setup asks each enabled role's
-model, then its thinking level. Fresh installs select both roles. A newly shipped
+remain searchable. A fresh install writes a default config at session start — both
+roles enabled, both following the main model — and announces the command once; the
+full setup asks each enabled role's model, then its thinking level. A newly shipped
 built-in is surfaced once without being re-enabled after you deliberately turn it
 off. Then ask for work:
 
@@ -494,8 +498,10 @@ scope, including roles never configured before. Project files require Pi's proje
 Config-only names are not role definitions and never appear in the enable or configure
 picker. Saving an enable selection or full setup discards unavailable role names and their
 model/thinking settings; no retired-name aliases or configuration migration are applied.
-To start over, remove `pi-subagents.json` and run `/subagents-setup` again. Other settings live in
-`~/.pi/agent/pi-subagents.json` (following `PI_CODING_AGENT_DIR`):
+The file is created on first start, and its presence is what keeps later sessions
+silent. To start over, delete it and run `/subagents-setup`; the next session writes
+the defaults again. Settings live in `~/.pi/agent/pi-subagents.json` (following
+`PI_CODING_AGENT_DIR`):
 
 ```json
 {

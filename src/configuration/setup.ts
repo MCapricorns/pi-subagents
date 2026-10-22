@@ -15,7 +15,6 @@ import {
 	BUILTIN_AGENT_NAMES,
 	DEFAULT_CONFIG,
 	DEFAULT_ENABLED_AGENTS,
-	FIRST_RUN_SETUP_HINT,
 	agentProfile,
 	errorMessage,
 	getConfigPath,
@@ -387,20 +386,19 @@ export async function runSetup(ctx: ExtensionContext, configPath: string = getCo
 }
 
 /**
- * First-install offer: announce the command, then let the user start the wizard
- * right away. Declining leaves the config untouched and the notice is enough to
- * run `/subagents-setup` later.
+ * First start: write the shipped defaults so both roles work immediately — no
+ * model overrides means each child follows the main model — then announce the
+ * command that customizes them. The file is the marker: once it exists, later
+ * sessions stay silent.
  */
-export async function offerFirstRunSetup(
+export async function ensureDefaultConfig(
 	ctx: ExtensionContext,
 	configPath: string = getConfigPath(),
 ): Promise<void> {
-	ctx.ui.notify(`pi-subagents: ${FIRST_RUN_SETUP_HINT}`, "info");
-	if (ctx.mode !== "tui") return;
-	const start = await ctx.ui.confirm(
-		"Configure pi-subagents now?",
-		"Pick each role's model, then its thinking level. Esc in the wizard stops setup; run /subagents-setup later if you skip now.",
+	if (await configExists(configPath)) return;
+	await saveConfig(DEFAULT_CONFIG, configPath);
+	ctx.ui.notify(
+		`pi-subagents: wrote ${configPath} with scout and artisan enabled; both follow the main model. Run /subagents-setup to pick a model and thinking level per role.`,
+		"info",
 	);
-	if (!start) return;
-	await runSetup(ctx, configPath);
 }
