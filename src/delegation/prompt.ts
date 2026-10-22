@@ -142,7 +142,7 @@ function preferredRoleUse(agents: readonly AgentConfig[]): string | undefined {
 	// The catalog above already carries each role's full description; this line
 	// adds only the routing preference and the boundary that most often misroutes.
 	if (names.has("scout")) {
-		uses.push("`scout` for read-only lookups (no shell — commands, tests, and builds stay in main)");
+		uses.push("`scout` for read-only lookups (read-only tools, no shell — commands, tests, and builds stay in main)");
 	}
 	if (names.has("artisan")) {
 		uses.push("`artisan` for one substantial change with its checks");
@@ -160,6 +160,7 @@ function delegationBody(agents: AgentConfig[]): string {
 		"The user's task sets the outcome. If it conflicts with this section, follow the task. Admission still rejects duplicate phases and overlapping writers.",
 		"Use a subagent when the work can run independently in parallel, its boundary is clear, and delegation will actually reduce cost or improve completion quality.",
 		...(preferred ? [preferred] : []),
+		"Children inherit this session's live tool surface: a role without an allowlist gets everything you have, including `codemode`, and a read-only role keeps only the tools the host proves read-only. Do not plan a phase that needs a tool its role cannot reach.",
 		"Give each phase one owner, a stable `phaseId`, and exact writer `scope`. Parallelize independent phases in one call; never overlap writers or duplicate an owned phase. Dependent phases wait for prerequisites. Scope is conflict metadata, not permissions or a sandbox.",
 		"Children have no parent conversation; send a self-contained brief and reuse established evidence.",
 		"One-shot runs return once. Main takes over failed or incomplete work from partial edits and artifacts; a different deliverable needs a new phase.",

@@ -60,6 +60,7 @@ function dispatchHarness(configPath: string): {
 	const tools = new Map<string, RegisteredTool>();
 	const pi = {
 		getActiveTools: () => ["read", "write"],
+		getAllTools: () => [],
 		on: () => undefined,
 		registerTool: (tool: RegisteredTool & { name: string }) => tools.set(tool.name, tool),
 		sendMessage: () => undefined,

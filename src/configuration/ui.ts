@@ -62,18 +62,34 @@ class Picker implements Component, Focusable {
 	private query = "";
 	private cursor = 0;
 	private filtered: PickerItem[];
+	private readonly items: PickerItem[];
+	private readonly multi: boolean;
+	private readonly selected: Set<string>;
+	private readonly styles: PickerStyles;
+	private readonly headerLines: string[];
+	private readonly tui: TUI;
+	private readonly keybindings: KeybindingsManager;
+	private readonly cb: PickerCallbacks;
 
 	constructor(
-		private readonly items: PickerItem[],
-		private readonly multi: boolean,
-		private readonly selected: Set<string>,
-		private readonly styles: PickerStyles,
-		private readonly headerLines: string[],
-		private readonly tui: TUI,
-		private readonly keybindings: KeybindingsManager,
-		private readonly cb: PickerCallbacks,
+		items: PickerItem[],
+		multi: boolean,
+		selected: Set<string>,
+		styles: PickerStyles,
+		headerLines: string[],
+		tui: TUI,
+		keybindings: KeybindingsManager,
+		cb: PickerCallbacks,
 		initialValue?: string,
 	) {
+		this.items = items;
+		this.multi = multi;
+		this.selected = selected;
+		this.styles = styles;
+		this.headerLines = headerLines;
+		this.tui = tui;
+		this.keybindings = keybindings;
+		this.cb = cb;
 		this.filtered = items;
 		const initialIndex = initialValue === undefined ? -1 : items.findIndex((item) => item.value === initialValue);
 		if (initialIndex >= 0) this.cursor = initialIndex;

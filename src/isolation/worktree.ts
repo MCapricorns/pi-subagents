@@ -117,12 +117,15 @@ export interface WorktreeIsolation {
 }
 
 export class WorktreeSetupError extends Error {
+	readonly retainedPaths: readonly string[];
+
 	constructor(
 		message: string,
-		readonly retainedPaths: readonly string[] = [],
+		retainedPaths: readonly string[] = [],
 	) {
 		super(message);
 		this.name = "WorktreeSetupError";
+		this.retainedPaths = retainedPaths;
 	}
 }
 
@@ -308,23 +311,41 @@ class GitWorktreeIsolation implements WorktreeIsolation {
 	private discardPromise?: Promise<void>;
 	/** Full workspace checkpoint retained for manual recovery. */
 	private continuationCheckpoint?: WorktreeCheckpoint;
+	readonly originalCwd: string;
+	readonly originalRoot: string;
+	readonly cwd: string;
+	readonly worktreePath: string;
+	readonly tempDir: string;
+	readonly patchPath: string;
+	readonly head: string;
+	private readonly runner: CommandRunner;
+	/** A restored base may represent work already integrated into the parent. */
+	readonly integrationBaseHead: string;
 
 	constructor(
-		readonly originalCwd: string,
-		readonly originalRoot: string,
-		readonly cwd: string,
-		readonly worktreePath: string,
-		readonly tempDir: string,
-		readonly patchPath: string,
-		readonly head: string,
-		private readonly runner: CommandRunner,
-		/** A restored base may represent work already integrated into the parent. */
-		readonly integrationBaseHead: string = head,
+		originalCwd: string,
+		originalRoot: string,
+		cwd: string,
+		worktreePath: string,
+		tempDir: string,
+		patchPath: string,
+		head: string,
+		runner: CommandRunner,
+		integrationBaseHead: string = head,
 		restored?: {
 			state: WorktreeIsolation["state"];
 			checkpoint?: WorktreeCheckpoint;
 		},
 	) {
+		this.originalCwd = originalCwd;
+		this.originalRoot = originalRoot;
+		this.cwd = cwd;
+		this.worktreePath = worktreePath;
+		this.tempDir = tempDir;
+		this.patchPath = patchPath;
+		this.head = head;
+		this.runner = runner;
+		this.integrationBaseHead = integrationBaseHead;
 		if (restored) {
 			this.currentState = restored.state;
 			if (restored.checkpoint) this.continuationCheckpoint = cloneCheckpoint(restored.checkpoint);

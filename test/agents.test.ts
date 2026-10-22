@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, it, type TestContext } from "node:test";
@@ -8,19 +8,18 @@ import {
 	isWriteCapableAgent,
 	loadBuiltinAgents,
 	resolveAgentTools,
+	type ToolMetadata,
 } from "../src/delegation/agents.ts";
 
-const SCOUT_READ_ONLY_TOOLS = [
-	"read",
-	"grep",
-	"find",
-	"ls",
-	"anchor_grep",
-	"web_search",
-	"fetch_content",
-	"anysearch",
-	"anysearch_extract",
-] as const;
+function tool(
+	name: string,
+	annotations?: ToolMetadata["annotations"],
+	reachesTools?: ToolMetadata["reachesTools"],
+): ToolMetadata {
+	return { name, ...(annotations ? { annotations } : {}), ...(reachesTools ? { reachesTools } : {}) };
+}
+
+const READ_ONLY = tool("docs_search", { readOnlyHint: true });
 
 describe("loadBuiltinAgents", () => {
 	it("ships scout and artisan without frontmatter thinking", () => {
@@ -41,7 +40,10 @@ describe("loadBuiltinAgents", () => {
 	it("keeps scout read-only and retrieval-only", () => {
 		const scout = loadBuiltinAgents().find((agent) => agent.name === "scout");
 		assert.ok(scout);
-		assert.deepEqual(scout.tools, SCOUT_READ_ONLY_TOOLS);
+		// The surface is derived from live tool metadata, so no role file carries
+		// a list of extension, MCP, or vendor tool names.
+		assert.equal(scout.tools, undefined);
+		assert.equal(scout.filePath, "builtin:scout");
 		assert.match(scout.description, /external facts/u);
 		assert.ok(scout.systemPrompt.includes("retrieval lead"));
 		assert.ok(scout.systemPrompt.includes("Stay read-only"));
@@ -87,14 +89,18 @@ describe("discoverAgents", () => {
 	it("orders builtins canonically ahead of customs regardless of file order", (t: TestContext) => {
 		const dir = mkdtempSync(join(tmpdir(), "pi-subagents-agents-"));
 		t.after(() => rmSync(dir, { recursive: true, force: true }));
+		const agentsDir = join(dir, ".pi", "agents");
+		mkdirSync(agentsDir, { recursive: true });
+		// A project file may override a built-in name; it is still ranked as that
+		// built-in, and readdir order must not leak into the catalog.
 		const write = (name: string) =>
-			writeFileSync(join(dir, `${name}.md`), `---\nname: ${name}\ndescription: test\n---\nbody\n`, "utf8");
-		// Written in deliberately non-canonical order; readdir order must not leak out.
+			writeFileSync(join(agentsDir, `${name}.md`), `---\nname: ${name}\ndescription: test\n---\nbody\n`, "utf8");
 		for (const name of ["zeta", "artisan", "scout", "alpha"]) write(name);
 
-		const scope = { scope: "project" as const, builtinDir: dir };
+		const scope = { scope: "project" as const, projectTrusted: true };
 		const discovered = discoverAgents(dir, scope);
 		assert.deepEqual(discovered.agents.map((agent) => agent.name), ["scout", "artisan", "alpha", "zeta"]);
+		assert.ok(discovered.agents.some((agent) => agent.filePath.startsWith(agentsDir)), "project files override built-ins");
 
 		const filtered = discoverAgents(dir, { ...scope, enabledNames: ["zeta", "scout"] });
 		assert.deepEqual(filtered.agents.map((agent) => agent.name), ["scout", "zeta"]);
@@ -102,20 +108,43 @@ describe("discoverAgents", () => {
 });
 
 describe("resolveAgentTools", () => {
-	it("enforces the scout read-only boundary", () => {
+	it("derives the scout boundary from live read-only metadata", () => {
 		const scout = loadBuiltinAgents().find((agent) => agent.name === "scout");
 		assert.ok(scout);
-		const resolved = resolveAgentTools(scout, [...SCOUT_READ_ONLY_TOOLS, "query-docs", "resolve-library-id", "bash", "edit", "write", "subagent", "subagent_status"]);
-		assert.deepEqual(resolved.tools, SCOUT_READ_ONLY_TOOLS);
-		const inherited = resolveAgentTools({ ...scout, tools: undefined }, [
+		const infos = [
+			READ_ONLY,
+			tool("mcp__docs__search", { readOnlyHint: true }),
+			tool("db_write", { readOnlyHint: false }),
+			tool("unannotated_retrieval"),
+			tool("codemode", { readOnlyHint: true }, () => "all"),
+			tool("tool_search", undefined, () => "all"),
+		];
+		const resolved = resolveAgentTools(scout, [
 			"read",
-			"anchor_grep",
-			"web_search",
-			"query-docs",
+			"grep",
+			"mcp__docs__search",
+			"docs_search",
+			"db_write",
+			"unannotated_retrieval",
+			"codemode",
+			"tool_search",
+			"bash",
 			"edit",
-			"custom_mutator",
-		]);
-		assert.deepEqual(inherited.tools, ["read", "anchor_grep", "web_search"]);
+			"write",
+			"subagent",
+			"subagent_status",
+		], infos);
+		assert.deepEqual(resolved.tools, ["read", "grep", "mcp__docs__search", "docs_search"]);
+	});
+
+	it("keeps codemode for broad roles and out of read-only roles", () => {
+		const artisan = loadBuiltinAgents().find((agent) => agent.name === "artisan");
+		const scout = loadBuiltinAgents().find((agent) => agent.name === "scout");
+		assert.ok(artisan && scout);
+		const infos = [tool("codemode", undefined, () => "all"), READ_ONLY];
+		const active = ["read", "edit", "codemode", "docs_search"];
+		assert.deepEqual(resolveAgentTools(artisan, active, infos).tools, active);
+		assert.deepEqual(resolveAgentTools(scout, active, infos).tools, ["read", "docs_search"]);
 	});
 
 	it("adapts a declared shell to the parent's active shell", () => {
@@ -130,10 +159,13 @@ describe("resolveAgentTools", () => {
 		assert.deepEqual(resolved.tools, ["read", "powershell"]);
 	});
 
-	it("treats unknown explicitly allowed tools as potentially write-capable", () => {
+	it("treats tools without a read-only proof as potentially write-capable", () => {
+		const infos = [READ_ONLY, tool("db_write", { readOnlyHint: false }), tool("codemode", undefined, () => "all")];
 		assert.equal(isWriteCapableAgent({ name: "reviewer", tools: ["read", "grep"] }), false);
-		assert.equal(isWriteCapableAgent({ name: "reviewer", tools: ["anchor_grep", "web_search", "find"] }), false);
+		assert.equal(isWriteCapableAgent({ name: "reviewer", tools: ["read", "docs_search"] }, infos), false);
 		assert.equal(isWriteCapableAgent({ name: "reviewer", tools: ["read", "custom_repository_tool"] }), true);
+		assert.equal(isWriteCapableAgent({ name: "reviewer", tools: ["read", "db_write"] }, infos), true);
+		assert.equal(isWriteCapableAgent({ name: "reviewer", tools: ["read", "codemode"] }, infos), true);
 	});
 
 	it("keeps only explicitly declared active custom tools", () => {

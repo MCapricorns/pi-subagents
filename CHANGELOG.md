@@ -3,6 +3,37 @@
 Release notes for `@ferris1225/pi-subagents`. Only the most recent releases
 are kept here; every published version is preserved as a GitHub Release.
 
+## 4.3.32
+
+- Derive a role's tools from the live catalog instead of a hardcoded name list.
+  No role file names extension, MCP, or vendor tools any more: `scout` keeps
+  every active tool the host proves read-only (`annotations.readOnlyHint`, plus
+  pi's own `read`, `grep`, `find`, `ls`), so any retrieval extension or MCP
+  search server works for it without being named. The former `anysearch`,
+  `anchor_grep`, `web_search`, and `fetch_content` entries are gone.
+- Keep a tool that reaches other tools out of a read-only role. `codemode` and
+  `tool_search` can reach a writer, so scout never receives them even when they
+  are annotated read-only; broad roles still inherit the session's live surface,
+  codemode included, and a code-mode parent therefore produces code-mode
+  children under the same `codemode.mode`.
+- Enforce explicit role lists as a strict intersection for MCP tools too. pi keeps
+  MCP tools unless a `--tools` entry names one, so a list that names none now
+  adds `mcp__*` to the child's excluded tools; scout's read-only boundary can no
+  longer leak an MCP writer.
+- Treat tools without a read-only annotation as write-capable for worktree and
+  repository-lane decisions, instead of trusting a built-in name list.
+- Ship the two built-in role prompts as code and drop `agents/` from the
+  package. Custom roles are still discovered from `~/.pi/agent/agents/` and
+  `.pi/agents/`, and still override a built-in of the same name.
+- Show a code-mode script's first meaningful line in the activity trail instead
+  of a bare tool name, and drop the remaining vendor tool names from the
+  formatter.
+- Development dependencies track Pi 1.4.0. The unused
+  `@earendil-works/pi-server` and `@earendil-works/pi-agent-core` peer and
+  development dependencies are removed, and the source no longer uses parameter
+  properties, so `npm test` runs without an experimental flag on Node 26 as well
+  as Node 22 and 24.
+
 ## 4.3.31
 
 - Write the config on first start instead of prompting. A missing

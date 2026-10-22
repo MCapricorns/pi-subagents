@@ -30,6 +30,7 @@ function dispatcher(threads: PhaseLeaseSource[]) {
 	const pi = {
 		on: () => undefined,
 		getActiveTools: () => ["read", "write"],
+		getAllTools: () => [],
 		sendMessage: () => undefined,
 	} as unknown as ExtensionAPI;
 	const runtime = createRuntime(pi, `${process.cwd()}/.pi-test/config.json`);
@@ -92,6 +93,7 @@ describe("fresh write capability", () => {
 		const pi = {
 			on: () => undefined,
 			getActiveTools: () => ["read", "grep", "bash"],
+		getAllTools: () => [],
 			sendMessage: () => undefined,
 		} as unknown as ExtensionAPI;
 		const runtime = createRuntime(pi, `${process.cwd()}/.pi-test/config.json`);

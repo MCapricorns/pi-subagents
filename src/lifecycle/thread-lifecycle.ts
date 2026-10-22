@@ -96,8 +96,12 @@ export function createBackgroundDispatcher(options: BackgroundDispatcherOptions)
 		const runConfig = baseEnvironment.config;
 		const discoveredAgent = baseEnvironment.agents.find((candidate) => candidate.name === agentName);
 		if (!discoveredAgent) return failedStartResult(agentName, task, `Unknown agent: "${agentName}".`);
+		// Admission reads the catalog once; each child launch reads the live one
+		// again, like the active tool set, so a server that connected meanwhile
+		// is classified by its own annotations.
+		const toolInfos = runtime.getToolInfos();
 		const resolveLiveAgentTools = (candidate: AgentConfig): AgentConfig =>
-			resolveAgentTools({ ...candidate, tools: discoveredAgent.tools }, runtime.getActiveTools());
+			resolveAgentTools({ ...candidate, tools: discoveredAgent.tools }, runtime.getActiveTools(), runtime.getToolInfos());
 		const agent = resolveLiveAgentTools(discoveredAgent);
 		const originalCwd = resolve(cwd ?? runCtx.cwd);
 		let phaseId: string | undefined;
@@ -108,8 +112,8 @@ export function createBackgroundDispatcher(options: BackgroundDispatcherOptions)
 		} catch (error) {
 			return failedStartResult(agentName, task, error instanceof Error ? error.message : String(error));
 		}
-		const writeCapable = Boolean(startOptions.writeCapable) || isWriteCapableAgent(agent);
-		if (isolation === "worktree" && !isWorktreeCapableAgent(agent)) {
+		const writeCapable = Boolean(startOptions.writeCapable) || isWriteCapableAgent(agent, toolInfos);
+		if (isolation === "worktree" && !isWorktreeCapableAgent(agent, toolInfos)) {
 			return {
 				...failedStartResult(agentName, task, `Agent "${agentName}" is read-only; worktree isolation is available only to write-capable agents such as artisan.`),
 				isolation,

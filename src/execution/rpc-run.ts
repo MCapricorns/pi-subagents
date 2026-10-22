@@ -31,6 +31,8 @@ import {
 export { asPlainTextRpcPrompt, terminateProcessTree };
 
 export const DEPTH_ENV_VAR = "PI_SUBAGENT_DEPTH";
+/** Every tool of an MCP server shares this prefix, whatever its exposure. */
+const MCP_TOOL_PREFIX = "mcp__";
 export const SUBAGENT_KILL_GRACE_MS = 5_000;
 /** ACK budget after the child is known to be reading RPC. */
 export const RPC_COMMAND_TIMEOUT_MS = 30_000;
@@ -288,36 +290,76 @@ export interface RunRpcAttemptOptions {
 	rpcCommandTimeoutMs?: number;
 }
 
-/** Run one persistent RPC child until a stable `agent_settled` or control action. */
-export async function runRpcAgentAttempt(options: RunRpcAttemptOptions): Promise<RpcSingleResult> {
-	const { agent, agentName, task, thinkingLevel, idleTimeoutMs, signal, onLive, control } = options;
-	const args: string[] = ["--mode", "rpc", "--exclude-tools", SUBAGENT_TOOL_NAMES.join(",")];
+export interface ChildLaunchOptions {
+	agent: Pick<AgentConfig, "model" | "tools">;
+	thinkingLevel: ThinkingLevel;
+	sessionDir?: string;
+	sessionId?: string;
+	/** The session directory already holds the session being resumed. */
+	resumeExistingSession?: boolean;
+	/** Appended system prompt file, when the role carries one. */
+	promptPath?: string;
+	retryPolicyPath: string;
+}
+
+/** Command line for one child attempt.
+ *
+ * An explicit role list is a strict intersection of the parent's tools, but pi
+ * keeps MCP tools unless a `--tools` entry names one, so a list that names none
+ * has to exclude them by pattern. Scout depends on that: its read-only boundary
+ * must not leak an MCP writer. */
+export function buildChildLaunchArgs(options: ChildLaunchOptions): string[] {
+	const { agent, thinkingLevel } = options;
+	const excludedTools: string[] = [...SUBAGENT_TOOL_NAMES];
+	const args: string[] = ["--mode", "rpc"];
 	if (options.sessionDir && options.sessionId) {
 		args.push("--session-dir", options.sessionDir);
-		args.push(sessionExists(options.sessionDir, options.sessionId) ? "--session" : "--session-id", options.sessionId);
+		args.push(options.resumeExistingSession ? "--session" : "--session-id", options.sessionId);
 	} else {
 		args.push("--no-session");
 	}
 	if (agent.model) args.push("--model", agent.model);
 	args.push("--thinking", thinkingLevel);
 	if (agent.tools) {
-		if (agent.tools.length > 0) args.push("--tools", agent.tools.join(","));
-		else args.push("--no-tools");
+		if (agent.tools.length > 0) {
+			args.push("--tools", agent.tools.join(","));
+			if (!agent.tools.some((tool) => tool.startsWith(MCP_TOOL_PREFIX))) excludedTools.push(`${MCP_TOOL_PREFIX}*`);
+		} else {
+			args.push("--no-tools");
+		}
 	}
+	args.push("--exclude-tools", excludedTools.join(","));
+	if (options.promptPath) args.push("--append-system-prompt", options.promptPath);
+	args.push("--extension", options.retryPolicyPath);
+	return args;
+}
 
+/** Run one persistent RPC child until a stable `agent_settled` or control action. */
+export async function runRpcAgentAttempt(options: RunRpcAttemptOptions): Promise<RpcSingleResult> {
+	const { agent, agentName, task, thinkingLevel, idleTimeoutMs, signal, onLive, control } = options;
 	let tmpPromptDir: string | null = null;
 	let tmpPromptPath: string | null = null;
 	if (agent.systemPrompt.trim()) {
 		const tmp = await writePromptToTempFile(options.scratchRoot, agent.name, agent.systemPrompt);
 		tmpPromptDir = tmp.dir;
 		tmpPromptPath = tmp.filePath;
-		args.push("--append-system-prompt", tmpPromptPath);
 	}
 
 	let retryPolicy: ChildRetryPolicyExtension;
+	let args: string[];
 	try {
 		retryPolicy = await writeChildRetryPolicyExtension(options.scratchRoot, agent.model);
-		args.push("--extension", retryPolicy.filePath);
+		args = buildChildLaunchArgs({
+			agent,
+			thinkingLevel,
+			sessionDir: options.sessionDir,
+			sessionId: options.sessionId,
+			resumeExistingSession: Boolean(
+				options.sessionDir && options.sessionId && sessionExists(options.sessionDir, options.sessionId),
+			),
+			promptPath: tmpPromptPath ?? undefined,
+			retryPolicyPath: retryPolicy.filePath,
+		});
 	} catch (error) {
 		if (tmpPromptDir) await rm(tmpPromptDir, { recursive: true, force: true }).catch(() => undefined);
 		throw error;

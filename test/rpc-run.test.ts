@@ -3,7 +3,7 @@ import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, it } from "node:test";
-import { appendBoundedStderr, renderChildRetryPolicySource, RPC_STDERR_MAX_CHARS, runRpcAgentAttempt } from "../src/execution/rpc-run.ts";
+import { appendBoundedStderr, buildChildLaunchArgs, renderChildRetryPolicySource, RPC_STDERR_MAX_CHARS, runRpcAgentAttempt } from "../src/execution/rpc-run.ts";
 import { getResultOutput, isFailedResult, isModelLevelFailure, isRetryableStartupFailure, runSingleAgentWithMainFallback } from "../src/execution/spawn.ts";
 import { RpcRunControl } from "../src/execution/rpc-control.ts";
 
@@ -63,6 +63,65 @@ createInterface({ input: process.stdin }).on("line", (line) => {
 		await rm(root, { recursive: true, force: true });
 	}
 }
+
+describe("child launch arguments", () => {
+	const base = { thinkingLevel: "high" as const, retryPolicyPath: "/tmp/policy.mjs" };
+
+	function valueOf(args: string[], flag: string): string | undefined {
+		const index = args.indexOf(flag);
+		return index === -1 ? undefined : args[index + 1];
+	}
+
+	it("keeps MCP tools for a role that inherits the parent's tools", () => {
+		const args = buildChildLaunchArgs({ ...base, agent: { model: "anthropic/claude-sonnet" } });
+		assert.equal(valueOf(args, "--tools"), undefined);
+		assert.equal(args.includes("--no-tools"), false);
+		assert.equal(valueOf(args, "--exclude-tools"), "subagent,subagent_status,subagent_stop");
+		assert.equal(valueOf(args, "--model"), "anthropic/claude-sonnet");
+		assert.equal(valueOf(args, "--thinking"), "high");
+		assert.equal(valueOf(args, "--extension"), "/tmp/policy.mjs");
+	});
+
+	it("keeps an explicit role list a strict intersection, MCP tools included", () => {
+		const readOnly = buildChildLaunchArgs({ ...base, agent: { tools: ["read", "grep"] } });
+		assert.equal(valueOf(readOnly, "--tools"), "read,grep");
+		assert.equal(valueOf(readOnly, "--exclude-tools"), "subagent,subagent_status,subagent_stop,mcp__*");
+
+		const named = buildChildLaunchArgs({ ...base, agent: { tools: ["read", "mcp__docs__search"] } });
+		assert.equal(valueOf(named, "--tools"), "read,mcp__docs__search");
+		// `--tools` filters MCP tools once an entry names one.
+		assert.equal(valueOf(named, "--exclude-tools"), "subagent,subagent_status,subagent_stop");
+	});
+
+	it("starts a child without tools when the role resolved to none", () => {
+		const args = buildChildLaunchArgs({ ...base, agent: { tools: [] } });
+		assert.equal(args.includes("--no-tools"), true);
+		assert.equal(valueOf(args, "--tools"), undefined);
+	});
+
+	it("resumes an existing session and starts a named one otherwise", () => {
+		const fresh = buildChildLaunchArgs({
+			...base,
+			agent: {},
+			sessionDir: "/sessions/run",
+			sessionId: "abc",
+		});
+		assert.equal(valueOf(fresh, "--session-dir"), "/sessions/run");
+		assert.equal(valueOf(fresh, "--session-id"), "abc");
+		assert.equal(fresh.includes("--session"), false);
+
+		const resumed = buildChildLaunchArgs({
+			...base,
+			agent: {},
+			sessionDir: "/sessions/run",
+			sessionId: "abc",
+			resumeExistingSession: true,
+		});
+		assert.equal(valueOf(resumed, "--session"), "abc");
+		assert.equal(resumed.includes("--session-id"), false);
+		assert.equal(buildChildLaunchArgs({ ...base, agent: {} }).includes("--no-session"), true);
+	});
+});
 
 describe("child provider retry policy", () => {
 	it("registers a Pi 1.0 stream override for the selected provider api", () => {

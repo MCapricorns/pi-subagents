@@ -13,6 +13,14 @@ is clear, and delegation will actually reduce cost or improve completion quality
 
 ## What's new
 
+**4.3.32** — codemode-aware, tool-agnostic role policy. No role file names
+extension, MCP, or vendor tools any more: `scout` keeps every active tool the
+host proves read-only and can never keep a tool that reaches other tools, such as
+`codemode`, while broad roles inherit the session's live surface, codemode
+included, so a code-mode host works unchanged. An explicit role list now also
+excludes MCP tools it does not name, the two built-in role prompts ship as code
+instead of Markdown files, and development dependencies track Pi 1.4.0.
+
 **4.3.31** — a first start writes `pi-subagents.json` instead of prompting. Both
 roles are enabled with no model overrides, so scout and artisan follow the main
 model immediately; session start announces `/subagents-setup` once, and later
@@ -467,21 +475,26 @@ no `thinking` field in agent Markdown. Precedence: your setup override > the
 role default, then the model clamp. There is no separate vision mode — assign
 a multimodal model and name the image paths in the task.
 
-Every dispatch, startup retry, and model fallback snapshots the parent's active tools,
-and all `subagent*` tools are removed so children remain leaves. A role without
-an explicit list inherits that snapshot; an explicit list is a strict
-intersection, so active extension tools are available only when named. A declared
-shell slot follows the parent's active shell on non-scout roles.
+Every dispatch, startup retry, and model fallback snapshots the parent's live
+tools, and all `subagent*` tools are removed so children remain leaves. A role
+without an explicit list inherits that snapshot — including `codemode` when the
+session runs it — so a code-mode parent produces code-mode children under the
+same `codemode.mode`. An explicit list is a strict intersection: an active
+extension tool is available only when named, and MCP tools are kept only when a
+listed name refers to one. A declared shell slot follows the parent's active
+shell on non-scout roles.
 
-`scout` is a hard read-only boundary even when a project override omits or
-overstates its tool list. Its known-safe set includes `read`, `grep`, `find`,
-`ls`, `anchor_grep`, the web-retrieval pairs `web_search`/`fetch_content` and
-`anysearch`/`anysearch_extract`; tools not installed or
-active in Main are simply omitted. Scout
-receives no shell, local mutation tool, or unknown custom tool. Unknown tools
-declared by other roles are conservatively treated as write-capable when
-isolation is chosen. An empty resolved snapshot starts the child with
-`--no-tools`.
+No role file lists extension, MCP, or vendor tool names. `scout` is a hard
+read-only boundary that is derived from the live catalog: it keeps every active
+tool the host proves read-only — `annotations.readOnlyHint` for extension and
+MCP tools, plus pi's own `read`, `grep`, `find`, and `ls` — and never a shell, a
+mutation tool, or a tool that reaches other tools, so `codemode` and
+`tool_search` cannot reach a writer through it. A retrieval extension or an MCP
+search server therefore works for scout without being named anywhere; expose it
+directly rather than script-only when you want scout to have it. Tools with no
+read-only annotation, whether they are declared by another role or by an active
+extension, are conservatively treated as write-capable when isolation is chosen.
+An empty resolved snapshot starts the child with `--no-tools`.
 
 For external research scout prefers official documentation, specifications, release
 notes, and first-party repositories; it fetches decisive pages rather than citing
@@ -585,7 +598,8 @@ baseline. These motivate measuring your own workflow, not a universal team size.
 
 ## Custom agents
 
-Built-ins ship with the package. Add or replace them with Markdown files:
+Built-in roles ship as code inside the extension. Add or replace them with
+Markdown files:
 
 - User agents: `~/.pi/agent/agents/`
 - Project agents: the nearest `.pi/agents/` in a trusted project
@@ -605,8 +619,8 @@ tools: read, grep, find, ls
 role's default boundary as described under [Parallel edits](#parallel-edits).
 Models come only from `/subagents-setup`; an agent file cannot pin one. An
 explicit `tools` list is intersected with the parent's active set; omitting it
-inherits the active set. A role named `scout` is always reduced to the fixed
-read-only tool set described above.
+inherits the active set. A role named `scout` always loses its list: it is
+reduced to the read-only surface described above, whatever the file declares.
 
 ## Storage and cleanup
 
@@ -645,11 +659,11 @@ grouped by responsibility under `src/`: configuration, delegation, execution, is
 lifecycle, and presentation. Thread restoration, shared lifecycle coordination, RPC control,
 and Git command execution live in focused modules rather than oversized catch-all files.
 
-The test runner uses Node 22 or 24; Node 26 removed `--experimental-transform-types`.
-Pi 1.0 declares `@earendil-works/pi-server`. This project still lists that package
-as a peer and a development dependency so `npm run check` typechecks against the
-same SDK the tests import. It is not bundled into the extension, and no
-replacement RPC server is introduced.
+`npm test` runs the TypeScript sources on Node's built-in type stripping from
+Node 22.19 up, including Node 26, which removed `--experimental-transform-types`;
+the source therefore avoids parameter properties and other transform-only
+syntax. Pi and TypeBox are peers, and the extension imports only pi's public SDK
+surface, so nothing is bundled.
 
 ## Changelog
 

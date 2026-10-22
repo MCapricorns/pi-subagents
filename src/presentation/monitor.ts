@@ -383,6 +383,17 @@ function shortTarget(value: unknown): string {
 	return chars.length > ACTIVITY_TARGET_MAX ? `${chars.slice(0, ACTIVITY_TARGET_MAX - 1).join("")}…` : oneLine;
 }
 
+/** A code-mode script's first meaningful line: the earliest line that is not
+ * blank and not a `//` comment, shortened like any other activity target. */
+function scriptLine(value: unknown): string {
+	if (typeof value !== "string") return "";
+	const line = value
+		.split("\n")
+		.map((part) => part.trim())
+		.find((part) => part.length > 0 && !part.startsWith("//"));
+	return line ? shortTarget(line) : "";
+}
+
 /** Newest-last rolling window of what a run has been doing, surfaced to the
  * parent model as a progress trail. */
 export const RECENT_ACTIVITY_MAX = 6;
@@ -416,17 +427,12 @@ export function formatToolActivity(toolName: string, args: unknown): string {
 			break;
 		case "grep":
 		case "find":
-		case "glob":
 			target = pick("pattern", "query", "path");
 			break;
-		case "web_search":
-		case "search":
-			target = pick("query");
-			break;
-		case "fetch":
-		case "web_fetch":
-		case "fetch_content":
-			target = pick("url");
+		case "codemode":
+			// A script is source, not a target: name its first meaningful line so the
+			// trail shows what the child is doing instead of a code blob.
+			target = scriptLine(a.code);
 			break;
 		case "subagent":
 			target = pick("agent", "task");

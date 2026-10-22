@@ -6,16 +6,16 @@
  * at the higher scope). Discovery is re-run on every invocation so editing a file or
  * dropping a new one takes effect mid-session without a reload.
  *
- *   builtin : <package>/agents            (shipped with this extension)
+ *   builtin : builtin-agents.ts           (shipped as code with this extension)
  *   user    : <agentDir>/agents           (~/.pi/agent/agents)
  *   project : <cwd...>/.pi/agents         (nearest, walking up)
  */
 
 import { type Dirent, existsSync, readdirSync, readFileSync, statSync } from "node:fs";
 import { dirname, join } from "node:path";
-import { fileURLToPath } from "node:url";
-import { CONFIG_DIR_NAME, getAgentDir, parseFrontmatter } from "@earendil-works/pi-coding-agent";
+import { CONFIG_DIR_NAME, getAgentDir, parseFrontmatter, type ToolInfo } from "@earendil-works/pi-coding-agent";
 import { type AgentScope, BUILTIN_AGENT_NAMES } from "../configuration/config.ts";
+import { BUILTIN_AGENTS } from "./builtin-agents.ts";
 import type { IsolationMode } from "../isolation/worktree.ts";
 
 export type AgentSource = "builtin" | "user" | "project";
@@ -39,17 +39,10 @@ const SHELL_TOOL_NAMES = new Set(["bash", "powershell"]);
  * Only used to break a tie when the parent has both enabled — a parent running a
  * single shell is followed as configured, whatever it is. */
 const NATIVE_SHELL_TOOL = process.platform === "win32" ? "powershell" : "bash";
-const READ_ONLY_TOOL_NAMES = new Set([
-	"read",
-	"grep",
-	"find",
-	"ls",
-	"anchor_grep",
-	"web_search",
-	"fetch_content",
-	"anysearch",
-	"anysearch_extract",
-]);
+/** Pi's own retrieval builtins. They carry no annotations, so they are the only
+ * names that are read-only without the host saying so. */
+const BUILTIN_READ_ONLY_TOOL_NAMES = ["read", "grep", "find", "ls"] as const;
+const BUILTIN_READ_ONLY_TOOL_SET: ReadonlySet<string> = new Set(BUILTIN_READ_ONLY_TOOL_NAMES);
 export const SUBAGENT_TOOL_NAMES = [
 	"subagent",
 	"subagent_status",
@@ -57,11 +50,39 @@ export const SUBAGENT_TOOL_NAMES = [
 ] as const;
 const SUBAGENT_TOOL_NAME_SET = new Set<string>(SUBAGENT_TOOL_NAMES);
 
+/** The parts of pi's `ToolInfo` that decide whether a tool is safe for a
+ * read-only role. Live `pi.getAllTools()` entries satisfy it structurally. */
+export type ToolMetadata = Pick<ToolInfo, "name" | "annotations" | "reachesTools">;
+/** Live tool metadata keyed by name. Read-only and write capability come from it
+ * instead of a maintained list of extension or MCP tool names. */
+type ToolInfoIndex = ReadonlyMap<string, ToolMetadata>;
+
+function indexToolInfos(toolInfos?: readonly ToolMetadata[]): ToolInfoIndex {
+	return new Map((toolInfos ?? []).map((info) => [info.name, info]));
+}
+
+/** Whether a tool is proven read-only. Extension and MCP tools prove it with
+ * `annotations.readOnlyHint`; the built-in retrieval tools are known safe. A tool
+ * that reaches other tools can always reach a writer, so codemode, tool_search,
+ * shells, and this package's own controls are never read-only for a role. */
+function isReadOnlyTool(tool: ToolMetadata): boolean {
+	if (SHELL_TOOL_NAMES.has(tool.name) || SUBAGENT_TOOL_NAME_SET.has(tool.name)) return false;
+	if (tool.reachesTools) return false;
+	return tool.annotations?.readOnlyHint === true || BUILTIN_READ_ONLY_TOOL_SET.has(tool.name);
+}
+
+function isReadOnlyToolName(name: string, index: ToolInfoIndex): boolean {
+	const info = index.get(name);
+	return info ? isReadOnlyTool(info) : BUILTIN_READ_ONLY_TOOL_SET.has(name);
+}
+
 /** Resolve every child against the parent's live tool selection. Roles without
  * an allowlist inherit the complete active set. Explicit lists are strict: they
  * keep only declared tools that are active in the parent, with shell adaptation.
- * Active extension/SDK tools are never added implicitly. pi-subagents controls
- * are always removed so children stay leaves.
+ * Active extension/SDK tools are never added implicitly. A read-only role keeps
+ * every active tool that is proven read-only, so retrieval extensions and MCP
+ * servers work without naming them in a role file. pi-subagents controls are
+ * always removed so children stay leaves.
  *
  * A declared shell is one slot, so it resolves to one shell: the parent's, and
  * the host-native one when the parent runs both. A child never inherits a shell
@@ -69,14 +90,19 @@ const SUBAGENT_TOOL_NAME_SET = new Set<string>(SUBAGENT_TOOL_NAMES);
 export function resolveAgentTools(
 	agent: AgentConfig,
 	activeToolNames: readonly string[],
+	toolInfos?: readonly ToolMetadata[],
 ): AgentConfig {
 	const active = [...new Set(activeToolNames)].filter((tool) => !SUBAGENT_TOOL_NAME_SET.has(tool));
-	if (!agent.tools) {
-		return { ...agent, tools: agent.name === "scout" ? active.filter((tool) => READ_ONLY_TOOL_NAMES.has(tool)) : active };
+	const toolIndex = indexToolInfos(toolInfos);
+	// Scout is a hard read-only boundary, so its surface is derived: a role file
+	// or project override can narrow the active set but never widen it past what
+	// the live catalog proves read-only. Codemode and tool_search are excluded
+	// here because they reach other tools.
+	if (agent.name === "scout") {
+		return { ...agent, tools: active.filter((tool) => isReadOnlyToolName(tool, toolIndex)) };
 	}
-	const declaredTools = agent.name === "scout"
-		? agent.tools.filter((tool) => READ_ONLY_TOOL_NAMES.has(tool))
-		: agent.tools;
+	if (!agent.tools) return { ...agent, tools: active };
+	const declaredTools = agent.tools;
 	const activeSet = new Set(active);
 
 	const parentShellTools = active.filter((tool) => SHELL_TOOL_NAMES.has(tool));
@@ -100,24 +126,28 @@ export function resolveAgentTools(
 /** Filesystem-write capability used by worktree admission and repository-lane
  * safety. Scout is a hard read-only boundary even with a project override.
  * Omitted allowlists inherit arbitrary active tools and are therefore mutable.
- * For explicit allowlists, only the canonical retrieval tools are proven
- * read-only; shells and unknown custom tools are conservatively mutable. */
+ * For explicit allowlists only proven read-only tools count as safe: shells,
+ * tool-reaching tools, and tools without a read-only annotation stay mutable. */
 export function isWriteCapableAgent(
 	agent: Pick<AgentConfig, "name" | "tools">,
+	toolInfos?: readonly ToolMetadata[],
 ): boolean {
 	if (agent.name === "scout") return false;
 	if (agent.name === "artisan") return true;
 	if (!agent.tools) return true;
-	return agent.tools.some((tool) => !READ_ONLY_TOOL_NAMES.has(tool));
+	const toolIndex = indexToolInfos(toolInfos);
+	return agent.tools.some((tool) => !isReadOnlyToolName(tool, toolIndex));
 }
 
-const here = dirname(fileURLToPath(import.meta.url));
-/** <package>/agents — the agents shipped with this extension. */
-export const BUILTIN_AGENTS_DIR = join(here, "..", "..", "agents");
-
-/** Agents shipped with the package and surfaced by the setup overlay. */
+/** Agents shipped with the package and surfaced by the setup overlay. They are
+ * code, not files: a user or project role with the same name still overrides
+ * them through discovery. */
 export function loadBuiltinAgents(): AgentConfig[] {
-	return loadAgentsFromDir(BUILTIN_AGENTS_DIR, "builtin");
+	return BUILTIN_AGENTS.map((agent) => ({
+		...agent,
+		source: "builtin" as const,
+		filePath: `builtin:${agent.name}`,
+	}));
 }
 
 function loadAgentsFromDir(dir: string, source: AgentSource): AgentConfig[] {
@@ -201,8 +231,6 @@ export interface DiscoverOptions {
 	enabledNames?: readonly string[];
 	/** Project-controlled prompts are loaded only after Pi trusts the project. */
 	projectTrusted?: boolean;
-	/** Override the built-in agents directory (used by tests). */
-	builtinDir?: string;
 }
 
 /**
@@ -215,10 +243,9 @@ export interface DiscoverOptions {
  */
 export function discoverAgents(cwd: string, options: DiscoverOptions = {}): { agents: AgentConfig[] } {
 	const scope = options.scope ?? "user";
-	const builtinDir = options.builtinDir ?? BUILTIN_AGENTS_DIR;
 	const projectAgentsDir = findNearestProjectAgentsDir(cwd);
 
-	const builtin = loadAgentsFromDir(builtinDir, "builtin");
+	const builtin = loadBuiltinAgents();
 	const user = scope === "project" ? [] : loadAgentsFromDir(join(getAgentDir(), "agents"), "user");
 	const project =
 		scope === "user" || !projectAgentsDir || options.projectTrusted !== true

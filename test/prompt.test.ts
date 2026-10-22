@@ -39,7 +39,11 @@ describe("buildDelegationDirective", () => {
 	it("prefers the two built-in roles without inventing extra phases", () => {
 		const directive = buildDelegationDirective(loadBuiltinAgents());
 		assert.match(directive, /Use a subagent when the work can run independently in parallel, its boundary is clear, and delegation will actually reduce cost or improve completion quality/u);
-		assert.match(directive, /Prefer `scout` for read-only lookups \(no shell — commands, tests, and builds stay in main\), and `artisan` for one substantial change with its checks/u);
+		assert.match(directive, /Prefer `scout` for read-only lookups \(read-only tools, no shell — commands, tests, and builds stay in main\), and `artisan` for one substantial change with its checks/u);
+		// The routing contract states the live tool policy without naming tools.
+		assert.match(directive, /Children inherit this session's live tool surface/u);
+		assert.match(directive, /including `codemode`/u);
+		assert.match(directive, /Do not plan a phase that needs a tool its role cannot reach/u);
 		// The preference line must not restate the catalog descriptions.
 		for (const role of loadBuiltinAgents()) {
 			assert.equal(directive.split(role.description).length - 1, 1);

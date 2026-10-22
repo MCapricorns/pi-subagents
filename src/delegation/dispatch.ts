@@ -11,7 +11,7 @@ import { resolve } from "node:path";
 import type { ExtensionAPI, Theme } from "@earendil-works/pi-coding-agent";
 import { Text } from "@earendil-works/pi-tui";
 import { Type } from "typebox";
-import { discoverAgents, isWriteCapableAgent, type AgentConfig } from "./agents.ts";
+import { discoverAgents, isWriteCapableAgent, type AgentConfig, type ToolMetadata } from "./agents.ts";
 import { loadConfig } from "../configuration/config.ts";
 import { resolveSubagentConcurrency } from "../execution/background.ts";
 import { formatCompletionBlock, formatUsage } from "../presentation/format.ts";
@@ -157,6 +157,7 @@ function prepareDispatchTasks(
 	tasks: ReadonlyArray<{ agent: string; task: string; cwd?: string; phaseId?: string; scope?: PhaseScopeInput; isolation?: IsolationMode }>,
 	callerCwd: string,
 	agents: readonly AgentConfig[],
+	toolInfos?: readonly ToolMetadata[],
 ): PreparedDispatchTask[] {
 	return tasks.map((item, index) => {
 		const cwd = resolve(callerCwd, item.cwd ?? ".");
@@ -169,7 +170,7 @@ function prepareDispatchTasks(
 			phaseId: normalizePhaseId(item.phaseId),
 			scope: normalizePhaseScope(item.scope, cwd),
 			isolation: item.isolation,
-			writeCapable: agent ? isWriteCapableAgent(agent) : true,
+			writeCapable: agent ? isWriteCapableAgent(agent, toolInfos) : true,
 		};
 	});
 }
@@ -530,6 +531,9 @@ export function registerSubagentTool(pi: ExtensionAPI, runtime: SubagentRuntime)
 				projectTrusted: ctx.isProjectTrusted?.() === true,
 			});
 			const agents = discovery.agents;
+			// One admission snapshot: role boundaries and writer capability must
+			// describe the same catalog the batch is validated against.
+			const toolInfos = runtime.getToolInfos();
 			environmentRef.current = { ctx, config, agents };
 
 			const hasTasks = (params.tasks?.length ?? 0) > 0;
@@ -581,7 +585,7 @@ export function registerSubagentTool(pi: ExtensionAPI, runtime: SubagentRuntime)
 			if (params.tasks && params.tasks.length > 0) {
 				let prepared: PreparedDispatchTask[];
 				try {
-					prepared = prepareDispatchTasks(params.tasks, ctx.cwd, agents);
+					prepared = prepareDispatchTasks(params.tasks, ctx.cwd, agents, toolInfos);
 				} catch (error) {
 					throw new Error(`Parallel admission rejected: ${error instanceof Error ? error.message : String(error)} No background tasks were started.`);
 				}
@@ -603,7 +607,7 @@ export function registerSubagentTool(pi: ExtensionAPI, runtime: SubagentRuntime)
 							"parallel",
 							item.agent,
 							item.isolation,
-							catalogAgent ? isWorktreeCapableAgent(catalogAgent) : undefined,
+							catalogAgent ? isWorktreeCapableAgent(catalogAgent, toolInfos) : undefined,
 							catalogAgent?.isolation,
 						),
 						{
@@ -664,7 +668,7 @@ export function registerSubagentTool(pi: ExtensionAPI, runtime: SubagentRuntime)
 					phaseId: params.phaseId,
 					scope: params.scope,
 					isolation: params.isolation as IsolationMode | undefined,
-				}], ctx.cwd, agents)[0]!;
+				}], ctx.cwd, agents, toolInfos)[0]!;
 			} catch (error) {
 				throw new Error(`Dispatch admission rejected: ${error instanceof Error ? error.message : String(error)}`);
 			}
@@ -677,7 +681,7 @@ export function registerSubagentTool(pi: ExtensionAPI, runtime: SubagentRuntime)
 					"single",
 					single.agent,
 					single.isolation,
-					singleCatalogAgent ? isWorktreeCapableAgent(singleCatalogAgent) : undefined,
+					singleCatalogAgent ? isWorktreeCapableAgent(singleCatalogAgent, toolInfos) : undefined,
 					singleCatalogAgent?.isolation,
 				),
 				{
