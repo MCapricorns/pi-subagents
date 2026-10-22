@@ -101,10 +101,10 @@ export function resolveAgentTools(
 ): AgentConfig {
 	const active = [...new Set(activeToolNames)].filter((tool) => !SUBAGENT_TOOL_NAME_SET.has(tool));
 	const toolIndex = indexToolInfos(toolInfos);
-	// Scout is a hard read-only boundary, so its surface is derived: a role file
-	// or project override can narrow the active set but never widen it past what
-	// the live catalog proves read-only. Codemode and tool_search are excluded
-	// here because they reach other tools.
+	// Scout is a hard read-only boundary, so its surface is derived: an override's
+	// declared list is dropped and the live catalog alone decides what stays, so
+	// the role can never widen past what the host proves read-only. Codemode and
+	// tool_search are excluded here because they reach other tools.
 	if (agent.name === "scout") {
 		const tools = active.filter((tool) => isReadOnlyToolName(tool, toolIndex));
 		// A read-only tool the session reaches through codemode or tool_search is
