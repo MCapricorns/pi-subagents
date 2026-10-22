@@ -191,7 +191,7 @@ export function resolveDispatchModelRoute(
 		availableRefs: availableModels.map(modelRef),
 	});
 	// A `/subagents-setup` override wins; otherwise the role default. No
-	// per-call or frontmatter thinking.
+	// per-call thinking.
 	const preferred =
 		config.agentThinkingLevels[agent.name] ?? roleThinkingLevel(agent.name);
 	const thinkingLevelForModel = (ref?: string): ThinkingLevel => {

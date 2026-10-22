@@ -10,7 +10,7 @@
 import { join, resolve } from "node:path";
 import { isWriteCapableAgent, resolveAgentTools, type AgentConfig } from "../delegation/agents.ts";
 import type { CompletionMessageItem } from "./completion.ts";
-import { loadConfig } from "../configuration/config.ts";
+import { DEFAULT_IDLE_TIMEOUT_SEC, DEFAULT_MAX_RESULT_LINES, loadConfig } from "../configuration/config.ts";
 import { dispatchFailedResult, failedStartResult, formatCompletionBlock, modelLevelTakeoverNote, queuedResult } from "../presentation/format.ts";
 import { formatTaskSummary, monitor } from "../presentation/monitor.ts";
 import { findDuplicateDispatch } from "../delegation/prompt.ts";
@@ -101,7 +101,7 @@ export function createBackgroundDispatcher(options: BackgroundDispatcherOptions)
 		// is classified by its own annotations.
 		const toolInfos = runtime.getToolInfos();
 		const resolveLiveAgentTools = (candidate: AgentConfig): AgentConfig =>
-			resolveAgentTools({ ...candidate, tools: discoveredAgent.tools }, runtime.getActiveTools(), runtime.getToolInfos());
+			resolveAgentTools(candidate, runtime.getActiveTools(), runtime.getToolInfos());
 		const agent = resolveLiveAgentTools(discoveredAgent);
 		const originalCwd = resolve(cwd ?? runCtx.cwd);
 		let phaseId: string | undefined;
@@ -227,14 +227,13 @@ export function createBackgroundDispatcher(options: BackgroundDispatcherOptions)
 			// queued behind the concurrency limit. Re-resolve the route at actual
 			// start so /subagents-setup edits apply to not-yet-started runs.
 			let activeRoute = route;
-			let activeIdleTimeoutMs = runConfig.idleTimeoutSec * 1000;
+			const activeIdleTimeoutMs = DEFAULT_IDLE_TIMEOUT_SEC * 1000;
 			try {
 				const startConfig = await loadConfig(runtime.configPath);
 				const resolvedStart = resolveDispatchModelRoute(agent, startConfig, runCtx);
 				activeRoute = isolation === "worktree"
 					? { ...resolvedStart, agent: withWorktreeSystemPrompt(resolvedStart.agent) }
 					: resolvedStart;
-				activeIdleTimeoutMs = startConfig.idleTimeoutSec * 1000;
 				monitor.setModel(runId, activeRoute.agent.model);
 				monitor.setThinking(runId, activeRoute.thinkingLevel);
 			} catch {
@@ -347,7 +346,7 @@ export function createBackgroundDispatcher(options: BackgroundDispatcherOptions)
 				);
 				runtime.registerRunResult(runId, result);
 
-				const block = formatCompletionBlock(result, runConfig.maxResultLines, {
+				const block = formatCompletionBlock(result, DEFAULT_MAX_RESULT_LINES, {
 					resultRoot: projectResultsRoot(runtime.configPath, result.projectCwd ?? originalCwd),
 				});
 				const completion: CompletionMessageItem = {
@@ -456,7 +455,7 @@ export function createBackgroundDispatcher(options: BackgroundDispatcherOptions)
 						runCtx.ui.notify(`✗ ${crashed.agent} dispatch failed: ${notifyDetail(crashed.errorMessage, "dispatch crashed")}`, "error");
 						runtime.publishRunCompletion(runId, {
 							agent: crashed.agent,
-							block: formatCompletionBlock(crashed, runConfig.maxResultLines, { resultRoot: projectResultsRoot(runtime.configPath, crashed.projectCwd ?? originalCwd) }),
+							block: formatCompletionBlock(crashed, DEFAULT_MAX_RESULT_LINES, { resultRoot: projectResultsRoot(runtime.configPath, crashed.projectCwd ?? originalCwd) }),
 							usage: crashed.usage,
 						}, true);
 					} catch {

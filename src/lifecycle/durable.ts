@@ -34,7 +34,7 @@ import {
 	worktreeSnapshot,
 } from "../isolation/worktree.ts";
 
-export const THREADS_MANIFEST_FILE_NAME = "pi-subagents-threads.json";
+const THREADS_MANIFEST_FILE_NAME = "pi-subagents-threads.json";
 const THREADS_MANIFEST_VERSION = 1;
 
 /** Project directories whose newest file has not been touched for this long
@@ -98,7 +98,7 @@ export interface ThreadRecord {
 }
 
 /** Approximate timestamp of the machine's current boot. */
-export function currentBootId(now = Date.now()): number {
+function currentBootId(now = Date.now()): number {
 	return Math.round(now - uptime() * 1_000);
 }
 
@@ -475,7 +475,7 @@ export async function pruneThreadRecords(
 
 /** Paths a thread manifest still references; combined with recovery references by
  * startup retention before any durable directory is swept. */
-export function referencedDurablePaths(records: readonly ThreadRecord[]): Set<string> {
+function referencedDurablePaths(records: readonly ThreadRecord[]): Set<string> {
 	const paths = new Set<string>();
 	for (const record of records) {
 		if (record.sessionDir) paths.add(record.sessionDir);

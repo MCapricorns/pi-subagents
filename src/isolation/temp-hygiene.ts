@@ -43,7 +43,7 @@ const DURABLE_SUBDIRS = ["sessions", "worktrees"] as const;
 
 /** Unmarked directories (crash before the marker write) must outlive this age
  * before removal. */
-export const UNMARKED_TEMP_MAX_AGE_MS = 7 * 24 * 60 * 60 * 1_000;
+const UNMARKED_TEMP_MAX_AGE_MS = 7 * 24 * 60 * 60 * 1_000;
 
 interface TempOwner {
 	pid: number;
@@ -138,7 +138,7 @@ function directoryAgeMs(entry: Dirent, dir: string, now: number): number | undef
 
 /** Remove dead-owner and old-unmarked directories under `rootDir`.
  * Returns how many directories were removed. */
-export function sweepOrphanTempDirs(
+function sweepOrphanTempDirs(
 	rootDir: string,
 	options: SweepOptions = {},
 ): number {

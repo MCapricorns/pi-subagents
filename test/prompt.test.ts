@@ -16,8 +16,6 @@ function agent(name: string): AgentConfig {
 		name,
 		description: `${name} description`,
 		systemPrompt: "body",
-		source: "builtin",
-		filePath: `/agents/${name}.md`,
 	};
 }
 
@@ -38,7 +36,7 @@ describe("buildDelegationDirective", () => {
 
 	it("prefers the two built-in roles without inventing extra phases", () => {
 		const directive = buildDelegationDirective(loadBuiltinAgents());
-		assert.match(directive, /Use a subagent when the work can run independently in parallel, its boundary is clear, and delegation will actually reduce cost or improve completion quality/u);
+		assert.match(directive, /Delegate whenever the work has independent parts or a bounded job can be briefed self-contained/u);
 		assert.match(directive, /Prefer `scout` for read-only lookups \(read-only tools, no shell — commands, tests, and builds stay in main\), and `artisan` for one substantial change with its checks/u);
 		// The routing contract states the live tool policy without naming tools.
 		assert.match(directive, /Children inherit this session's live tool surface/u);
@@ -48,6 +46,7 @@ describe("buildDelegationDirective", () => {
 		for (const role of loadBuiltinAgents()) {
 			assert.equal(directive.split(role.description).length - 1, 1);
 		}
+		assert.match(directive, /Route broad or unfamiliar lookups to a child instead of running the same searches serially in main/u);
 		assert.match(directive, /Keep a small edit already understood in the current context in main/u);
 		assert.match(directive, /Do not open a phase that repeats owned work, splits one tightly coupled change, or exists only to fill a free slot/u);
 		assert.match(directive, /one owner, a stable `phaseId`, and exact writer `scope`/u);

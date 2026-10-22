@@ -22,23 +22,40 @@ are kept here; every published version is preserved as a GitHub Release.
   read-only ones directly — exactly those, since a named MCP tool also filters the
   rest — so a script-only search server works for scout with no `mcp.json` edit,
   and the child still cannot reach an MCP writer.
-- Enforce explicit role lists as a strict intersection for MCP tools too. pi keeps
-  MCP tools unless a `--tools` entry names one, so a list that names none now
-  adds `mcp__*` to the child's excluded tools; scout's read-only boundary can no
-  longer leak an MCP writer.
+- Keep MCP tools out of a child that names none. pi keeps MCP tools unless a
+  `--tools` entry names one, so a resolved child list that names none now adds
+  `mcp__*` to the excluded tools; scout's read-only boundary can no longer leak
+  an MCP writer.
 - Treat tools without a read-only annotation as write-capable for worktree and
   repository-lane decisions, instead of trusting a built-in name list.
 - Ship the two built-in role prompts as code and drop `agents/` from the
-  package. Custom roles are still discovered from `~/.pi/agent/agents/` and
-  `.pi/agents/`, and still override a built-in of the same name.
+  package. Custom role files are gone entirely: nothing is discovered from
+  `~/.pi/agent/agents/` or `.pi/agents/` any more, `scout` and `artisan` are
+  always enabled, and a role can no longer declare its own tool list or
+  isolation default.
+- Reduce the config file to `agentModels` and `agentThinkingLevels`.
+  `enabledAgents`, `knownAgents`, `agentScope`, `maxConcurrentAgents`,
+  `idleTimeoutSec`, and `maxResultLines` are removed — capacity, idle timeout,
+  and result length are fixed constants — and obsolete keys in an older file
+  are dropped on load. `/subagents-setup` now lists the two fixed roles with
+  their current route and walks model then thinking for one or both.
 - Show a code-mode script's first meaningful line in the activity trail instead
   of a bare tool name, and drop the remaining vendor tool names from the
   formatter.
+- Default to delegating instead of requiring a proven benefit first. The
+  delegation directive and the `subagent` tool description now tell main to
+  dispatch independent or self-contained work — parallel phases usually beat a
+  serialized main — and keep only what needs conversation context or is too
+  small to brief.
 - Development dependencies track Pi 1.4.0. The unused
   `@earendil-works/pi-server` and `@earendil-works/pi-agent-core` peer and
   development dependencies are removed, and the source no longer uses parameter
   properties, so `npm test` runs without an experimental flag on Node 26 as well
   as Node 22 and 24.
+- Drop dead code and tighten the module surface: stale re-exports
+  (`matchRunIds`, `runInManagedRepositoryLane`, the `rpc-run` passthroughs) and
+  the never-read `WorktreeSetupError.retainedPaths` are gone, and internal
+  helpers and tuning constants are no longer exported. No behavior change.
 
 ## 4.3.31
 

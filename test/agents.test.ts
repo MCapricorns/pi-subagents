@@ -1,10 +1,6 @@
 import assert from "node:assert/strict";
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
-import { join } from "node:path";
-import { describe, it, type TestContext } from "node:test";
+import { describe, it } from "node:test";
 import {
-	discoverAgents,
 	isWriteCapableAgent,
 	loadBuiltinAgents,
 	resolveAgentTools,
@@ -50,7 +46,6 @@ describe("loadBuiltinAgents", () => {
 		// The surface is derived from live tool metadata, so no role file carries
 		// a list of extension, MCP, or vendor tool names.
 		assert.equal(scout.tools, undefined);
-		assert.equal(scout.filePath, "builtin:scout");
 		assert.match(scout.description, /external facts/u);
 		assert.ok(scout.systemPrompt.includes("retrieval lead"));
 		assert.ok(scout.systemPrompt.includes("Stay read-only"));
@@ -89,28 +84,6 @@ describe("loadBuiltinAgents", () => {
 				assert.ok(agent.systemPrompt.includes("PowerShell"), `${agent.name} assumes one shell flavor`);
 			}
 		}
-	});
-});
-
-describe("discoverAgents", () => {
-	it("orders builtins canonically ahead of customs regardless of file order", (t: TestContext) => {
-		const dir = mkdtempSync(join(tmpdir(), "pi-subagents-agents-"));
-		t.after(() => rmSync(dir, { recursive: true, force: true }));
-		const agentsDir = join(dir, ".pi", "agents");
-		mkdirSync(agentsDir, { recursive: true });
-		// A project file may override a built-in name; it is still ranked as that
-		// built-in, and readdir order must not leak into the catalog.
-		const write = (name: string) =>
-			writeFileSync(join(agentsDir, `${name}.md`), `---\nname: ${name}\ndescription: test\n---\nbody\n`, "utf8");
-		for (const name of ["zeta", "artisan", "scout", "alpha"]) write(name);
-
-		const scope = { scope: "project" as const, projectTrusted: true };
-		const discovered = discoverAgents(dir, scope);
-		assert.deepEqual(discovered.agents.map((agent) => agent.name), ["scout", "artisan", "alpha", "zeta"]);
-		assert.ok(discovered.agents.some((agent) => agent.filePath.startsWith(agentsDir)), "project files override built-ins");
-
-		const filtered = discoverAgents(dir, { ...scope, enabledNames: ["zeta", "scout"] });
-		assert.deepEqual(filtered.agents.map((agent) => agent.name), ["scout", "zeta"]);
 	});
 });
 
@@ -177,18 +150,6 @@ describe("resolveAgentTools", () => {
 		assert.deepEqual(resolveAgentTools(scout, ["read"], infos).tools, ["read"]);
 	});
 
-	it("adapts a declared shell to the parent's active shell", () => {
-		const resolved = resolveAgentTools({
-			name: "reviewer",
-			description: "review",
-			tools: ["read", "bash"],
-			systemPrompt: "review",
-			source: "project",
-			filePath: "reviewer.md",
-		}, ["read", "powershell"]);
-		assert.deepEqual(resolved.tools, ["read", "powershell"]);
-	});
-
 	it("treats tools without a read-only proof as potentially write-capable", () => {
 		const infos = [READ_ONLY, tool("db_write", { readOnlyHint: false }), tool("codemode", undefined, () => "all")];
 		assert.equal(isWriteCapableAgent({ name: "reviewer", tools: ["read", "grep"] }), false);
@@ -196,17 +157,5 @@ describe("resolveAgentTools", () => {
 		assert.equal(isWriteCapableAgent({ name: "reviewer", tools: ["read", "custom_repository_tool"] }), true);
 		assert.equal(isWriteCapableAgent({ name: "reviewer", tools: ["read", "db_write"] }, infos), true);
 		assert.equal(isWriteCapableAgent({ name: "reviewer", tools: ["read", "codemode"] }, infos), true);
-	});
-
-	it("keeps only explicitly declared active custom tools", () => {
-		const resolved = resolveAgentTools({
-			name: "reviewer",
-			description: "review",
-			tools: ["read", "review_db", "subagent_stop"],
-			systemPrompt: "review",
-			source: "project",
-			filePath: "reviewer.md",
-		}, ["read", "review_db", "repository_mutator", "subagent_stop"]);
-		assert.deepEqual(resolved.tools, ["read", "review_db"]);
 	});
 });

@@ -116,16 +116,10 @@ export interface WorktreeIsolation {
 	finalize(): Promise<WorktreeFinalization>;
 }
 
-export class WorktreeSetupError extends Error {
-	readonly retainedPaths: readonly string[];
-
-	constructor(
-		message: string,
-		retainedPaths: readonly string[] = [],
-	) {
+class WorktreeSetupError extends Error {
+	constructor(message: string) {
 		super(message);
 		this.name = "WorktreeSetupError";
-		this.retainedPaths = retainedPaths;
 	}
 }
 
@@ -279,7 +273,7 @@ export async function resolveRepositoryRoot(
 }
 
 /** Resolve and validate the Git repository/worktree that contains cwd. */
-export async function resolveWorktreeTarget(
+async function resolveWorktreeTarget(
 	cwd: string,
 	runner: CommandRunner = runCommand,
 ): Promise<WorktreeTarget> {
@@ -669,7 +663,6 @@ export async function createWorktreeIsolation(
 		const cause = error instanceof Error ? error.message : String(error);
 		throw new WorktreeSetupError(
 			`Could not create isolated Git worktree: ${cause}${rollbackErrors.length > 0 ? ` Rollback errors: ${rollbackErrors.join("; ")}` : ""}${retainedPaths.length > 0 ? ` Retained artifacts: ${retainedPaths.join(", ")}` : ""}`,
-			retainedPaths,
 		);
 	}
 }

@@ -29,7 +29,7 @@ import {
 	type RunView,
 } from "./monitor.ts";
 
-export const SUBAGENTS_WIDGET_ID = "pi-subagents";
+const SUBAGENTS_WIDGET_ID = "pi-subagents";
 
 /** The TUI caps string-array widgets at this many lines; a factory widget owns
  * the same bound itself, or a wide parallel dispatch floods the editor area. */
@@ -65,7 +65,7 @@ function composeLine(left: string, tail: string, theme: Theme, width: number): s
 /** Short truthful wait word for a queued row — shown in the widget telemetry
  * column and aggregated into the footer status line, so both surfaces name a
  * wait the same way. */
-export function waitWord(run: Pick<RunView, "waitReason">): string {
+function waitWord(run: Pick<RunView, "waitReason">): string {
 	switch (run.waitReason) {
 		case "repository-lane":
 			return "repo lane";

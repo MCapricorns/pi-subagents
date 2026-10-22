@@ -28,21 +28,19 @@ import {
 	type SubagentLiveEvent,
 } from "./rpc-control.ts";
 
-export { asPlainTextRpcPrompt, terminateProcessTree };
-
-export const DEPTH_ENV_VAR = "PI_SUBAGENT_DEPTH";
+const DEPTH_ENV_VAR = "PI_SUBAGENT_DEPTH";
 /** Every tool of an MCP server shares this prefix, whatever its exposure. */
 const MCP_TOOL_PREFIX = "mcp__";
-export const SUBAGENT_KILL_GRACE_MS = 5_000;
+const SUBAGENT_KILL_GRACE_MS = 5_000;
 /** ACK budget after the child is known to be reading RPC. */
-export const RPC_COMMAND_TIMEOUT_MS = 30_000;
+const RPC_COMMAND_TIMEOUT_MS = 30_000;
 
 /** clear_queue is stop-path hygiene ahead of the abort: give it its own short
  * budget so a hung response cannot eat into the abort-settle window. */
 const RPC_CLEAR_QUEUE_TIMEOUT_MS = 2_000;
 /** Time allowed for the child to boot and answer get_state. */
-export const RPC_READY_TIMEOUT_MS = 60_000;
-export const RPC_ABORT_SETTLE_TIMEOUT_MS = 5_000;
+const RPC_READY_TIMEOUT_MS = 60_000;
+const RPC_ABORT_SETTLE_TIMEOUT_MS = 5_000;
 /** Retained stderr tail. A chatty or crash-looping child must not grow parent
  * memory without bound, and the tail carries the decisive diagnostic. */
 export const RPC_STDERR_MAX_CHARS = 32_000;
@@ -90,7 +88,7 @@ export function sessionExists(sessionDir: string, sessionId: string): boolean {
 }
 
 /** Resolve how to invoke the same pi build as the current process. */
-export function getPiInvocation(args: string[]): { command: string; args: string[] } {
+function getPiInvocation(args: string[]): { command: string; args: string[] } {
 	const currentScript = process.argv[1];
 	const isBunVirtualScript = currentScript?.startsWith("/$bunfs/root/");
 	if (currentScript && !isBunVirtualScript && existsSync(currentScript)) {
@@ -102,7 +100,7 @@ export function getPiInvocation(args: string[]): { command: string; args: string
 	return { command: "pi", args };
 }
 
-export function extractToolErrorText(content: unknown): string {
+function extractToolErrorText(content: unknown): string {
 	const parts = Array.isArray(content) ? content : [];
 	const text = parts
 		.filter(
@@ -163,7 +161,7 @@ export function renderChildRetryPolicySource(modelRef?: string): string {
  * stream adapter with its registered API implementation while forcing
  * maxRetries=0. It uses Pi's public extension and pi-ai compatibility APIs, so
  * it works in Node and standalone/Bun builds without touching user settings. */
-export async function writeChildRetryPolicyExtension(
+async function writeChildRetryPolicyExtension(
 	scratchRoot: string,
 	modelRef?: string,
 ): Promise<ChildRetryPolicyExtension> {
@@ -183,7 +181,7 @@ export async function writeChildRetryPolicyExtension(
 
 /** Hand the agent body to the child as a file rather than inline argv text.
  * `--append-system-prompt` takes either, but a system prompt is unbounded — a
- * custom agent can carry a whole spec — while Windows caps a command line at
+ * role can carry a whole spec — while Windows caps a command line at
  * 32767 characters, so inlining turns a long agent into an opaque spawn failure.
  * The file lives in the run's scratch dir and is removed when the attempt ends. */
 async function writePromptToTempFile(

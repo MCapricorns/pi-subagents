@@ -8,100 +8,22 @@
 
 On-demand delegation for [pi](https://github.com/earendil-works/pi): a lightweight
 reader and an implementer, durable threads, and Git worktree isolation. Main
-uses a subagent when the work can run independently in parallel, the boundary
-is clear, and delegation will actually reduce cost or improve completion quality.
+delegates whenever the work has independent parts or a bounded job can be briefed
+self-contained — parallel phases usually beat a serialized main.
 
 ## What's new
 
-**4.3.32** — codemode-aware, tool-agnostic role policy. No role file names
-extension, MCP, or vendor tools any more: `scout` keeps every active tool the
-host proves read-only and can never keep a tool that reaches other tools, such as
-`codemode`, while broad roles inherit the session's live surface, codemode
-included, so a code-mode host works unchanged. An explicit role list now also
-excludes MCP tools it does not name, the two built-in role prompts ship as code
-instead of Markdown files, and development dependencies track Pi 1.4.0.
+**4.3.32** — codemode-aware, tool-agnostic role policy and a minimal config.
+`scout` keeps every active tool the host proves read-only and can never keep a
+tool that reaches other tools, such as `codemode`, while `artisan` inherits the
+session's live surface, codemode included, so a code-mode host works unchanged.
+The two roles ship as code, are always enabled, and custom `agent.md` discovery
+is gone; `/subagents-setup` now only picks a model and thinking level per role,
+and the config file keeps just `agentModels` and `agentThinkingLevels`. The
+delegation contract defaults to delegating independent or self-contained work.
 
-**4.3.31** — a first start writes `pi-subagents.json` instead of prompting. Both
-roles are enabled with no model overrides, so scout and artisan follow the main
-model immediately; session start announces `/subagents-setup` once, and later
-sessions stay silent because the file itself is the marker.
-
-**4.3.30** — pi's own footer is back: the per-model cost footer is removed, so
-pi's built-in consumption line shows unchanged. The wizard asks each role's model
-and immediately its thinking level.
-
-**4.3.29** — the retired `steward` and `sentinel` roles lose their leftover
-routing rules: a custom file with either name is now an ordinary custom role.
-
-**4.3.28** — a child's final answer is delivered whole even when it spans
-several text blocks, child stderr is kept to a bounded tail with one-line error
-toasts, and model handoffs keep a multi-line objective intact. Streaming
-activity no longer re-renders the widget per token, and the durable manifest is
-no longer rewritten on every child turn.
-
-**4.3.26** — scout is search-only, completions stop double-delivering, and
-progress no longer routes through files. Scout's role is now exactly code and
-documentation search plus web lookup; it has no shell, and work that needs
-execution stays in main. A result that exceeds the inline limit is no longer
-dumped truncated into the completion: none of it is inlined, and the notice
-points at the full Markdown artifact, so the content enters the main context
-exactly once. `subagent_status` answers progress with an activity trail
-(what each run has been doing) instead of child session paths, and the
-advisory `subagent_risk` tool is gone. Development dependencies track Pi 1.3.0.
-
-**4.3.24** — the per-model cost footer drops the live `tok/s` throughput
-figure: measured rates could not be trusted across providers, so the footer
-sticks to what pi reports exactly — per-model token flow, cost, context share,
-and thinking level.
-
-**4.3.23** — Pi 1.0.3. Development dependencies track that release. A stored
-agent model that still names `azure-openai-responses/<id>` keeps working: it
-follows the live catalog, and is saved as `azure/<id>` once that is the id Pi
-reports.
-
-**4.3.22** — use a subagent when the work can run independently in parallel, its
-boundary is clear, and delegation will actually reduce cost or improve
-completion quality. Role choice stays with scout and artisan.
-
-**4.3.21** — two built-in roles. `scout` is the lightweight read-only researcher
-and `artisan` implements one substantial change. Steward and sentinel are no
-longer shipped. Role prompts follow the GPT-6 Astra guidance: the brief wins,
-authorized work runs through, and checks stay proportional. Main prefers scout
-and artisan when a fresh context or a parallel phase helps, and does not open
-extra phases to fill free slots.
-
-**4.3.20** — Pi 1.0 prompt sections and tool exposure. The delegation contract
-is a `<subagents>` section, and live leases are a separate `<subagent_leases>`
-section, so an unchanged turn keeps the cached system prefix. Orchestration
-tools stay declared to the model and cannot be called from codemode scripts.
-Dispatch and stop run sequentially so one assistant message cannot race
-admission. Child processes still force provider `maxRetries: 0`, using the
-1.0 registration that requires an `api`.
-
-**4.3.19** — session-start restore and recovery notices stay inside the current
-project. A second pi window no longer surfaces another checkout's retained
-worktree or restores (and would otherwise stop) that project's interrupted runs.
-
-**4.3.18** — main-first delegation: keep known-context local changes in main,
-use cleanup and review roles only where they add value, and configure process
-capacity with `maxConcurrentAgents`. See [Evaluate delegation](#evaluate-delegation)
-to compare quality, elapsed time, and complete task cost on your own workload.
-
-**4.3.15** — fix the cost footer crash after `/reload`, `/new`, `/resume`, or
-`/fork`: each footer now reads only its own session's live context, never an
-event context retained from the previous session.
-
-**4.3.13** — the footer is reserved for the per-model cost tally: the
-`subagents N running` activity-count line is gone, leaving the widget,
-completion notifications, and `subagent_status` for live progress.
-
-**4.3.12** — per-model accounting: the main window's consumption line becomes a
-per-model cost footer (token flow, cost, context share, and live `tok/s` per
-`provider/model`), awaited children's usage is no longer folded into the parent
-session total, and parallel completion totals are grouped per model instead of
-summed across them.
-
-See [CHANGELOG.md](./CHANGELOG.md).
+See [CHANGELOG.md](./CHANGELOG.md) for earlier releases; every published version
+is preserved as a GitHub Release.
 
 ## Contents
 
@@ -115,10 +37,8 @@ See [CHANGELOG.md](./CHANGELOG.md).
 - [Models, thinking, and tools](#models-thinking-and-tools)
 - [Configuration](#configuration)
 - [Evaluate delegation](#evaluate-delegation)
-- [Custom agents](#custom-agents)
 - [Storage and cleanup](#storage-and-cleanup)
 - [Development](#development)
-- [Changelog](#changelog)
 - [Release](#release)
 
 ## Why
@@ -128,9 +48,11 @@ at "spawn a child with a prompt" and leave the hard parts — when to delegate, 
 wide to fan out, what happens when a model dies, how results come
 back — with you. This extension owns them:
 
-- Main uses a subagent when the work can run independently in parallel, its
-  boundary is clear, and delegation will actually reduce cost or improve
-  completion quality. `scout` covers read-only code, documentation, and web
+- Main delegates whenever the work has independent parts or a bounded job can be
+  briefed self-contained — parallel phases usually beat a serialized main, and
+  broad or unfamiliar lookups go to a child instead of the same searches run
+  serially.
+  `scout` covers read-only code, documentation, and web
   lookup only — it has no shell, so work that needs execution stays in main;
   `artisan` covers one substantial change. A small edit already understood in
   the current context stays in main, and a free process slot is not a reason
@@ -162,14 +84,11 @@ pi install npm:@ferris1225/pi-subagents
 
 Pi's extension list shows `@ferris1225/pi-subagents` without an internal source-path suffix.
 
-Open pi and run `/subagents-setup`. The original menu flow lets you enable or
-disable roles, configure one role's model and thinking level, or run the full setup
-again. Each screen uses the usual arrow-key/Enter/Esc navigation, and model lists
-remain searchable. A fresh install writes a default config at session start — both
-roles enabled, both following the main model — and announces the command once; the
-full setup asks each enabled role's model, then its thinking level. A newly shipped
-built-in is surfaced once without being re-enabled after you deliberately turn it
-off. Then ask for work:
+A fresh install writes a default config at session start — both roles enabled,
+both following the main model — and announces `/subagents-setup` once; the file
+itself is the marker, so later sessions stay silent. Run `/subagents-setup` to
+pick a model and thinking level per role — that is the entire configuration
+surface. Then ask for work:
 
 ```text
 Map how authentication works, fix the refresh race, and run the tests.
@@ -191,9 +110,8 @@ tests, docs, and local cleanup, and reports a disproved premise or a scope/appro
 blocker with evidence. Handoffs lead with the outcome and report checks as
 `command → result`.
 
-Custom roles join them with a Markdown file (see [Custom agents](#custom-agents)).
-Enabled roles form the available catalog. Two enabled roles do not require two
-children on every task.
+The catalog is fixed: `scout` and `artisan` are always enabled, and there are no
+custom role files. Two roles do not require two children on every task.
 
 Every child is a leaf pi process with its own context window and no memory of your
 conversation. It still loads normal Pi context, including applicable project
@@ -205,9 +123,7 @@ material assumptions or blockers.
 
 Children run the official `pi --mode rpc` server, using Pi's exported command/response
 types and its own session persistence. There is no separate subagent protocol. The
-host transport remains local. Pi's `RpcClient` still spawns its own `node`
-process, signals only that process, and does not provide process-tree shutdown,
-bounded abort coordination, or cancellation of child extension dialogs.
+host transport remains local.
 
 ## Dispatching work
 
@@ -242,24 +158,18 @@ subagent({
 });
 ```
 
-Main uses a subagent when the work can run independently in parallel, its
-boundary is clear, and delegation will actually reduce cost or improve
-completion quality. It puts those independent phases in one `tasks` array and
-keeps a small, already-understood edit itself. A free process slot is not a
-reason to invent another phase. The runtime paces
-execution: `maxConcurrentAgents: 0` (the default) keeps automatic capacity at half
-the machine's cores, bounded to 4–6 child processes. Set `maxConcurrentAgents` to
-1–6 for an explicit capacity. Wider batches queue and start as slots free.
-This setting limits simultaneous processes, not total tasks or total token cost.
+Independent phases go in one `tasks` array. The runtime paces execution at half
+the machine's cores, bounded to 4–6 simultaneous child processes; wider batches
+queue and start as slots free. The limit paces processes, not total tasks or
+total token cost.
 
 A run leases its stable, single-line `phaseId` in the resolved working directory.
 Rewording the task with the same `phaseId` is rejected and names the existing run.
 Completed and failed phases stay owned for the current session, even without a retained
 session file. Calls that omit `phaseId` keep exact normalized task+cwd matching; equal
-task text with different phase ids is
-still rejected by that fallback. Matching is deterministic, never fuzzy, embedding-based,
-or inferred from natural language. Active leases win over matching settled threads when
-the runtime chooses which owner to report.
+task text with different phase ids is still rejected by that fallback. Matching is
+deterministic, never fuzzy, embedding-based, or inferred from natural language. Active
+leases win over matching settled threads when the runtime chooses which owner to report.
 
 Because queueing is pacing rather than refusal, it is always reported as such.
 Dispatch confirmations name each waiting run's real reason — waiting for a free
@@ -277,11 +187,10 @@ only when the phases are independent. Never overlap writers or duplicate an owne
 phase, and do not split one tightly coupled change across children.
 
 Verification follows the change and required project gates. Tests should catch
-meaningful failures, not mirror reversible, low-impact edits; there is no blanket
-requirement to mutate code or demonstrate a red/green cycle for every test. Fix
-failures caused by the change, then repeat or broaden checks only for new edits,
-failures, or unresolved concerns. Main owns architecture, the integrated diff,
-the final gate, and release; children never bump versions, commit, push, or publish.
+meaningful failures, not mirror reversible, low-impact edits. Fix failures caused
+by the change, then repeat or broaden checks only for new edits, failures, or
+unresolved concerns. Main owns architecture, the integrated diff, the final gate,
+and release; children never bump versions, commit, push, or publish.
 
 These defaults follow [OpenAI's GPT-6 Astra model guidance](https://developers.openai.com/api/docs/guides/latest-model?model=gpt-6-astra)
 and [Eric Provencher's skills and prompts guidance](https://x.com/pvncher/status/2095991462416490862).
@@ -311,8 +220,8 @@ launch receipt say `independence not verified`; that means the contract lacked e
 metadata, not that overlap was proved safe. Single calls never make a batch-independence
 claim. The existing shared-checkout writer lane remains the final serialization boundary.
 
-- Single tasks use your checkout. Parallel write-capable agents (`artisan` and
-  custom writers) default to a detached Git worktree, so parallel writers run at
+- Single tasks use your checkout. Parallel write-capable agents (`artisan`)
+  default to a detached Git worktree, so parallel writers run at
   the same time. Worktree mode needs a committed `HEAD`. Read-only roles such as
   scout stay on the shared checkout, and an explicit `isolation: worktree` for a
   read-only role is rejected.
@@ -321,9 +230,6 @@ claim. The existing shared-checkout writer lane remains the final serialization 
 Child tools, network access, and environment access retain the Pi process's privileges.
 Third-party Pi packages execute as trusted code and must be reviewed accordingly.
 
-- A role file can pin its own default with `isolation: worktree` or
-  `isolation: shared` in the frontmatter. Precedence is an explicit per-dispatch
-  `isolation`, then the role's declaration, then the parallel write default.
 - An isolated run's tracked, deleted, untracked, and binary changes integrate
   back exactly once, after the child settles. Nothing is staged and your index is
   untouched.
@@ -364,20 +270,19 @@ child to finish. The model-facing answer is the progress view: state, elapsed ti
 and an activity trail of what the run has been doing (for example
 `activity: read src/config.ts · grep "cacheKey" · thinking`), plus failure
 diagnostics and any actionable paths (a truncated run's full-result file, retained
-worktree/patch artifacts). Child session directories are not dangled in front of
-the model; they stay in the structured details. States
-distinguish `queued`, `running`, `interrupting`, `settling` (Git finalization),
-`completed`, `failed`, `stopped`, and `interrupted` (recovered unfinished work).
-Queued runs report their actual wait reason. Settled runs remain queryable in the
-current parent session even after their transient widget rows disappear.
+worktree/patch artifacts). States distinguish `queued`, `running`, `interrupting`,
+`settling` (Git finalization), `completed`, `failed`, `stopped`, and `interrupted`
+(recovered unfinished work). Queued runs report their actual wait reason. Settled
+runs remain queryable in the current parent session even after their transient
+widget rows disappear.
 
-The tool returns these facts in Pi's existing structured `details.runs` field.
-An individual run's failure does not make a successful status lookup a tool error;
-an unknown `id` does. This is runtime-authored data, not a requirement for children
-to generate strict JSON. Agent-written reports remain evidence to verify.
+The tool returns these facts in Pi's structured `details.runs` field. An individual
+run's failure does not make a successful status lookup a tool error; an unknown `id`
+does. This is runtime-authored data, not a requirement for children to generate
+strict JSON. Agent-written reports remain evidence to verify.
 
 A background dispatch returns a launch receipt, then its completion arrives at
-the next safe parent boundary—after current tool calls and before the next model
+the next safe parent boundary — after current tool calls and before the next model
 call. `wait: true` instead holds the dispatch until its new runs settle, which is
 useful for one-shot `pi -p` sessions or an immediate dependency. Each run has one
 delivery route; aborting the waiting parent turn transfers delivery to the
@@ -392,26 +297,23 @@ manual recovery after reload or crash. Missing session files no longer discard
 isolated edits. Restore for this checkout runs at session start; lookup tools,
 prompt injection, and fresh dispatch wait for that pass so an existing id cannot
 be reported missing or reused. A sibling window in another project leaves those
-records untouched. Missing recorded worktrees surface as failures without discarding the
-remaining recovery evidence.
+records untouched. Missing recorded worktrees surface as failures without
+discarding the remaining recovery evidence.
 
-Canonical managed-path and repository validation remains in place. Invalid records
-are dropped without following or deleting their targets. Recovery-owned worktrees
-and patches stay protected from startup sweeps and project-root retention.
-Completed/failed runs drop their durable thread record; after reload, inspect their
-delivered result instead of expecting them in the current-session status list.
+Invalid durable records are dropped without following or deleting their targets.
+Recovery-owned worktrees and patches stay protected from startup sweeps and
+project-root retention. Completed/failed runs drop their durable thread record;
+after reload, inspect their delivered result instead of expecting them in the
+current-session status list.
 
 ## Live status and results
 
 The TUI widget renders one line per active run in fixed identity columns —
-status icon, right-aligned `#id`, padded agent name, then the task label — so
-every label starts at the same column, with the live activity dimmed after
-`↳` on its own line and the rest of the telemetry flowing inline after ` · `: the
-worktree badge, wait state, token flow in pi's footer vocabulary (`↑` input, `↓`
-output, `R`/`W` cache read/write), cost, full `provider/model`, current effective
-`think:<level>`, and seconds-precision elapsed. A live run renders
-two lines: what it is — agent, task, usage, model, thinking, elapsed —
-and, dim under the label column, what it is doing right now:
+status icon, right-aligned `#id`, padded agent name, then the task label — with
+the live activity dimmed after `↳` on its own line and the rest of the telemetry
+inline after ` · `: the worktree badge, wait state, token flow in pi's footer
+vocabulary (`↑` input, `↓` output, `R`/`W` cache read/write), cost, full
+`provider/model`, current effective `think:<level>`, and seconds-precision elapsed:
 
 ```text
 ● #12 artisan  src/cache.ts · worktree:a91f3c · ↑5.2k ↓41.0k R210.0k W6.1k $1.9400 · think:high · 12m06s
@@ -426,18 +328,16 @@ Telemetry drops leftmost-first when a row runs out of width (badge, wait state,
 usage, model, thinking) while elapsed survives every width. Queued rows state
 what they actually wait for — `queued` for a free process slot, `repo lane`
 for shared-checkout write serialization, or `starting`. The widget is
-capped at ten lines: when many runs are live, extra runs collapse into a
-`… +N more` marker so the editor keeps its space.
+capped at ten lines: extra runs collapse into a `… +N more` marker.
 
 Completions resume the main agent on their own, with a compact block of at most 40
 lines by default. Longer output (or lines wider than 200 characters) is not inlined
-at all: the notice states the true size — `137 lines`, or a 200-character clip when
-a short result has a long line — and points at the unchanged Markdown artifact
+at all: the notice states the true size and points at the unchanged Markdown artifact
 holding the full output, and main is told to read that file. The content therefore
 enters the main context exactly once, never first as a truncated copy the model
-cannot trust and then again as the file read. Roles write result-only handoffs — outcome, paths,
-verification, unresolved blockers — and the main agent is told to add its
-conclusion rather than restate what you already read. A failed run adds its
+cannot trust and then again as the file read. Roles write result-only handoffs —
+outcome, paths, verification, unresolved blockers — and the main agent is told to
+add its conclusion rather than restate what you already read. A failed run adds its
 failed-tool diagnostics.
 
 Delivery is held while a context compaction is in flight and released once it
@@ -445,11 +345,9 @@ settles — on failure and abort too — so a result a child spent minutes produ
 is never swallowed by the summary that replaces the history.
 
 A `wait: true` dispatch streams its progress onto the tool card while it waits.
-Usage is no longer attached to the tool result: pi folds tool-result usage into
-one session total, which merged every model's spend into the main window's
-consumption line. Instead, each child reports its usage per run — with its full
-`provider/model` ref — when it settles, and a parallel group's totals
-are grouped per model, never summed across them:
+Each child reports its usage per run — with its full `provider/model` ref — when it
+settles, and a parallel group's totals are grouped per model, never summed across
+them:
 
 ```text
 Totals: 3 runs · zhipu/glm-4.7: ↓300 $0.0500 · anthropic/claude-sonnet-4: ↓4.0k $1.5000
@@ -467,24 +365,21 @@ session** continues on the main model, so finished searches, reads, and edits
 survive. Ordinary task failures do not trigger a handoff.
 
 Thinking is a **role default** — scout `low`, artisan `high` — clamped to what
-the effective model supports. Custom roles default to `medium`. `/subagents-setup` →
-_Configure an agent_ lists only the levels that model supports and marks the role
+the effective model supports. The `/subagents-setup` thinking picker lists only
+the levels that model supports and marks the role
 default; selecting it clears the stored override. There is no
-Auto choice, no per-dispatch `thinking` flag, and
-no `thinking` field in agent Markdown. Precedence: your setup override > the
+Auto choice and no per-dispatch `thinking` flag. Precedence: your setup override > the
 role default, then the model clamp. There is no separate vision mode — assign
 a multimodal model and name the image paths in the task.
 
 Every dispatch, startup retry, and model fallback snapshots the parent's live
-tools, and all `subagent*` tools are removed so children remain leaves. A role
-without an explicit list inherits that snapshot — including `codemode` when the
-session runs it — so a code-mode parent produces code-mode children under the
-same `codemode.mode`. An explicit list is a strict intersection: an active
-extension tool is available only when named, and MCP tools are kept only when a
-listed name refers to one. A declared shell slot follows the parent's active
-shell on non-scout roles.
+tools, and all `subagent*` tools are removed so children remain leaves. A broad
+role inherits that snapshot — including `codemode` when the session runs it — so
+a code-mode parent produces code-mode children under the same `codemode.mode`.
+An explicit resolved list that names no MCP tool also excludes MCP tools it does
+not name.
 
-No role file lists extension, MCP, or vendor tool names. `scout` is a hard
+Neither role names extension, MCP, or vendor tools. `scout` is a hard
 read-only boundary that is derived from the live catalog: it keeps every active
 tool the host proves read-only — `annotations.readOnlyHint` for extension and
 MCP tools, plus pi's own `read`, `grep`, `find`, and `ls` — and never a shell, a
@@ -505,62 +400,37 @@ search snippets, records material dates/versions, and marks uncertainty.
 
 ## Configuration
 
-`/subagents-setup` opens the original settings menu: enable or disable roles,
-configure one enabled role's model and thinking level, or walk through a full
-re-setup. A full re-setup asks each role's model and then its thinking level, in
-that order. `Esc` moves back through the menu stack, and model lists support fuzzy
-search. The enable menu discovers built-ins and actual custom role files in the configured
-scope, including roles never configured before. Project files require Pi's project trust.
-Config-only names are not role definitions and never appear in the enable or configure
-picker. Saving an enable selection or full setup discards unavailable role names and their
-model/thinking settings; no retired-name aliases or configuration migration are applied.
-The file is created on first start, and its presence is what keeps later sessions
-silent. To start over, delete it and run `/subagents-setup`; the next session writes
-the defaults again. Settings live in `~/.pi/agent/pi-subagents.json` (following
-`PI_CODING_AGENT_DIR`):
+`scout` and `artisan` are always enabled; the only settings are a model and a
+thinking level per role. `/subagents-setup` opens a menu with one row per role —
+its summary, current model, and current thinking level — plus a "Both roles"
+walk that asks each role's model and then its thinking level. `Esc` moves back,
+and the model picker supports fuzzy search. To start over, delete
+`~/.pi/agent/pi-subagents.json` and run `/subagents-setup`; the next session
+writes the defaults again. Settings live in `~/.pi/agent/pi-subagents.json`
+(following `PI_CODING_AGENT_DIR`):
 
 ```json
 {
-  "enabledAgents": ["scout", "artisan"],
-  "knownAgents": ["scout", "artisan"],
   "agentModels": { "scout": "anthropic/claude-haiku-4-5" },
-  "agentThinkingLevels": { "artisan": "high" },
-  "maxResultLines": 40,
-  "maxConcurrentAgents": 0,
-  "agentScope": "user",
-  "idleTimeoutSec": 1800
+  "agentThinkingLevels": { "artisan": "high" }
 }
 ```
 
 | Field                 | Meaning |
 | --------------------- | ------- |
-| `enabledAgents`       | Agents available for discovery and delegation. `[]` disables all. |
-| `knownAgents`         | Catalog shown by setup; tracks built-in adoption, but cannot define a custom role without a file. |
-| `agentModels`         | Optional model per agent; missing means the current main model. |
-| `agentThinkingLevels` | Optional setup override per agent; missing means the role default. |
-| `maxResultLines`      | Lines kept in a completion message before the artifact takes over. Default `40`. |
-| `maxConcurrentAgents` | Simultaneous child-process limit: `0` keeps automatic capacity (4–6); `1`–`6` sets an explicit capacity. Default `0`. |
-| `agentScope`          | Discover `user`, `project`, or `both` agent directories. Default `user`. |
-| `idleTimeoutSec`      | Seconds without child RPC output before termination; `0` disables. Default `1800`. |
+| `agentModels`         | Optional model per role as `provider/model-id`; missing means the current main model. |
+| `agentThinkingLevels` | Optional thinking override per role; missing means the role default (`scout` low, `artisan` high). |
 
-Concurrency changes apply at the next `subagent` dispatch. Lowering the limit
-lets active children finish before queued work acquires the reduced pool;
-increasing it releases queued work in its existing order. Set it back to `0`
-to restore automatic capacity. Setup preserves this setting when reconfiguring
-roles or models; edit it in the JSON configuration file.
+Everything else is a fixed constant: result deliveries keep 40 lines before the
+on-disk artifact takes over, process capacity is automatic, and a child silent
+for 30 minutes is terminated. Obsolete keys left by older config files are
+dropped when the canonical shape is persisted, and invalid values fall back to
+defaults.
 
-When at least one role is enabled, the delegation directive is installed as a
-`<subagents>` prompt section. Active leases go in `<subagent_leases>`. Pi 1.0
-appends a section delta only when that text changes, so idle turns keep the
-cached system prefix. Hosts without a section map still receive the same
-contract appended to the system prompt. `enabledAgents` is authoritative after
-catalog adoption: a newly shipped built-in is appended once, then `knownAgents`
-records that it was surfaced
-so a deliberate later disable remains disabled. Role names left in an older
-config do nothing unless a file still defines them; saving setup drops names
-that have no file. Available custom roles remain
-selectable even when disabled. Invalid known fields fall back safely, and unknown fields
-are dropped when canonical config is persisted.
+The delegation directive is installed as a `<subagents>` prompt section. Active
+leases go in `<subagent_leases>`. Pi 1.0 appends a section delta only when that
+text changes, so idle turns keep the cached system prefix. Hosts without a
+section map still receive the same contract appended to the system prompt.
 
 At session start, model overrides that pi no longer reports are removed with a
 one-time notice. If pi's own session compaction fails mid-thread, a notice surfaces
@@ -578,19 +448,17 @@ facts, but its tests do not establish a quality or cost advantage over solo Pi.
    Keep task prompts, models, thinking levels, tools, and project instructions
    fixed. Keep results from earlier attempts out of later prompts; alternate
    execution order and repeat each comparison several times.
-3. Compare main alone (`enabledAgents: []`, with `knownAgents` retaining the
-   current built-in catalog) against the same enabled-role catalog with
-   `maxConcurrentAgents` set to `1`, `2`, and `4`. These are concurrency limits:
-   a pool of one can still launch several children sequentially. Record actual
-   child counts and roles as well, and do not require filling the pool.
+3. Compare a session where main delegates freely against one where you instruct
+   it to work solo (or uninstall the extension). Record actual child counts and
+   roles as well — a delegation-prone main may still finish some tasks alone.
 4. Measure final acceptance and regressions, elapsed time through integration,
    and rework. Record main plus every child's token usage and cost, retaining
    model identities and including failed attempts, review, integration, and
    retries. A child's successful exit or quick first patch is not final success.
 5. Compare quality under matched total-cost budgets and matched wall-clock
-   limits as separate experiments. Include failed or unfinished runs. The
-   concurrency setting is not a spending cap, and `idleTimeoutSec` only detects
-   a silent child; enforce experiment-wide budgets in your evaluation process.
+   limits as separate experiments. Include failed or unfinished runs. The idle
+   timeout only detects a silent child; enforce experiment-wide budgets in your
+   evaluation process.
 
 The [BOAD coding study](https://arxiv.org/html/2512.23631v2) found a useful small
 expert set but declining results when adding more roles; its role-count result
@@ -598,32 +466,6 @@ does not prescribe a concurrency limit. A broader
 [2026 agent-system study](https://www.nature.com/articles/s42256-026-01268-y)
 also found that coordination outcomes depend on the task and single-agent
 baseline. These motivate measuring your own workflow, not a universal team size.
-
-## Custom agents
-
-Built-in roles ship as code inside the extension. Add or replace them with
-Markdown files:
-
-- User agents: `~/.pi/agent/agents/`
-- Project agents: the nearest `.pi/agents/` in a trusted project
-- Precedence: project > user > built-in, where the same `name` wins
-
-```yaml
----
-name: scout
-description: Fast read-only codebase reconnaissance
-isolation: shared
-tools: read, grep, find, ls
----
-…additional system prompt…
-```
-
-`description` is the routing line the main model reads. `isolation` pins the
-role's default boundary as described under [Parallel edits](#parallel-edits).
-Models come only from `/subagents-setup`; an agent file cannot pin one. An
-explicit `tools` list is intersected with the parent's active set; omitting it
-inherits the active set. A role named `scout` always loses its list: it is
-reduced to the read-only surface described above, whatever the file declares.
 
 ## Storage and cleanup
 
@@ -659,8 +501,7 @@ npm run check
 `npm run check` is `tsc --noEmit` plus the unit tests (`npm test`). There are
 no bundled runtime dependencies; pi and TypeBox are peers. The source is
 grouped by responsibility under `src/`: configuration, delegation, execution, isolation,
-lifecycle, and presentation. Thread restoration, shared lifecycle coordination, RPC control,
-and Git command execution live in focused modules rather than oversized catch-all files.
+lifecycle, and presentation.
 
 `npm test` runs the TypeScript sources on Node's built-in type stripping from
 Node 22.19 up, including Node 26, which removed `--experimental-transform-types`;

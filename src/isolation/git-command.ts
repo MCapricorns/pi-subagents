@@ -27,9 +27,8 @@ export type CommandRunner = (
 ) => Promise<CommandResult>;
 
 export const GIT_COMMAND_TIMEOUT_MS = 120_000;
-export const GIT_COMMAND_KILL_GRACE_MS = 2_000;
+const GIT_COMMAND_KILL_GRACE_MS = 2_000;
 export const GIT_OUTPUT_MAX_BYTES = 64 * 1024 * 1024;
-export const WORKTREE_PATCH_MAX_BYTES = GIT_OUTPUT_MAX_BYTES;
 
 /** Default argument-safe runner. Output is bounded before binary patches enter
  * memory, and timeout/abort terminates the complete checkout-filter process tree. */

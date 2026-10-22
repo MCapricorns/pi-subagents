@@ -1,4 +1,4 @@
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import assert from "node:assert/strict";
@@ -13,7 +13,6 @@ import {
 } from "@earendil-works/pi-tui";
 import type { SubagentsConfig } from "../src/configuration/config.ts";
 import { ensureDefaultConfig, runSetup } from "../src/configuration/setup.ts";
-import { promptSelectMany } from "../src/configuration/ui.ts";
 
 const KEY = {
 	enter: "\r",
@@ -37,7 +36,6 @@ type PickerFactory = (
 	done: (value: unknown) => void,
 ) => Component;
 
-
 function model(id: string, reasoning = true): Model<Api> {
 	return {
 		id,
@@ -55,14 +53,8 @@ function model(id: string, reasoning = true): Model<Api> {
 
 function baseConfig(overrides: Partial<SubagentsConfig> = {}): SubagentsConfig {
 	return {
-		enabledAgents: ["scout", "artisan", "steward", "sentinel"],
-		knownAgents: ["scout", "artisan", "steward", "sentinel"],
 		agentModels: {},
 		agentThinkingLevels: {},
-		maxResultLines: 40,
-		maxConcurrentAgents: 0,
-		agentScope: "user",
-		idleTimeoutSec: 1800,
 		...overrides,
 	};
 }
@@ -74,51 +66,16 @@ function writeConfig(config: SubagentsConfig, t: TestContext): string {
 	writeFileSync(path, `${JSON.stringify(config, null, 2)}\n`, "utf8");
 	return path;
 }
-function writeAgent(configPath: string, name: string): void {
-	const directory = join(dirname(configPath), ".pi", "agents");
-	mkdirSync(directory, { recursive: true });
-	writeFileSync(join(directory, `${name}.md`), `---\nname: ${name}\ndescription: Test custom role\n---\nStay on task.\n`, "utf8");
-}
-
 
 function renderComponent(factory: PickerFactory, done: (value: unknown) => void): Component {
 	return factory(tui, theme, keybindings, done) as Component;
 }
 
-describe("promptSelectMany", () => {
-	it("confirms in listed order, not toggle order", async () => {
-		const confirmed = await promptSelectMany(
-			{
-				mode: "tui",
-				ui: {
-					custom: async (factory: PickerFactory) =>
-						new Promise((resolve) => {
-							const component = renderComponent(factory, resolve);
-							// Toggle scout off and back on: insertion order would put artisan first.
-							component.handleInput?.(" ");
-							component.handleInput?.(" ");
-							component.handleInput?.(KEY.enter);
-						}),
-				},
-			} as unknown as ExtensionCommandContext,
-			"Which roles?",
-			"hint",
-			[
-				{ value: "scout", label: "scout" },
-				{ value: "artisan", label: "artisan" },
-			],
-			["scout", "artisan"],
-		);
-		assert.deepEqual(confirmed, ["scout", "artisan"]);
-	});
-});
-
 describe("runSetup menu", () => {
-	it("opens the Git-era settings menu instead of a grid overlay", async (t) => {
-		const path = writeConfig(baseConfig(), t);
+	it("lists the two fixed roles with their current routes, and Esc exits", async (t) => {
+		const path = writeConfig(baseConfig({ agentModels: { artisan: "test/reasoning" } }), t);
 		const reasoning = model("reasoning");
-		let selectCalls = 0;
-		let customCalls = 0;
+		let offered: string[] = [];
 		const context = {
 			mode: "tui",
 			model: reasoning,
@@ -126,137 +83,47 @@ describe("runSetup menu", () => {
 			modelRegistry: { getAvailable: () => [reasoning] },
 			ui: {
 				notify() {},
-				select: async (title: string) => {
-					selectCalls++;
-					assert.equal(title, "pi-subagents settings");
+				select: async (_title: string, options: string[]) => {
+					offered = options;
 					return undefined;
 				},
 				custom: async () => {
-					customCalls++;
-					return undefined;
+					throw new Error("no picker should open when Esc leaves the menu");
 				},
 			},
 		} as unknown as ExtensionCommandContext;
 
 		await runSetup(context, path);
 
-		assert.equal(selectCalls, 1);
-		assert.equal(customCalls, 0);
+		assert.equal(offered.length, 3);
+		assert.match(offered[0] ?? "", /^scout — .*thinking: low/u);
+		assert.match(offered[0] ?? "", /current main model/u);
+		assert.match(offered[1] ?? "", /^artisan — .*model: test\/reasoning.*thinking: high/u);
+		assert.match(offered[2] ?? "", /^Both roles/u);
 	});
 
-	it("preserves explicit process capacity through full re-setup", async (t) => {
-		const path = writeConfig(baseConfig({ enabledAgents: ["scout"], maxConcurrentAgents: 2 }), t);
-		const reasoning = model("reasoning");
-		const notices: string[] = [];
-		let pickerCount = 0;
-		const context = {
-			mode: "tui",
-			cwd: dirname(path),
-			model: reasoning,
-			scopedModels: [],
-			modelRegistry: { getAvailable: () => [reasoning] },
-			ui: {
-				notify: (message: string) => notices.push(message),
-				select: async (title: string, options: string[]) => title === "pi-subagents settings"
-					? options.find((option) => option.startsWith("Full"))
-					: options[0],
-				custom: async (factory: PickerFactory) => new Promise((resolve) => {
-					pickerCount++;
-					const component = renderComponent(factory, resolve);
-					component.handleInput?.(KEY.enter);
-				}),
-			},
-		} as unknown as ExtensionCommandContext;
-
-		await runSetup(context, path);
-		assert.ok(!notices.some((message) => message.includes("failed")), notices.join("\n"));
-		// Enable picker, then a model and its thinking level for the one role.
-		assert.equal(pickerCount, 3);
-		const saved = JSON.parse(readFileSync(path, "utf8")) as SubagentsConfig;
-		assert.deepEqual(saved.enabledAgents, ["scout"]);
-		assert.equal(saved.maxConcurrentAgents, 2);
-		assert.deepEqual(saved.agentThinkingLevels, {});
-	});
-
-	it("configures a custom role through the nested fuzzy model picker", async (t) => {
-		const path = writeConfig(baseConfig({
-			enabledAgents: ["scout", "artisan", "steward", "sentinel", "custom-worker"],
-			knownAgents: ["scout", "artisan", "steward", "sentinel", "custom-worker"],
-			agentModels: { "custom-worker": "test/reasoning" },
-			agentScope: "project",
-		}), t);
-		writeAgent(path, "custom-worker");
+	it("configures one role through model then thinking pickers and saves", async (t) => {
+		const path = writeConfig(baseConfig(), t);
 		const reasoning = model("reasoning");
 		const other = model("other");
-		let menuCall = 0;
-		let customCall = 0;
+		let menuCalls = 0;
+		let customCalls = 0;
 		const context = {
 			mode: "tui",
 			cwd: dirname(path),
-			isProjectTrusted: () => true,
 			model: reasoning,
 			scopedModels: [],
 			modelRegistry: { getAvailable: () => [reasoning, other] },
 			ui: {
 				notify() {},
-				select: async (_title: string, options: string[]) => {
-					if (menuCall++ > 0) return undefined;
-					return options.find((option) => option.startsWith("Configure"));
-				},
-				custom: async (factory: PickerFactory) => new Promise((resolve) => {
-					const component = renderComponent(factory, resolve);
-					customCall++;
-					if (customCall === 1) {
-						for (const character of "custom-worker") component.handleInput?.(character);
-						assert.match(component.render(120).join("\n"), /custom-worker \(custom\)/);
-						component.handleInput?.(KEY.enter);
-					} else if (customCall === 2) {
-						const initialDisplay = component.render(120).join("\n");
-						assert.match(initialDisplay, /Current main model \(dynamic\)/);
-						for (const character of "other") component.handleInput?.(character);
-						assert.match(component.render(120).join("\n"), /filter: other/);
-						component.handleInput?.(KEY.enter);
-					} else if (customCall === 3) {
-						component.handleInput?.(KEY.enter);
-					} else {
-						component.handleInput?.(KEY.escape);
-					}
-				}),
-			},
-		} as unknown as ExtensionCommandContext;
-
-		await runSetup(context, path);
-
-		const saved = JSON.parse(readFileSync(path, "utf8")) as SubagentsConfig;
-		assert.equal(customCall, 4);
-		assert.equal(saved.agentModels["custom-worker"], "test/other");
-		assert.ok(!("custom-worker" in saved.agentThinkingLevels));
-	});
-
-	it("keeps disabled custom agents visible in the enable menu", async (t) => {
-		const path = writeConfig(baseConfig({
-			knownAgents: ["scout", "artisan", "steward", "sentinel", "dormant-custom"],
-			agentScope: "project",
-		}), t);
-		writeAgent(path, "dormant-custom");
-		const reasoning = model("reasoning");
-		let customDisplay = "";
-		const context = {
-			mode: "tui",
-			cwd: dirname(path),
-			isProjectTrusted: () => true,
-			model: reasoning,
-			scopedModels: [],
-			modelRegistry: { getAvailable: () => [reasoning] },
-			ui: {
-				notify() {},
 				select: async (_title: string, options: string[]) =>
-					options.find((option) => option.startsWith("Enable")),
+					menuCalls++ === 0 ? options.find((option) => option.startsWith("scout")) : undefined,
 				custom: async (factory: PickerFactory) => new Promise((resolve) => {
+					customCalls++;
 					const component = renderComponent(factory, resolve);
-					for (const character of "dormant") component.handleInput?.(character);
-					customDisplay = component.render(120).join("\n");
-					component.handleInput?.(" ");
+					if (customCalls === 1) {
+						for (const character of "other") component.handleInput?.(character);
+					}
 					component.handleInput?.(KEY.enter);
 				}),
 			},
@@ -264,113 +131,78 @@ describe("runSetup menu", () => {
 
 		await runSetup(context, path);
 
+		assert.equal(customCalls, 2, "model picker then thinking picker");
 		const saved = JSON.parse(readFileSync(path, "utf8")) as SubagentsConfig;
-		assert.match(customDisplay, /dormant-custom \(custom\)/);
-		assert.ok(saved.enabledAgents.includes("dormant-custom"));
-		assert.ok(saved.knownAgents.includes("dormant-custom"));
+		assert.equal(saved.agentModels.scout, "test/other");
+		assert.deepEqual(saved.agentThinkingLevels, {}, "the role default stays unwritten");
 	});
 
-	it("discovers unconfigured custom definitions only in a trusted project", async (t) => {
-		for (const trusted of [true, false]) {
-			const path = writeConfig(baseConfig({ agentScope: "project" }), t);
-			writeAgent(path, "fresh-custom");
-			let display = "";
-			const context = {
-				mode: "tui",
-				cwd: dirname(path),
-				isProjectTrusted: () => trusted,
-				ui: {
-					notify() {},
-					select: async (_title: string, options: string[]) =>
-						options.find((option) => option.startsWith("Enable")),
-					custom: async (factory: PickerFactory) => new Promise((resolve) => {
-						const component = renderComponent(factory, resolve);
-						display = component.render(120).join("\n");
-						component.handleInput?.(KEY.enter);
-					}),
-				},
-			} as unknown as ExtensionCommandContext;
-
-			await runSetup(context, path);
-
-			assert.match(display, /scout/u);
-			const saved = JSON.parse(readFileSync(path, "utf8")) as SubagentsConfig;
-			if (trusted) {
-				assert.match(display, /fresh-custom \(custom\)/u);
-				assert.deepEqual(saved.knownAgents, ["scout", "artisan", "fresh-custom"]);
-			} else {
-				assert.doesNotMatch(display, /fresh-custom/u);
-				assert.deepEqual(saved.knownAgents, ["scout", "artisan"]);
-			}
-		}
-	});
-
-	it("lists configured roles in canonical order regardless of saved order", async (t) => {
-		const path = writeConfig(baseConfig({ enabledAgents: ["artisan", "scout"] }), t);
-		let menuCalls = 0;
-		let display = "";
+	it("walks both roles from the Both roles entry", async (t) => {
+		const path = writeConfig(baseConfig(), t);
+		const reasoning = model("reasoning");
+		const titles: string[] = [];
 		const context = {
 			mode: "tui",
 			cwd: dirname(path),
+			model: reasoning,
+			scopedModels: [],
+			modelRegistry: { getAvailable: () => [reasoning] },
 			ui: {
 				notify() {},
 				select: async (_title: string, options: string[]) =>
-					menuCalls++ === 0 ? options.find((option) => option.startsWith("Configure")) : undefined,
+					options.find((option) => option.startsWith("Both")) ?? options[0],
 				custom: async (factory: PickerFactory) => new Promise((resolve) => {
 					const component = renderComponent(factory, resolve);
-					display = component.render(120).join("\n");
-					component.handleInput?.(KEY.escape);
+					titles.push(component.render(120)[1] ?? "");
+					component.handleInput?.(KEY.enter);
 				}),
 			},
 		} as unknown as ExtensionCommandContext;
 
 		await runSetup(context, path);
 
-		assert.ok(display.includes("scout") && display.includes("artisan"), display);
-		assert.ok(display.indexOf("scout") < display.indexOf("artisan"), display);
+		assert.match(titles[0] ?? "", /Model for scout/u);
+		assert.match(titles[1] ?? "", /Thinking for scout/u);
+		assert.match(titles[2] ?? "", /Model for artisan/u);
+		assert.match(titles[3] ?? "", /Thinking for artisan/u);
+		const saved = JSON.parse(readFileSync(path, "utf8")) as SubagentsConfig;
+		assert.deepEqual(saved, { agentModels: {}, agentThinkingLevels: {} });
 	});
 
-	for (const menu of ["Enable", "Configure"] as const) {
-	it(`does not offer retired config-only roles in the ${menu.toLowerCase()} picker`, async (t) => {
-		const path = writeConfig(baseConfig({
-			enabledAgents: ["scout", "artisan", "explorer", "executor"],
-			knownAgents: ["scout", "artisan", "steward", "sentinel", "explorer", "executor"],
-			agentModels: { explorer: "test/reasoning" },
-			agentThinkingLevels: { executor: "high" },
-		}), t);
-		let menuCalls = 0;
-		let display = "";
-		const notifications: string[] = [];
+	it("ignores stale roles left in an old config file", async (t) => {
+		const dir = mkdtempSync(join(tmpdir(), "pi-subagents-setup-"));
+		t.after(() => rmSync(dir, { recursive: true, force: true }));
+		const path = join(dir, "pi-subagents.json");
+		// A pre-simplification file: removed keys and stale role overrides are
+		// normalized away on load before the menu ever sees them.
+		writeFileSync(path, JSON.stringify({
+			enabledAgents: ["scout", "retired-role"],
+			agentModels: { "retired-role": "test/reasoning", scout: "test/reasoning" },
+			maxConcurrentAgents: 4,
+		}), "utf8");
+		const reasoning = model("reasoning");
+		let offered: string[] = [];
 		const context = {
 			mode: "tui",
-			cwd: dirname(path),
+			cwd: dir,
+			model: reasoning,
+			scopedModels: [],
+			modelRegistry: { getAvailable: () => [reasoning] },
 			ui: {
-				notify: (message: string) => notifications.push(message),
-				select: async (_title: string, options: string[]) =>
-					menuCalls++ === 0 ? options.find((option) => option.startsWith(menu)) : undefined,
-				custom: async (factory: PickerFactory) => new Promise((resolve) => {
-					const component = renderComponent(factory, resolve);
-					display = component.render(120).join("\n");
-					component.handleInput?.(menu === "Enable" ? KEY.enter : KEY.escape);
-				}),
+				notify() {},
+				select: async (_title: string, options: string[]) => {
+					offered = options;
+					return undefined;
+				},
+				custom: async () => undefined,
 			},
 		} as unknown as ExtensionCommandContext;
 
 		await runSetup(context, path);
 
-		assert.match(display, /scout/u);
-		assert.match(display, /artisan/u);
-		assert.doesNotMatch(display, /explorer|executor/u);
-		assert.ok(!notifications.some((message) => message.includes("failed")), notifications.join("\n"));
-		if (menu === "Enable") {
-			const saved = JSON.parse(readFileSync(path, "utf8")) as SubagentsConfig;
-			assert.deepEqual(saved.enabledAgents, ["scout", "artisan"]);
-			assert.deepEqual(saved.knownAgents, ["scout", "artisan"]);
-			assert.deepEqual(saved.agentModels, {});
-			assert.deepEqual(saved.agentThinkingLevels, {});
-		}
+		assert.equal(offered.length, 3);
+		assert.ok(offered.every((option) => !/retired-role/u.test(option)), offered.join("\n"));
 	});
-}
 });
 
 describe("first install", () => {
@@ -393,10 +225,10 @@ describe("first install", () => {
 		await ensureDefaultConfig(context, path);
 
 		const saved = JSON.parse(readFileSync(path, "utf8")) as SubagentsConfig;
-		assert.deepEqual(saved.enabledAgents, ["scout", "artisan"]);
-		assert.deepEqual(saved.knownAgents, ["scout", "artisan"]);
-		assert.deepEqual(saved.agentModels, {}, "no override keeps both roles on the main model");
-		assert.deepEqual(saved.agentThinkingLevels, {});
+		assert.deepEqual(saved, {
+			agentModels: {},
+			agentThinkingLevels: {},
+		}, "no override keeps both roles on the main model");
 		assert.equal(notices.length, 1, notices.join("\n"));
 		assert.match(notices[0] ?? "", /\/subagents-setup/u);
 
@@ -417,7 +249,6 @@ describe("first install", () => {
 			modelRegistry: { getAvailable: () => [reasoning] },
 			ui: {
 				notify: (message: string) => notices.push(message),
-				confirm: async () => true,
 				select: async (_title: string, options: string[]) => options[0],
 				custom: async (factory: PickerFactory) => new Promise((resolve) => {
 					const component = renderComponent(factory, resolve);
@@ -429,12 +260,11 @@ describe("first install", () => {
 
 		await runSetup(context, path);
 
-		assert.match(titles[1] ?? "", /Model for scout/u);
-		assert.match(titles[2] ?? "", /Thinking for scout/u);
-		assert.match(titles[3] ?? "", /Model for artisan/u);
-		assert.match(titles[4] ?? "", /Thinking for artisan/u);
+		assert.match(titles[0] ?? "", /Model for scout/u);
+		assert.match(titles[1] ?? "", /Thinking for scout/u);
+		assert.match(titles[2] ?? "", /Model for artisan/u);
+		assert.match(titles[3] ?? "", /Thinking for artisan/u);
 		const saved = JSON.parse(readFileSync(path, "utf8")) as SubagentsConfig;
-		assert.deepEqual(saved.enabledAgents, ["scout", "artisan"]);
 		assert.deepEqual(saved.agentThinkingLevels, {});
 	});
 });

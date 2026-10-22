@@ -39,7 +39,7 @@ createInterface({ input: process.stdin }).on("line", (line) => {
 		const control = new RpcRunControl("Test the transport", 1);
 		const options = {
 			defaultCwd: root,
-			agent: { name: "artisan", description: "test", systemPrompt: "", source: "builtin", filePath: child },
+			agent: { name: "artisan", description: "test", systemPrompt: "" },
 			agentName: "artisan",
 			task: "Test the transport",
 			thinkingLevel: "off",

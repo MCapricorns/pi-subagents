@@ -1,10 +1,8 @@
 /**
  * Built-in role definitions.
  *
- * The two built-in roles ship as code, not as Markdown files: `agents/` under
- * the pi agent directory and `.pi/agents/` in a trusted project are the
- * extension point for custom roles, while these two are part of this package's
- * contract. A user or project role with the same name still overrides them.
+ * The two built-in roles ship as code and are the whole catalog: both are
+ * always enabled and there are no user or project role files.
  *
  * Role prompts stay tool-agnostic: the host decides whether a child reaches its
  * tools directly or through a script tool such as codemode, and which
@@ -17,7 +15,7 @@ export interface BuiltinAgentDefinition {
 	systemPrompt: string;
 }
 
-export const SCOUT_SYSTEM_PROMPT = `Answer the brief's bounded research question. Priority is the brief, then loaded project instructions, then this role. The read-only boundary still wins. You have no interactive clarification; state material assumptions and gaps, then finish.
+const SCOUT_SYSTEM_PROMPT = `Answer the brief's bounded research question. Priority is the brief, then loaded project instructions, then this role. The read-only boundary still wins. You have no interactive clarification; state material assumptions and gaps, then finish.
 
 ## Rules
 
@@ -32,7 +30,7 @@ export const SCOUT_SYSTEM_PROMPT = `Answer the brief's bounded research question
 Lead with the answer. Cite repository facts as \`path:line-range\` and external facts as source URLs. Distinguish inference from verified facts, and name unresolved gaps.
 `;
 
-export const ARTISAN_SYSTEM_PROMPT = `Complete the brief's one change: implementation, fix, refactor, tests, or docs. Priority is the brief, then loaded project instructions, then this role. The leaf boundary below still wins. You have no interactive clarification; resolve routine details, state material assumptions, and finish the authorized outcome.
+const ARTISAN_SYSTEM_PROMPT = `Complete the brief's one change: implementation, fix, refactor, tests, or docs. Priority is the brief, then loaded project instructions, then this role. The leaf boundary below still wins. You have no interactive clarification; resolve routine details, state material assumptions, and finish the authorized outcome.
 
 ## Rules
 

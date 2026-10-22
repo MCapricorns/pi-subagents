@@ -169,7 +169,7 @@ describe("phase and scope normalization", () => {
 });
 
 describe("dispatch concurrency", () => {
-	it("applies saved limits on the next dispatch and restores automatic capacity", async (t) => {
+	it("always uses automatic capacity; a stale limit in an old config is ignored", async (t) => {
 		const root = await mkdtemp(join(tmpdir(), "pi-subagents-dispatch-capacity-"));
 		t.after(() => rm(root, { recursive: true, force: true }));
 		const configPath = join(root, "config.json");
@@ -177,12 +177,10 @@ describe("dispatch concurrency", () => {
 		t.after(() => runtime.shutdown());
 		const task = { agent: "missing-role", task: "No provider call should be made" };
 
-		for (const limit of [1, 2, 0]) {
-			await saveConfig(normalizeConfig({ maxConcurrentAgents: limit }), configPath);
-			await assert.rejects(execute(tool, task, root), /Unknown agent: "missing-role"/);
-			assert.equal(runtime.backgroundQueue.capacity, limit || resolveSubagentConcurrency());
-			assert.equal(runtime.threads.size, 0, "unknown roles must not start children");
-		}
+		await saveConfig(normalizeConfig({ maxConcurrentAgents: 1 }), configPath);
+		await assert.rejects(execute(tool, task, root), /Unknown agent: "missing-role"/);
+		assert.equal(runtime.backgroundQueue.capacity, resolveSubagentConcurrency());
+		assert.equal(runtime.threads.size, 0, "unknown roles must not start children");
 	});
 });
 

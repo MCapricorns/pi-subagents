@@ -149,7 +149,7 @@ function preferredRoleUse(agents: readonly AgentConfig[]): string | undefined {
 	}
 	if (uses.length === 0) return undefined;
 	const preference = uses.length === 1 ? `Prefer ${uses[0]}` : `Prefer ${uses[0]}, and ${uses[1]}`;
-	return `${preference}. Keep a small edit already understood in the current context in main. Do not open a phase that repeats owned work, splits one tightly coupled change, or exists only to fill a free slot.`;
+	return `${preference}. Route broad or unfamiliar lookups to a child instead of running the same searches serially in main. Keep a small edit already understood in the current context in main. Do not open a phase that repeats owned work, splits one tightly coupled change, or exists only to fill a free slot.`;
 }
 
 function delegationBody(agents: AgentConfig[]): string {
@@ -158,7 +158,7 @@ function delegationBody(agents: AgentConfig[]): string {
 
 	const dispatchRules = [
 		"The user's task sets the outcome. If it conflicts with this section, follow the task. Admission still rejects duplicate phases and overlapping writers.",
-		"Use a subagent when the work can run independently in parallel, its boundary is clear, and delegation will actually reduce cost or improve completion quality.",
+		"Delegate whenever the work has independent parts or a bounded job can be briefed self-contained: parallel phases usually beat a serialized main, and a child with a fresh context is often cheaper than growing yours. Keep in main the edit that needs your conversation context or is too small to brief.",
 		...(preferred ? [preferred] : []),
 		"Children inherit this session's live tool surface: a role without an allowlist gets everything you have, including `codemode`, and a read-only role keeps only the tools the host proves read-only. Do not plan a phase that needs a tool its role cannot reach.",
 		"Give each phase one owner, a stable `phaseId`, and exact writer `scope`. Parallelize independent phases in one call; never overlap writers or duplicate an owned phase. Dependent phases wait for prerequisites. Scope is conflict metadata, not permissions or a sandbox.",
@@ -178,13 +178,13 @@ ${bullets(dispatchRules)}`;
 }
 
 /** Routing contract without live leases. Empty when no role is enabled and no lease forces the catalog. */
-export function buildStableDelegationSection(agents: AgentConfig[], includeEmptyCatalog = false): string {
+function buildStableDelegationSection(agents: AgentConfig[], includeEmptyCatalog = false): string {
 	if (agents.length === 0 && !includeEmptyCatalog) return "";
 	return delegationBody(agents);
 }
 
 /** Active-lease block. Empty when nothing is queued, running, or settling. */
-export function buildActiveLeaseSection(sources: Iterable<PhaseLeaseSource>): string {
+function buildActiveLeaseSection(sources: Iterable<PhaseLeaseSource>): string {
 	const activeLeases = formatActivePhaseLeases(sources);
 	if (!activeLeases) return "";
 	return `Active phase leases:\n${activeLeases}`;
