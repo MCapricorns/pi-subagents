@@ -52,7 +52,14 @@ const SUBAGENT_TOOL_NAME_SET = new Set<string>(SUBAGENT_TOOL_NAMES);
 
 /** The parts of pi's `ToolInfo` that decide whether a tool is safe for a
  * read-only role. Live `pi.getAllTools()` entries satisfy it structurally. */
-export type ToolMetadata = Pick<ToolInfo, "name" | "annotations" | "reachesTools">;
+export type ToolMetadata = Pick<ToolInfo, "name" | "annotations" | "reachesTools"> & {
+	/** How the model reaches the tool; absent metadata is treated as declared. */
+	exposure?: ToolInfo["exposure"];
+};
+
+/** Exposures reached through a script or `tool_search` instead of a declaration.
+ * The session can call these, so a child can be given them directly. */
+const INDIRECT_EXPOSURES: ReadonlySet<string> = new Set(["codemode", "deferred"]);
 /** Live tool metadata keyed by name. Read-only and write capability come from it
  * instead of a maintained list of extension or MCP tool names. */
 type ToolInfoIndex = ReadonlyMap<string, ToolMetadata>;
@@ -99,7 +106,20 @@ export function resolveAgentTools(
 	// the live catalog proves read-only. Codemode and tool_search are excluded
 	// here because they reach other tools.
 	if (agent.name === "scout") {
-		return { ...agent, tools: active.filter((tool) => isReadOnlyToolName(tool, toolIndex)) };
+		const tools = active.filter((tool) => isReadOnlyToolName(tool, toolIndex));
+		// A read-only tool the session reaches through codemode or tool_search is
+		// part of the same capability, and the child can be handed it directly.
+		// Declaring it is the only way to give scout an MCP server it cannot
+		// reconfigure, without also giving it a tool that reaches a writer.
+		if (active.some((tool) => toolIndex.get(tool)?.reachesTools)) {
+			const indirect = [...toolIndex.values()]
+				.filter((tool) => typeof tool.exposure === "string" && INDIRECT_EXPOSURES.has(tool.exposure) && isReadOnlyTool(tool))
+				.map((tool) => tool.name)
+				.filter((name) => !tools.includes(name))
+				.sort();
+			tools.push(...indirect);
+		}
+		return { ...agent, tools };
 	}
 	if (!agent.tools) return { ...agent, tools: active };
 	const declaredTools = agent.tools;

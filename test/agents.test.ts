@@ -15,11 +15,18 @@ function tool(
 	name: string,
 	annotations?: ToolMetadata["annotations"],
 	reachesTools?: ToolMetadata["reachesTools"],
+	exposure?: ToolMetadata["exposure"],
 ): ToolMetadata {
-	return { name, ...(annotations ? { annotations } : {}), ...(reachesTools ? { reachesTools } : {}) };
+	return {
+		name,
+		...(annotations ? { annotations } : {}),
+		...(reachesTools ? { reachesTools } : {}),
+		...(exposure ? { exposure } : {}),
+	};
 }
 
 const READ_ONLY = tool("docs_search", { readOnlyHint: true });
+const CODEMODE = tool("codemode", undefined, () => "all", "direct");
 
 describe("loadBuiltinAgents", () => {
 	it("ships scout and artisan without frontmatter thinking", () => {
@@ -141,10 +148,33 @@ describe("resolveAgentTools", () => {
 		const artisan = loadBuiltinAgents().find((agent) => agent.name === "artisan");
 		const scout = loadBuiltinAgents().find((agent) => agent.name === "scout");
 		assert.ok(artisan && scout);
-		const infos = [tool("codemode", undefined, () => "all"), READ_ONLY];
+		const infos = [CODEMODE, READ_ONLY];
 		const active = ["read", "edit", "codemode", "docs_search"];
 		assert.deepEqual(resolveAgentTools(artisan, active, infos).tools, active);
 		assert.deepEqual(resolveAgentTools(scout, active, infos).tools, ["read", "docs_search"]);
+	});
+
+	it("hands a read-only role the script-only read-only tools the session can reach", () => {
+		const scout = loadBuiltinAgents().find((agent) => agent.name === "scout");
+		assert.ok(scout);
+		const infos = [
+			CODEMODE,
+			READ_ONLY,
+			// An MCP server the user cannot reconfigure: script-only by default.
+			tool("mcp__search__search", { readOnlyHint: true }, undefined, "codemode"),
+			tool("mcp__search__extract", { readOnlyHint: true }, undefined, "deferred"),
+			// Write-capable, unannotated, or reaching tools stay out.
+			tool("mcp__repo__push", { readOnlyHint: false }, undefined, "codemode"),
+			tool("mcp__repo__unknown", undefined, undefined, "codemode"),
+		];
+		const active = ["read", "codemode"];
+		assert.deepEqual(resolveAgentTools(scout, active, infos).tools, [
+			"read",
+			"mcp__search__extract",
+			"mcp__search__search",
+		]);
+		// Without an indirect tool in the session, nothing can reach them.
+		assert.deepEqual(resolveAgentTools(scout, ["read"], infos).tools, ["read"]);
 	});
 
 	it("adapts a declared shell to the parent's active shell", () => {

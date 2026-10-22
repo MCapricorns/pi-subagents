@@ -16,6 +16,12 @@ are kept here; every published version is preserved as a GitHub Release.
   are annotated read-only; broad roles still inherit the session's live surface,
   codemode included, and a code-mode parent therefore produces code-mode
   children under the same `codemode.mode`.
+- Reach read-only MCP tools without reconfiguring the server. A server left at
+  pi's default `codemode` exposure keeps its tools out of the model's
+  declarations, so scout previously got nothing from it. It now receives the
+  read-only ones directly — exactly those, since a named MCP tool also filters the
+  rest — so a script-only search server works for scout with no `mcp.json` edit,
+  and the child still cannot reach an MCP writer.
 - Enforce explicit role lists as a strict intersection for MCP tools too. pi keeps
   MCP tools unless a `--tools` entry names one, so a list that names none now
   adds `mcp__*` to the child's excluded tools; scout's read-only boundary can no

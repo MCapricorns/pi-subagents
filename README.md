@@ -490,8 +490,11 @@ tool the host proves read-only — `annotations.readOnlyHint` for extension and
 MCP tools, plus pi's own `read`, `grep`, `find`, and `ls` — and never a shell, a
 mutation tool, or a tool that reaches other tools, so `codemode` and
 `tool_search` cannot reach a writer through it. A retrieval extension or an MCP
-search server therefore works for scout without being named anywhere; expose it
-directly rather than script-only when you want scout to have it. Tools with no
+search server therefore works for scout without being named anywhere, and without
+reconfiguring the server: a read-only tool the session reaches only through
+`codemode` or `tool_search` — pi's default for MCP servers — is handed to scout
+directly, which is the same capability without giving scout a way to reach a
+writer. Every other MCP tool stays excluded from that child. Tools with no
 read-only annotation, whether they are declared by another role or by an active
 extension, are conservatively treated as write-capable when isolation is chosen.
 An empty resolved snapshot starts the child with `--no-tools`.
