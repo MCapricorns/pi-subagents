@@ -125,8 +125,17 @@ export function createBackgroundDispatcher(options: BackgroundDispatcherOptions)
 		}
 		const duplicate = findDuplicateDispatch(runtime.threads.values(), task, originalCwd, phaseId);
 		if (duplicate) {
+			// A phase stays owned across reloads: an interrupted run keeps its claim
+			// until it is retired, so "let it finish" is wrong advice for a parked
+			// owner and leaves the caller with no way forward.
+			const owner = duplicate.source;
+			const remedy = owner.state === "parked" || owner.retired
+				? `That run was interrupted (possibly in an earlier session) and keeps the phase claimed; retire it with subagent_stop({ id: ${owner.id} }) to reuse the phase, or give this work a different phaseId. Main handles follow-up work.`
+				: owner.state === "completed" || owner.state === "failed"
+					? "Inspect it with subagent_status; a different deliverable needs a different phaseId. Main handles follow-up work."
+					: "Do not redispatch it; inspect its result or let it finish. Main handles follow-up work.";
 			return failedStartResult(agentName, task,
-				`Run #${duplicate.source.id} (${duplicate.source.agentName}) already owns this logical phase (${duplicate.source.state}). Do not redispatch it; inspect its result or let it finish. Main handles follow-up work.`);
+				`Run #${owner.id} (${owner.agentName}) already owns this logical phase (${owner.state}). ${remedy}`);
 		}
 		if (writeCapable && scope) {
 			const conflict = findWriterLeaseScopeOverlap(scope, runtime.threads.values());

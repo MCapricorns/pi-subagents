@@ -3,6 +3,16 @@
 Release notes for `@ferris1225/pi-subagents`. Only the most recent releases
 are kept here; every published version is preserved as a GitHub Release.
 
+## 4.3.34
+
+- Reject a workflow that would reuse a phase this session already owns, before
+  any node starts, and name each owning run with the way out. A settled phase
+  stays owned once it settles, and an interrupted one keeps its claim across
+  reloads, so "re-run it in a new session" was wrong: the graph previously failed
+  its first node and blocked the rest.
+- Say the same thing for a per-run duplicate: a parked owner is told to retire
+  the phase with `subagent_stop({ id })` instead of being told to let it finish.
+
 ## 4.3.33
 
 - Add `subagent_workflow`: declare a graph of phases with `dependsOn` and the

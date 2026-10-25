@@ -172,10 +172,14 @@ Save a graph when it will run again, when a reviewer should read the plan before
 it runs, or when the phases are long enough that you want them in version
 control. Run it by name; do not restate it inline.
 
-**Re-running a graph in the same session is a duplicate phase.** Derived phase
-ids are `<workflow-slug>.<node-id>`, and a settled phase stays owned for the
-session. To run the same shape on new work, either start a new session or vary
-the briefs (a new commit, a new target) so the phases are genuinely different.
+**A phase stays owned after it settles, and across reloads.** Derived phase ids
+are `<workflow-slug>.<node-id>`; an interrupted run keeps its claim until it is
+retired. Re-running the same shape is therefore rejected **before any node
+starts**, naming the owning runs. Three ways forward: retire the owner with
+`subagent_stop({ id })` (destructive — it drops that run's retained session),
+give the reused nodes different ids or `phaseId`s, or run the graph under a
+different name. A new session alone does not help: a retained interrupted run is
+restored with its claim intact.
 
 ## 9. Cost
 

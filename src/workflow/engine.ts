@@ -20,6 +20,7 @@ import { formatDuration, formatTaskSummary, monitor } from "../presentation/moni
 import { perModelTotals, type CompletionMessageItem } from "../lifecycle/completion.ts";
 import type { SubagentRuntime } from "../lifecycle/runtime.ts";
 import type { StartBackgroundInternal } from "../lifecycle/thread-shared.ts";
+import { findDuplicateDispatch } from "../delegation/prompt.ts";
 import { defaultPhaseId, renderNodeTask, type CompiledWorkflow, type UpstreamOutput } from "./plan.ts";
 import {
 	readWorkflowRecords,
@@ -392,6 +393,40 @@ async function settle(ctx: RunContext): Promise<void> {
 	// No usage on the item: the summary carries its own per-model tally, and a
 	// group total would merge different models' spend into one number.
 	runtime.sendCompletionGroup([item]);
+}
+
+/** A phase a live or retained thread already owns. */
+export interface OwnedPhase {
+	nodeId: string;
+	phaseId: string;
+	runId: number;
+	agent: string;
+	state: string;
+}
+
+/**
+ * Phases this session already owns, checked before the graph starts.
+ *
+ * A phase is owned by the parent session, not by one graph: an interrupted or
+ * settled owner keeps its claim until it is retired. Checking every node up
+ * front turns "the first node failed and the rest never ran" into one message
+ * that names the owners and the way out, at the cost of no child process.
+ */
+export function findOwnedPhases(runtime: SubagentRuntime, workflow: CompiledWorkflow): OwnedPhase[] {
+	const owned: OwnedPhase[] = [];
+	for (const node of workflow.nodes) {
+		const phaseId = node.phaseId ?? defaultPhaseId(workflow, node);
+		const duplicate = findDuplicateDispatch(runtime.threads.values(), node.task, node.cwd, phaseId);
+		if (!duplicate) continue;
+		owned.push({
+			nodeId: node.id,
+			phaseId,
+			runId: duplicate.source.id,
+			agent: duplicate.source.agentName,
+			state: duplicate.source.lifecycleOperation === "settle" ? "settling" : duplicate.source.state,
+		});
+	}
+	return owned;
 }
 
 /** Start a compiled graph. Nodes dispatch as their prerequisites settle. */

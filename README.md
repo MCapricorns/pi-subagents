@@ -13,6 +13,12 @@ self-contained — parallel phases usually beat a serialized main.
 
 ## What's new
 
+**4.3.34** — a workflow that would reuse a phase this session already owns (a
+settled run, or an interrupted one retained from an earlier session) is now
+rejected before any node starts, naming each owning run and the way out; the
+per-run duplicate message says the same for a parked owner instead of asking you
+to "let it finish".
+
 **4.3.33** — dependency graphs for multi-phase work. `subagent_workflow` declares
 nodes with `dependsOn`, validates the graph before any child starts, dispatches
 each node as its prerequisites settle, and reports the whole graph once. Saved
@@ -268,9 +274,11 @@ object or a bare node array. The package also ships a `workflow` skill
 (`skills/workflow/SKILL.md`) with the authoring guidance: when a graph is worth
 its cost, how to slice phases, how to write briefs, and the anti-patterns.
 
-Derived phase ids are `<workflow-slug>.<node-id>`, and a settled phase stays owned
-for the parent session, so the same graph with identical briefs is rejected as a
-duplicate. Re-run it in a new session, or change what the phases target.
+Derived phase ids are `<workflow-slug>.<node-id>`, and a phase stays owned after it
+settles and across reloads — an interrupted run keeps its claim until it is retired.
+A graph that reuses one is rejected before any node starts, naming each owning run;
+retire the owner with `subagent_stop({ id })`, or give those nodes different ids or
+`phaseId`s, or run the graph under a different name.
 
 `subagent_status({ workflow: id })` reports nodes and their wait reasons;
 `subagent_stop({ workflow: id })` stops a graph without starting its idle

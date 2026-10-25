@@ -9,7 +9,7 @@ import { emptyUsage } from "../src/execution/rpc-control.ts";
 import type { CompletionMessageItem } from "../src/lifecycle/completion.ts";
 import { compileWorkflow, defaultPhaseId, renderNodeTask, WORKFLOW_NODE_LIMIT } from "../src/workflow/plan.ts";
 import { discoverWorkflows, resolveWorkflowDefinition } from "../src/workflow/files.ts";
-import { startWorkflow, stopWorkflow, persistInterruptedWorkflows, readRetainedWorkflows } from "../src/workflow/engine.ts";
+import { findOwnedPhases, startWorkflow, stopWorkflow, persistInterruptedWorkflows, readRetainedWorkflows } from "../src/workflow/engine.ts";
 import type { WorkflowRun } from "../src/workflow/state.ts";
 import { createRuntime } from "../src/lifecycle/runtime.ts";
 import { registerWorkflowTool } from "../src/workflow/tool.ts";
@@ -408,6 +408,22 @@ describe("workflow runner", () => {
 	});
 });
 
+function parkedThread(id: number, cwd: string, phaseId: string) {
+	return {
+		id,
+		generation: 1,
+		agentName: "scout",
+		task: "an interrupted phase",
+		phaseId,
+		cwd,
+		executionCwd: cwd,
+		isolation: "shared",
+		state: "parked",
+		lifecycleVersion: 0,
+		elapsedMs: 0,
+	} as never;
+}
+
 describe("subagent_workflow tool", () => {
 	function toolHarness(configPath: string) {
 		type RegisteredTool = {
@@ -502,4 +518,49 @@ describe("subagent_workflow tool", () => {
 			await rm(root, { recursive: true, force: true });
 		}
 	});
+
+	it("rejects the whole graph before dispatching any node when a phase is owned", async () => {
+		const root = await mkdtemp(join(tmpdir(), "pi-subagents-workflow-owned-"));
+		const harness = toolHarness(join(root, "pi-subagents.json"));
+		try {
+			(harness.runtime.threads as Map<number, never>).set(5, parkedThread(5, root, "smoke.probe"));
+			await assert.rejects(
+				execute(harness.tool, {
+					name: "smoke",
+					nodes: [{ id: "probe", agent: "scout", task: "Probe" }],
+				}, root),
+				/already owned by run #5[\s\S]*subagent_stop/,
+			);
+			assert.deepEqual(harness.started, [], "no child is dispatched when a phase is already owned");
+			assert.equal(harness.runtime.workflows.size, 0, "no graph is left behind");
+		} finally {
+			await harness.runtime.shutdown();
+			await rm(root, { recursive: true, force: true });
+		}
+	});
+});
+
+describe("workflow phase ownership", () => {
+	it("names the owner of a phase the session already holds", () => {
+		const runtime = {
+			configPath: "C:/tmp/pi-subagents.json",
+			threads: new Map(),
+			workflows: new Map(),
+		} as unknown as SubagentRuntime;
+		(runtime.threads as Map<number, never>).set(7, parkedThread(7, process.cwd(), "smoke.probe"));
+		const workflow = compileWorkflow(
+			{
+				name: "smoke",
+				nodes: [
+					{ id: "probe", agent: "scout", task: "Probe" },
+					{ id: "report", agent: "scout", task: "Report", dependsOn: ["probe"] },
+				],
+			},
+			process.cwd(),
+			AGENTS,
+		);
+		const owned = findOwnedPhases(runtime, workflow);
+		assert.deepEqual(owned, [{ nodeId: "probe", phaseId: "smoke.probe", runId: 7, agent: "scout", state: "parked" }]);
+	});
+
 });

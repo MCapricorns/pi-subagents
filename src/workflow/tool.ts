@@ -20,6 +20,7 @@ import { projectResultsRoot } from "../lifecycle/thread-shared.ts";
 import { formatTaskSummary, monitor } from "../presentation/monitor.ts";
 import { pruneWorkflowRecords } from "./durable.ts";
 import {
+	findOwnedPhases,
 	persistInterruptedWorkflows,
 	readRetainedWorkflows,
 	startWorkflow,
@@ -196,6 +197,22 @@ export function registerWorkflowTool(pi: ExtensionAPI, runtime: SubagentRuntime,
 			} catch (error) {
 				throw new Error(
 					"Workflow rejected before any node started:\n" + (error instanceof Error ? error.message : String(error)),
+				);
+			}
+
+			// Re-using a phase another owner holds fails the first node and blocks the
+			// rest; reject the whole graph instead, with the owners named.
+			const owned = findOwnedPhases(runtime, workflow);
+			if (owned.length > 0) {
+				const lines = owned.map((owner) =>
+					"- node \"" + owner.nodeId + "\" → phase \"" + owner.phaseId + "\" is already owned by run #" + owner.runId +
+					" (" + owner.agent + ", " + owner.state + ")",
+				);
+				throw new Error(
+					"Workflow \"" + workflow.name + "\" was not started: " + owned.length + " of " + workflow.nodes.length +
+					" node" + (owned.length === 1 ? " reuses" : "s reuse") + " a phase this session already owns.\n" +
+					lines.join("\n") +
+					"\nRetire the owner with subagent_stop({ id: <run id> }) (destructive: it drops that run's retained session), give those nodes different ids or phaseIds, or run the graph under a different name. No nodes were started.",
 				);
 			}
 
