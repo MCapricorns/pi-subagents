@@ -17,7 +17,6 @@ import { resolveSubagentConcurrency } from "../execution/background.ts";
 import { formatCompletionBlock, formatUsage } from "../presentation/format.ts";
 import {
 	formatTaskSummary,
-	formatToolActivity,
 	monitor,
 	statusIcon,
 	statusLabel,
@@ -35,22 +34,18 @@ import {
 	type PhaseScopeInput,
 } from "./phase-scope.ts";
 import type { SubagentRuntime, SubagentThread } from "../lifecycle/runtime.ts";
-import { createBackgroundDispatcher } from "../lifecycle/thread-lifecycle.ts";
+import { createDispatchCore, type DispatchCore } from "../lifecycle/dispatch-core.ts";
 import {
-	getResultError,
 	getResultOutput,
 	isFailedResult,
 	type SingleResult,
 	type SubagentDetails,
-	type SubagentLiveEvent,
 	type UsageStats,
 } from "../execution/spawn.ts";
 import {
 	isWorktreeCapableAgent,
-	persistThreadCheckpoint,
 	projectResultsRoot,
 	runInManagedRepositoryLane,
-	type DispatchEnvironment,
 } from "../lifecycle/thread-shared.ts";
 import type { IsolationMode } from "../isolation/worktree.ts";
 
@@ -61,17 +56,17 @@ const NON_BLANK_TASK_OPTIONS = { minLength: 1, pattern: "\\S" } as const;
 const ISOLATION_DESCRIPTION =
 	"Git isolation (not a sandbox): shared uses the caller's checkout; worktree creates a detached temporary worktree for write-capable agents only.";
 
-const IsolationSchema = Type.Optional(
+export const IsolationSchema = Type.Optional(
 	StringEnum(["shared", "worktree"] as const, { description: ISOLATION_DESCRIPTION }),
 );
 
-const PhaseIdSchema = Type.Optional(Type.String({
+export const PhaseIdSchema = Type.Optional(Type.String({
 	minLength: 1,
 	maxLength: PHASE_ID_MAX_LENGTH,
 	pattern: PHASE_ID_PATTERN_SOURCE,
 	description: "Stable logical phase id. Reuse it when rewording the same phase; exact task+cwd is the fallback when omitted.",
 }));
-const ScopeSchema = Type.Optional(Type.Object({
+export const ScopeSchema = Type.Optional(Type.Object({
 	paths: Type.Optional(Type.Array(Type.String({
 		...NON_BLANK_TASK_OPTIONS,
 		description: "Exact file or directory write claim resolved from the caller-facing cwd; wildcard * and ? are rejected, while other punctuation is literal.",
@@ -347,98 +342,12 @@ export async function awaitRunResults(
 	}
 }
 
-export function registerSubagentTool(pi: ExtensionAPI, runtime: SubagentRuntime): void {
-	// Each dispatch refreshes the context, config, and agent catalog.
-	const environmentRef: { current: DispatchEnvironment | undefined } = { current: undefined };
-
-	// Terminal rows stay in the monitor until the next beginTurn so the footer
-	// can count them beside siblings that are still live. The widget ignores
-	// them. Repeated publication of the same settlement is a no-op.
-	const publishedEndedAt = new Map<number, number>();
-	const finishRun = (
-		runId: number,
-		status: "done" | "failed",
-		opts?: { silent?: boolean },
-	): void => {
-		const run = monitor.findRun(runId);
-		if (!run) return;
-		monitor.setStatus(runId, status); // stamps endedAt for the elapsed time
-		const endedAt = monitor.findRun(runId)?.endedAt;
-		if (endedAt !== undefined && publishedEndedAt.get(runId) === endedAt) return;
-		if (endedAt !== undefined) publishedEndedAt.set(runId, endedAt);
-		if (opts?.silent || !runtime.sessionActive) return;
-		const icon = status === "done" ? "✓" : "✗";
-		const result = runtime.threads.get(runId)?.lastResult;
-		const error = status === "failed" ? result ? getResultError(result) : "No failure reason was recorded." : undefined;
-		environmentRef.current?.ctx.ui.notify(
-			`${icon} #${run.id} ${monitor.summarize(run)}${error ? ` · ${formatTaskSummary(error, 300, false)}` : ""}`,
-			status === "done" ? "info" : "error",
-		);
-	};
-
-	// Live sub-agent activity → concise one-line status ("thinking",
-	// "read src/index.ts", ...), never a raw args blob. The live handler
-	// only updates monitor state; the queue task owns terminal removal,
-	// notification, and lifecycle decisions.
-	const makeLiveHandler = (runId: number, generation?: number) => {
-		// Every child turn reports "running"; the manifest is rewritten only when
-		// what it records for recovery (session path, child pids) actually changed.
-		let checkpointKey: string | undefined;
-		return (e: SubagentLiveEvent): void => {
-			if (generation !== undefined && runtime.threads.get(runId)?.generation !== generation) return;
-			switch (e.kind) {
-				case "status":
-					monitor.setStatus(runId, e.status);
-					// A fresh running segment refreshes the durable checkpoint (session
-					// path plus child pids) so a crash mid-generation still restores.
-					if (e.status === "running") {
-						const thread = runtime.threads.get(runId);
-						if (thread?.sessionId && thread.sessionDir) {
-							const key = `${thread.sessionDir}\0${thread.control.getChildPids().join(",")}`;
-							if (key !== checkpointKey) {
-								checkpointKey = key;
-								persistThreadCheckpoint(runtime, thread, "parked");
-							}
-						}
-					}
-					break;
-				case "model":
-					monitor.setModel(runId, e.model, e.fallbackFrom);
-					monitor.setThinking(runId, e.thinking);
-					break;
-				case "usage":
-					monitor.setUsage(runId, e.usage, e.model);
-					break;
-				case "session": {
-					runtime.retainSession({ sessionDir: e.sessionDir });
-					const thread = runtime.threads.get(runId);
-					if (thread && (generation === undefined || runtime.threads.get(runId)?.generation === generation)) {
-						thread.sessionId = e.sessionId;
-						thread.sessionDir = e.sessionDir;
-						persistThreadCheckpoint(runtime, thread, "parked");
-					}
-					break;
-				}
-				case "tool_start":
-					monitor.recordToolStart(runId, e.toolName, formatToolActivity(e.toolName, e.args));
-					break;
-				case "tool_end":
-					monitor.recordToolEnd(runId, e.toolName, e.isError);
-					break;
-				case "thinking":
-					monitor.setActivity(runId, "thinking");
-					break;
-				case "text":
-					// A text delta is model output, not a filesystem write.
-					monitor.setActivity(runId, "responding");
-					break;
-			}
-		};
-	};
-
-	const makeDetails =
-		(mode: "single" | "parallel", background = false) =>
-		(results: SingleResult[]): SubagentDetails => ({ mode, results, background });
+export function registerSubagentTool(
+	pi: ExtensionAPI,
+	runtime: SubagentRuntime,
+	core: DispatchCore = createDispatchCore(runtime),
+): void {
+	const { startBackground, makeDetails } = core;
 
 	const phaseLeaseReceipt = (
 		runIds: number[],
@@ -480,19 +389,6 @@ export function registerSubagentTool(pi: ExtensionAPI, runtime: SubagentRuntime)
 		return ` Pacing: ${parts.join(" · ")}.`;
 	};
 
-	const startBackground = createBackgroundDispatcher({
-		runtime,
-		getEnvironment: () => {
-			if (!environmentRef.current) {
-				throw new Error("pi-subagents dispatch environment is not ready yet.");
-			}
-			return environmentRef.current;
-		},
-		finishRun,
-		makeLiveHandler,
-		makeDetails,
-	});
-
 	pi.registerTool({
 		name: "subagent",
 		label: "Subagent",
@@ -530,7 +426,7 @@ export function registerSubagentTool(pi: ExtensionAPI, runtime: SubagentRuntime)
 				projectTrusted: ctx.isProjectTrusted?.() === true,
 			});
 			const agents = discovery.agents;
-			environmentRef.current = { ctx, config, agents };
+			core.setEnvironment({ ctx, config, agents });
 
 			const hasTasks = (params.tasks?.length ?? 0) > 0;
 			const hasSingle = Boolean(params.agent) && params.task !== undefined;

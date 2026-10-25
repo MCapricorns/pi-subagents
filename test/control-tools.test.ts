@@ -100,11 +100,11 @@ describe("subagent_status", () => {
 			assert.ok(tools.has("subagent_status"), "the status interface must be registered");
 			const status = tools.get("subagent_status")!;
 			const empty = await execute(status);
-			assert.deepEqual(empty.details, { runs: [] });
+			assert.deepEqual(empty.details, { runs: [], workflows: [], retainedWorkflows: [] });
 			assert.match(resultText(empty), /no subagent runs/i);
 			const missing = await execute(status, { id: 999 });
 			assert.equal(missing.isError, true);
-			assert.deepEqual(missing.details, { runs: [] });
+			assert.deepEqual(missing.details, { runs: [], workflows: [], retainedWorkflows: [] });
 			assert.match(resultText(missing), /#999/);
 		} finally { await shutdown(runtime); }
 	});

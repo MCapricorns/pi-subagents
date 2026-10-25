@@ -13,6 +13,13 @@ is clear, and delegation will actually reduce cost or improve completion quality
 
 ## What's new
 
+**4.3.31** — dependency graphs for multi-phase work. `subagent_workflow` declares
+nodes with `dependsOn`, validates the graph before anything starts, dispatches
+each node as its prerequisites settle, and reports the whole graph once. Saved
+definitions live in `.pi/workflows/` or `~/.pi/agent/workflows/`, three templates
+ship with the package, and a `workflow` skill carries the authoring guidance.
+`subagent_status` and `subagent_stop` accept a graph id.
+
 **4.3.30** — pi's own footer is back: the per-model cost footer is removed, so
 pi's built-in consumption line shows unchanged. On a fresh install pi-subagents
 announces `/subagents-setup` and asks whether to configure now; the wizard then
@@ -97,6 +104,7 @@ See [CHANGELOG.md](./CHANGELOG.md).
 - [Install](#install)
 - [The team](#the-team)
 - [Dispatching work](#dispatching-work)
+- [Workflows](#workflows)
 - [Parallel edits](#parallel-edits)
 - [Runs: status and stop](#runs-status-and-stop)
 - [Live status and results](#live-status-and-results)
@@ -275,6 +283,80 @@ These defaults follow [OpenAI's GPT-6 Astra model guidance](https://developers.o
 and [Eric Provencher's skills and prompts guidance](https://x.com/pvncher/status/2095991462416490862).
 They simplify instructions without changing the configured models or thinking levels.
 
+## Workflows
+
+A request sometimes has phases whose order is known before the work starts:
+establish the facts, change independent slices at the same time, then run one
+gate. `subagent_workflow` declares that graph once. The runtime starts each node
+the moment its prerequisites settle and a process slot frees, so no parent model
+turn sits between waves, and it wakes the main agent once with a summary of the
+whole graph.
+
+```ts
+subagent_workflow({
+  name: "auth-fix",
+  description: "Map the refresh race, fix it, gate it.",
+  nodes: [
+    { id: "map", agent: "scout", task: "Map the refresh race in src/auth. Cite path:line." },
+    { id: "fix", agent: "artisan", task: "Fix it. Evidence:\n{{map}}", dependsOn: ["map"],
+      scope: { paths: ["src/auth"] } },
+    { id: "tests", agent: "artisan", task: "Add regression tests. Evidence:\n{{map}}",
+      dependsOn: ["map"], scope: { paths: ["test/auth.test.ts"] } },
+    { id: "gate", agent: "artisan", task: "Run the checks.\nFix:\n{{fix}}\nTests:\n{{tests}}",
+      dependsOn: ["fix", "tests"] },
+  ],
+});
+```
+
+- `{{id}}` interpolates that node's final answer into a dependent's brief;
+  `{{id.status}}`, `{{id.runId}}`, and `{{id.error}}` interpolate facts. A
+  placeholder may only name a node the current one waits for, directly or through
+  its chain; anything else is rejected at compile time.
+- The graph is validated before the first child starts: unique ids, existing
+  dependencies, no cycles, resolvable placeholders, and no declared writer-scope
+  overlap between nodes that no dependency orders.
+- Nodes are ordinary one-shot runs: same isolated worktrees, admission, durable
+  checkpoints, and usage accounting as a `subagent` call. A node's result is
+  registered only after its worktree is integrated, so a dependent reads what its
+  prerequisite actually left behind.
+- Failure is contained by the graph. A failed node blocks only its dependents,
+  independent branches keep running, and the summary names completed, failed, and
+  never-ran nodes with the reason. Nodes never retry: main finishes incomplete work
+  from the retained evidence.
+- A workflow reports once. Node completions are quiet, and the single summary
+  carries each node's answer (clipped, with a full-report file when anything was
+  cut) plus a per-model tally.
+- Write-capable nodes default to a detached worktree, which needs a committed
+  `HEAD`; pass `isolation: "shared"` on a node to keep it in your checkout and
+  serialize it on the repository write lane.
+
+Saved definitions run by name and can be reviewed before they run:
+
+- Project: `.pi/workflows/<name>.json` or `.pi/workflows/<name>.md` (trusted projects only)
+- User: `~/.pi/agent/workflows/`
+- Shipped: the `code-review`, `research`, and `migration` templates in this package
+- Precedence: project > user > built-in, where the same `name` wins
+
+```ts
+subagent_workflow({ workflow: "code-review" });
+subagent_workflow({ file: ".pi/workflows/code-review.md" });
+```
+
+A Markdown definition carries prose plus one `json` fenced block holding the plan
+object or a bare node array. The package also ships a `workflow` skill
+(`skills/workflow/SKILL.md`) with the authoring guidance: when a graph is worth
+its cost, how to slice phases, how to write briefs, and the anti-patterns.
+
+Derived phase ids are `<workflow-slug>.<node-id>`, and a settled phase stays owned
+for the parent session, so the same graph with identical briefs is rejected as a
+duplicate. Re-run it in a new session, or change what the phases target.
+
+`subagent_status({ workflow: id })` reports nodes and their wait reasons;
+`subagent_stop({ workflow: id })` stops a graph without starting its idle
+dependents. An unfinished graph keeps its shape on disk, so the next session's
+start notice and `subagent_status` report which nodes completed and which were
+still running.
+
 ## Parallel edits
 
 `scope` is declarative admission metadata for expected writes, not access control. `paths`
@@ -338,8 +420,9 @@ deliverable needs a new phase and brief, not a recycled thread.
 
 | Tool | What it does |
 | ---- | ------------ |
-| `subagent_status` | Read-only progress check. Omit `id` to list this parent session's runs, or pass an exact numeric `id` to inspect one. |
-| `subagent_stop` | Destructively cancel/retire a run by id/prefix, or all active runs with `all: true`. Delivers partial output and finalizes isolated changes. |
+| `subagent_workflow` | Run a dependency graph: declare `nodes` with `dependsOn` (or name a saved definition), get a launch receipt, and receive one summary when the graph settles. |
+| `subagent_status` | Read-only progress check. Omit `id` to list this parent session's runs, or pass an exact numeric `id` to inspect one. Omit `workflow` to include graphs, or pass a graph id. |
+| `subagent_stop` | Destructively cancel/retire a run by id/prefix, a whole graph with `workflow: id`, or all active runs with `all: true`. Delivers partial output and finalizes isolated changes. |
 
 ```ts
 subagent_status({});
@@ -616,6 +699,7 @@ that removes it, so this directory does not grow without bound:
 | `ferris-pi-subagents/<project>/sessions/`  | Child sessions for in-run fallback and manual recovery | When the owning session ends and no recovery record claims them |
 | `ferris-pi-subagents/<project>/worktrees/` | Isolated checkouts for parallel writers              | On integration, or when no thread/recovery record claims them  |
 | `ferris-pi-subagents/<project>/results/`   | Full text of truncated results                       | After 7 days, or beyond 50 per project                           |
+| `ferris-pi-subagents/<project>/pi-subagents-workflows.json` | Shape and node state of unfinished workflow graphs | When the graph settles, or after 30 days                         |
 | `ferris-pi-subagents/<project>/tmp/`       | Child prompt copies and the no-retry policy shim     | When its owning process exits                                    |
 | `ferris-pi-subagents/<project>/`           | All of the above for one checkout                     | After 3 idle days unless a thread/recovery record claims it      |
 

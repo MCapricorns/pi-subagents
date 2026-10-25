@@ -40,6 +40,14 @@ export function isRunActiveStatus(status: RunStatus): boolean {
  * terminal WorktreeFinalizationStatus. */
 export type RunIntegrationStatus = "pending" | "finalizing" | WorktreeFinalizationStatus;
 
+/** Workflow membership of a run: which graph, and which node of it. Rendered so
+ * a workflow's nodes read as one group in the widget and the status view. */
+export interface RunWorkflowTag {
+	workflowId: number;
+	name: string;
+	nodeId: string;
+}
+
 export interface RunView {
 	id: number;
 	agent: string;
@@ -73,11 +81,15 @@ export interface RunView {
 	elapsedMs: number;
 	/** Epoch ms when the latest active segment stopped. */
 	endedAt?: number;
+	/** Workflow membership, when this run is a node of a `subagent_workflow` graph. */
+	workflow?: RunWorkflowTag;
 }
 
 export interface RunChainMeta {
 	isolation?: IsolationMode;
 	worktreeId?: string;
+	/** Set for nodes the workflow runner dispatches. */
+	workflow?: RunWorkflowTag;
 	/** Initial wait reason; defaults to "process-slot" (a fresh dispatch enters
 	 * the process queue). Children spawned outside the queue pass "starting"
 	 * because they never wait for a slot. */
@@ -488,7 +500,10 @@ export class MonitorStore {
 			id,
 			agent,
 			task,
-			label: runLabel(task),
+			// A graph node is identified by its graph and node id: the task text it
+			// actually runs is interpolated with upstream answers, which makes a
+			// fragment-extracted label read like noise.
+			label: meta?.workflow ? `${meta.workflow.name}/${meta.workflow.nodeId}` : runLabel(task),
 			model,
 			thinking,
 			status: "queued",
@@ -496,6 +511,7 @@ export class MonitorStore {
 			usage: emptyUsage(),
 			elapsedMs: 0,
 			...(meta?.isolation ? { isolation: meta.isolation, integrationStatus: meta.isolation === "worktree" ? "pending" : undefined, ...(meta.worktreeId ? { worktreeId: meta.worktreeId } : {}) } : {}),
+			...(meta?.workflow ? { workflow: meta.workflow } : {}),
 		});
 		this.notify();
 		return id;

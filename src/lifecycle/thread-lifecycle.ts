@@ -109,6 +109,10 @@ export function createBackgroundDispatcher(options: BackgroundDispatcherOptions)
 			return failedStartResult(agentName, task, error instanceof Error ? error.message : String(error));
 		}
 		const writeCapable = Boolean(startOptions.writeCapable) || isWriteCapableAgent(agent);
+		// A workflow node is an ordinary managed run whose reporting belongs to
+		// the graph: it settles into the graph's single summary instead of
+		// waking the parent once per node.
+		const quiet = startOptions.quiet === true;
 		if (isolation === "worktree" && !isWorktreeCapableAgent(agent)) {
 			return {
 				...failedStartResult(agentName, task, `Agent "${agentName}" is read-only; worktree isolation is available only to write-capable agents such as artisan.`),
@@ -139,7 +143,10 @@ export function createBackgroundDispatcher(options: BackgroundDispatcherOptions)
 			? { ...resolvedRoute, agent: withWorktreeSystemPrompt(resolvedRoute.agent) }
 			: resolvedRoute;
 		const thinkingLevel = route.thinkingLevel;
-		const runId = monitor.addRun(agent.name, task, route.agent.model, thinkingLevel, { isolation });
+		const runId = monitor.addRun(agent.name, task, route.agent.model, thinkingLevel, {
+			isolation,
+			...(startOptions.workflow ? { workflow: startOptions.workflow } : {}),
+		});
 		runtime.claimRunDelivery(runId, startOptions.deliveryRoute ?? "background");
 		const generation = 1;
 		const pending: SingleResult = {
@@ -339,26 +346,29 @@ export function createBackgroundDispatcher(options: BackgroundDispatcherOptions)
 				finishRun(
 					runId,
 					failed ? "failed" : "done",
-					modelLevel || dispatchFailed ? { silent: true } : undefined,
+					quiet || modelLevel || dispatchFailed ? { silent: true } : undefined,
 				);
 				runtime.registerRunResult(runId, result);
-
-				const block = formatCompletionBlock(result, runConfig.maxResultLines, {
-					resultRoot: projectResultsRoot(runtime.configPath, result.projectCwd ?? originalCwd),
-				});
-				const completion: CompletionMessageItem = {
-					agent: result.agent,
-					block: modelLevel ? `${block}\n\n${modelLevelTakeoverNote(result)}` : block,
-					usage: result.usage,
-					model: result.model,
-				};
-				if (modelLevel) {
-					const detail = notifyDetail(result.errorMessage, "model unavailable or broken");
-					runCtx.ui.notify(`✗ ${result.agent} dispatch failed: ${detail} — task handed to the main window`, "error");
-				} else if (dispatchFailed) {
-					runCtx.ui.notify(`✗ ${result.agent} dispatch failed: ${notifyDetail(result.errorMessage, "dispatch crashed")}`, "error");
+				if (quiet) {
+					// The workflow engine owns reporting for this run.
+				} else {
+					const block = formatCompletionBlock(result, runConfig.maxResultLines, {
+						resultRoot: projectResultsRoot(runtime.configPath, result.projectCwd ?? originalCwd),
+					});
+					const completion: CompletionMessageItem = {
+						agent: result.agent,
+						block: modelLevel ? `${block}\n\n${modelLevelTakeoverNote(result)}` : block,
+						usage: result.usage,
+						model: result.model,
+					};
+					if (modelLevel) {
+						const detail = notifyDetail(result.errorMessage, "model unavailable or broken");
+						runCtx.ui.notify(`✗ ${result.agent} dispatch failed: ${detail} — task handed to the main window`, "error");
+					} else if (dispatchFailed) {
+						runCtx.ui.notify(`✗ ${result.agent} dispatch failed: ${notifyDetail(result.errorMessage, "dispatch crashed")}`, "error");
+					}
+					runtime.publishRunCompletion(runId, completion, failed);
 				}
-				runtime.publishRunCompletion(runId, completion, failed);
 			} finally {
 				if (ownsSettlement()) thread.lifecycleOperation = undefined;
 			}
@@ -448,6 +458,7 @@ export function createBackgroundDispatcher(options: BackgroundDispatcherOptions)
 					runtime.runControllers.delete(runId);
 					thread.queueController = undefined;
 					if (!runtime.sessionActive || !ownsSettlement()) return;
+					if (quiet) return;
 					try {
 						runCtx.ui.notify(`✗ ${crashed.agent} dispatch failed: ${notifyDetail(crashed.errorMessage, "dispatch crashed")}`, "error");
 						runtime.publishRunCompletion(runId, {

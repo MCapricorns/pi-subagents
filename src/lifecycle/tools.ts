@@ -13,6 +13,13 @@ import { persistRecoveryRecords, recoveryRecordFromFinalization } from "../isola
 import type { SubagentRuntime, SubagentThread } from "./runtime.ts";
 import { CONTROL_QUIESCE_TIMEOUT_MS, projectResultsRoot, quiesced } from "./thread-shared.ts";
 import { getResultError, type SingleResult } from "../execution/spawn.ts";
+import {
+	formatRetainedWorkflow,
+	formatWorkflowStatus,
+	readRetainedWorkflows,
+	stopWorkflow,
+	workflowStatus,
+} from "../workflow/engine.ts";
 import type { WorktreeFinalization } from "../isolation/worktree.ts";
 
 function renderFirstLine(result: { content?: unknown }, label: string, theme: any): Text {
@@ -40,8 +47,9 @@ export function registerLookupTools(pi: ExtensionAPI, runtime: SubagentRuntime):
 		},
 		parameters: Type.Object({
 			id: Type.Optional(Type.Integer({ minimum: 1, description: "Exact run id; omit to list all runs in this parent session." })),
+			workflow: Type.Optional(Type.Integer({ minimum: 1, description: "Workflow graph id; omit to list every graph in this parent session." })),
 		}),
-		async execute(_toolCallId, params) {
+		async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
 			await runtime.durableRestore;
 			const threads = [...runtime.threads.values()]
 				.filter((thread) => params.id === undefined || thread.id === params.id)
@@ -103,10 +111,34 @@ export function registerLookupTools(pi: ExtensionAPI, runtime: SubagentRuntime):
 					if (paths.length > 0) lines.push(`  ${paths.join("\n  ")}`);
 					return lines.join("\n");
 				}).join("\n");
+			// Workflow graphs are reported beside individual runs: which nodes have
+			// started, which one is waiting on a dependency, and what a graph that
+			// outlived its session left behind.
+			const workflowRuns = [...runtime.workflows.values()]
+				.filter((run) => params.workflow === undefined || run.id === params.workflow)
+				.sort((left, right) => left.id - right.id);
+			const retainedWorkflows = (await readRetainedWorkflows(runtime, ctx?.cwd ?? process.cwd()).catch(() => []))
+				.filter((record) => params.workflow === undefined || record.id === params.workflow)
+				.filter((record) => !workflowRuns.some((run) => run.id === record.id));
+			const workflowSections = [
+				...workflowRuns.map((run) => formatWorkflowStatus(run).join("\n")),
+				...retainedWorkflows.map((record) => formatRetainedWorkflow(record).join("\n")),
+			];
+			const sections = [text, ...workflowSections].filter((section) => section.trim().length > 0);
+			const unknownWorkflow = params.workflow !== undefined && workflowRuns.length === 0 && retainedWorkflows.length === 0;
 			return {
-				content: [{ type: "text", text }],
-				details: { runs },
-				...(params.id !== undefined && runs.length === 0 ? { isError: true } : {}),
+				content: [{
+					type: "text",
+					text: unknownWorkflow
+						? `No workflow graph matches #${params.workflow} in this parent session.`
+						: sections.join("\n\n"),
+				}],
+				details: {
+					runs,
+					workflows: workflowRuns.map(workflowStatus),
+					retainedWorkflows,
+				},
+				...((params.id !== undefined && runs.length === 0) || unknownWorkflow ? { isError: true } : {}),
 			};
 		},
 		renderCall(args, theme) {
@@ -127,7 +159,11 @@ export function registerLookupTools(pi: ExtensionAPI, runtime: SubagentRuntime):
 				description: "Run id or prefix to stop (see subagent dispatch output).",
 			}),
 		),
-		all: Type.Optional(Type.Boolean({ description: "Stop every active run (default false)." })),
+		all: Type.Optional(Type.Boolean({ description: "Stop every active run and every running workflow (default false)." })),
+		workflow: Type.Optional(Type.Integer({
+			minimum: 1,
+			description: "Stop this workflow graph: no dependent node starts and running nodes are cancelled.",
+		})),
 	});
 
 	pi.registerTool({
@@ -146,6 +182,40 @@ export function registerLookupTools(pi: ExtensionAPI, runtime: SubagentRuntime):
 
 		async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
 			await runtime.durableRestore;
+			// A graph stop owns its own lifecycle: dependents must not start, and the
+			// graph's own summary reports what had already completed. Stopping the
+			// nodes one by one first would let the runner dispatch the next layer.
+			if (params.workflow !== undefined) {
+				const graph = runtime.workflows.get(params.workflow);
+				if (!graph) {
+					const known = [...runtime.workflows.keys()].map((id) => `#${id}`).join(", ");
+					return {
+						content: [{
+							type: "text",
+							text: `No workflow graph matches #${params.workflow}.${known ? ` Known graphs: ${known}.` : ""}`,
+						}],
+						details: {},
+					};
+				}
+				const cancelled = await stopWorkflow(runtime, graph, "Stopped by subagent_stop.");
+				return {
+					content: [{
+						type: "text",
+						text: `Stopped workflow #${graph.id} ${graph.name}${cancelled.length > 0 ? `; cancelled ${cancelled.map((id) => `#${id}`).join(", ")}` : "; no node had started"}. Its summary reports the completed work, and each node keeps its own run evidence.`,
+					}],
+					details: {},
+				};
+			}
+			const graphStops: string[] = [];
+			if (params.all === true) {
+				for (const graph of [...runtime.workflows.values()]) {
+					if (graph.state !== "running") continue;
+					const cancelled = await stopWorkflow(runtime, graph, "Stopped by subagent_stop.");
+					graphStops.push(
+						`workflow #${graph.id} ${graph.name}${cancelled.length > 0 ? ` (${cancelled.length} node${cancelled.length === 1 ? "" : "s"} cancelled)` : ""}`,
+					);
+				}
+			}
 			// Claim every target before awaiting process cleanup or configuration I/O.
 			const configPromise = loadConfig(runtime.configPath).catch(() => undefined);
 			const completionResults: SingleResult[] = [];
@@ -163,6 +233,12 @@ export function registerLookupTools(pi: ExtensionAPI, runtime: SubagentRuntime):
 
 			if (targets.length === 0) {
 				const available = [...runtime.threads.keys()].map((id) => `#${id}`).join(", ");
+				if (graphStops.length > 0) {
+					return {
+						content: [{ type: "text", text: `Stopped ${graphStops.length} workflow${graphStops.length === 1 ? "" : "s"}: ${graphStops.join(", ")}.` }],
+						details: {},
+					};
+				}
 				return {
 					content: [{ type: "text", text: params.all === true
 						? "No active subagent runs to stop."
@@ -343,7 +419,7 @@ export function registerLookupTools(pi: ExtensionAPI, runtime: SubagentRuntime):
 			return {
 				content: [{
 					type: "text",
-					text: `Stopped ${stopped.length} thread${stopped.length === 1 ? "" : "s"}: ${stopped.join(", ")}. Retained sessions were retired; worktree changes are integrated on settlement.${retainedIntegration.length > 0 ? ` Integration failed for ${retainedIntegration.join(", ")}; inspect its result for retained recovery paths.` : ""}${pendingIntegration.length > 0 ? ` Integration is still settling in the background for ${pendingIntegration.join(", ")}; a recovery record was persisted in case it fails.` : ""}`,
+					text: `${graphStops.length > 0 ? `Stopped ${graphStops.length} workflow${graphStops.length === 1 ? "" : "s"}: ${graphStops.join(", ")}. ` : ""}Stopped ${stopped.length} thread${stopped.length === 1 ? "" : "s"}: ${stopped.join(", ")}. Retained sessions were retired; worktree changes are integrated on settlement.${retainedIntegration.length > 0 ? ` Integration failed for ${retainedIntegration.join(", ")}; inspect its result for retained recovery paths.` : ""}${pendingIntegration.length > 0 ? ` Integration is still settling in the background for ${pendingIntegration.join(", ")}; a recovery record was persisted in case it fails.` : ""}`,
 				}],
 				details: {},
 			};

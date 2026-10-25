@@ -161,6 +161,7 @@ function delegationBody(agents: AgentConfig[]): string {
 		"Use a subagent when the work can run independently in parallel, its boundary is clear, and delegation will actually reduce cost or improve completion quality.",
 		...(preferred ? [preferred] : []),
 		"Give each phase one owner, a stable `phaseId`, and exact writer `scope`. Parallelize independent phases in one call; never overlap writers or duplicate an owned phase. Dependent phases wait for prerequisites. Scope is conflict metadata, not permissions or a sandbox.",
+		"When the request is one deliverable spanning ordered phases (survey, then independent changes, then a single gate), declare the graph once with `subagent_workflow` instead of dispatching wave after wave: the runtime starts each node the moment its prerequisites settle and sends one summary when the graph does. Saved graphs under `.pi/workflows/` run by name.",
 		"Children have no parent conversation; send a self-contained brief and reuse established evidence.",
 		"One-shot runs return once. Main takes over failed or incomplete work from partial edits and artifacts; a different deliverable needs a new phase.",
 		"Use `wait: true` for an immediate dependency or one-shot session; otherwise continue disjoint work and end your turn when none remains — completions arrive automatically and wake you; do not poll or sleep to wait. Conclude the overall task only after every run settles or is stopped.",

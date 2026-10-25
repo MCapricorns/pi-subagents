@@ -25,6 +25,7 @@ import { isRunActiveStatus, monitor } from "../presentation/monitor.ts";
 import type { RpcRunControl } from "../execution/rpc-control.ts";
 import { isFailedResult, type SingleResult } from "../execution/spawn.ts";
 import type { IsolationMode, WorktreeFinalization, WorktreeIsolation } from "../isolation/worktree.ts";
+import type { WorkflowRun } from "../workflow/state.ts";
 
 export type ThreadState = "queued" | "running" | "interrupting" | "parked" | "completed" | "failed" | "stopped";
 
@@ -111,6 +112,15 @@ export interface SubagentRuntime {
 	registerRunResult: (runId: number, result: SingleResult) => void;
 	/** Logical threads outlive process attempts and completed generations. */
 	threads: Map<number, SubagentThread>;
+	/** Workflow graphs started in this parent session, live and settled. */
+	workflows: Map<number, WorkflowRun>;
+	/** Allocate a graph id that no retained or live workflow record owns. */
+	reserveWorkflowId: () => number;
+	/** Raise the graph-id allocator above an id restored from a durable record. */
+	ensureWorkflowIdAbove: (id: number) => void;
+	/** Session-teardown tasks that must run before runtime state is released
+	 * (persisting a graph's shape, for example). */
+	shutdownHooks: Array<() => Promise<void> | void>;
 	/** Every session directory retained for this parent session. */
 	sessionDirs: Set<string>;
 	retainSession: (result: Pick<SingleResult, "sessionDir">) => void;
@@ -121,6 +131,7 @@ export interface SubagentRuntime {
 
 export function createRuntime(pi: ExtensionAPI, configPath: string): SubagentRuntime {
 	const backgroundQueue = new BackgroundTaskQueue(resolveSubagentConcurrency());
+	let nextWorkflowId = 1;
 	// Compaction reads the whole history, summarizes it, and replaces it. A
 	// completion injected into that window can be swallowed by the summary,
 	// silently losing a result a child spent minutes producing — so delivery is
@@ -210,6 +221,12 @@ export function createRuntime(pi: ExtensionAPI, configPath: string): SubagentRun
 		settledRuns: new Map<number, SingleResult>(),
 		settledListeners: new Map<number, Set<(result: SingleResult) => void>>(),
 		threads: new Map<number, SubagentThread>(),
+		workflows: new Map<number, WorkflowRun>(),
+		reserveWorkflowId: () => nextWorkflowId++,
+		ensureWorkflowIdAbove: (id) => {
+			if (id >= nextWorkflowId) nextWorkflowId = id + 1;
+		},
+		shutdownHooks: [],
 		sessionDirs: new Set<string>(),
 		retainSession: (result) => {
 			if (result.sessionDir) runtime.sessionDirs.add(result.sessionDir);
@@ -329,6 +346,15 @@ export function createRuntime(pi: ExtensionAPI, configPath: string): SubagentRun
 					/* best-effort; the state-root sweep catches leftovers later */
 				}
 			}
+			// Let owners persist their own last state (a workflow's shape) while the
+			// threads it refers to still exist.
+			for (const hook of runtime.shutdownHooks) {
+				try {
+					await hook();
+				} catch {
+					/* a teardown hook must never block shutdown */
+				}
+			}
 			runtime.settledRuns.clear();
 			runtime.settledListeners.clear();
 			runtime.runControllers.clear();
@@ -337,6 +363,8 @@ export function createRuntime(pi: ExtensionAPI, configPath: string): SubagentRun
 			// manifest; the next process re-registers them at restore.
 			runtime.sessionDirs.clear();
 			runtime.threads.clear();
+			runtime.workflows.clear();
+			runtime.shutdownHooks = [];
 			monitor.clear();
 		},
 	};

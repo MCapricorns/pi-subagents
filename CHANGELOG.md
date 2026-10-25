@@ -3,6 +3,33 @@
 Release notes for `@ferris1225/pi-subagents`. Only the most recent releases
 are kept here; every published version is preserved as a GitHub Release.
 
+## 4.3.31
+
+- Add `subagent_workflow`: declare a graph of phases with `dependsOn` and the
+  runtime dispatches each node the moment its prerequisites settle and a process
+  slot frees, without a parent model turn between waves. The graph is validated
+  before the first child starts (unique ids, existing dependencies, no cycles,
+  resolvable `{{id}}` placeholders, no declared writer-scope overlap between
+  nodes no dependency orders), so an invalid plan costs zero child processes.
+- Nodes are ordinary one-shot runs: same dispatcher, admission, isolation,
+  durable checkpointing, and usage accounting. A node's result registers only
+  after its worktree is integrated, so a dependent reads what its prerequisite
+  actually left behind.
+- A node completion is quiet; the graph reports once. The summary names
+  completed, failed, and never-ran nodes with the reason, inlines each node's
+  answer (clipped, with a full-report artifact when anything was cut), and adds a
+  per-model tally. A failed node blocks only its dependents.
+- Saved definitions: `.pi/workflows/<name>.json` or `.md` in a trusted project,
+  `~/.pi/agent/workflows/` for the user, and `code-review`, `research`, and
+  `migration` templates shipped with the package. Markdown definitions carry
+  prose plus one `json` fenced block.
+- `subagent_status` accepts `workflow` and reports graph nodes, wait reasons, and
+  retained graphs; `subagent_stop` accepts `workflow` and stops a graph without
+  starting its idle dependents. An unfinished graph's shape is retained on disk
+  for the next session's notice instead of resuming automatically.
+- Ship a `workflow` skill with the authoring guidance, and describe the graph
+  tool in the delegation contract.
+
 ## 4.3.30
 
 - Restore pi's own footer. The extension no longer replaces the built-in
