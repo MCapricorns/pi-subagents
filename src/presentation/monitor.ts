@@ -132,7 +132,7 @@ interface KeyFragment {
  * first occurrence and deduped (a path covers its own sub-fragments). These
  * are what make parallel tasks of the same agent look different.
  */
-export function extractKeyFragments(text: string): string[] {
+function extractKeyFragments(text: string): string[] {
 	const fragments: KeyFragment[] = [];
 	const add = (re: RegExp, group = 0): void => {
 		for (const m of text.matchAll(re)) {
@@ -244,7 +244,7 @@ export function formatTaskSummary(task: string, maxWidth: number = TASK_SUMMARY_
 }
 
 /** Max display width of a run's content label. */
-export const RUN_LABEL_MAX = 32;
+const RUN_LABEL_MAX = 32;
 
 /**
  * Short content label for a run, derived from its task: the single most
@@ -279,7 +279,7 @@ export function shrinkRunLabel(text: string, maxWidth: number): string {
 	return `${TASK_SUMMARY_ELLIPSIS}${tailGraphemes(chars, maxWidth - 1)}`;
 }
 
-export function formatTokens(count: number): string {
+function formatTokens(count: number): string {
 	if (count >= 1_000_000) return `${(count / 1_000_000).toFixed(1)}M`;
 	if (count >= 1_000) return `${(count / 1_000).toFixed(1)}k`;
 	return String(count);
@@ -303,7 +303,7 @@ export function formatUsageCompact(usage: UsageStats): string {
 }
 
 /** Cost as its own droppable part: `$0.0421`, undefined when nothing accrued. */
-export function usageCostPart(usage: UsageStats | undefined): string | undefined {
+function usageCostPart(usage: UsageStats | undefined): string | undefined {
 	return usage?.cost ? `$${usage.cost.toFixed(4)}` : undefined;
 }
 
@@ -334,7 +334,7 @@ export function formatDuration(ms: number): string {
 	return `${hours}h${String(minutes % 60).padStart(2, "0")}m${String(seconds).padStart(2, "0")}s`;
 }
 
-export function elapsedMilliseconds(run: RunView, now: number = Date.now()): number {
+function elapsedMilliseconds(run: RunView, now: number = Date.now()): number {
 	let elapsed = run.elapsedMs ?? 0;
 	if (run.activeSince !== undefined) elapsed += Math.max(0, now - run.activeSince);
 	// Keep formatting tolerant of older/synthetic RunView values that predate
@@ -351,7 +351,7 @@ export function formatElapsed(run: RunView, now: number = Date.now()): string {
 }
 
 /** Max length of the argument target inside a formatted activity line. */
-export const ACTIVITY_TARGET_MAX = 60;
+const ACTIVITY_TARGET_MAX = 60;
 
 const REDACTED = "<redacted>";
 
@@ -395,9 +395,20 @@ function shortTarget(value: unknown): string {
 	return chars.length > ACTIVITY_TARGET_MAX ? `${chars.slice(0, ACTIVITY_TARGET_MAX - 1).join("")}…` : oneLine;
 }
 
+/** A code-mode script's first meaningful line: the earliest line that is not
+ * blank and not a `//` comment, shortened like any other activity target. */
+function scriptLine(value: unknown): string {
+	if (typeof value !== "string") return "";
+	const line = value
+		.split("\n")
+		.map((part) => part.trim())
+		.find((part) => part.length > 0 && !part.startsWith("//"));
+	return line ? shortTarget(line) : "";
+}
+
 /** Newest-last rolling window of what a run has been doing, surfaced to the
  * parent model as a progress trail. */
-export const RECENT_ACTIVITY_MAX = 6;
+const RECENT_ACTIVITY_MAX = 6;
 
 /** Concise "what is it doing" text for a tool call: the tool name plus its single
  * most telling argument (path, command, pattern, ...) — never a raw JSON blob. */
@@ -428,17 +439,12 @@ export function formatToolActivity(toolName: string, args: unknown): string {
 			break;
 		case "grep":
 		case "find":
-		case "glob":
 			target = pick("pattern", "query", "path");
 			break;
-		case "web_search":
-		case "search":
-			target = pick("query");
-			break;
-		case "fetch":
-		case "web_fetch":
-		case "fetch_content":
-			target = pick("url");
+		case "codemode":
+			// A script is source, not a target: name its first meaningful line so the
+			// trail shows what the child is doing instead of a code blob.
+			target = scriptLine(a.code);
 			break;
 		case "subagent":
 			target = pick("agent", "task");

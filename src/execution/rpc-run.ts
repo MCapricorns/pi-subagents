@@ -28,19 +28,19 @@ import {
 	type SubagentLiveEvent,
 } from "./rpc-control.ts";
 
-export { asPlainTextRpcPrompt, terminateProcessTree };
-
-export const DEPTH_ENV_VAR = "PI_SUBAGENT_DEPTH";
-export const SUBAGENT_KILL_GRACE_MS = 5_000;
+const DEPTH_ENV_VAR = "PI_SUBAGENT_DEPTH";
+/** Every tool of an MCP server shares this prefix, whatever its exposure. */
+const MCP_TOOL_PREFIX = "mcp__";
+const SUBAGENT_KILL_GRACE_MS = 5_000;
 /** ACK budget after the child is known to be reading RPC. */
-export const RPC_COMMAND_TIMEOUT_MS = 30_000;
+const RPC_COMMAND_TIMEOUT_MS = 30_000;
 
 /** clear_queue is stop-path hygiene ahead of the abort: give it its own short
  * budget so a hung response cannot eat into the abort-settle window. */
 const RPC_CLEAR_QUEUE_TIMEOUT_MS = 2_000;
 /** Time allowed for the child to boot and answer get_state. */
-export const RPC_READY_TIMEOUT_MS = 60_000;
-export const RPC_ABORT_SETTLE_TIMEOUT_MS = 5_000;
+const RPC_READY_TIMEOUT_MS = 60_000;
+const RPC_ABORT_SETTLE_TIMEOUT_MS = 5_000;
 /** Retained stderr tail. A chatty or crash-looping child must not grow parent
  * memory without bound, and the tail carries the decisive diagnostic. */
 export const RPC_STDERR_MAX_CHARS = 32_000;
@@ -88,7 +88,7 @@ export function sessionExists(sessionDir: string, sessionId: string): boolean {
 }
 
 /** Resolve how to invoke the same pi build as the current process. */
-export function getPiInvocation(args: string[]): { command: string; args: string[] } {
+function getPiInvocation(args: string[]): { command: string; args: string[] } {
 	const currentScript = process.argv[1];
 	const isBunVirtualScript = currentScript?.startsWith("/$bunfs/root/");
 	if (currentScript && !isBunVirtualScript && existsSync(currentScript)) {
@@ -100,7 +100,7 @@ export function getPiInvocation(args: string[]): { command: string; args: string
 	return { command: "pi", args };
 }
 
-export function extractToolErrorText(content: unknown): string {
+function extractToolErrorText(content: unknown): string {
 	const parts = Array.isArray(content) ? content : [];
 	const text = parts
 		.filter(
@@ -161,7 +161,7 @@ export function renderChildRetryPolicySource(modelRef?: string): string {
  * stream adapter with its registered API implementation while forcing
  * maxRetries=0. It uses Pi's public extension and pi-ai compatibility APIs, so
  * it works in Node and standalone/Bun builds without touching user settings. */
-export async function writeChildRetryPolicyExtension(
+async function writeChildRetryPolicyExtension(
 	scratchRoot: string,
 	modelRef?: string,
 ): Promise<ChildRetryPolicyExtension> {
@@ -181,7 +181,7 @@ export async function writeChildRetryPolicyExtension(
 
 /** Hand the agent body to the child as a file rather than inline argv text.
  * `--append-system-prompt` takes either, but a system prompt is unbounded — a
- * custom agent can carry a whole spec — while Windows caps a command line at
+ * role can carry a whole spec — while Windows caps a command line at
  * 32767 characters, so inlining turns a long agent into an opaque spawn failure.
  * The file lives in the run's scratch dir and is removed when the attempt ends. */
 async function writePromptToTempFile(
@@ -288,36 +288,76 @@ export interface RunRpcAttemptOptions {
 	rpcCommandTimeoutMs?: number;
 }
 
-/** Run one persistent RPC child until a stable `agent_settled` or control action. */
-export async function runRpcAgentAttempt(options: RunRpcAttemptOptions): Promise<RpcSingleResult> {
-	const { agent, agentName, task, thinkingLevel, idleTimeoutMs, signal, onLive, control } = options;
-	const args: string[] = ["--mode", "rpc", "--exclude-tools", SUBAGENT_TOOL_NAMES.join(",")];
+export interface ChildLaunchOptions {
+	agent: Pick<AgentConfig, "model" | "tools">;
+	thinkingLevel: ThinkingLevel;
+	sessionDir?: string;
+	sessionId?: string;
+	/** The session directory already holds the session being resumed. */
+	resumeExistingSession?: boolean;
+	/** Appended system prompt file, when the role carries one. */
+	promptPath?: string;
+	retryPolicyPath: string;
+}
+
+/** Command line for one child attempt.
+ *
+ * An explicit role list is a strict intersection of the parent's tools, but pi
+ * keeps MCP tools unless a `--tools` entry names one, so a list that names none
+ * has to exclude them by pattern. Scout depends on that: its read-only boundary
+ * must not leak an MCP writer. */
+export function buildChildLaunchArgs(options: ChildLaunchOptions): string[] {
+	const { agent, thinkingLevel } = options;
+	const excludedTools: string[] = [...SUBAGENT_TOOL_NAMES];
+	const args: string[] = ["--mode", "rpc"];
 	if (options.sessionDir && options.sessionId) {
 		args.push("--session-dir", options.sessionDir);
-		args.push(sessionExists(options.sessionDir, options.sessionId) ? "--session" : "--session-id", options.sessionId);
+		args.push(options.resumeExistingSession ? "--session" : "--session-id", options.sessionId);
 	} else {
 		args.push("--no-session");
 	}
 	if (agent.model) args.push("--model", agent.model);
 	args.push("--thinking", thinkingLevel);
 	if (agent.tools) {
-		if (agent.tools.length > 0) args.push("--tools", agent.tools.join(","));
-		else args.push("--no-tools");
+		if (agent.tools.length > 0) {
+			args.push("--tools", agent.tools.join(","));
+			if (!agent.tools.some((tool) => tool.startsWith(MCP_TOOL_PREFIX))) excludedTools.push(`${MCP_TOOL_PREFIX}*`);
+		} else {
+			args.push("--no-tools");
+		}
 	}
+	args.push("--exclude-tools", excludedTools.join(","));
+	if (options.promptPath) args.push("--append-system-prompt", options.promptPath);
+	args.push("--extension", options.retryPolicyPath);
+	return args;
+}
 
+/** Run one persistent RPC child until a stable `agent_settled` or control action. */
+export async function runRpcAgentAttempt(options: RunRpcAttemptOptions): Promise<RpcSingleResult> {
+	const { agent, agentName, task, thinkingLevel, idleTimeoutMs, signal, onLive, control } = options;
 	let tmpPromptDir: string | null = null;
 	let tmpPromptPath: string | null = null;
 	if (agent.systemPrompt.trim()) {
 		const tmp = await writePromptToTempFile(options.scratchRoot, agent.name, agent.systemPrompt);
 		tmpPromptDir = tmp.dir;
 		tmpPromptPath = tmp.filePath;
-		args.push("--append-system-prompt", tmpPromptPath);
 	}
 
 	let retryPolicy: ChildRetryPolicyExtension;
+	let args: string[];
 	try {
 		retryPolicy = await writeChildRetryPolicyExtension(options.scratchRoot, agent.model);
-		args.push("--extension", retryPolicy.filePath);
+		args = buildChildLaunchArgs({
+			agent,
+			thinkingLevel,
+			sessionDir: options.sessionDir,
+			sessionId: options.sessionId,
+			resumeExistingSession: Boolean(
+				options.sessionDir && options.sessionId && sessionExists(options.sessionDir, options.sessionId),
+			),
+			promptPath: tmpPromptPath ?? undefined,
+			retryPolicyPath: retryPolicy.filePath,
+		});
 	} catch (error) {
 		if (tmpPromptDir) await rm(tmpPromptDir, { recursive: true, force: true }).catch(() => undefined);
 		throw error;

@@ -4,7 +4,8 @@ import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-a
 import type { SubagentsConfig } from "../src/configuration/config.ts";
 import { loadBuiltinAgents, type AgentConfig } from "../src/delegation/agents.ts";
 import { normalizePhaseScope } from "../src/delegation/phase-scope.ts";
-import { defaultIsolationMode, isWorktreeCapableAgent } from "../src/delegation/dispatch.ts";
+import { defaultIsolationMode } from "../src/delegation/dispatch.ts";
+import { isWorktreeCapableAgent } from "../src/lifecycle/thread-shared.ts";
 import { createRuntime, type SubagentThread } from "../src/lifecycle/runtime.ts";
 import { findDuplicateDispatch, type PhaseLeaseSource } from "../src/delegation/prompt.ts";
 import { buildResumePrompt } from "../src/execution/spawn.ts";
@@ -30,6 +31,7 @@ function dispatcher(threads: PhaseLeaseSource[]) {
 	const pi = {
 		on: () => undefined,
 		getActiveTools: () => ["read", "write"],
+		getAllTools: () => [],
 		sendMessage: () => undefined,
 	} as unknown as ExtensionAPI;
 	const runtime = createRuntime(pi, `${process.cwd()}/.pi-test/config.json`);
@@ -38,8 +40,6 @@ function dispatcher(threads: PhaseLeaseSource[]) {
 		name: "artisan",
 		description: "implementation",
 		systemPrompt: "body",
-		source: "builtin",
-		filePath: "/agents/artisan.md",
 	};
 	const start = createBackgroundDispatcher({
 		runtime,
@@ -61,7 +61,7 @@ describe("isolation policy", () => {
 		assert.ok(scout);
 		assert.equal(isWorktreeCapableAgent(scout), false);
 		assert.equal(
-			defaultIsolationMode("parallel", scout.name, undefined, isWorktreeCapableAgent(scout), scout.isolation),
+			defaultIsolationMode("parallel", scout.name, undefined, isWorktreeCapableAgent(scout)),
 			"shared",
 		);
 	});
@@ -92,6 +92,7 @@ describe("fresh write capability", () => {
 		const pi = {
 			on: () => undefined,
 			getActiveTools: () => ["read", "grep", "bash"],
+		getAllTools: () => [],
 			sendMessage: () => undefined,
 		} as unknown as ExtensionAPI;
 		const runtime = createRuntime(pi, `${process.cwd()}/.pi-test/config.json`);

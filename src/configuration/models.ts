@@ -64,7 +64,7 @@ const RENAMED_PROVIDER_IDS: Readonly<Record<string, string>> = {
 };
 
 /** Stored ref plus the renamed provider id, when Pi published one. */
-export function modelRefAliases(ref: string): readonly string[] {
+function modelRefAliases(ref: string): readonly string[] {
 	const normalized = ref.trim();
 	const slash = normalized.indexOf("/");
 	if (slash <= 0 || slash >= normalized.length - 1) return [normalized];

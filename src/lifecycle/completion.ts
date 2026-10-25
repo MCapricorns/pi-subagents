@@ -14,7 +14,7 @@ export interface CompletionBatchTimings {
 	maxWaitMs: number;
 }
 
-export const DEFAULT_COMPLETION_BATCH_TIMINGS: CompletionBatchTimings = {
+const DEFAULT_COMPLETION_BATCH_TIMINGS: CompletionBatchTimings = {
 	debounceMs: 150,
 	maxWaitMs: 1_000,
 };

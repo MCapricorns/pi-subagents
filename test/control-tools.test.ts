@@ -28,6 +28,7 @@ function harness(configPath = join(tmpdir(), `pi-subagents-control-${process.pid
 	const sent: unknown[] = [];
 	const pi = {
 		getActiveTools: () => [],
+		getAllTools: () => [],
 		on: () => undefined,
 		registerTool: (tool: RegisteredTool & { name: string }) => tools.set(tool.name, tool),
 		sendMessage: (message: unknown) => sent.push(message),

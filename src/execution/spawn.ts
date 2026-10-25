@@ -24,45 +24,34 @@ import {
 } from "./rpc-control.ts";
 import {
 	currentSubagentDepth,
-	DEPTH_ENV_VAR,
-	extractToolErrorText,
-	getPiInvocation,
 	isRpcCommandTimeoutError,
 	runRpcAgentAttempt,
 	sessionExists,
-	writeChildRetryPolicyExtension,
-	SUBAGENT_KILL_GRACE_MS,
 } from "./rpc-run.ts";
 import { writeTempOwnerMarker } from "../isolation/temp-hygiene.ts";
 
 export {
 	currentSubagentDepth,
-	DEPTH_ENV_VAR,
-	extractToolErrorText,
-	getPiInvocation,
-	isRpcCommandTimeoutError,
 	RpcRunControl,
 	sessionExists,
-	SUBAGENT_KILL_GRACE_MS,
-	writeChildRetryPolicyExtension,
 };
 export type { SubagentLiveEvent, UsageStats };
 
-export const SUBAGENT_THINKING_LEVEL: ThinkingLevel = DEFAULT_THINKING_LEVEL;
+const SUBAGENT_THINKING_LEVEL: ThinkingLevel = DEFAULT_THINKING_LEVEL;
 /** 0 disables the watchdog; dispatch supplies the configured timeout. */
-export const SUBAGENT_DEFAULT_IDLE_TIMEOUT_MS = 0;
+const SUBAGENT_DEFAULT_IDLE_TIMEOUT_MS = 0;
 /** Base delays cover Pi's stale-lock window and leave headroom beyond the
  * default four-way launch fan-out. Additive jitter below reduces the chance
  * that contenders retry in the same lockstep waves. */
-export const SUBAGENT_STARTUP_RETRY_DELAYS_MS = [250, 750, 1500, 3000, 6000] as const;
-export const MAX_SUBAGENT_STARTUP_FAILURE_DURATION_MS = 2000;
-export const MAX_SUBAGENT_STARTUP_RETRY_JITTER_MS = 1000;
+const SUBAGENT_STARTUP_RETRY_DELAYS_MS = [250, 750, 1500, 3000, 6000] as const;
+const MAX_SUBAGENT_STARTUP_FAILURE_DURATION_MS = 2000;
+const MAX_SUBAGENT_STARTUP_RETRY_JITTER_MS = 1000;
 
 function normalizeStartupRetryDelay(delayMs: number): number {
 	return Number.isFinite(delayMs) && delayMs > 0 ? delayMs : 0;
 }
 
-export function addStartupRetryJitter(delayMs: number, randomValue = Math.random()): number {
+function addStartupRetryJitter(delayMs: number, randomValue = Math.random()): number {
 	const baseDelay = Math.floor(normalizeStartupRetryDelay(delayMs));
 	if (baseDelay === 0) return 0;
 	const boundedRandom = Number.isFinite(randomValue) ? Math.max(0, Math.min(1, randomValue)) : 0;
@@ -80,7 +69,7 @@ export interface SubagentDetails {
 /** Text of the newest assistant message that has any. A final answer may be
  * split into several text blocks (for example around interleaved thinking);
  * returning only the first block silently dropped the rest of the result. */
-export function getFinalOutput(messages: Message[]): string {
+function getFinalOutput(messages: Message[]): string {
 	for (let i = messages.length - 1; i >= 0; i--) {
 		const msg = messages[i];
 		if (msg.role !== "assistant") continue;
@@ -113,13 +102,13 @@ export function truncateResultOutput(output: string, maxLines: number): Truncate
 	return { text: kept.join("\n"), truncated: true, shownLines: kept.length, totalLines, widthClipped };
 }
 
-export const RESULT_ARTIFACT_MAX_AGE_MS = 7 * 24 * 60 * 60 * 1_000;
-export const RESULT_ARTIFACT_MAX_FILES_PER_PROJECT = 50;
+const RESULT_ARTIFACT_MAX_AGE_MS = 7 * 24 * 60 * 60 * 1_000;
+const RESULT_ARTIFACT_MAX_FILES_PER_PROJECT = 50;
 // Explicit current prefix plus the strict timestamp/token convention used by 1.1.0.
 const RESULT_ARTIFACT_NAME = /^(?:pi-subagent-\d{13,}-[0-9a-f]{12}|\d{13,}-[a-z0-9]{6})-[\w.-]+\.md$/;
 
 /** Name of the single internal-state root under the pi agent directory. */
-export const PROJECT_ROOTS_DIR_NAME = "ferris-pi-subagents";
+const PROJECT_ROOTS_DIR_NAME = "ferris-pi-subagents";
 
 export function getSubagentsRoot(configPath: string): string {
 	return join(dirname(configPath), PROJECT_ROOTS_DIR_NAME);
@@ -142,7 +131,7 @@ interface ResultArtifactRetentionOptions {
  * results directory, newest kept first. Unknown files and symlinks are never
  * touched. Runs on every artifact write, so an active project stays bounded
  * without ever deleting the result the current completion just linked. */
-export function pruneResultArtifacts(
+function pruneResultArtifacts(
 	resultsDir: string,
 	options: ResultArtifactRetentionOptions = {},
 ): void {
@@ -196,7 +185,7 @@ export function sweepProjectResultArtifacts(
 	}
 }
 
-export function resultArtifactProjectKey(cwd?: string): string {
+function resultArtifactProjectKey(cwd?: string): string {
 	if (!cwd) return "default";
 	let canonical: string;
 	try {
@@ -289,11 +278,11 @@ export function isRetryableStartupFailure(result: SingleResult, durationMs: numb
 	return true;
 }
 
-export function formatStartupRetryExhaustedError(model: string, attempts: number): string {
+function formatStartupRetryExhaustedError(model: string, attempts: number): string {
 	return `Subagent failed to start after ${attempts} attempt${attempts === 1 ? "" : "s"} on ${model}: the child failed before its initial RPC prompt was dispatched and produced no model, tool, output, or usage activity. Main handles this phase; inspect launch diagnostics instead of redispatching it.`;
 }
 
-export async function waitForStartupRetry(delayMs: number, signal?: AbortSignal): Promise<boolean> {
+async function waitForStartupRetry(delayMs: number, signal?: AbortSignal): Promise<boolean> {
 	const normalizedDelay = normalizeStartupRetryDelay(delayMs);
 	if (normalizedDelay === 0) return !signal?.aborted;
 	if (!signal) {
@@ -366,14 +355,14 @@ export function buildResumePrompt(task: string, reason: string): string {
 /** Create a fresh private session directory under the given root. The owner
  * marker is what lets a later load tell a session this process still owns from
  * one a crash abandoned. */
-export async function createSessionDir(root: string): Promise<string> {
+async function createSessionDir(root: string): Promise<string> {
 	await mkdir(root, { recursive: true });
 	const dir = await mkdtemp(join(root, "pi-subagent-session-"));
 	writeTempOwnerMarker(dir);
 	return dir;
 }
 
-export function buildFallbackResumeReason(fromModel?: string): string {
+function buildFallbackResumeReason(fromModel?: string): string {
 	return fromModel
 		? `the selected model (${fromModel}) failed at the model/provider level, so the current main model is continuing`
 		: "the selected model failed at the model/provider level, so the current main model is continuing";
@@ -444,7 +433,7 @@ function signalAbortDisposition(options: RunSingleOptions, base: SingleResult): 
 }
 
 /** Spawn one RPC attempt and wait for stable settlement. */
-export async function runSingleAgent(options: RunSingleOptions): Promise<SingleResult> {
+async function runSingleAgent(options: RunSingleOptions): Promise<SingleResult> {
 	const {
 		agent,
 		agentName,

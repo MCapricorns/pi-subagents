@@ -8,7 +8,7 @@
  * to every registration site, so state stays in one place without globals.
  */
 
-import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
+import type { ExtensionAPI, ToolInfo } from "@earendil-works/pi-coding-agent";
 import type { PhaseScope } from "../delegation/phase-scope.ts";
 import { rmSync } from "node:fs";
 import { resolveSubagentConcurrency, BackgroundTaskQueue } from "../execution/background.ts";
@@ -77,6 +77,10 @@ export interface SubagentRuntime {
 	backgroundQueue: BackgroundTaskQueue;
 	/** Live parent tool names from ExtensionAPI, read again for each child launch. */
 	getActiveTools: () => string[];
+	/** Live metadata for the registered tools, read again for each child launch.
+	 * Read-only role policy and write capability come from it, never from a
+	 * hardcoded list of extension or MCP tool names. */
+	getToolInfos: () => ToolInfo[];
 	/** False after session_shutdown; guards delivery and queue work. */
 	sessionActive: boolean;
 	/** Resolves when the load-time durable restore pass has finished. Everything
@@ -148,6 +152,7 @@ export function createRuntime(pi: ExtensionAPI, configPath: string): SubagentRun
 		configPath,
 		backgroundQueue,
 		getActiveTools: () => pi.getActiveTools(),
+		getToolInfos: () => pi.getAllTools(),
 		sessionActive: true,
 		durableRestore: Promise.resolve(),
 		restoredRunIds: [],

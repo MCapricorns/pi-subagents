@@ -106,13 +106,17 @@ export class RpcRunControl {
 	private stopRequested = false;
 	private stopMessage = "Subagent was aborted";
 	private childPids = new Set<number>();
+	readonly generation: number;
+	private readonly onPhase?: (phase: RpcControlPhase) => void;
 
 	constructor(
 		objective: string,
-		readonly generation: number,
-		private readonly onPhase?: (phase: RpcControlPhase) => void,
+		generation: number,
+		onPhase?: (phase: RpcControlPhase) => void,
 	) {
 		this.objective = objective;
+		this.generation = generation;
+		this.onPhase = onPhase;
 	}
 
 	getObjective(): string {

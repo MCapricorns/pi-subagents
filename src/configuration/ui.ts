@@ -1,11 +1,9 @@
 /**
- * TUI pickers for /subagents-setup, built on @earendil-works/pi-tui.
+ * TUI picker for /subagents-setup, built on @earendil-works/pi-tui.
  *
- * A single self-contained `Picker` component powers both selectors:
- *   - single-select (model picker): type to fuzzy-filter, arrows to move,
- *     PageUp/PageDown to page, Enter to choose, Esc to cancel.
- *   - multi-select (module picker): same navigation, Space toggles a checkbox,
- *     Enter confirms the selection set.
+ * A single self-contained `Picker` component powers the model and thinking
+ * selectors: type to fuzzy-filter, arrows to move, PageUp/PageDown to page,
+ * Enter to choose, Esc to cancel.
  *
  * pi-tui's built-in SelectList only handles up/down/confirm/cancel (no paging),
  * so we render the list ourselves and use the injected keybinding manager. Every line
@@ -38,8 +36,6 @@ interface PickerStyles {
 	selectedLabel: (t: string) => string;
 	label: (t: string) => string;
 	dim: (t: string) => string;
-	checked: (t: string) => string;
-	unchecked: (t: string) => string;
 	filterEcho: (t: string) => string;
 }
 
@@ -50,10 +46,8 @@ function pickerItemSearchText(item: PickerItem): string {
 }
 
 interface PickerCallbacks {
-	/** single-select: fired with the highlighted value on Enter. */
-	onSelect?: (value: string) => void;
-	/** multi-select: fired with the full chosen set on Enter. */
-	onConfirm?: (values: string[]) => void;
+	/** Fired with the highlighted value on Enter. */
+	onSelect: (value: string) => void;
 	onCancel: () => void;
 }
 
@@ -62,18 +56,28 @@ class Picker implements Component, Focusable {
 	private query = "";
 	private cursor = 0;
 	private filtered: PickerItem[];
+	private readonly items: PickerItem[];
+	private readonly styles: PickerStyles;
+	private readonly headerLines: string[];
+	private readonly tui: TUI;
+	private readonly keybindings: KeybindingsManager;
+	private readonly cb: PickerCallbacks;
 
 	constructor(
-		private readonly items: PickerItem[],
-		private readonly multi: boolean,
-		private readonly selected: Set<string>,
-		private readonly styles: PickerStyles,
-		private readonly headerLines: string[],
-		private readonly tui: TUI,
-		private readonly keybindings: KeybindingsManager,
-		private readonly cb: PickerCallbacks,
+		items: PickerItem[],
+		styles: PickerStyles,
+		headerLines: string[],
+		tui: TUI,
+		keybindings: KeybindingsManager,
+		cb: PickerCallbacks,
 		initialValue?: string,
 	) {
+		this.items = items;
+		this.styles = styles;
+		this.headerLines = headerLines;
+		this.tui = tui;
+		this.keybindings = keybindings;
+		this.cb = cb;
 		this.filtered = items;
 		const initialIndex = initialValue === undefined ? -1 : items.findIndex((item) => item.value === initialValue);
 		if (initialIndex >= 0) this.cursor = initialIndex;
@@ -116,10 +120,7 @@ class Picker implements Component, Focusable {
 				const mark = isCursor ? s.cursorMark("❯ ") : "  ";
 				const label = isCursor ? s.selectedLabel(item.label) : s.label(item.label);
 				const description = item.description ? s.dim(` — ${item.description}`) : "";
-				const line = this.multi
-					? mark + (this.selected.has(item.value) ? s.checked("[x] ") : s.unchecked("[ ] ")) + label + description
-					: mark + label + description;
-				lines.push(fit(line));
+				lines.push(fit(mark + label + description));
 			}
 			const more = this.filtered.length > PAGE_SIZE ? "  ↑/↓ move • PgUp/PgDn page" : "";
 			lines.push(fit(s.dim(`  (${this.cursor + 1}/${this.filtered.length})${more}`)));
@@ -140,14 +141,8 @@ class Picker implements Component, Focusable {
 		} else if (kb.matches(data, "tui.select.pageDown")) {
 			this.cursor = Math.min(Math.max(0, this.filtered.length - 1), this.cursor + PAGE_SIZE);
 		} else if (kb.matches(data, "tui.select.confirm")) {
-			if (this.multi) {
-				// Confirm in listed order, not toggle order: callers persist this
-				// sequence and re-render it as the saved role order.
-				this.cb.onConfirm?.(this.items.filter((item) => this.selected.has(item.value)).map((item) => item.value));
-			} else {
-				const item = this.filtered[this.cursor];
-				if (item) this.cb.onSelect?.(item.value);
-			}
+			const item = this.filtered[this.cursor];
+			if (item) this.cb.onSelect(item.value);
 			return;
 		} else if (kb.matches(data, "tui.select.cancel")) {
 			this.cb.onCancel();
@@ -156,18 +151,6 @@ class Picker implements Component, Focusable {
 			this.query = this.query.slice(0, -1);
 			this.cursor = 0;
 			this.recompute();
-		} else if (data === " ") {
-			if (this.multi) {
-				const item = this.filtered[this.cursor];
-				if (item) {
-					if (this.selected.has(item.value)) this.selected.delete(item.value);
-					else this.selected.add(item.value);
-				}
-			} else {
-				this.query += data;
-				this.cursor = 0;
-				this.recompute();
-			}
 		} else if (isPrintable(data)) {
 			this.query += data;
 			this.cursor = 0;
@@ -195,8 +178,6 @@ function makeStyles(theme: Theme): PickerStyles {
 		selectedLabel: (t) => theme.fg("accent", theme.bold(t)),
 		label: (t) => t,
 		dim: (t) => theme.fg("dim", t),
-		checked: (t) => theme.fg("accent", t),
-		unchecked: (t) => theme.fg("dim", t),
 		filterEcho: (t) => theme.fg("accent", t),
 	};
 }
@@ -221,28 +202,9 @@ export function promptSelectOne(
 	return ctx.ui.custom<string | undefined>((tui, theme, keybindings, done) => {
 		const styles = makeStyles(theme);
 		const header = [styles.title(title), styles.hint(hint)];
-		return new Picker(items, false, new Set<string>(), styles, header, tui, keybindings, {
+		return new Picker(items, styles, header, tui, keybindings, {
 			onSelect: (value) => done(value),
 			onCancel: () => done(undefined),
 		}, initialValue);
-	});
-}
-
-/** Multi-select with fuzzy filter + paging. Resolves undefined on Esc. */
-export function promptSelectMany(
-	ctx: PickerContext,
-	title: string,
-	hint: string,
-	items: PickerItem[],
-	initialSelected: readonly string[],
-): Promise<string[] | undefined> {
-	if (!requireTui(ctx)) return Promise.resolve(undefined);
-	return ctx.ui.custom<string[] | undefined>((tui, theme, keybindings, done) => {
-		const styles = makeStyles(theme);
-		const header = [styles.title(title), styles.hint(hint)];
-		return new Picker(items, true, new Set<string>(initialSelected), styles, header, tui, keybindings, {
-			onConfirm: (values) => done(values),
-			onCancel: () => done(undefined),
-		});
 	});
 }

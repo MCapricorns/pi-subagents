@@ -3,7 +3,7 @@
 import { realpath } from "node:fs/promises";
 import { join, resolve } from "node:path";
 import type { ExtensionContext } from "@earendil-works/pi-coding-agent";
-import { isWriteCapableAgent, type AgentConfig } from "../delegation/agents.ts";
+import { isWriteCapableAgent, type AgentConfig, type ToolMetadata } from "../delegation/agents.ts";
 import type { PhaseScope } from "../delegation/phase-scope.ts";
 import { roleThinkingLevel, type SubagentsConfig, type ThinkingLevel } from "../configuration/config.ts";
 import { removeThreadRecord, threadRecordFromThread, upsertThreadRecord } from "./durable.ts";
@@ -139,8 +139,8 @@ export function withWorktreeSystemPrompt(agent: AgentConfig): AgentConfig {
 }
 
 /** Only write-capable agents can run in an isolated worktree. */
-export function isWorktreeCapableAgent(agent: AgentConfig): boolean {
-	return isWriteCapableAgent(agent);
+export function isWorktreeCapableAgent(agent: AgentConfig, toolInfos?: readonly ToolMetadata[]): boolean {
+	return isWriteCapableAgent(agent, toolInfos);
 }
 
 export interface DispatchEnvironment {
@@ -198,7 +198,7 @@ export function resolveDispatchModelRoute(
 		availableRefs: availableModels.map(modelRef),
 	});
 	// A `/subagents-setup` override wins; otherwise the role default. No
-	// per-call or frontmatter thinking.
+	// per-call thinking.
 	const preferred =
 		config.agentThinkingLevels[agent.name] ?? roleThinkingLevel(agent.name);
 	const thinkingLevelForModel = (ref?: string): ThinkingLevel => {

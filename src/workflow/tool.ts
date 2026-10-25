@@ -10,7 +10,7 @@
 import type { ExtensionAPI, ExtensionContext, Theme } from "@earendil-works/pi-coding-agent";
 import { Text } from "@earendil-works/pi-tui";
 import { Type } from "typebox";
-import { discoverAgents, isWriteCapableAgent } from "../delegation/agents.ts";
+import { isWriteCapableAgent, loadBuiltinAgents } from "../delegation/agents.ts";
 import { defaultIsolationMode, IsolationSchema, PhaseIdSchema, ScopeSchema } from "../delegation/dispatch.ts";
 import { loadConfig } from "../configuration/config.ts";
 import { resolveSubagentConcurrency } from "../execution/background.ts";
@@ -149,13 +149,12 @@ export function registerWorkflowTool(pi: ExtensionAPI, runtime: SubagentRuntime,
 			await runtime.durableRestore;
 			monitor.beginTurn();
 			const config = await loadConfig(runtime.configPath);
-			runtime.backgroundQueue.setConcurrency(config.maxConcurrentAgents || resolveSubagentConcurrency());
-			const discovery = discoverAgents(ctx.cwd, {
-				scope: config.agentScope,
-				enabledNames: config.enabledAgents,
-				projectTrusted: ctx.isProjectTrusted?.() === true,
-			});
-			core.setEnvironment({ ctx, config, agents: discovery.agents });
+			runtime.backgroundQueue.setConcurrency(resolveSubagentConcurrency());
+			// Both built-in roles are always available; the live tool metadata decides
+			// which of them is write-capable in this session.
+			const agents = loadBuiltinAgents();
+			const toolInfos = runtime.getToolInfos();
+			core.setEnvironment({ ctx, config, agents });
 
 			const hasInline = (params.nodes?.length ?? 0) > 0;
 			const hasReference = Boolean(params.workflow?.trim() || params.file?.trim());
@@ -175,7 +174,7 @@ export function registerWorkflowTool(pi: ExtensionAPI, runtime: SubagentRuntime,
 				const resolved = resolveWorkflowDefinition(
 					ctx.cwd,
 					{ ...(params.workflow ? { name: params.workflow } : {}), ...(params.file ? { path: params.file } : {}) },
-					{ scope: config.agentScope, projectTrusted: ctx.isProjectTrusted?.() === true },
+					{ projectTrusted: ctx.isProjectTrusted?.() === true },
 				);
 				if (resolved.error || !resolved.definition) {
 					throw new Error((resolved.error ?? "workflow definition could not be read") + ". No nodes were started.");
@@ -193,7 +192,7 @@ export function registerWorkflowTool(pi: ExtensionAPI, runtime: SubagentRuntime,
 
 			let workflow;
 			try {
-				workflow = compileWorkflow(plan, ctx.cwd, discovery.agents.map((agent) => agent.name), { fallbackName });
+				workflow = compileWorkflow(plan, ctx.cwd, agents.map((agent) => agent.name), { fallbackName });
 			} catch (error) {
 				throw new Error(
 					"Workflow rejected before any node started:\n" + (error instanceof Error ? error.message : String(error)),
@@ -205,13 +204,12 @@ export function registerWorkflowTool(pi: ExtensionAPI, runtime: SubagentRuntime,
 					runtime,
 					startBackground: core.startBackground,
 					resolveIsolation: (agentName) => {
-						const agent = discovery.agents.find((candidate) => candidate.name === agentName);
+						const agent = agents.find((candidate) => candidate.name === agentName);
 						return defaultIsolationMode(
 							"parallel",
 							agentName,
 							undefined,
-							agent ? isWriteCapableAgent(agent) : undefined,
-							agent?.isolation,
+							agent ? isWriteCapableAgent(agent, toolInfos) : undefined,
 						);
 					},
 					resultsRoot: projectResultsRoot(runtime.configPath, ctx.cwd),

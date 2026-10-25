@@ -9,7 +9,7 @@ import { getProjectRoot, getSubagentsRoot } from "../execution/spawn.ts";
 import { managedRecoveryGroup, samePath } from "./managed-paths.ts";
 import { removeWorktreeGroup, type WorktreeFinalization } from "./worktree.ts";
 
-export const RECOVERY_MANIFEST_FILE_NAME = "pi-subagents-recovery.json";
+const RECOVERY_MANIFEST_FILE_NAME = "pi-subagents-recovery.json";
 const RECOVERY_MANIFEST_VERSION = 1;
 
 export interface RecoveryRecord {

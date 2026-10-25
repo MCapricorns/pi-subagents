@@ -1,21 +1,18 @@
 /**
  * Interactive configuration wizard for /subagents-setup.
  *
- * The top-level menu exposes enabled roles, per-agent model and thinking choices,
- * and a full setup pass. Everything else (scope, concurrency, timeout, result lines)
- * is config-file-only.
+ * The catalog is fixed: scout and artisan are always enabled. The menu lets the
+ * user pick a model and thinking level for each role — that is the entire
+ * configuration surface.
  */
 
 import { stat } from "node:fs/promises";
 import type { Api, Model } from "@earendil-works/pi-ai";
 import type { ExtensionContext } from "@earendil-works/pi-coding-agent";
-import { discoverAgents } from "../delegation/agents.ts";
 import {
 	AGENT_PROFILES,
 	BUILTIN_AGENT_NAMES,
 	DEFAULT_CONFIG,
-	DEFAULT_ENABLED_AGENTS,
-	FIRST_RUN_SETUP_HINT,
 	agentProfile,
 	errorMessage,
 	getConfigPath,
@@ -36,7 +33,7 @@ import {
 	resolveThinkingLevel,
 	supportedThinkingLevels,
 } from "./models.ts";
-import { promptSelectMany, promptSelectOne } from "./ui.ts";
+import { promptSelectOne } from "./ui.ts";
 
 const THINKING_LEVEL_HINTS: Record<ThinkingLevel, string> = {
 	off: "no reasoning tokens",
@@ -48,31 +45,6 @@ const THINKING_LEVEL_HINTS: Record<ThinkingLevel, string> = {
 	max: "strongest reasoning",
 };
 
-function setupAgentNames(ctx: ExtensionContext, config: SubagentsConfig): string[] {
-	const { agents } = discoverAgents(ctx.cwd, {
-		scope: config.agentScope,
-		projectTrusted: ctx.isProjectTrusted?.() === true,
-	});
-	const available = new Set(agents.map((agent) => agent.name));
-	return [...new Set([...BUILTIN_AGENT_NAMES, ...available])].filter((name) => available.has(name));
-}
-
-function agentPickerItems(names: readonly string[]): Array<{ value: string; label: string; description: string }> {
-	return names.map((name) => {
-		const profile = agentProfile(name);
-		return {
-			value: name,
-			label: profile ? name : `${name} (custom)`,
-			description: profile ? `${profile.summary} — ${profile.remark}` : "custom agent",
-		};
-	});
-}
-
-function moduleLabel(name: string): string {
-	const profile = agentProfile(name);
-	return profile ? `${name} — ${profile.summary}` : `${name} (custom)`;
-}
-
 async function configExists(configPath: string): Promise<boolean> {
 	try {
 		await stat(configPath);
@@ -80,20 +52,6 @@ async function configExists(configPath: string): Promise<boolean> {
 	} catch {
 		return false;
 	}
-}
-
-async function pickEnabledAgents(
-	ctx: ExtensionContext,
-	config: SubagentsConfig,
-): Promise<string[] | undefined> {
-	const names = setupAgentNames(ctx, config);
-	return promptSelectMany(
-		ctx,
-		"Which roles should be available?",
-		"Each line is a role and its job. Space toggles • Enter confirms • Esc back",
-		agentPickerItems(names),
-		config.enabledAgents.filter((name) => names.includes(name)),
-	);
 }
 
 async function pickConfiguredModel(
@@ -121,7 +79,7 @@ async function pickAgentModel(
 	ctx: ExtensionContext,
 	agentName: string,
 	agentModels: Readonly<Record<string, string>>,
-	escNote = "cancels this setup pass",
+	escNote = "returns to the role list",
 ): Promise<string | undefined> {
 	const profile = agentProfile(agentName);
 	const duty = profile ? ` — ${profile.summary}` : "";
@@ -150,7 +108,7 @@ async function pickAgentStrength(
 	agentName: string,
 	model: Model<Api> | undefined,
 	current: ThinkingLevel | undefined,
-	escNote = "cancels this setup pass",
+	escNote = "returns to model selection",
 ): Promise<ThinkingLevel | undefined> {
 	const supported = supportedThinkingLevels(model);
 	const roleDefault = resolveThinkingLevel(model, roleThinkingLevel(agentName));
@@ -177,75 +135,6 @@ async function pickAgentStrength(
 	) as Promise<ThinkingLevel | undefined>;
 }
 
-async function pickAgentToConfigure(
-	ctx: ExtensionContext,
-	enabledAgents: readonly string[],
-): Promise<string | undefined> {
-	if (enabledAgents.length === 0) {
-		ctx.ui.notify("No agents are enabled. Enable agents first.", "warning");
-		return undefined;
-	}
-	return promptSelectOne(
-		ctx,
-		"Configure which agent?",
-		"Name, then what it owns • ↑/↓ • Enter selects • Esc returns to settings",
-		enabledAgents.map((name) => {
-			const profile = agentProfile(name);
-			return {
-				value: name,
-				label: moduleLabel(name),
-				description: profile?.remark,
-			};
-		}),
-	);
-}
-
-interface ConfiguredAgentChoice {
-	name: string;
-	model: string;
-	strength: ThinkingLevel;
-}
-
-async function configureOneAgent(
-	ctx: ExtensionContext,
-	config: SubagentsConfig,
-): Promise<ConfiguredAgentChoice | undefined> {
-	// Canonical order (built-ins first), whatever order the config file saved.
-	const available = setupAgentNames(ctx, config);
-	const enabled = available.filter((name) => config.enabledAgents.includes(name));
-	while (true) {
-		const name = await pickAgentToConfigure(ctx, enabled);
-		if (name === undefined) return undefined;
-		const profile = agentProfile(name);
-		if (profile) ctx.ui.notify(`${name}: ${profile.remark}`, "info");
-
-		while (true) {
-			const modelChoice = await pickAgentModel(
-				ctx,
-				name,
-				config.agentModels,
-				"returns to agent selection",
-			);
-			if (modelChoice === undefined) break;
-			const model = effectiveModelForChoice(ctx, name, modelChoice, config.agentModels);
-			const strength = await pickAgentStrength(
-				ctx,
-				name,
-				model,
-				config.agentThinkingLevels[name],
-				"returns to model selection",
-			);
-			if (strength === undefined) continue;
-			return { name, model: modelChoice, strength };
-		}
-	}
-}
-
-function keepAgentEntries<T>(record: Record<string, T>, enabled: readonly string[]): Record<string, T> {
-	const keep = new Set(enabled);
-	return Object.fromEntries(Object.entries(record).filter(([name]) => keep.has(name)));
-}
-
 function applyThinkingChoice(
 	levels: Record<string, ThinkingLevel>,
 	agentName: string,
@@ -256,6 +145,57 @@ function applyThinkingChoice(
 	const roleDefault = resolveThinkingLevel(model, roleThinkingLevel(agentName));
 	if (strength === roleDefault) delete next[agentName];
 	else next[agentName] = resolveThinkingLevel(model, strength);
+	return next;
+}
+
+interface RoleChoice {
+	model: string;
+	strength: ThinkingLevel;
+}
+
+/** Model then thinking for one fixed role. Esc on the model picker backs out to
+ * the menu; Esc on the thinking picker re-asks the model. */
+async function configureOneRole(
+	ctx: ExtensionContext,
+	agentName: string,
+	config: SubagentsConfig,
+): Promise<RoleChoice | undefined> {
+	const profile = agentProfile(agentName);
+	if (profile) ctx.ui.notify(`${agentName}: ${profile.remark}`, "info");
+	while (true) {
+		const modelChoice = await pickAgentModel(ctx, agentName, config.agentModels);
+		if (modelChoice === undefined) return undefined;
+		const model = effectiveModelForChoice(ctx, agentName, modelChoice, config.agentModels);
+		const strength = await pickAgentStrength(
+			ctx,
+			agentName,
+			model,
+			config.agentThinkingLevels[agentName],
+		);
+		if (strength === undefined) continue;
+		return { model: modelChoice, strength };
+	}
+}
+
+async function applyRoleChoice(
+	ctx: ExtensionContext,
+	configPath: string,
+	config: SubagentsConfig,
+	agentName: string,
+	choice: RoleChoice,
+): Promise<SubagentsConfig> {
+	const agentModels = applyAgentModelChoice({ ...config.agentModels }, agentName, choice.model);
+	const model = effectiveModelForChoice(ctx, agentName, choice.model, agentModels);
+	const next: SubagentsConfig = {
+		agentModels,
+		agentThinkingLevels: applyThinkingChoice(
+			{ ...config.agentThinkingLevels },
+			agentName,
+			choice.strength,
+			model,
+		),
+	};
+	await saveConfig(next, configPath);
 	return next;
 }
 
@@ -275,15 +215,13 @@ async function introduceSetup(ctx: ExtensionContext): Promise<boolean> {
 	return choice !== undefined;
 }
 
+/** Walk both roles in order — model, then thinking — and save once at the end. */
 async function runFullSetup(ctx: ExtensionContext, configPath: string, base: SubagentsConfig): Promise<boolean> {
 	if (!(await introduceSetup(ctx))) return false;
 
-	const enabled = await pickEnabledAgents(ctx, base);
-	if (enabled === undefined) return false;
-
-	let agentModels = keepAgentEntries(base.agentModels, enabled);
-	let agentThinkingLevels = keepAgentEntries(base.agentThinkingLevels, enabled);
-	for (const agentName of enabled) {
+	let agentModels = { ...base.agentModels };
+	let agentThinkingLevels = { ...base.agentThinkingLevels };
+	for (const agentName of BUILTIN_AGENT_NAMES) {
 		const profile = agentProfile(agentName);
 		if (profile) ctx.ui.notify(`${agentName}: ${profile.remark}`, "info");
 		const choice = await pickAgentModel(ctx, agentName, agentModels);
@@ -297,74 +235,39 @@ async function runFullSetup(ctx: ExtensionContext, configPath: string, base: Sub
 		agentThinkingLevels = applyThinkingChoice(agentThinkingLevels, agentName, strength, model);
 	}
 
-	const next: SubagentsConfig = {
-		enabledAgents: enabled,
-		knownAgents: setupAgentNames(ctx, base),
-		agentModels,
-		agentThinkingLevels,
-		maxResultLines: base.maxResultLines,
-		maxConcurrentAgents: base.maxConcurrentAgents,
-		agentScope: base.agentScope,
-		idleTimeoutSec: base.idleTimeoutSec,
-	};
-	await saveConfig(next, configPath);
-	ctx.ui.notify(
-		`pi-subagents saved to ${configPath}. Models and thinking levels are set; open Configure an agent to change one.`,
-		"info",
-	);
+	await saveConfig({ agentModels, agentThinkingLevels }, configPath);
+	ctx.ui.notify(`pi-subagents saved to ${configPath}.`, "info");
 	return true;
 }
 
+function roleRow(name: string, config: SubagentsConfig): string {
+	const profile = AGENT_PROFILES[name as keyof typeof AGENT_PROFILES];
+	const model = config.agentModels[name] ?? "current main model";
+	const thinking = config.agentThinkingLevels[name] ?? roleThinkingLevel(name);
+	return `${name} — ${profile.summary} · model: ${model} · thinking: ${thinking}`;
+}
+
+/** Menu: one row per fixed role showing its current route, plus a both-roles
+ * walk. Esc exits; saving happens after each change so a later Esc loses
+ * nothing. */
 async function runMenu(ctx: ExtensionContext, configPath: string, config: SubagentsConfig): Promise<void> {
 	while (true) {
+		const rows = BUILTIN_AGENT_NAMES.map((name) => roleRow(name, config));
 		const choice = await ctx.ui.select("pi-subagents settings", [
-			"Enable/disable agents — choose which roles are available",
-			"Configure an agent — model and thinking, with its job on the row",
-			"Full re-setup — pick each role's model and thinking again",
+			...rows,
+			"Both roles — walk model and thinking for each",
 		]);
 		if (choice === undefined) return;
-		if (choice.startsWith("Full")) {
+		if (choice.startsWith("Both")) {
 			if (await runFullSetup(ctx, configPath, config)) return;
 			continue;
 		}
-
-		let next: SubagentsConfig = {
-			...config,
-			agentModels: { ...config.agentModels },
-			agentThinkingLevels: { ...config.agentThinkingLevels },
-		};
-		if (choice.startsWith("Enable")) {
-			const enabled = await pickEnabledAgents(ctx, config);
-			if (enabled === undefined) continue;
-			next.enabledAgents = enabled;
-			next.knownAgents = setupAgentNames(ctx, config);
-			next.agentModels = keepAgentEntries(next.agentModels, enabled);
-			next.agentThinkingLevels = keepAgentEntries(next.agentThinkingLevels, enabled);
-		} else {
-			let configuredAny = false;
-			while (true) {
-				const picked = await configureOneAgent(ctx, next);
-				if (!picked) break;
-				configuredAny = true;
-				next.agentModels = applyAgentModelChoice(next.agentModels, picked.name, picked.model);
-				const model = effectiveModelForChoice(ctx, picked.name, picked.model, next.agentModels);
-				next.agentThinkingLevels = applyThinkingChoice(
-					next.agentThinkingLevels,
-					picked.name,
-					picked.strength,
-					model,
-				);
-			}
-			if (!configuredAny) continue;
-			await saveConfig(next, configPath);
-			ctx.ui.notify(`pi-subagents updated. Saved to ${configPath}`, "info");
-			config = next;
-			continue;
-		}
-
-		await saveConfig(next, configPath);
+		const agentName = BUILTIN_AGENT_NAMES.find((name) => choice.startsWith(name));
+		if (!agentName) continue;
+		const picked = await configureOneRole(ctx, agentName, config);
+		if (!picked) continue;
+		config = await applyRoleChoice(ctx, configPath, config, agentName, picked);
 		ctx.ui.notify(`pi-subagents updated. Saved to ${configPath}`, "info");
-		return;
 	}
 }
 
@@ -378,7 +281,7 @@ export async function runSetup(ctx: ExtensionContext, configPath: string = getCo
 		const exists = await configExists(configPath);
 		const config = await loadConfig(configPath);
 		if (exists) await runMenu(ctx, configPath, config);
-		else if (!(await runFullSetup(ctx, configPath, { ...DEFAULT_CONFIG, enabledAgents: [...DEFAULT_ENABLED_AGENTS] }))) {
+		else if (!(await runFullSetup(ctx, configPath, DEFAULT_CONFIG))) {
 			ctx.ui.notify("pi-subagents setup cancelled.", "info");
 		}
 	} catch (error) {
@@ -387,20 +290,19 @@ export async function runSetup(ctx: ExtensionContext, configPath: string = getCo
 }
 
 /**
- * First-install offer: announce the command, then let the user start the wizard
- * right away. Declining leaves the config untouched and the notice is enough to
- * run `/subagents-setup` later.
+ * First start: write the shipped defaults so both roles work immediately — no
+ * model overrides means each child follows the main model — then announce the
+ * command that customizes them. The file is the marker: once it exists, later
+ * sessions stay silent.
  */
-export async function offerFirstRunSetup(
+export async function ensureDefaultConfig(
 	ctx: ExtensionContext,
 	configPath: string = getConfigPath(),
 ): Promise<void> {
-	ctx.ui.notify(`pi-subagents: ${FIRST_RUN_SETUP_HINT}`, "info");
-	if (ctx.mode !== "tui") return;
-	const start = await ctx.ui.confirm(
-		"Configure pi-subagents now?",
-		"Pick each role's model, then its thinking level. Esc in the wizard stops setup; run /subagents-setup later if you skip now.",
+	if (await configExists(configPath)) return;
+	await saveConfig(DEFAULT_CONFIG, configPath);
+	ctx.ui.notify(
+		`pi-subagents: wrote ${configPath} with scout and artisan enabled; both follow the main model. Run /subagents-setup to pick a model and thinking level per role.`,
+		"info",
 	);
-	if (!start) return;
-	await runSetup(ctx, configPath);
 }

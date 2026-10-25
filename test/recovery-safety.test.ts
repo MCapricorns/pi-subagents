@@ -35,6 +35,7 @@ const execFileAsync = promisify(execFile);
 function fakePi(): ExtensionAPI {
 	return {
 		getActiveTools: () => [],
+		getAllTools: () => [],
 		on: () => undefined,
 		sendMessage: () => undefined,
 	} as unknown as ExtensionAPI;

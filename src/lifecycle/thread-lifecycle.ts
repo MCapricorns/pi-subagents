@@ -10,7 +10,7 @@
 import { join, resolve } from "node:path";
 import { isWriteCapableAgent, resolveAgentTools, type AgentConfig } from "../delegation/agents.ts";
 import type { CompletionMessageItem } from "./completion.ts";
-import { loadConfig } from "../configuration/config.ts";
+import { DEFAULT_IDLE_TIMEOUT_SEC, DEFAULT_MAX_RESULT_LINES, loadConfig } from "../configuration/config.ts";
 import { dispatchFailedResult, failedStartResult, formatCompletionBlock, modelLevelTakeoverNote, queuedResult } from "../presentation/format.ts";
 import { formatTaskSummary, monitor } from "../presentation/monitor.ts";
 import { findDuplicateDispatch } from "../delegation/prompt.ts";
@@ -96,8 +96,12 @@ export function createBackgroundDispatcher(options: BackgroundDispatcherOptions)
 		const runConfig = baseEnvironment.config;
 		const discoveredAgent = baseEnvironment.agents.find((candidate) => candidate.name === agentName);
 		if (!discoveredAgent) return failedStartResult(agentName, task, `Unknown agent: "${agentName}".`);
+		// Admission reads the catalog once; each child launch reads the live one
+		// again, like the active tool set, so a server that connected meanwhile
+		// is classified by its own annotations.
+		const toolInfos = runtime.getToolInfos();
 		const resolveLiveAgentTools = (candidate: AgentConfig): AgentConfig =>
-			resolveAgentTools({ ...candidate, tools: discoveredAgent.tools }, runtime.getActiveTools());
+			resolveAgentTools(candidate, runtime.getActiveTools(), runtime.getToolInfos());
 		const agent = resolveLiveAgentTools(discoveredAgent);
 		const originalCwd = resolve(cwd ?? runCtx.cwd);
 		let phaseId: string | undefined;
@@ -108,12 +112,12 @@ export function createBackgroundDispatcher(options: BackgroundDispatcherOptions)
 		} catch (error) {
 			return failedStartResult(agentName, task, error instanceof Error ? error.message : String(error));
 		}
-		const writeCapable = Boolean(startOptions.writeCapable) || isWriteCapableAgent(agent);
+		const writeCapable = Boolean(startOptions.writeCapable) || isWriteCapableAgent(agent, toolInfos);
 		// A workflow node is an ordinary managed run whose reporting belongs to
 		// the graph: it settles into the graph's single summary instead of
 		// waking the parent once per node.
 		const quiet = startOptions.quiet === true;
-		if (isolation === "worktree" && !isWorktreeCapableAgent(agent)) {
+		if (isolation === "worktree" && !isWorktreeCapableAgent(agent, toolInfos)) {
 			return {
 				...failedStartResult(agentName, task, `Agent "${agentName}" is read-only; worktree isolation is available only to write-capable agents such as artisan.`),
 				isolation,
@@ -230,14 +234,13 @@ export function createBackgroundDispatcher(options: BackgroundDispatcherOptions)
 			// queued behind the concurrency limit. Re-resolve the route at actual
 			// start so /subagents-setup edits apply to not-yet-started runs.
 			let activeRoute = route;
-			let activeIdleTimeoutMs = runConfig.idleTimeoutSec * 1000;
+			const activeIdleTimeoutMs = DEFAULT_IDLE_TIMEOUT_SEC * 1000;
 			try {
 				const startConfig = await loadConfig(runtime.configPath);
 				const resolvedStart = resolveDispatchModelRoute(agent, startConfig, runCtx);
 				activeRoute = isolation === "worktree"
 					? { ...resolvedStart, agent: withWorktreeSystemPrompt(resolvedStart.agent) }
 					: resolvedStart;
-				activeIdleTimeoutMs = startConfig.idleTimeoutSec * 1000;
 				monitor.setModel(runId, activeRoute.agent.model);
 				monitor.setThinking(runId, activeRoute.thinkingLevel);
 			} catch {
@@ -349,10 +352,8 @@ export function createBackgroundDispatcher(options: BackgroundDispatcherOptions)
 					quiet || modelLevel || dispatchFailed ? { silent: true } : undefined,
 				);
 				runtime.registerRunResult(runId, result);
-				if (quiet) {
-					// The workflow engine owns reporting for this run.
-				} else {
-					const block = formatCompletionBlock(result, runConfig.maxResultLines, {
+				if (!quiet) {
+					const block = formatCompletionBlock(result, DEFAULT_MAX_RESULT_LINES, {
 						resultRoot: projectResultsRoot(runtime.configPath, result.projectCwd ?? originalCwd),
 					});
 					const completion: CompletionMessageItem = {
@@ -366,8 +367,7 @@ export function createBackgroundDispatcher(options: BackgroundDispatcherOptions)
 						runCtx.ui.notify(`✗ ${result.agent} dispatch failed: ${detail} — task handed to the main window`, "error");
 					} else if (dispatchFailed) {
 						runCtx.ui.notify(`✗ ${result.agent} dispatch failed: ${notifyDetail(result.errorMessage, "dispatch crashed")}`, "error");
-					}
-					runtime.publishRunCompletion(runId, completion, failed);
+				}
 				}
 			} finally {
 				if (ownsSettlement()) thread.lifecycleOperation = undefined;
@@ -463,7 +463,7 @@ export function createBackgroundDispatcher(options: BackgroundDispatcherOptions)
 						runCtx.ui.notify(`✗ ${crashed.agent} dispatch failed: ${notifyDetail(crashed.errorMessage, "dispatch crashed")}`, "error");
 						runtime.publishRunCompletion(runId, {
 							agent: crashed.agent,
-							block: formatCompletionBlock(crashed, runConfig.maxResultLines, { resultRoot: projectResultsRoot(runtime.configPath, crashed.projectCwd ?? originalCwd) }),
+							block: formatCompletionBlock(crashed, DEFAULT_MAX_RESULT_LINES, { resultRoot: projectResultsRoot(runtime.configPath, crashed.projectCwd ?? originalCwd) }),
 							usage: crashed.usage,
 						}, true);
 					} catch {

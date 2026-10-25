@@ -19,8 +19,11 @@ import { type Dirent, existsSync, readdirSync, readFileSync, statSync } from "no
 import { basename, dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { CONFIG_DIR_NAME, getAgentDir, parseFrontmatter } from "@earendil-works/pi-coding-agent";
-import type { AgentScope } from "../configuration/config.ts";
 import type { WorkflowNodeInput, WorkflowPlanInput } from "./plan.ts";
+
+/** Which workflow directories discovery reads. Same precedence as the templates
+ * they ship with: project > user > built-in for the same name. */
+export type WorkflowScope = "user" | "project" | "both";
 
 export type WorkflowSource = "builtin" | "user" | "project";
 
@@ -163,7 +166,7 @@ function loadDefinitionsFromDir(dir: string, source: WorkflowSource): WorkflowDe
 }
 
 export interface DiscoverWorkflowsOptions {
-	scope?: AgentScope;
+	scope?: WorkflowScope;
 	projectTrusted?: boolean;
 	builtinDir?: string;
 }

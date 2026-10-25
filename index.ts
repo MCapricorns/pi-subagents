@@ -3,7 +3,7 @@
  *
  * Assembly point: builds the shared runtime and registers everything.
  * The heavy lifting lives in focused modules:
- *   - delegation/    — role discovery, routing prompts, and tool contract
+ *   - delegation/    — built-in roles, routing prompts, and tool contract
  *   - configuration/ — persisted settings, model routes, and setup UI
  *   - execution/     — process queue, RPC transport/control, and model handoff
  *   - lifecycle/     — durable threads, restoration, controls, and delivery
@@ -22,9 +22,9 @@
 
 import { getAgentDir, type ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { Text } from "@earendil-works/pi-tui";
-import { getConfigPath, loadConfig } from "./src/configuration/config.ts";
+import { getConfigPath } from "./src/configuration/config.ts";
 import { runSetup } from "./src/configuration/setup.ts";
-import { discoverAgents } from "./src/delegation/agents.ts";
+import { loadBuiltinAgents } from "./src/delegation/agents.ts";
 import { registerSubagentTool } from "./src/delegation/dispatch.ts";
 import { buildDelegationDirective, installDelegationSections } from "./src/delegation/prompt.ts";
 import { currentSubagentDepth } from "./src/execution/spawn.ts";
@@ -34,10 +34,7 @@ import { bootstrapDurableState } from "./src/lifecycle/thread-restore.ts";
 import { registerLookupTools } from "./src/lifecycle/tools.ts";
 import { registerWorkflowTool, restoreWorkflowState } from "./src/workflow/tool.ts";
 import { registerAnnouncements } from "./src/presentation/announcements.ts";
-import { matchRunIds } from "./src/presentation/format.ts";
 import { clearActiveRunsWidget } from "./src/presentation/widget.ts";
-
-export { matchRunIds };
 
 export default function (pi: ExtensionAPI): void {
 	const configPath = getConfigPath(getAgentDir());
@@ -79,7 +76,7 @@ export default function (pi: ExtensionAPI): void {
 	registerLookupTools(pi, runtime);
 
 	pi.registerCommand("subagents-setup", {
-		description: "Configure pi-subagents: agents, models, and per-role thinking",
+		description: "Configure pi-subagents: model and thinking per role",
 		handler: async (_args, ctx) => {
 			await runSetup(ctx, configPath);
 		},
@@ -95,12 +92,7 @@ export default function (pi: ExtensionAPI): void {
 	// A full systemPrompt return forces an opaque prompt and invalidates the cache.
 	pi.on("before_agent_start", async (event, ctx) => {
 		await runtime.durableRestore;
-		const config = await loadConfig(configPath);
-		const { agents } = discoverAgents(ctx.cwd, {
-			scope: config.agentScope,
-			enabledNames: config.enabledAgents,
-			projectTrusted: ctx.isProjectTrusted?.() === true,
-		});
+		const agents = loadBuiltinAgents();
 		const sources = [...runtime.threads.values()];
 		const sections = event.systemPromptOptions?.sections;
 		if (sections) {

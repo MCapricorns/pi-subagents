@@ -421,6 +421,7 @@ describe("subagent_workflow tool", () => {
 		let nextRunId = 1;
 		const pi = {
 			getActiveTools: () => ["read", "write"],
+			getAllTools: () => [],
 			on: () => undefined,
 			registerTool: (tool: { name: string }) => tools.set(tool.name, tool as unknown as RegisteredTool),
 			sendMessage: (message: { content: string }) => messages.push(message),

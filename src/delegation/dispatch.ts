@@ -1,6 +1,6 @@
 /**
- * The `subagent` tool: dispatches enabled built-in and custom roles as
- * isolated pi child processes, single or parallel.
+ * The `subagent` tool: dispatches the built-in roles as isolated pi child
+ * processes, single or parallel.
  * Owns the public dispatch contract and
  * per-run status tracking. Stable thread generations, final integration, and
  * completion ownership live in thread-lifecycle.ts.
@@ -11,8 +11,8 @@ import { resolve } from "node:path";
 import type { ExtensionAPI, Theme } from "@earendil-works/pi-coding-agent";
 import { Text } from "@earendil-works/pi-tui";
 import { Type } from "typebox";
-import { discoverAgents, isWriteCapableAgent, type AgentConfig } from "./agents.ts";
-import { loadConfig } from "../configuration/config.ts";
+import { isWriteCapableAgent, loadBuiltinAgents, type AgentConfig, type ToolMetadata } from "./agents.ts";
+import { DEFAULT_MAX_RESULT_LINES, loadConfig } from "../configuration/config.ts";
 import { resolveSubagentConcurrency } from "../execution/background.ts";
 import { formatCompletionBlock, formatUsage } from "../presentation/format.ts";
 import {
@@ -40,16 +40,12 @@ import {
 	isFailedResult,
 	type SingleResult,
 	type SubagentDetails,
-	type UsageStats,
 } from "../execution/spawn.ts";
 import {
 	isWorktreeCapableAgent,
 	projectResultsRoot,
-	runInManagedRepositoryLane,
 } from "../lifecycle/thread-shared.ts";
 import type { IsolationMode } from "../isolation/worktree.ts";
-
-export { isWorktreeCapableAgent, runInManagedRepositoryLane };
 
 const NON_BLANK_TASK_OPTIONS = { minLength: 1, pattern: "\\S" } as const;
 
@@ -117,10 +113,8 @@ const SubagentParams = Type.Object({
  * worktree-capable agents join them via the live catalog on the execute path. */
 const WORKTREE_DEFAULT_AGENTS = new Set(["artisan"]);
 
-/** Resolve the default isolation for a dispatch. Precedence: an explicit
- * per-call request, then the role's own frontmatter declaration (`worktree`
- * honored for write-capable roles only; `shared` always), then the parallel
- * write default — parallel write-capable agents get a detached worktree
+/** Resolve the default isolation for a dispatch. An explicit per-call request
+ * wins; otherwise parallel write-capable agents get a detached worktree
  * because shared writers serialize on the repository lane, so defaulting them
  * to shared would turn one parallel batch into a convoy that also parks
  * process slots. */
@@ -129,11 +123,8 @@ export function defaultIsolationMode(
 	agentName: string,
 	requested?: IsolationMode,
 	writeCapable = WORKTREE_DEFAULT_AGENTS.has(agentName),
-	declared?: IsolationMode,
 ): IsolationMode {
 	if (requested) return requested;
-	if (declared === "shared") return "shared";
-	if (declared === "worktree" && writeCapable) return "worktree";
 	return mode === "parallel" && writeCapable ? "worktree" : "shared";
 }
 
@@ -152,6 +143,7 @@ function prepareDispatchTasks(
 	tasks: ReadonlyArray<{ agent: string; task: string; cwd?: string; phaseId?: string; scope?: PhaseScopeInput; isolation?: IsolationMode }>,
 	callerCwd: string,
 	agents: readonly AgentConfig[],
+	toolInfos?: readonly ToolMetadata[],
 ): PreparedDispatchTask[] {
 	return tasks.map((item, index) => {
 		const cwd = resolve(callerCwd, item.cwd ?? ".");
@@ -164,7 +156,7 @@ function prepareDispatchTasks(
 			phaseId: normalizePhaseId(item.phaseId),
 			scope: normalizePhaseScope(item.scope, cwd),
 			isolation: item.isolation,
-			writeCapable: agent ? isWriteCapableAgent(agent) : true,
+			writeCapable: agent ? isWriteCapableAgent(agent, toolInfos) : true,
 		};
 	});
 }
@@ -242,7 +234,7 @@ function formatResultRow(r: SingleResult, theme: Theme): string {
 
 /** In-turn wait for a fresh dispatch. Registration resolves it without a model-chosen
  * timer; parent abort or removal ends the wait without losing background delivery. */
-export async function awaitRunResults(
+async function awaitRunResults(
 	runtime: SubagentRuntime,
 	runIds: number[],
 	signal: AbortSignal | undefined,
@@ -392,7 +384,7 @@ export function registerSubagentTool(
 	pi.registerTool({
 		name: "subagent",
 		label: "Subagent",
-		description: "Start one-shot leaf runs for substantial work. Duplicate phases and declared writer overlaps are rejected before allocation; scope does not prove independence or grant permissions. Parallel tasks without scope report `independence not verified`. Results arrive automatically, or in-turn with wait:true. Main handles incomplete work.",
+		description: "Start one-shot leaf runs for delegated phases: independent work in parallel, or one bounded job that can be briefed self-contained. Duplicate phases and declared writer overlaps are rejected before allocation; scope does not prove independence or grant permissions. Parallel tasks without scope report `independence not verified`. Results arrive automatically, or in-turn with wait:true. Main handles incomplete work.",
 		// Declared to the model, never callable from codemode scripts. Dispatch shares
 		// the in-memory lease table, so a batch that includes it runs one tool at a time.
 		exposure: "model-only",
@@ -418,14 +410,11 @@ export function registerSubagentTool(
 			await runtime.durableRestore;
 			monitor.beginTurn();
 			const config = await loadConfig(runtime.configPath);
-			runtime.backgroundQueue.setConcurrency(config.maxConcurrentAgents || resolveSubagentConcurrency());
-
-			const discovery = discoverAgents(ctx.cwd, {
-				scope: config.agentScope,
-				enabledNames: config.enabledAgents,
-				projectTrusted: ctx.isProjectTrusted?.() === true,
-			});
-			const agents = discovery.agents;
+			runtime.backgroundQueue.setConcurrency(resolveSubagentConcurrency());
+			const agents = loadBuiltinAgents();
+			// One admission snapshot: role boundaries and writer capability must
+			// describe the same catalog the batch is validated against.
+			const toolInfos = runtime.getToolInfos();
 			core.setEnvironment({ ctx, config, agents });
 
 			const hasTasks = (params.tasks?.length ?? 0) > 0;
@@ -477,7 +466,7 @@ export function registerSubagentTool(
 			if (params.tasks && params.tasks.length > 0) {
 				let prepared: PreparedDispatchTask[];
 				try {
-					prepared = prepareDispatchTasks(params.tasks, ctx.cwd, agents);
+					prepared = prepareDispatchTasks(params.tasks, ctx.cwd, agents, toolInfos);
 				} catch (error) {
 					throw new Error(`Parallel admission rejected: ${error instanceof Error ? error.message : String(error)} No background tasks were started.`);
 				}
@@ -499,8 +488,7 @@ export function registerSubagentTool(
 							"parallel",
 							item.agent,
 							item.isolation,
-							catalogAgent ? isWorktreeCapableAgent(catalogAgent) : undefined,
-							catalogAgent?.isolation,
+							catalogAgent ? isWorktreeCapableAgent(catalogAgent, toolInfos) : undefined,
 						),
 						{
 							deliveryRoute: params.wait ? "await" : "background",
@@ -529,7 +517,7 @@ export function registerSubagentTool(
 					throw new Error(`No subagents started.\n${failureLines.join("\n")}`);
 				}
 				if (params.wait) {
-					const blocks = await awaitRunResults(runtime, startedIds, signal, config.maxResultLines, ctx.cwd, makeProgress(makeDetails("parallel", true)(results)));
+					const blocks = await awaitRunResults(runtime, startedIds, signal, DEFAULT_MAX_RESULT_LINES, ctx.cwd, makeProgress(makeDetails("parallel", true)(results)));
 					if (signal?.aborted) runtime.fallbackAwaitDelivery(startedIds);
 					else runtime.completeAwaitDelivery(startedIds);
 					const resultText = failureLines.length > 0
@@ -560,7 +548,7 @@ export function registerSubagentTool(
 					phaseId: params.phaseId,
 					scope: params.scope,
 					isolation: params.isolation as IsolationMode | undefined,
-				}], ctx.cwd, agents)[0]!;
+				}], ctx.cwd, agents, toolInfos)[0]!;
 			} catch (error) {
 				throw new Error(`Dispatch admission rejected: ${error instanceof Error ? error.message : String(error)}`);
 			}
@@ -573,8 +561,7 @@ export function registerSubagentTool(
 					"single",
 					single.agent,
 					single.isolation,
-					singleCatalogAgent ? isWorktreeCapableAgent(singleCatalogAgent) : undefined,
-					singleCatalogAgent?.isolation,
+					singleCatalogAgent ? isWorktreeCapableAgent(singleCatalogAgent, toolInfos) : undefined,
 				),
 				{
 					deliveryRoute: params.wait ? "await" : "background",
@@ -587,7 +574,7 @@ export function registerSubagentTool(
 				throw new Error(getResultOutput(result));
 			}
 			if (params.wait && result.runId !== undefined) {
-				const blocks = await awaitRunResults(runtime, [result.runId], signal, config.maxResultLines, ctx.cwd, makeProgress(makeDetails("single", true)([result])));
+				const blocks = await awaitRunResults(runtime, [result.runId], signal, DEFAULT_MAX_RESULT_LINES, ctx.cwd, makeProgress(makeDetails("single", true)([result])));
 				if (signal?.aborted) runtime.fallbackAwaitDelivery([result.runId]);
 				else runtime.completeAwaitDelivery([result.runId]);
 				return {

@@ -4,7 +4,7 @@ import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { Text } from "@earendil-works/pi-tui";
 import { existsSync } from "node:fs";
 import { Type } from "typebox";
-import { DEFAULT_MAX_RESULT_LINES, loadConfig } from "../configuration/config.ts";
+import { DEFAULT_MAX_RESULT_LINES } from "../configuration/config.ts";
 import { removeThreadRecord } from "./durable.ts";
 import { formatCompletionBlock, matchRunIds } from "../presentation/format.ts";
 import { emptyUsage } from "../execution/rpc-control.ts";
@@ -216,8 +216,6 @@ export function registerLookupTools(pi: ExtensionAPI, runtime: SubagentRuntime):
 					);
 				}
 			}
-			// Claim every target before awaiting process cleanup or configuration I/O.
-			const configPromise = loadConfig(runtime.configPath).catch(() => undefined);
 			const completionResults: SingleResult[] = [];
 			const candidateIds = params.all === true
 				? [...new Set([
@@ -407,10 +405,9 @@ export function registerLookupTools(pi: ExtensionAPI, runtime: SubagentRuntime):
 				stopped.push(`#${runId} ${thread.agentName}${wasQueued ? " (queued)" : wasActive ? "" : ` (${previousState})`}`);
 			}
 			if (completionResults.length > 0) {
-				const maxResultLines = (await configPromise)?.maxResultLines ?? DEFAULT_MAX_RESULT_LINES;
 				runtime.sendCompletionGroup(completionResults.map((result) => ({
 					agent: result.agent,
-					block: formatCompletionBlock(result, maxResultLines, { resultRoot: projectResultsRoot(runtime.configPath, result.projectCwd ?? ctx.cwd) }),
+					block: formatCompletionBlock(result, DEFAULT_MAX_RESULT_LINES, { resultRoot: projectResultsRoot(runtime.configPath, result.projectCwd ?? ctx.cwd) }),
 					triggerTurn: true,
 					usage: result.usage,
 				})));

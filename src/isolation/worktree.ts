@@ -116,11 +116,8 @@ export interface WorktreeIsolation {
 	finalize(): Promise<WorktreeFinalization>;
 }
 
-export class WorktreeSetupError extends Error {
-	constructor(
-		message: string,
-		readonly retainedPaths: readonly string[] = [],
-	) {
+class WorktreeSetupError extends Error {
+	constructor(message: string) {
 		super(message);
 		this.name = "WorktreeSetupError";
 	}
@@ -276,7 +273,7 @@ export async function resolveRepositoryRoot(
 }
 
 /** Resolve and validate the Git repository/worktree that contains cwd. */
-export async function resolveWorktreeTarget(
+async function resolveWorktreeTarget(
 	cwd: string,
 	runner: CommandRunner = runCommand,
 ): Promise<WorktreeTarget> {
@@ -308,23 +305,41 @@ class GitWorktreeIsolation implements WorktreeIsolation {
 	private discardPromise?: Promise<void>;
 	/** Full workspace checkpoint retained for manual recovery. */
 	private continuationCheckpoint?: WorktreeCheckpoint;
+	readonly originalCwd: string;
+	readonly originalRoot: string;
+	readonly cwd: string;
+	readonly worktreePath: string;
+	readonly tempDir: string;
+	readonly patchPath: string;
+	readonly head: string;
+	private readonly runner: CommandRunner;
+	/** A restored base may represent work already integrated into the parent. */
+	readonly integrationBaseHead: string;
 
 	constructor(
-		readonly originalCwd: string,
-		readonly originalRoot: string,
-		readonly cwd: string,
-		readonly worktreePath: string,
-		readonly tempDir: string,
-		readonly patchPath: string,
-		readonly head: string,
-		private readonly runner: CommandRunner,
-		/** A restored base may represent work already integrated into the parent. */
-		readonly integrationBaseHead: string = head,
+		originalCwd: string,
+		originalRoot: string,
+		cwd: string,
+		worktreePath: string,
+		tempDir: string,
+		patchPath: string,
+		head: string,
+		runner: CommandRunner,
+		integrationBaseHead: string = head,
 		restored?: {
 			state: WorktreeIsolation["state"];
 			checkpoint?: WorktreeCheckpoint;
 		},
 	) {
+		this.originalCwd = originalCwd;
+		this.originalRoot = originalRoot;
+		this.cwd = cwd;
+		this.worktreePath = worktreePath;
+		this.tempDir = tempDir;
+		this.patchPath = patchPath;
+		this.head = head;
+		this.runner = runner;
+		this.integrationBaseHead = integrationBaseHead;
 		if (restored) {
 			this.currentState = restored.state;
 			if (restored.checkpoint) this.continuationCheckpoint = cloneCheckpoint(restored.checkpoint);
@@ -648,7 +663,6 @@ export async function createWorktreeIsolation(
 		const cause = error instanceof Error ? error.message : String(error);
 		throw new WorktreeSetupError(
 			`Could not create isolated Git worktree: ${cause}${rollbackErrors.length > 0 ? ` Rollback errors: ${rollbackErrors.join("; ")}` : ""}${retainedPaths.length > 0 ? ` Retained artifacts: ${retainedPaths.join(", ")}` : ""}`,
-			retainedPaths,
 		);
 	}
 }

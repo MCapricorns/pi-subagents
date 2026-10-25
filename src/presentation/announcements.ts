@@ -1,10 +1,9 @@
 /** Session-start recovery, stale-model cleanup, and progress-surface installation. */
 
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
-import { existsSync } from "node:fs";
 import { loadConfig, saveConfig } from "../configuration/config.ts";
 import { availableModelsInScope, filterUnavailableModelOverrides } from "../configuration/models.ts";
-import { offerFirstRunSetup } from "../configuration/setup.ts";
+import { ensureDefaultConfig } from "../configuration/setup.ts";
 import { announceRecoveryRecords, relocateRecoveryManifest } from "../isolation/recovery.ts";
 import type { SubagentRuntime } from "../lifecycle/runtime.ts";
 import { installActiveRunsWidget } from "./widget.ts";
@@ -35,7 +34,7 @@ async function removeUnavailableAgentModels(
 
 export function registerAnnouncements(pi: ExtensionAPI, runtime: SubagentRuntime): void {
 	pi.on("session_start", async (_event, ctx) => {
-		const firstRun = !existsSync(runtime.configPath);
+		await ensureDefaultConfig(ctx, runtime.configPath);
 		await relocateRecoveryManifest(runtime.configPath);
 		await announceRecoveryRecords(runtime.configPath, ctx);
 		await removeUnavailableAgentModels(ctx, runtime);
@@ -53,7 +52,6 @@ export function registerAnnouncements(pi: ExtensionAPI, runtime: SubagentRuntime
 		// The active-run widget is TUI-only.
 		if (ctx.mode !== "tui") return;
 		installActiveRunsWidget(ctx);
-		if (firstRun) await offerFirstRunSetup(ctx, runtime.configPath);
 	});
 
 	// Compaction failures are otherwise silent in long orchestration sessions

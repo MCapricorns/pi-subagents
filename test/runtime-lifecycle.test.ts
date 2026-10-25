@@ -24,6 +24,7 @@ function deferred(): { promise: Promise<void>; resolve: () => void } {
 function fakePi(sent: Array<{ message: unknown; options: unknown }>): ExtensionAPI {
 	return {
 		getActiveTools: () => [],
+		getAllTools: () => [],
 		on: () => undefined,
 		sendMessage: (message: unknown, options: unknown) => {
 			sent.push({ message, options });
