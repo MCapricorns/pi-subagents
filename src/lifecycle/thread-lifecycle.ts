@@ -201,9 +201,11 @@ export function createBackgroundDispatcher(options: BackgroundDispatcherOptions)
 			generationCompletion: Promise.resolve(),
 			lifecycleVersion: 0,
 			elapsedMs: 0,
+			...(startOptions.resumeSession ?? {}),
 			finalizeIsolation: async () => undefined,
 		};
 		runtime.threads.set(runId, thread);
+		if (thread.sessionDir) runtime.retainSession({ sessionDir: thread.sessionDir });
 		const installCurrentLifecycle = (): void => installThreadLifecycle(thread, {
 			runtime,
 			runCtx,
@@ -269,6 +271,7 @@ export function createBackgroundDispatcher(options: BackgroundDispatcherOptions)
 						control,
 						idleTimeoutMs: activeIdleTimeoutMs,
 						sessionRoot: sessionsRoot,
+						...(startOptions.resumeSession ?? {}),
 						scratchRoot,
 					},
 					activeRoute.mainFallbackRef,

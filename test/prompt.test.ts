@@ -38,7 +38,7 @@ describe("buildDelegationDirective", () => {
 		const directive = buildDelegationDirective(loadBuiltinAgents());
 		assert.match(directive, /Work directly for small, familiar, or tightly coupled tasks/u);
 		assert.match(directive, /parallel progress, keeping noisy research out of main, or an independent check outweighs startup, briefing, and integration cost/u);
-		assert.match(directive, /use `scout` for bounded research with citations, and `artisan` for implementation with its checks, or command-based review/u);
+		assert.match(directive, /`scout` for cited research, `artisan` for implementation, `reviewer` for review, and `critic` to challenge changes or findings/u);
 		// The routing contract states the live tool policy without naming tools.
 		assert.match(directive, /Children inherit this session's live tool surface/u);
 		assert.match(directive, /including `codemode`/u);
@@ -52,7 +52,9 @@ describe("buildDelegationDirective", () => {
 		assert.match(directive, /one justified phase uses `subagent`; independent phases use its parallel `tasks`; two or more substantial phases with known dependencies and writer scopes use `subagent_workflow`/u);
 		assert.match(directive, /No special user command is needed/u);
 		assert.match(directive, /decide in main, then reassess/u);
-		assert.match(directive, /never impose a research\/implement\/review pipeline/u);
+		assert.match(directive, /smallest fix for each confirmed defect/u);
+		assert.match(directive, /apply those fixes in the same turn \(artisan or main\), then let that role confirm only the fix/u);
+		assert.match(directive, /Do not re-review the whole change/u);
 		assert.match(directive, /one owner, a stable `phaseId`, and exact writer `scope`/u);
 		assert.match(directive, /Parallelize independent phases in one call/u);
 		assert.match(directive, /never overlap writers or duplicate an owned phase/u);
@@ -80,9 +82,9 @@ describe("buildDelegationDirective", () => {
 
 	it("preserves one-shot ownership and completion requirements", () => {
 		const directive = buildDelegationDirective(loadBuiltinAgents());
-		assert.match(directive, /One-shot runs return once/u);
-		assert.match(directive, /Main takes over failed or incomplete work from partial edits and artifacts/u);
-		assert.match(directive, /different deliverable needs a new phase/u);
+		assert.match(directive, /Each run returns once/u);
+		assert.match(directive, /`subagent_message` to steer an active run or continue a completed run/u);
+		assert.match(directive, /Main handles failed or interrupted work from partial edits and artifacts/u);
 		assert.match(directive, /`wait: true` for an immediate dependency or one-shot session/u);
 		assert.match(directive, /completions arrive automatically and wake you; do not poll or sleep to wait/u);
 		assert.match(directive, /Conclude the overall task only after every run settles or is stopped/u);
@@ -94,7 +96,7 @@ describe("buildDelegationDirective", () => {
 	it("shows routing only for enabled roles", () => {
 		const directive = buildDelegationDirective([agent("artisan")]);
 		assert.match(directive, /- artisan: artisan description/u);
-		assert.match(directive, /use `artisan` for implementation with its checks/u);
+		assert.match(directive, /use `artisan` for implementation/u);
 		assert.doesNotMatch(directive, /\bscout\b/u);
 	});
 

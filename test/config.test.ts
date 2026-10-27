@@ -14,13 +14,15 @@ import {
 } from "../src/configuration/config.ts";
 
 describe("catalog", () => {
-	it("ships scout and artisan", () => {
-		assert.deepEqual(BUILTIN_AGENT_NAMES, ["scout", "artisan"]);
+	it("ships research, implementation, review and challenge roles", () => {
+		assert.deepEqual(BUILTIN_AGENT_NAMES, ["scout", "artisan", "reviewer", "critic"]);
 	});
 
 	it("assigns a role thinking default and leaves other names on medium", () => {
 		assert.equal(roleThinkingLevel("scout"), "low");
 		assert.equal(roleThinkingLevel("artisan"), "high");
+		assert.equal(roleThinkingLevel("reviewer"), "high");
+		assert.equal(roleThinkingLevel("critic"), "high");
 		assert.equal(roleThinkingLevel("custom"), "medium");
 	});
 });

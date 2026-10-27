@@ -70,6 +70,7 @@ export type RunControlPhase =
 
 export interface AttemptControl {
 	stop(reason?: string): Promise<void>;
+	steer?(message: string): Promise<void>;
 }
 
 /** Prevent CLI prompt expansion when a message starts with a slash command. */
@@ -157,6 +158,13 @@ export class RunControl {
 	updateAttemptPhase(token: number, phase: RunControlPhase): void {
 		if (this.attempt?.token !== token) return;
 		this.setPhase(phase);
+	}
+
+	async steer(message: string): Promise<void> {
+		if (this.stopRequested || this.phase !== "running" || !this.attempt?.control.steer) {
+			throw new Error("This run is not accepting steering messages.");
+		}
+		await this.attempt.control.steer(message);
 	}
 
 	async stop(reason = "Subagent was aborted"): Promise<void> {

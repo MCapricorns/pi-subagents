@@ -138,6 +138,15 @@ describe("widget layout priorities", () => {
 		assert.doesNotMatch(narrow[1]!, /test\//u, "omit metadata rather than showing half a model id");
 	});
 
+	it("hides a stopped graph and its failed node rows", () => {
+		const graph = graphFixture();
+		graph.state = "stopped";
+		graph.nodes[0]!.state = "failed";
+		graph.nodes[0]!.runId = 7;
+		const run: RunView = { id: 7, agent: "artisan", task: "Stopped", status: "failed", usage: emptyUsage(), elapsedMs: 0, workflow: { workflowId: 3, name: "auth-fix", nodeId: "step0" } };
+		assert.deepEqual(formatSubagentWidgetLines([run], [graph], plainTheme, 80), []);
+	});
+
 	it("summarizes completed graphs without flooding the board with finished nodes", () => {
 		const graph = graphFixture(20);
 		graph.state = "completed";

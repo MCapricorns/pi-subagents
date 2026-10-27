@@ -1,14 +1,22 @@
 /** Read-only run inspection and destructive cancellation of one-shot runs. */
 
+import { randomUUID } from "node:crypto";
+import { copyFile, mkdir, mkdtemp, readdir, rm } from "node:fs/promises";
+import { join } from "node:path";
+import type { Message } from "@earendil-works/pi-ai";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { Text } from "@earendil-works/pi-tui";
 import { Type } from "typebox";
-import { DEFAULT_MAX_RESULT_LINES } from "../configuration/config.ts";
+import { DEFAULT_MAX_RESULT_LINES, loadConfig } from "../configuration/config.ts";
+import { loadBuiltinAgents } from "../delegation/agents.ts";
+import { getProjectRoot, getResultOutput, sessionExists } from "../execution/spawn.ts";
+import { writeTempOwnerMarker } from "../isolation/temp-hygiene.ts";
+import type { DispatchCore } from "./dispatch-core.ts";
 import { stopThreads } from "./stop.ts";
 import { formatCompletionBlock, matchRunIds } from "../presentation/format.ts";
 import { emptyUsage } from "../execution/run-control.ts";
 import { formatDuration, formatTaskSummary, monitor, runWaitLabel } from "../presentation/monitor.ts";
-import type { SubagentRuntime } from "./runtime.ts";
+import type { SubagentRuntime, SubagentThread } from "./runtime.ts";
 import { projectResultsRoot } from "./thread-shared.ts";
 import { getResultError } from "../execution/spawn.ts";
 import {
@@ -29,7 +37,53 @@ function renderFirstLine(result: { content?: unknown }, label: string, theme: an
 	return new Text(`${theme.fg("toolTitle", theme.bold(label))}${theme.fg("dim", firstLine.slice(0, 60))}`, 0, 0);
 }
 
-export function registerLookupTools(pi: ExtensionAPI, runtime: SubagentRuntime): void {
+/** Files a finished run read or changed, recovered from its recorded tool
+ * calls. A new child cannot see that history, so naming the paths is the
+ * difference between a useful brief and a blind restart. */
+function touchedPaths(messages: readonly Message[] | undefined): string[] {
+	const paths = new Set<string>();
+	const visit = (value: unknown, depth: number): void => {
+		if (depth > 3 || !value || typeof value !== "object") return;
+		for (const [key, child] of Object.entries(value as Record<string, unknown>)) {
+			if (/^(path|paths|file|files|file_path|target|pattern)$/u.test(key)) {
+				for (const candidate of Array.isArray(child) ? child : [child]) {
+					if (typeof candidate === "string" && candidate.length <= 200 && /[\\/.]/u.test(candidate)) paths.add(candidate);
+				}
+				continue;
+			}
+			visit(child, depth + 1);
+		}
+	};
+	for (const message of messages ?? []) {
+		const content = (message as { content?: unknown }).content;
+		if (Array.isArray(content)) for (const part of content) visit(part, 0);
+	}
+	return [...paths].slice(0, 20);
+}
+
+/** Brief for a summary follow-up: what the run was asked, what it delivered,
+ * which files it touched, and the new instruction — bounded so a long result
+ * cannot become the whole context. */
+function buildSummaryFollowUp(thread: SubagentThread, message: string): string {
+	const prior = thread.lastResult ? getResultOutput(thread.lastResult) : "(no recorded result)";
+	const bounded = prior.length > 4_000 ? prior.slice(0, 4_000) + "\n…(truncated; read the files for detail)" : prior;
+	const files = touchedPaths(thread.lastResult?.messages);
+	return [
+		`Earlier run #${thread.id} (${thread.agentName}) was briefed with:`,
+		formatTaskSummary(thread.task, 1_200, false),
+		"",
+		"It finished with:",
+		bounded,
+		...(files.length ? ["", "Files it touched:", files.map((path) => `- ${path}`).join("\n")] : []),
+		"",
+		"Continue with this instruction:",
+		message,
+		"",
+		"You did not witness the earlier session. Verify the files before relying on them, and state any assumption this summary does not support.",
+	].join("\n");
+}
+
+export function registerLookupTools(pi: ExtensionAPI, runtime: SubagentRuntime, dispatchCore?: DispatchCore): void {
 	pi.registerTool({
 		name: "subagent_status",
 		label: "Subagent Status",
@@ -111,18 +165,19 @@ export function registerLookupTools(pi: ExtensionAPI, runtime: SubagentRuntime):
 			// Workflow graphs are reported beside individual runs: which nodes have
 			// started, which one is waiting on a dependency, and what a graph that
 			// outlived its session left behind.
+			const workflowId = params.id === undefined ? params.workflow : undefined;
 			const workflowRuns = [...runtime.workflows.values()]
-				.filter((run) => params.workflow === undefined || run.id === params.workflow)
+				.filter((run) => workflowId === undefined || run.id === workflowId)
 				.sort((left, right) => left.id - right.id);
 			const retainedWorkflows = (await readRetainedWorkflows(runtime, ctx?.cwd ?? process.cwd()).catch(() => []))
-				.filter((record) => params.workflow === undefined || record.id === params.workflow)
+				.filter((record) => workflowId === undefined || record.id === workflowId)
 				.filter((record) => !workflowRuns.some((run) => run.id === record.id));
-			const workflowSections = [
+			const workflowSections = params.id === undefined ? [
 				...workflowRuns.map((run) => formatWorkflowStatus(run).join("\n")),
 				...retainedWorkflows.map((record) => formatRetainedWorkflow(record).join("\n")),
-			];
+			] : [];
 			const sections = [text, ...workflowSections].filter((section) => section.trim().length > 0);
-			const unknownWorkflow = params.workflow !== undefined && workflowRuns.length === 0 && retainedWorkflows.length === 0;
+			const unknownWorkflow = workflowId !== undefined && workflowRuns.length === 0 && retainedWorkflows.length === 0;
 			return {
 				content: [{
 					type: "text",
@@ -147,6 +202,70 @@ export function registerLookupTools(pi: ExtensionAPI, runtime: SubagentRuntime):
 		},
 	});
 
+	pi.registerTool({
+		name: "subagent_message",
+		label: "Subagent Message",
+		description: "Send a steering message to a running subagent, or continue a completed run. Use context \"session\" (default) to redo or revise the same work: it continues a private copy of the retained session, so earlier reasoning and the provider prompt-cache key survive. Use context \"summary\" for a new next step: it starts fresh with a bounded summary (objective, result, touched files) instead of loading the old transcript. Running messages are queued by Pi and acknowledged, not guaranteed to have been acted on yet.",
+		exposure: "model-only",
+		executionMode: "sequential",
+		parameters: Type.Object({
+			id: Type.Integer({ minimum: 1, description: "Exact run id in this parent session." }),
+			message: Type.String({ minLength: 1, pattern: "\\S", description: "Additional instruction or follow-up question." }),
+			context: Type.Optional(Type.String({ enum: ["session", "summary"], description: "session (default) continues the retained session, preserving its history and provider prompt-cache key. summary starts a fresh run briefed with a bounded summary of the earlier work: cheaper context, no cache reuse, and no access to details the summary omits." })),
+		}),
+		async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
+			await runtime.durableRestore;
+			const thread = runtime.threads.get(params.id);
+			const fail = (message: string) => ({ content: [{ type: "text" as const, text: message }], details: {}, isError: true });
+			if (!thread || thread.retired) return fail(`No available run matches #${params.id} in this session.`);
+			if (thread.state === "running" && !thread.lifecycleOperation) {
+				try {
+					await thread.control.steer(params.message);
+					return { content: [{ type: "text" as const, text: `Steering queued for #${thread.id}; it has not necessarily been acted on yet.` }], details: { id: thread.id } };
+				} catch (error) { return fail(`Could not send to #${thread.id}: ${error instanceof Error ? error.message : String(error)}`); }
+			}
+			if (thread.state !== "completed" || thread.lifecycleOperation) {
+				return fail(`Run #${thread.id} is ${thread.state}; wait for a running or successfully completed run.`);
+			}
+			if (!dispatchCore) return fail("Follow-up dispatch is unavailable in this process.");
+			const useSummary = params.context === "summary";
+			if (!useSummary && (!thread.sessionDir || !thread.sessionId || !sessionExists(thread.sessionDir, thread.sessionId))) {
+				return fail(`Run #${thread.id} has no available session to continue; retry with context: "summary".`);
+			}
+			let copyDir: string | undefined;
+			try {
+				dispatchCore.setEnvironment({ ctx, config: await loadConfig(runtime.configPath), agents: loadBuiltinAgents() });
+				if (useSummary) {
+					const task = buildSummaryFollowUp(thread, params.message);
+					const result = await dispatchCore.startBackground(thread.agentName, task, thread.cwd, thread.isolation, {
+						phaseId: `followup:${thread.id}:${randomUUID()}`, scope: thread.scope,
+					});
+					if (result.runId === undefined) throw new Error(result.errorMessage || "Follow-up dispatch failed.");
+					return { content: [{ type: "text" as const, text: `Started follow-up #${result.runId} from #${thread.id} with a summary only; results arrive automatically.` }], details: { id: result.runId, sourceId: thread.id } };
+				}
+				const root = join(getProjectRoot(runtime.configPath, thread.cwd), "sessions");
+				await mkdir(root, { recursive: true });
+				copyDir = await mkdtemp(join(root, "pi-subagent-session-"));
+				writeTempOwnerMarker(copyDir);
+				const file = (await readdir(thread.sessionDir!)).find((name) => name.endsWith(`_${thread.sessionId}.jsonl`));
+				if (!file) throw new Error("The retained session file is missing; retry with context: \"summary\".");
+				await copyFile(join(thread.sessionDir!, file), join(copyDir, file));
+				if (thread.retired || thread.lifecycleOperation || thread.state !== "completed") throw new Error("The source run changed while its session was copied.");
+				const task = `Follow-up to run #${thread.id} (${randomUUID()}):\n${params.message}`;
+				const result = await dispatchCore.startBackground(thread.agentName, task, thread.cwd, thread.isolation, {
+					phaseId: `followup:${thread.id}:${randomUUID()}`, scope: thread.scope,
+					resumeSession: { sessionId: thread.sessionId!, sessionDir: copyDir },
+				});
+				if (result.runId === undefined) throw new Error(result.errorMessage || "Follow-up dispatch failed.");
+				copyDir = undefined;
+				return { content: [{ type: "text" as const, text: `Started follow-up #${result.runId} from #${thread.id} with its retained session; results arrive automatically.` }], details: { id: result.runId, sourceId: thread.id } };
+			} catch (error) {
+				if (copyDir) await rm(copyDir, { recursive: true, force: true }).catch(() => undefined);
+				return fail(`Could not continue #${thread.id}: ${error instanceof Error ? error.message : String(error)}`);
+			}
+		},
+	});
+
 	// Cancel one or more active runs: aborts the queue controller, which
 	// terminates the child and delivers an aborted result (with whatever partial
 	// output it produced) so the main agent always knows the run stopped.
@@ -166,7 +285,7 @@ export function registerLookupTools(pi: ExtensionAPI, runtime: SubagentRuntime):
 	pi.registerTool({
 		name: "subagent_stop",
 		label: "Subagent Stop",
-		description: "Destructively stop and retire one run by id/prefix, or all active runs with all: true. Delivers partial results; stopped runs cannot resume.",
+		description: "Destructively stop and retire one run by id/prefix, one workflow by workflow id, or this session’s active runs and workflows with all: true. all takes precedence over id and workflow; id takes precedence over workflow. Other Pi sessions and projects are not targeted. Delivers partial results; stopped runs cannot resume.",
 		exposure: "model-only",
 		executionMode: "sequential",
 		annotations: {
@@ -182,7 +301,7 @@ export function registerLookupTools(pi: ExtensionAPI, runtime: SubagentRuntime):
 			// A graph stop owns its own lifecycle: dependents must not start, and the
 			// graph's own summary reports what had already completed. Stopping the
 			// nodes one by one first would let the runner dispatch the next layer.
-			if (params.workflow !== undefined) {
+			if (params.all !== true && !params.id?.trim() && params.workflow !== undefined) {
 				const graph = runtime.workflows.get(params.workflow);
 				if (!graph) {
 					const known = [...runtime.workflows.keys()].map((id) => `#${id}`).join(", ");

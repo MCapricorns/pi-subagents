@@ -11,6 +11,7 @@ async function withChild(
 	onPrompt: string,
 	verify: (result: Awaited<ReturnType<typeof runCliAgentAttempt>>) => void,
 	stopOnStart = false,
+	onSteer?: string,
 ): Promise<void> {
 	const root = await mkdtemp(join(tmpdir(), "pi-subagents-cli-test-"));
 	const child = join(root, "child.mjs");
@@ -20,15 +21,26 @@ const send = (event) => process.stdout.write(JSON.stringify(event) + "\\n");
 const assistant = (stopReason, text = "", errorMessage) => send({
  type: "message_end", message: { role: "assistant", content: [{ type: "text", text }], stopReason, errorMessage }
 });
-process.stdin.resume();
-process.stdin.on("end", () => {
- send({ type: "agent_start" });
- ${onPrompt}
+process.stdin.setEncoding("utf8");
+let buffer = "";
+process.stdin.on("data", chunk => {
+ buffer += chunk;
+ let index;
+ while ((index = buffer.indexOf("\\n")) >= 0) {
+  const command = JSON.parse(buffer.slice(0, index));
+  buffer = buffer.slice(index + 1);
+  if (command.type === "steer") { ${onSteer ?? ""} continue; }
+  if (command.type !== "prompt") continue;
+  send({ type: "response", id: command.id, command: "prompt", success: true, data: { disposition: "started" } });
+  send({ type: "agent_start" });
+  ${onPrompt}
+ }
 });
 `, "utf8");
 	try {
 		process.argv[1] = child;
 		const control = new RunControl("Test native Pi", 1);
+		let steering: Promise<void> | undefined;
 		const result = await runCliAgentAttempt({
 			defaultCwd: root, agent: { name: "artisan", description: "test", systemPrompt: "" },
 			agentName: "artisan", task: "Test native Pi", thinkingLevel: "off", idleTimeoutMs: 0,
@@ -36,9 +48,11 @@ process.stdin.on("end", () => {
 			signal: AbortSignal.timeout(10_000), startupTimeoutMs: 5_000,
 			onLive: (event) => {
 				if (stopOnStart && event.kind === "status" && event.status === "running") void control.stop("User cancelled");
+				if (onSteer && !steering && event.kind === "status" && event.status === "running") steering = control.steer("Please check the caller");
 			},
 		});
 		if (stopOnStart) await control.stop("User cancelled");
+		if (steering) await steering;
 		verify(result);
 	} finally {
 		process.argv[1] = previousScript;
@@ -58,7 +72,7 @@ describe("child launch arguments", () => {
 		const args = buildChildLaunchArgs({ ...base, agent: { model: "anthropic/claude-sonnet" } });
 		assert.equal(valueOf(args, "--tools"), undefined);
 		assert.equal(args.includes("--no-tools"), false);
-		assert.equal(valueOf(args, "--exclude-tools"), "subagent,subagent_workflow,subagent_status,subagent_stop");
+		assert.equal(valueOf(args, "--exclude-tools"), "subagent,subagent_workflow,subagent_status,subagent_message,subagent_stop");
 		assert.equal(valueOf(args, "--model"), "anthropic/claude-sonnet");
 		assert.equal(valueOf(args, "--thinking"), "high");
 	});
@@ -66,12 +80,12 @@ describe("child launch arguments", () => {
 	it("keeps an explicit role list a strict intersection, MCP tools included", () => {
 		const readOnly = buildChildLaunchArgs({ ...base, agent: { tools: ["read", "grep"] } });
 		assert.equal(valueOf(readOnly, "--tools"), "read,grep");
-		assert.equal(valueOf(readOnly, "--exclude-tools"), "subagent,subagent_workflow,subagent_status,subagent_stop,mcp__*");
+		assert.equal(valueOf(readOnly, "--exclude-tools"), "subagent,subagent_workflow,subagent_status,subagent_message,subagent_stop,mcp__*");
 
 		const named = buildChildLaunchArgs({ ...base, agent: { tools: ["read", "mcp__docs__search"] } });
 		assert.equal(valueOf(named, "--tools"), "read,mcp__docs__search");
 		// `--tools` filters MCP tools once an entry names one.
-		assert.equal(valueOf(named, "--exclude-tools"), "subagent,subagent_workflow,subagent_status,subagent_stop");
+		assert.equal(valueOf(named, "--exclude-tools"), "subagent,subagent_workflow,subagent_status,subagent_message,subagent_stop");
 	});
 
 	it("starts a child without tools when the role resolved to none", () => {
@@ -113,11 +127,16 @@ describe("bounded stderr retention", () => {
 });
 
 
-describe("native JSON child lifecycle", () => {
-	it("uses the official one-shot JSON mode", () => {
+describe("native RPC child lifecycle", () => {
+	it("uses the official RPC mode", () => {
 		const args = buildChildLaunchArgs({ agent: {}, thinkingLevel: "off" });
-		assert.deepEqual(args.slice(0, 2), ["--mode", "json"]);
-		assert.equal(args.includes("rpc"), false);
+		assert.deepEqual(args.slice(0, 2), ["--mode", "rpc"]);
+	});
+	it("delivers and acknowledges steering before the final answer", async () => {
+		await withChild("", (result) => {
+			assert.equal(isFailedResult(result), false);
+			assert.match(getResultOutput(result), /Please check the caller/u);
+		}, false, `send({ type: "response", id: command.id, command: "steer", success: true, data: { disposition: "queued" } }); assistant("stop", command.message); send({ type: "agent_settled" });`);
 	});
 	it("cancels a live child and waits for its process to close", async () => {
 		await withChild('setInterval(() => {}, 1000);', (result) => {

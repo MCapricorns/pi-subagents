@@ -24,7 +24,7 @@ import {
 	type SingleResult,
 } from "../execution/spawn.ts";
 import { samePath } from "../isolation/managed-paths.ts";
-import { isProcessAlive, killProcessTree, sweepProjectDurableDirs, sweepProjectTempDirs } from "../isolation/temp-hygiene.ts";
+import { isProcessAlive, sweepProjectDurableDirs, sweepProjectTempDirs } from "../isolation/temp-hygiene.ts";
 import {
 	isPathInside,
 	restoreWorktreeIsolation,
@@ -79,8 +79,8 @@ function belongsToSessionProject(configPath: string, cwd: string, record: Thread
 
 /** Rebuild interrupted records for this session's checkout after reload.
  * Other projects' parked threads stay on disk for their own window; this process
- * must not restore them or kill their children. Orphaned children of *this*
- * checkout are stopped first; missing session files do not discard isolated
+ * must not restore them or kill their children. Records with a live owner or
+ * child are left alone; missing session files do not discard isolated
  * edits. Already-settled records from older versions are removed with their
  * managed artifacts. */
 export async function restoreDurableThreads(runtime: SubagentRuntime, cwd: string): Promise<number[]> {
@@ -89,18 +89,15 @@ export async function restoreDurableThreads(runtime: SubagentRuntime, cwd: strin
 	for (const record of records) {
 		if (!belongsToSessionProject(runtime.configPath, cwd, record)) continue;
 		if (runtime.threads.has(record.runId) || monitor.findRun(record.runId)) continue;
+		// Another Pi window may own this checkpoint, and PID reuse means a live
+		// recorded child is not proof of ownership. Never kill either on restore.
+		if (isCurrentBoot(record) && (
+			(record.ownerPid !== undefined && record.ownerPid !== process.pid && isProcessAlive(record.ownerPid)) ||
+			record.childPids.some(isProcessAlive)
+		)) continue;
 		if (record.state !== "parked") {
 			await discardRestoredRecord(runtime, record);
 			continue;
-		}
-		// A child orphaned by reload/crash may still hold the retained session.
-		// The on-disk session checkpoint is what survives; kill the writer — but
-		// only while the recorded pids are still ours. Across a reboot the same
-		// numbers belong to unrelated processes.
-		if (isCurrentBoot(record)) {
-			for (const pid of record.childPids) {
-				if (isProcessAlive(pid)) killProcessTree(pid);
-			}
 		}
 		const sessionValid =
 			record.sessionId !== undefined &&

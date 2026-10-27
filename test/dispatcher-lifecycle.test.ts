@@ -27,13 +27,21 @@ describe("dispatcher completion delivery", () => {
 				const child = join(root, "child.mjs");
 				await writeFile(child, `
 const send = (value) => process.stdout.write(JSON.stringify(value) + "\\n");
-process.stdin.resume();
-process.stdin.on("end", () => {
-  send({ type: "agent_start" });
-  send({ type: "message_end", message: { role: "assistant", content: [{ type: "text", text: "delivery verified" }], stopReason: ${scenario === "failure" ? '"error"' : '"stop"'}, ${scenario === "failure" ? 'errorMessage: "provider failed"' : ''} } });
-  send({ type: "agent_settled" });
-});
-`, "utf8");
+process.stdin.setEncoding("utf8");
+let buffer = "";
+process.stdin.on("data", (chunk) => {
+  buffer += chunk;
+  let index;
+  while ((index = buffer.indexOf("\\n")) >= 0) {
+    const command = JSON.parse(buffer.slice(0, index));
+    buffer = buffer.slice(index + 1);
+    if (command.type !== "prompt") continue;
+    send({ type: "response", id: command.id, command: "prompt", success: true, data: { disposition: "started" } });
+    send({ type: "agent_start" });
+    send({ type: "message_end", message: { role: "assistant", content: [{ type: "text", text: "delivery verified" }], stopReason: ${scenario === "failure" ? '"error"' : '"stop"'}, ${scenario === "failure" ? 'errorMessage: "provider failed"' : ''} } });
+    send({ type: "agent_settled" });
+  }
+});`, "utf8");
 				process.argv[1] = child;
 				const core = createDispatchCore(runtime);
 				core.setEnvironment({

@@ -92,6 +92,8 @@ export interface ThreadRecord {
 	sessionDir?: string;
 	worktree?: WorktreeSnapshot;
 	childPids: number[];
+	/** Parent Pi process which wrote this checkpoint, when known. */
+	ownerPid?: number;
 	/** Boot this record's `childPids` were observed in; see `isCurrentBoot`. */
 	bootId?: number;
 	resultSummary?: ThreadResultSummary;
@@ -201,6 +203,7 @@ function normalizeRecord(value: unknown): ThreadRecord | undefined {
 		childPids: Array.isArray(raw.childPids)
 			? raw.childPids.filter((pid): pid is number => typeof pid === "number" && Number.isInteger(pid) && pid > 0)
 			: [],
+		...(typeof raw.ownerPid === "number" && Number.isInteger(raw.ownerPid) && raw.ownerPid > 0 ? { ownerPid: raw.ownerPid } : {}),
 		...(typeof raw.bootId === "number" && Number.isFinite(raw.bootId) ? { bootId: raw.bootId } : {}),
 		...(raw.resultSummary === undefined ? {} : { resultSummary: normalizeResultSummary(raw.resultSummary) }),
 	};
@@ -401,6 +404,7 @@ export function threadRecordFromThread(
 		...(thread.sessionId && thread.sessionDir ? { sessionId: thread.sessionId, sessionDir: thread.sessionDir } : {}),
 		...(worktree ? { worktree } : {}),
 		childPids: thread.control?.getChildPids?.() ?? [],
+		ownerPid: process.pid,
 		bootId: currentBootId(now),
 		...(thread.lastResult ? { resultSummary: summarizeResult(thread.lastResult) } : {}),
 	};

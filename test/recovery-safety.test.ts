@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { execFile } from "node:child_process";
 import { existsSync } from "node:fs";
 import { mkdir, mkdtemp, readFile, rm, symlink, writeFile } from "node:fs/promises";
-import { tmpdir } from "node:os";
+import { tmpdir, uptime } from "node:os";
 import { dirname, join } from "node:path";
 import { promisify } from "node:util";
 import { describe, it } from "node:test";
@@ -433,6 +433,20 @@ describe("cross-project session isolation", () => {
 			});
 			assert.equal(existsSync(join(group, "worktree")), true);
 			assert.equal((await readRecoveryRecords(configPath)).length, 1);
+		});
+	});
+
+	it("does not restore or signal a checkpoint whose child is still alive", async () => {
+		await withFixture(async (root, configPath) => {
+			const project = await createRepository(join(root, "a"));
+			await writeThreadManifest(configPath, project.cwd, [threadRecord(project.cwd, {
+				runId: 10, childPids: [process.pid], bootId: Math.round(Date.now() - uptime() * 1000),
+			})]);
+			const runtime = createRuntime(fakePi(), configPath);
+			try {
+				assert.deepEqual(await restoreDurableThreads(runtime, project.cwd), []);
+				assert.equal((await readThreadRecords(configPath)).length, 1);
+			} finally { await runtime.shutdown(); monitor.clear(); }
 		});
 	});
 

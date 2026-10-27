@@ -3,6 +3,7 @@
 import {
 	Input,
 	fuzzyFilter,
+	matchesKey,
 	truncateToWidth,
 	visibleWidth,
 	wrapTextWithAnsi,
@@ -170,6 +171,148 @@ export function promptSelectOne(
 	initialValue?: string,
 ): Promise<string | undefined> {
 	return openPicker(ctx, items, { title, hint, searchable: true, initialValue });
+}
+
+/** One role per row, with Model, Thinking and Reset side by side: the whole
+ * configuration is visible at once, so a model choice and its clamped thinking
+ * level are compared in place instead of through nested screens. */
+export interface RoleGridRow {
+	role: string;
+	model: string;
+	thinking: string;
+	/** Whether the thinking level is a user override (shown with a marker). */
+	thinkingOverridden?: boolean;
+	/** Why this row matters; shown for the focused row only. */
+	description: string;
+}
+
+export interface RoleGridFocus {
+	row?: number;
+	column?: number;
+}
+
+const GRID_COLUMNS = ["model", "thinking", "reset"] as const;
+export type RoleGridColumn = (typeof GRID_COLUMNS)[number];
+
+export interface RoleGridChoice {
+	row: number;
+	column: number;
+	role: string;
+	field: RoleGridColumn;
+}
+
+class RoleGrid implements Component {
+	private row: number;
+	private column: number;
+	private readonly rows: RoleGridRow[];
+	private readonly status: string;
+	private readonly tui: TUI;
+	private readonly theme: Theme;
+	private readonly keybindings: KeybindingsManager;
+	private readonly done: (choice: RoleGridChoice | undefined) => void;
+
+	constructor(
+		rows: RoleGridRow[],
+		status: string,
+		focus: RoleGridFocus,
+		tui: TUI,
+		theme: Theme,
+		keybindings: KeybindingsManager,
+		done: (choice: RoleGridChoice | undefined) => void,
+	) {
+		this.rows = rows;
+		this.status = status;
+		this.tui = tui;
+		this.theme = theme;
+		this.keybindings = keybindings;
+		this.done = done;
+		this.row = Math.min(Math.max(0, focus.row ?? 0), Math.max(0, rows.length - 1));
+		this.column = Math.min(Math.max(0, focus.column ?? 0), GRID_COLUMNS.length - 1);
+	}
+
+	/** Column budget: the role name and the action stay readable, the two
+	 * measured values share what is left. */
+	private widths(width: number): number[] {
+		const role = Math.min(12, Math.max(4, Math.floor(width * 0.16)));
+		const reset = 6;
+		const gap = 2;
+		// The row prefix ("› ") and the three gaps also spend columns.
+		const available = Math.max(0, width - 2 - role - reset - gap * 3);
+		const model = Math.max(0, Math.floor(available * 0.55));
+		const thinking = Math.max(0, available - model);
+		return [role, model, thinking, reset];
+	}
+
+	render(width: number): string[] {
+		if (width <= 0) return [""];
+		const theme = this.theme;
+		const dim = (text: string) => theme.fg("dim", text);
+		const [roleWidth, modelWidth, thinkingWidth, resetWidth] = this.widths(width);
+		const cell = (text: string, size: number, active: boolean): string => {
+			const fitted = truncateToWidth(text, size, "…");
+			const pad = " ".repeat(Math.max(0, size - visibleWidth(fitted)));
+			return active ? theme.fg("accent", theme.bold(fitted)) + pad : fitted + pad;
+		};
+		const lines = [theme.fg("border", "─".repeat(width)), theme.fg("accent", theme.bold("Subagents · Roles")), dim("Model · Thinking · Reset per role · " + this.status), ""];
+		const header = ["Role", "Model", "Thinking", ""]
+			.map((title, index) => cell(title, [roleWidth, modelWidth, thinkingWidth, resetWidth][index]!, false))
+			.join("  ");
+		lines.push(dim(header));
+		for (const [index, row] of this.rows.entries()) {
+			const selected = index === this.row;
+			const cells = [row.role, row.model, row.thinking + (row.thinkingOverridden ? "*" : ""), "reset"]
+				.map((text, column) => cell(text, [roleWidth, modelWidth, thinkingWidth, resetWidth][column]!, selected && this.column === column));
+			lines.push((selected ? theme.fg("accent", "› ") : "  ") + cells.join("  "));
+		}
+		const focused = this.rows[this.row];
+		lines.push("", theme.fg("border", "─".repeat(width)));
+		if (focused) lines.push(...wrapTextWithAnsi(focused.description, Math.max(1, width)).slice(0, 3).map(dim));
+		lines.push(dim("↑/↓ role · ←/→ column · Enter edit · Esc close"));
+		return lines.map((line) => truncateToWidth(line, width, "…"));
+	}
+
+	handleInput(data: string): void {
+		const kb = this.keybindings;
+		const rows = this.rows.length;
+		if (kb.matches(data, "tui.select.up")) {
+			if (rows) this.row = (this.row - 1 + rows) % rows;
+		} else if (kb.matches(data, "tui.select.down")) {
+			if (rows) this.row = (this.row + 1) % rows;
+		} else if (matchesKey(data, "left") || kb.matches(data, "tui.editor.cursorLeft")) {
+			this.column = (this.column - 1 + GRID_COLUMNS.length) % GRID_COLUMNS.length;
+		} else if (matchesKey(data, "right") || kb.matches(data, "tui.editor.cursorRight")) {
+			this.column = (this.column + 1) % GRID_COLUMNS.length;
+		} else if (kb.matches(data, "tui.select.confirm")) {
+			const focused = this.rows[this.row];
+			if (focused) {
+				this.done({ row: this.row, column: this.column, role: focused.role, field: GRID_COLUMNS[this.column]! });
+				return;
+			}
+		} else if (kb.matches(data, "tui.select.cancel")) {
+			this.done(undefined);
+			return;
+		} else {
+			return;
+		}
+		this.tui.requestRender();
+	}
+
+	invalidate(): void {}
+}
+
+/** Role × setting grid. Esc closes without a change. */
+export function promptRoleGrid(
+	ctx: PickerContext,
+	rows: RoleGridRow[],
+	focus: RoleGridFocus = {},
+	status = "Changes save immediately",
+): Promise<RoleGridChoice | undefined> {
+	if (ctx.mode !== "tui") {
+		ctx.ui.notify("/subagents-setup requires Pi's interactive TUI.", "error");
+		return Promise.resolve(undefined);
+	}
+	return ctx.ui.custom<RoleGridChoice | undefined>((tui, theme, keybindings, done) =>
+		new RoleGrid(rows, status, focus, tui, theme, keybindings, done));
 }
 
 export function promptSettings(

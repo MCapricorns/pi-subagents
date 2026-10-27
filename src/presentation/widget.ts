@@ -150,8 +150,9 @@ export function formatSubagentWidgetLines(
 ): string[] {
 	if (width <= 0) return [];
 	const graphIds = new Set(workflows.map((graph) => graph.id));
+	const visibleWorkflows = workflows.filter((graph) => graph.state !== "stopped");
 	const standalone = runs.filter((run) => (!run.workflow || !graphIds.has(run.workflow.workflowId)) && (isRunActiveStatus(run.status) || run.status === "failed"));
-	const groups = workflows.map((graph) => workflowGroup(graph, runs, theme, width, now));
+	const groups = visibleWorkflows.map((graph) => workflowGroup(graph, runs, theme, width, now));
 	if (standalone.length) {
 		const rows = standalone.map((run) => runRow(run, theme, width, now));
 		groups.push({ rows, priority: Math.min(...rows.map((row) => row.priority)) });
@@ -161,7 +162,7 @@ export function formatSubagentWidgetLines(
 	const counts = ["failed", "blocked", "interrupting", "running", "queued", "waiting"]
 		.map((state) => ({ state, count: states.filter((value) => value === state).length }))
 		.filter(({ count }) => count > 0).map(({ state, count }) => count + " " + state);
-	if (workflows.length) counts.push(workflows.length + " workflow" + (workflows.length === 1 ? "" : "s"));
+	if (visibleWorkflows.length) counts.push(visibleWorkflows.length + " workflow" + (visibleWorkflows.length === 1 ? "" : "s"));
 	const overview = theme.fg("accent", theme.bold("Subagents")) + theme.fg("dim", "  " + counts.join(SEPARATOR));
 	return renderBoard(groups, theme, width, overview);
 }

@@ -36,6 +36,8 @@ import { registerLookupTools } from "./src/lifecycle/tools.ts";
 import { registerWorkflowTool, restoreWorkflowState } from "./src/workflow/tool.ts";
 import { registerAnnouncements } from "./src/presentation/announcements.ts";
 import { clearActiveRunsWidget } from "./src/presentation/widget.ts";
+import { formatBytes, measureDurableUsage, runStorageCleanup } from "./src/isolation/cleanup.ts";
+import { getSubagentsRoot } from "./src/execution/spawn.ts";
 
 export default function (pi: ExtensionAPI): void {
 	const configPath = getConfigPath(getAgentDir());
@@ -74,13 +76,34 @@ export default function (pi: ExtensionAPI): void {
 	const dispatchCore = createDispatchCore(runtime);
 	registerSubagentTool(pi, runtime, dispatchCore);
 	registerWorkflowTool(pi, runtime, dispatchCore);
-	registerLookupTools(pi, runtime);
+	registerLookupTools(pi, runtime, dispatchCore);
 	registerCancellationHooks(pi, runtime);
 
 	pi.registerCommand("subagents-setup", {
 		description: "Configure pi-subagents: model and thinking per role",
 		handler: async (_args, ctx) => {
 			await runSetup(ctx, configPath);
+		},
+	});
+
+	pi.registerCommand("subagents-cleanup", {
+		description: "Report and reclaim pi-subagents storage; /subagents-cleanup dry-run only reports",
+		handler: async (args, ctx) => {
+			const root = getSubagentsRoot(configPath);
+			if (args.trim() === "dry-run") {
+				const usage = measureDurableUsage(root);
+				const detail = usage.projects.slice(0, 5).map((project) =>
+					`${project.path.split(/[\\/]/u).at(-1)} ${formatBytes(project.bytes)} (${project.sessions} sessions, ${project.worktrees} worktrees)`);
+				ctx.ui.notify(`pi-subagents storage: ${formatBytes(usage.totalBytes)} in ${usage.projects.length} project(s)${detail.length ? " · " + detail.join(" · ") : ""}.`, "info");
+				return;
+			}
+			const result = await runStorageCleanup(configPath);
+			ctx.ui.notify(
+				`pi-subagents cleanup: freed ${formatBytes(result.freedBytes)} (${formatBytes(result.before.totalBytes)} → ${formatBytes(result.after.totalBytes)})`
+				+ `${result.removedProjects.length ? `; removed ${result.removedProjects.length} idle project root${result.removedProjects.length === 1 ? "" : "s"}` : ""}`
+				+ `; kept ${result.parkedRecords} parked recovery record${result.parkedRecords === 1 ? "" : "s"} and every referenced artifact.`,
+				"info",
+			);
 		},
 	});
 

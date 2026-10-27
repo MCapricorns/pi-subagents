@@ -55,7 +55,7 @@ subagent_workflow({
     { id: "map", agent: "scout", task: "Trace the refresh race in src/auth. Cite path:line and test coverage gaps." },
     { id: "fix", agent: "artisan", task: "Fix the race and add its regression tests. Evidence:\n{{map}}", dependsOn: ["map"],
       scope: { paths: ["src/auth", "test/auth.test.ts"] } },
-    { id: "review", agent: "artisan", isolation: "shared",
+    { id: "review", agent: "critic", isolation: "shared",
       task: "Try to disprove the fix: inspect callers and edge cases, then run the documented checks. Report evidence and unresolved risks; do not edit files.\n{{fix}}",
       dependsOn: ["fix"] },
   ],
@@ -85,7 +85,7 @@ The shapes that are worth writing, in the order they usually appear:
   confirmation tries to disprove their findings against callers, invariants,
   and focused reproductions. Use different lenses for independent reviewers.
   Distinguish reproduced, source-supported, disproved, and unverified findings.
-  Use artisan when commands are required; scout cannot execute a reproduction.
+  Use reviewer or critic when commands are required; scout cannot execute a reproduction.
 - **A closing gate.** The last node runs the project's own checks. Prefer
   commands over opinions: the repository's test suite, typecheck, build, or the
   verification line its README names. Ask for the strongest tier it has, not the

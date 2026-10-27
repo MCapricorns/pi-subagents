@@ -159,9 +159,10 @@ export async function stopThreads(runtime: SubagentRuntime, targets: readonly nu
 			runtime.registerRunResult(runId, stoppedResult);
 			thread.lastResult = stoppedResult;
 		}
-		monitor.setStatus(runId, "failed");
+		// A stopped run is not a failure. Its result remains available in runtime
+		// status and completion, but it must no longer occupy the active widget.
+		monitor.removeRun(runId);
 		if (stoppedResult) completionResults.push(stoppedResult);
-		// Leave the terminal row for the footer; beginTurn sweeps it.
 		runtime.retireThreadSession(thread);
 		// The destructive retire removes the durable record with the session;
 		// an id never resurrects after subagent_stop.

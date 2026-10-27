@@ -16,7 +16,7 @@ import { dirname, join } from "node:path";
 import { getAgentDir, withFileMutationQueue } from "@earendil-works/pi-coding-agent";
 
 /** Full catalog of agents shipped with the package; all of them always run. */
-export const BUILTIN_AGENT_NAMES = ["scout", "artisan"] as const;
+export const BUILTIN_AGENT_NAMES = ["scout", "artisan", "reviewer", "critic"] as const;
 
 /** Thinking levels accepted by pi's `--thinking` option. */
 const THINKING_LEVEL_VALUES = ["off", "minimal", "low", "medium", "high", "xhigh", "max"] as const;
@@ -30,6 +30,8 @@ export function roleThinkingLevel(agentName: string): ThinkingLevel {
 		case "scout":
 			return "low";
 		case "artisan":
+		case "reviewer":
+		case "critic":
 			return "high";
 		default:
 			return DEFAULT_THINKING_LEVEL;
@@ -50,8 +52,16 @@ export const AGENT_PROFILES: Record<(typeof BUILTIN_AGENT_NAMES)[number], AgentP
 		remark: "Bounded code, documentation, or web research with citations. No commands or edits.",
 	},
 	artisan: {
-		summary: "Engineering · implementation & checks",
-		remark: "One substantial change with its tests, or review and validation requiring commands.",
+		summary: "Implement · code & checks",
+		remark: "Implement one substantial change with its tests and verification.",
+	},
+	reviewer: {
+		summary: "Review · correctness",
+		remark: "Review code for actionable defects and verify findings without editing files.",
+	},
+	critic: {
+		summary: "Challenge · adversarial review",
+		remark: "Challenge changes or findings with counterexamples and independent verification.",
 	},
 };
 

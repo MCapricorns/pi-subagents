@@ -1,8 +1,8 @@
 /**
  * Agent catalog and tool resolution.
  *
- * The catalog is exactly the two built-in roles shipped as code in
- * builtin-agents.ts (scout, artisan). Both are always enabled; there are no
+ * The catalog consists of the built-in roles shipped as code in
+ * builtin-agents.ts. All are always enabled; there are no
  * user or project role files and nothing to discover on disk. The rest of this
  * module resolves each role against the parent's live tool surface.
  */
@@ -28,6 +28,7 @@ export const SUBAGENT_TOOL_NAMES = [
 	"subagent",
 	"subagent_workflow",
 	"subagent_status",
+	"subagent_message",
 	"subagent_stop",
 ] as const;
 const SUBAGENT_TOOL_NAME_SET = new Set<string>(SUBAGENT_TOOL_NAMES);
@@ -114,7 +115,7 @@ export function isWriteCapableAgent(
 	return agent.tools.some((tool) => !isReadOnlyToolName(tool, toolIndex));
 }
 
-/** The fixed built-in catalog: scout and artisan, in that order. */
+/** The fixed built-in catalog, in setup order. */
 export function loadBuiltinAgents(): AgentConfig[] {
 	return BUILTIN_AGENTS.map((agent) => ({ ...agent }));
 }

@@ -1,4 +1,4 @@
-/** Run a one-shot child using Pi's native JSON CLI and session persistence. */
+/** Run a child using Pi RPC, with a session retained after settlement. */
 
 import { spawn } from "node:child_process";
 import { existsSync, readdirSync } from "node:fs";
@@ -121,7 +121,7 @@ export interface ChildLaunchOptions {
 export function buildChildLaunchArgs(options: ChildLaunchOptions): string[] {
 	const { agent, thinkingLevel } = options;
 	const excludedTools: string[] = [...SUBAGENT_TOOL_NAMES];
-	const args: string[] = ["--mode", "json"];
+	const args: string[] = ["--mode", "rpc"];
 	if (options.sessionDir && options.sessionId) {
 		args.push("--session-dir", options.sessionDir);
 		args.push(options.resumeExistingSession ? "--session" : "--session-id", options.sessionId);
@@ -198,6 +198,8 @@ export async function runCliAgentAttempt(options: RunCliAttemptOptions): Promise
 		let shutdownTimer: ReturnType<typeof setTimeout> | undefined;
 		let idleTimer: ReturnType<typeof setInterval> | undefined;
 		let startupTimer: ReturnType<typeof setTimeout> | undefined;
+		let nextRequestId = 0;
+		const pendingSteers = new Map<string, { resolve: () => void; reject: (error: Error) => void }>();
 		let resolveClosed!: () => void;
 		const processClosed = new Promise<void>((resolve) => { resolveClosed = resolve; });
 		const emit = (event: SubagentLiveEvent): void => {
@@ -211,6 +213,23 @@ export async function runCliAgentAttempt(options: RunCliAttemptOptions): Promise
 			}, SUBAGENT_KILL_GRACE_MS);
 		};
 		const attempt: AttemptControl = {
+			steer(message) {
+				if (closed || settled || stopping || proc.stdin.destroyed) return Promise.reject(new Error("Subagent has stopped accepting messages."));
+				const id = `steer-${++nextRequestId}`;
+				return new Promise<void>((resolve, reject) => {
+					const timer = setTimeout(() => {
+						if (pendingSteers.delete(id)) reject(new Error("No acknowledgement; message delivery is unconfirmed."));
+					}, 10_000);
+					timer.unref?.();
+					pendingSteers.set(id, { resolve: () => { clearTimeout(timer); resolve(); }, reject: (error) => { clearTimeout(timer); reject(error); } });
+					proc.stdin.write(JSON.stringify({ id, type: "steer", message: asPlainTextPrompt(message) }) + "\n", (error) => {
+						if (error) {
+							const pending = pendingSteers.get(id);
+							if (pending) { pendingSteers.delete(id); pending.reject(error); }
+						}
+					});
+				});
+			},
 			async stop(reason = "Subagent was aborted") {
 				if (!closed) {
 					stopping = true;
@@ -237,8 +256,23 @@ export async function runCliAgentAttempt(options: RunCliAttemptOptions): Promise
 			result.usage.contextTokens = usage.totalTokens ?? result.usage.contextTokens;
 		};
 		const processLine = (line: string): void => {
-			let event: JsonAgentSessionEvent;
-			try { event = JSON.parse(line); } catch { return; }
+			let record: any;
+			try { record = JSON.parse(line); } catch { return; }
+			if (record?.type === "response") {
+				if (record.id === "initial-prompt" && (!record.success || record.data?.disposition === "handled")) {
+					result.dispatchFailed = true;
+					result.errorMessage = record.error || "Subagent prompt was handled without starting a run.";
+					terminate();
+				}
+				const pending = pendingSteers.get(record.id);
+				if (pending) {
+					pendingSteers.delete(record.id);
+					if (record.success) pending.resolve();
+					else pending.reject(new Error(record.error || "Steering was rejected."));
+				}
+				return;
+			}
+			const event = record as JsonAgentSessionEvent;
 			if (!event || typeof event !== "object") return;
 			if (event.type === "agent_start" || event.type === "turn_start") {
 				result.activityObserved = true;
@@ -280,7 +314,11 @@ export async function runCliAgentAttempt(options: RunCliAttemptOptions): Promise
 					result.stopReason = "aborted";
 					result.errorMessage ??= "Subagent was aborted";
 				}
-				// Pi normally exits itself. Bound a child extension's stuck disposal.
+				// RPC remains alive until stdin closes. A steer racing settlement is
+				// unconfirmed, so reject it rather than claim it was delivered.
+				for (const pending of pendingSteers.values()) pending.reject(new Error("Subagent settled before acknowledging the message."));
+				pendingSteers.clear();
+				proc.stdin.end();
 				if (!closed) shutdownTimer ??= setTimeout(terminate, SUBAGENT_KILL_GRACE_MS);
 			}
 		};
@@ -299,7 +337,7 @@ export async function runCliAgentAttempt(options: RunCliAttemptOptions): Promise
 		});
 		proc.stderr.on("data", (chunk: Buffer) => { result.stderr = appendBoundedStderr(result.stderr, stderrDecoder.write(chunk)); });
 		proc.stdin.on("error", (error) => {
-			if (stopping || closed) return;
+			if (stopping || closed || settled) return;
 			result.dispatchFailed = true;
 			result.errorMessage ??= "Subagent stdin failed: " + error.message;
 			terminate();
@@ -310,6 +348,8 @@ export async function runCliAgentAttempt(options: RunCliAttemptOptions): Promise
 		});
 		proc.once("close", (code, exitSignal) => {
 			closed = true;
+			for (const pending of pendingSteers.values()) pending.reject(new Error("Subagent exited before acknowledging the message."));
+			pendingSteers.clear();
 			if (startupTimer) clearTimeout(startupTimer);
 			if (idleTimer) clearInterval(idleTimer);
 			if (forceKillTimer) clearTimeout(forceKillTimer);
@@ -352,7 +392,7 @@ export async function runCliAgentAttempt(options: RunCliAttemptOptions): Promise
 		signal?.addEventListener("abort", onAbort, { once: true });
 		try {
 			if (signal?.aborted || control?.isStopRequested()) await attempt.stop(control?.getStopMessage());
-			else proc.stdin.end(asPlainTextPrompt(options.prompt));
+			else proc.stdin.write(JSON.stringify({ id: "initial-prompt", type: "prompt", message: asPlainTextPrompt(options.prompt) }) + "\n");
 			await processClosed;
 			return result;
 		} finally {

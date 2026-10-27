@@ -151,6 +151,8 @@ export interface DispatchEnvironment {
 
 /** Admission metadata for a fresh one-shot run. */
 export interface StartBackgroundOptions {
+	/** A private copy of a settled session used for a follow-up run. */
+	resumeSession?: { sessionId: string; sessionDir: string };
 	phaseId?: string;
 	scope?: PhaseScope;
 	/** A false hint cannot downgrade a live write-capable role. */

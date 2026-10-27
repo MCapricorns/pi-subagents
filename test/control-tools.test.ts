@@ -1,5 +1,7 @@
 import assert from "node:assert/strict";
-import { mkdtemp, readFile, readdir, rm } from "node:fs/promises";
+import { existsSync } from "node:fs";
+import { mkdir, mkdtemp, readFile, readdir, rm, writeFile } from "node:fs/promises";
+import { getProjectRoot } from "../src/execution/spawn.ts";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, it } from "node:test";
@@ -7,6 +9,7 @@ import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { emptyUsage, RunControl, type AttemptControl } from "../src/execution/run-control.ts";
 import { createRuntime, type SubagentRuntime, type SubagentThread, type ThreadState } from "../src/lifecycle/runtime.ts";
 import { registerLookupTools } from "../src/lifecycle/tools.ts";
+import type { DispatchCore } from "../src/lifecycle/dispatch-core.ts";
 import { formatCompletionBlock } from "../src/presentation/format.ts";
 import { monitor } from "../src/presentation/monitor.ts";
 
@@ -23,7 +26,7 @@ function deferred(): { promise: Promise<void>; resolve: () => void } {
 	return { promise, resolve };
 }
 
-function harness(configPath = join(tmpdir(), `pi-subagents-control-${process.pid}.json`)) {
+function harness(configPath = join(tmpdir(), `pi-subagents-control-${process.pid}.json`), dispatchCore?: DispatchCore) {
 	const tools = new Map<string, RegisteredTool>();
 	const sent: unknown[] = [];
 	const pi = {
@@ -34,7 +37,7 @@ function harness(configPath = join(tmpdir(), `pi-subagents-control-${process.pid
 		sendMessage: (message: unknown) => sent.push(message),
 	} as unknown as ExtensionAPI;
 	const runtime = createRuntime(pi, configPath);
-	registerLookupTools(pi, runtime);
+	registerLookupTools(pi, runtime, dispatchCore);
 	return { runtime, tools, sent };
 }
 
@@ -78,10 +81,10 @@ function attachRunning(control: RunControl, attempt: AttemptControl): void {
 }
 
 describe("subagent_status", () => {
-	it("registers only read-only status and destructive stop, without continuation controls", async () => {
+	it("registers status, message, and destructive stop controls", async () => {
 		const { runtime, tools } = harness();
 		try {
-			assert.deepEqual([...tools.keys()].sort(), ["subagent_status", "subagent_stop"]);
+			assert.deepEqual([...tools.keys()].sort(), ["subagent_message", "subagent_status", "subagent_stop"]);
 			const status = tools.get("subagent_status")!;
 			assert.equal(status.exposure, "model-only");
 			assert.equal(status.executionMode, "parallel");
@@ -169,7 +172,7 @@ describe("subagent_status", () => {
 		monitor.recordToolStart(7, "read", "read src/index.ts");
 		try {
 			assert.ok(tools.has("subagent_status"), "the status interface must be registered");
-			const response = await execute(tools.get("subagent_status")!, { id: 7 });
+			const response = await execute(tools.get("subagent_status")!, { id: 7, workflow: 999 });
 			const [run] = response.details.runs;
 			assert.equal(run.id, 7);
 			assert.equal(run.state, "running");
@@ -241,6 +244,76 @@ describe("subagent_status", () => {
 	});
 });
 
+describe("subagent_message", () => {
+	it("routes steering to the selected active run and reports acknowledgement", async () => {
+		const { runtime, tools } = harness();
+		const thread = makeThread(61);
+		let received = "";
+		attachRunning(thread.control, { stop: async () => {}, steer: async (message) => { received = message; } });
+		runtime.threads.set(61, thread);
+		try {
+			const response = await execute(tools.get("subagent_message")!, { id: 61, message: "Check the caller too" });
+			assert.equal(received, "Check the caller too");
+			assert.match(resultText(response), /queued.*not necessarily been acted on/u);
+			const unknown = await execute(tools.get("subagent_message")!, { id: 62, message: "Check" });
+			assert.equal(unknown.isError, true);
+		} finally { await shutdown(runtime); }
+	});
+
+	it("copies the completed session and preserves role, scope and workspace for the new run", async () => {
+		const root = await mkdtemp(join(tmpdir(), "pi-subagents-followup-"));
+		let captured: any;
+		const core = { setEnvironment() {}, async startBackground(...args: any[]) { captured = args; return { runId: 77 }; } } as unknown as DispatchCore;
+		const { runtime, tools } = harness(join(root, "config.json"), core);
+		const source = makeThread(63, "completed");
+		source.agentName = "scout";
+		source.sessionId = "test-session";
+		source.sessionDir = join(root, "source");
+		await mkdir(source.sessionDir);
+		await writeFile(join(source.sessionDir, "2026_test-session.jsonl"), "original context");
+		runtime.threads.set(63, source);
+		try {
+			const response = await execute(tools.get("subagent_message")!, { id: 63, message: "Find the missing evidence" });
+			assert.equal(response.isError, undefined);
+			assert.equal(response.details.id, 77);
+			assert.equal(captured[0], "scout");
+			assert.equal(captured[2], source.cwd);
+			assert.notEqual(captured[4].resumeSession.sessionDir, source.sessionDir);
+			assert.equal(await readFile(join(captured[4].resumeSession.sessionDir, "2026_test-session.jsonl"), "utf8"), "original context");
+		} finally { await shutdown(runtime); await rm(root, { recursive: true, force: true }); }
+	});
+
+	it("briefs a summary follow-up with the result and touched files instead of copying the session", async () => {
+		const root = await mkdtemp(join(tmpdir(), "pi-subagents-summary-"));
+		let captured: any;
+		const core = { setEnvironment() {}, async startBackground(...args: any[]) { captured = args; return { runId: 79 }; } } as unknown as DispatchCore;
+		const { runtime, tools } = harness(join(root, "config.json"), core);
+		const source = makeThread(64, "completed");
+		source.agentName = "reviewer";
+		source.sessionId = "summary-source";
+		source.sessionDir = join(root, "source");
+		await mkdir(source.sessionDir);
+		await writeFile(join(source.sessionDir, "2026_summary-source.jsonl"), "context");
+		source.lastResult = {
+			agent: "reviewer", task: source.task, exitCode: 0, stderr: "", usage: emptyUsage(),
+			messages: [
+				{ role: "assistant", content: [{ type: "text", text: "Found a race in src/cache.ts" }, { type: "toolCall", name: "read", arguments: { path: "src/cache.ts" } }], stopReason: "stop" } as never,
+			],
+		};
+		runtime.threads.set(64, source);
+		try {
+			const response = await execute(tools.get("subagent_message")!, { id: 64, message: "Now add the regression test", context: "summary" });
+			assert.equal(response.isError, undefined);
+			assert.equal(captured[4].resumeSession, undefined);
+			assert.match(captured[1], /Found a race in src\/cache\.ts/u);
+			assert.match(captured[1], /src\/cache\.ts/u);
+			assert.match(captured[1], /Now add the regression test/u);
+			assert.match(captured[1], /did not witness the earlier session/u);
+			assert.equal(existsSync(join(getProjectRoot(join(root, "config.json"), process.cwd()), "sessions")), false, "a summary follow-up must not copy the session");
+		} finally { await shutdown(runtime); await rm(root, { recursive: true, force: true }); }
+	});
+});
+
 describe("subagent_stop", () => {
 	it("stops an active attempt and delivers its partial result once without inventing shared-checkout integration work", async () => {
 		const root = await mkdtemp(join(tmpdir(), "pi-subagents-stop-"));
@@ -254,10 +327,12 @@ describe("subagent_stop", () => {
 		let stops = 0;
 		attachRunning(thread.control, { stop: async () => { stops++; } });
 		runtime.threads.set(31, thread);
+		monitor.restoreRun({ id: 31, agent: "artisan", task: thread.task, status: "running" });
 		try {
 			const response = await execute(tools.get("subagent_stop")!, { id: "31" });
 			assert.equal(thread.state, "stopped");
 			assert.equal(thread.retired, true);
+			assert.equal(monitor.findRun(31), undefined);
 			assert.equal(stops, 1);
 			assert.equal(runtime.settledRuns.get(31)?.stopReason, "aborted");
 			assert.match(JSON.stringify(sent), /Partial edits are in src\/index.ts/);
@@ -281,7 +356,8 @@ describe("subagent_stop", () => {
 		runtime.threads.set(41, first);
 		runtime.threads.set(42, second);
 		try {
-			const stopping = execute(tools.get("subagent_stop")!, { all: true });
+			// Some clients send all optional selectors; all must not be shadowed by an unknown workflow.
+			const stopping = execute(tools.get("subagent_stop")!, { all: true, id: "", workflow: 999 });
 			await started.promise;
 			assert.deepEqual(order, [41, 42]);
 			assert.equal(first.retired, true);

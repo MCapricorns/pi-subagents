@@ -11,13 +11,14 @@ Requires **Pi >= 1.0.0** and **Node.js >= 22.19.0**.
 pi install npm:@ferris1225/pi-subagents
 ```
 
-Run `/subagents-setup` for a grouped role settings panel. Edit **Model** and
-**Thinking** independently; **Reset role** restores that role's defaults. Each
-selection saves immediately, Esc returns without applying a picker selection,
-and the panel keeps your focus. Model pickers support search, paste, and paging.
+Run `/subagents-setup` for a role grid: one row per role with **Model**,
+**Thinking**, and **Reset** as columns. ↑/↓ moves between roles, ←/→ between
+columns, and Enter edits the focused cell. Each selection saves immediately;
+Esc returns without applying a picker selection, and the grid keeps the focused
+cell. Model pickers support search, paste, and paging.
 
-Both roles follow the main model by default; thinking defaults to `low` for scout
-and `high` for artisan. The panel distinguishes defaults from overrides and
+All roles follow the main model by default; thinking defaults to `low` for scout
+and `high` for artisan, reviewer, and critic. The panel distinguishes defaults from overrides and
 shows the effective level when model capabilities clamp a preference. Changing
 a model preserves the thinking preference. Settings live in
 `~/.pi/agent/pi-subagents.json` as `agentModels` and `agentThinkingLevels`.
@@ -27,7 +28,12 @@ a model preserves the thinking preference. Settings live in
 | Agent | Use for | Access |
 | --- | --- | --- |
 | `scout` | Code, documentation, and web research with citations | Read-only tools; no commands or edits |
-| `artisan` | Implementation with tests, or reviews and validation that need commands | Parent's tool surface, including codemode |
+| `artisan` | Implementation and fixes with tests and checks | Parent's tool surface, including codemode |
+| `reviewer` | Code review for correctness and regressions | Parent's tool surface; instructed not to edit |
+| `critic` | Adversarial review of changes or findings | Parent's tool surface; instructed not to edit |
+
+Reviewer and critic may run checks, so their no-edit boundary is an instruction,
+not a tool-enforced restriction. Configure each role independently.
 
 Children receive a self-contained brief and project instructions, but no parent
 conversation. They cannot delegate or release. Main owns planning, integration,
@@ -43,7 +49,7 @@ research, or an independent check. Free process slots are not a team-size target
 Use one owner per deliverable, including its regression tests. Brief the child
 with the outcome, done condition, relevant paths, established evidence, write
 boundaries, required checks, and a compact expected result. Scout retrieves
-sources; artisan can execute commands. This policy applies the context-isolation,
+sources; artisan implements, while reviewer and critic can execute checks. This policy applies the context-isolation,
 focused-role, and coordination-cost guidance in the official
 [Codex subagents](https://developers.openai.com/codex/subagents) and
 [Claude Code subagents](https://code.claude.com/docs/en/sub-agents) docs to Pi's
@@ -111,7 +117,7 @@ subagent_workflow({
     },
     {
       id: "review",
-      agent: "artisan",
+      agent: "critic",
       isolation: "shared",
       dependsOn: ["fix"],
       task: "Try to disprove this fix: inspect callers and edge cases, then run focused checks. Do not edit files.\n{{fix}}",
@@ -148,6 +154,8 @@ See the [workflow skill](./skills/workflow/SKILL.md) for graph authoring details
 | --- | --- |
 | `subagent_status({ id: 12 })` | Inspect a run's progress, result, and recovery paths |
 | `subagent_status({ workflow: 3 })` | Inspect graph nodes and dependencies |
+| `subagent_message({ id: 12, message: "Check the caller too" })` | Steer a running child, or start a follow-up from its completed session |
+| `subagent_message({ id: 12, message: "Add the test", context: "summary" })` | Start a new next step with only a bounded summary of the earlier run |
 | `subagent_stop({ id: "12" })` | Stop a run and retire its retained session |
 | `subagent_stop({ workflow: 3 })` | Stop a graph and finalize its active nodes |
 | `subagent_stop({ all: true })` | Stop all active runs and graphs |
@@ -173,11 +181,40 @@ work without completion wake-ups. New/resume/fork/reload ends old children and r
 for manual recovery. Runs do not resume automatically; main finishes incomplete
 work from partial changes and artifacts.
 
-Children use Pi's native `--mode json` CLI, retries, and session persistence.
+A steering message is queued at the next Pi steering boundary; acknowledgement
+does not mean the child has acted on it. To continue a successfully completed
+run, choose the context that fits the follow-up:
+
+- `context: "session"` (default) for rework — revising, fixing or extending the
+  same deliverable. It continues a private copy of the retained session, so the
+  earlier reasoning stays available and the provider prompt-cache key
+  (`sessionId`) is unchanged.
+- `context: "summary"` for a new next step — the new run never sees the old
+  transcript and is briefed with the objective, the final result and the files
+  the run touched. Cheaper, no cache reuse, and it cannot rely on detail the
+  summary omits.
+
+Both start a new run with the role, workspace and scope preserved. Queueing,
+admission and isolation still apply. Pending runs cannot be steered, and fixed
+workflow graphs cannot be edited.
+
+Children use Pi's native `--mode rpc` CLI, retries, and session persistence.
 A settled provider failure can hand off once to the main model in the same
 session. State and full-result files live under
 `~/.pi/agent/ferris-pi-subagents/`, grouped by project. `PI_CODING_AGENT_DIR`
 overrides the agent directory.
+
+## Storage and cleanup
+
+Each project root holds `sessions/`, `worktrees/`, `tmp/` and `results/`. Startup
+hygiene already drops temp leftovers, artifacts whose Pi process is gone, result
+files past their retention window, and project roots idle for three days. Parked
+recovery work and anything a manifest still references always survive.
+
+Long orchestration sessions still accumulate settled sessions and worktrees, so
+run `/subagents-cleanup` to reclaim them. It reports per-project usage and freed
+bytes, and keeps parked recovery records plus every referenced artifact. Use
+`/subagents-cleanup dry-run` to measure without deleting anything.
 
 ## Development
 

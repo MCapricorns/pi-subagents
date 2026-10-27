@@ -21,7 +21,6 @@
  * reusing process exits or the age cap catches the directory.
  */
 
-import { spawn } from "node:child_process";
 import { type Dirent, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 
@@ -80,28 +79,6 @@ function readTempOwnerMarker(dir: string): TempOwner | undefined {
 		return { pid: parsed.pid, createdAt: typeof parsed.createdAt === "number" ? parsed.createdAt : 0 };
 	} catch {
 		return undefined;
-	}
-}
-
-/** Terminate a whole process tree without waiting. Used on restore for child
- * processes orphaned by a reload or crash that still hold a retained session. */
-export function killProcessTree(pid: number): void {
-	if (!Number.isInteger(pid) || pid <= 0) return;
-	if (process.platform === "win32") {
-		try {
-			spawn("taskkill", ["/pid", String(pid), "/t", "/f"], {
-				stdio: "ignore",
-				windowsHide: true,
-			}).once("error", () => undefined);
-		} catch {
-			/* the process is gone */
-		}
-		return;
-	}
-	try {
-		process.kill(pid, "SIGKILL");
-	} catch {
-		/* the process is gone */
 	}
 }
 

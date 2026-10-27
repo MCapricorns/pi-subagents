@@ -5,12 +5,14 @@ import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { describe, it } from "node:test";
 import { getResultOutput, isFailedResult, runSingleAgentWithMainFallback } from "../src/execution/spawn.ts";
+import { RunControl } from "../src/execution/run-control.ts";
 
 // Exercise the actual installed Pi CLI with a local provider that never makes
 // network requests. The temporary agent directory contains no user credentials.
 describe("native Pi CLI integration", () => {
-	for (const fallback of [false, true]) {
-		it(fallback ? "resumes the same Pi session on main-model fallback" : "runs through Pi's own CLI, loader, provider, and JSON events", { timeout: 30_000 }, async () => {
+	for (const mode of ["normal", "fallback", "steering"] as const) {
+		const fallback = mode === "fallback";
+		it(mode === "fallback" ? "resumes the same Pi session on main-model fallback" : mode === "steering" ? "delivers steering through the real Pi RPC process" : "runs through Pi's own CLI, loader, provider, and RPC events", { timeout: 30_000 }, async () => {
 			const root = await mkdtemp(join(tmpdir(), "pi-subagents-native-pi-"));
 			const agentDir = join(root, "agent");
 			const previousScript = process.argv[1];
@@ -23,7 +25,7 @@ export default (pi) => pi.registerProvider("fixture", {
  models: ["selected", "main"].map((id) => ({ id, name: id, reasoning: false, input: ["text"], cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 }, contextWindow: 128000, maxTokens: 1000 })),
  streamSimple(model, context) {
   const stream = createAssistantMessageEventStream();
-  queueMicrotask(() => {
+  setTimeout(() => {
    const failed = model.id === "selected";
    const text = "native completed; " + context.messages.filter((m) => m.role === "user").length + " user messages";
    const message = { role: "assistant", content: [], api: model.api, provider: model.provider, model: model.id, timestamp: Date.now(), stopReason: "pending", usage: { input: 1, output: 1, cacheRead: 0, cacheWrite: 0, totalTokens: 2, cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 } } };
@@ -41,19 +43,26 @@ export default (pi) => pi.registerProvider("fixture", {
     stream.push({ type: "done", reason: "stop", message });
    }
    stream.end();
-  });
+  }, 250);
   return stream;
  }
 });
 `, "utf8");
 				process.argv[1] = fileURLToPath(new URL("./cli.js", import.meta.resolve("@earendil-works/pi-coding-agent")));
+				const control = new RunControl("Test native session preservation", 1);
+				let steering: Promise<void> | undefined;
 				const result = await runSingleAgentWithMainFallback({
 					defaultCwd: root, cwd: root, agent: { name: "artisan", description: "fixture", systemPrompt: "Return the fixture answer.", model: "fixture/" + (fallback ? "selected" : "main"), tools: [] },
 					agentName: "artisan", task: "Test native session preservation", thinkingLevel: "off", idleTimeoutMs: 0,
 					sessionRoot: join(root, "sessions"), scratchRoot: join(root, "scratch"),
-					env: { ...process.env, PI_CODING_AGENT_DIR: agentDir }, signal: AbortSignal.timeout(25_000),
+					env: { ...process.env, PI_CODING_AGENT_DIR: agentDir }, signal: AbortSignal.timeout(25_000), control,
+					onLive: (event) => {
+						if (mode === "steering" && !steering && event.kind === "status" && event.status === "running") steering = control.steer("Additional instruction");
+					},
 				}, fallback ? "fixture/main" : undefined);
+				if (steering) await steering;
 				assert.equal(isFailedResult(result), false, getResultOutput(result) + "\n" + result.stderr);
+				if (mode === "steering") assert.match(getResultOutput(result), /2 user messages/);
 				assert.match(getResultOutput(result), /native completed/);
 				assert.equal(result.model, "fixture/main");
 				assert.ok(result.sessionDir && result.sessionId);

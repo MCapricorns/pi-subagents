@@ -25,9 +25,9 @@ const READ_ONLY = tool("docs_search", { readOnlyHint: true });
 const CODEMODE = tool("codemode", undefined, () => "all", "direct");
 
 describe("loadBuiltinAgents", () => {
-	it("ships scout and artisan without frontmatter thinking", () => {
+	it("ships all four roles without frontmatter thinking", () => {
 		const agents = loadBuiltinAgents();
-		assert.deepEqual(agents.map((agent) => agent.name).sort(), ["artisan", "scout"]);
+		assert.deepEqual(agents.map((agent) => agent.name).sort(), ["artisan", "critic", "reviewer", "scout"]);
 		for (const agent of agents) {
 			assert.equal(agent.model, undefined);
 			assert.ok(!("thinking" in agent));

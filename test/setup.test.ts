@@ -71,129 +71,80 @@ async function scenario(t: TestContext, initial: SubagentsConfig | undefined, st
 	assert.equal(steps.length, 0, "all expected screens must open");
 	return path;
 }
-const close: Step = { title: /Subagents · Settings/u, act: (c) => press(c, KEY.escape) };
 
-describe("role settings panel", () => {
-	it("groups roles and separates model, thinking, and reset actions", async (t) => {
-		await scenario(t, baseConfig({ agentModels: { artisan: "test/reasoning" } }), [{
-			title: /Subagents · Settings/u,
-			act(c, screen) {
-				assert.match(screen, /scout · Research · read-only/u);
-				assert.match(screen, /artisan · Engineering/u);
-				assert.match(screen, /Model +Follow main/u);
-				assert.match(screen, /Model +test\/reasoning/u);
-				assert.match(screen, /Thinking +low · role default/u);
-				assert.match(screen, /Thinking +high · role default/u);
-				assert.equal(screen.split("Reset role").length - 1, 2);
+const RIGHT = "\x1b[C";
+
+describe("role grid", () => {
+	it("shows every role with model and thinking side by side", async (t) => {
+		await scenario(t, baseConfig({ agentModels: { reviewer: "test/other" }, agentThinkingLevels: { critic: "medium" } }), [{
+			title: /Subagents · Roles/u, act(c, screen) {
+				assert.match(screen, /Role\s+Model\s+Thinking/u);
+				for (const role of ["scout", "artisan", "reviewer", "critic"]) assert.match(screen, new RegExp(role));
+				assert.match(screen, /reviewer +test\/other +high/u);
+				assert.match(screen, /critic +Follow main +medium\*/u);
 				press(c, KEY.escape);
 			},
 		}]);
 	});
 
-	it("edits only the model, keeps thinking, and restores focus with saved feedback", async (t) => {
-		const path = await scenario(t, baseConfig({ agentThinkingLevels: { scout: "high" } }), [
-			{ title: /Settings/u, act: (c) => press(c, KEY.enter) },
-			{ title: /scout · Model/u, act: (c) => press(c, "other", KEY.enter) },
-			{ title: /Saved scout model/u, act(c, screen) {
-				assert.match(screen, /› Model +test\/other/u);
-				assert.match(screen, /high · override/u);
+	it("edits reviewer model and thinking from one row and keeps the focused cell", async (t) => {
+		const path = await scenario(t, baseConfig({ agentModels: { artisan: "test/reasoning" } }), [
+			{ title: /Roles/u, act: (c) => press(c, KEY.down, KEY.down, KEY.enter) },
+			{ title: /reviewer · Model/u, act: (c) => press(c, "other", KEY.enter) },
+			{ title: /Saved reviewer model/u, act(c, screen) {
+				assert.match(screen, /› reviewer +test\/other +high/u);
+				press(c, RIGHT, KEY.enter);
+			} },
+			{ title: /reviewer · Thinking/u, act: (c) => press(c, "medium", KEY.enter) },
+			{ title: /Saved reviewer thinking/u, act(c, screen) {
+				assert.match(screen, /reviewer +test\/other +medium\*/u);
 				press(c, KEY.escape);
 			} },
 		]);
-		assert.deepEqual(saved(path), baseConfig({ agentModels: { scout: "test/other" }, agentThinkingLevels: { scout: "high" } }));
+		assert.deepEqual(saved(path), baseConfig({ agentModels: { artisan: "test/reasoning", reviewer: "test/other" }, agentThinkingLevels: { reviewer: "medium" } }));
 	});
 
-	it("edits thinking directly without walking the model picker", async (t) => {
-		const path = await scenario(t, baseConfig(), [
-			{ title: /Settings/u, act: (c) => press(c, KEY.down, KEY.enter) },
-			{ title: /scout · Thinking/u, act: (c) => press(c, "high", KEY.enter) },
-			close,
+	it("reset lives in its own column and only clears the focused role", async (t) => {
+		const path = await scenario(t, baseConfig({ agentModels: { scout: "test/other", critic: "test/reasoning" }, agentThinkingLevels: { scout: "high", critic: "low" } }), [
+			{ title: /Roles/u, act: (c) => press(c, RIGHT, RIGHT, KEY.enter) },
+			{ title: /Saved scout defaults/u, act(c, screen) {
+				assert.match(screen, /› scout +Follow main +low/u);
+				assert.match(screen, /critic +test\/reasoning +low\*/u);
+				press(c, KEY.escape);
+			} },
 		]);
-		assert.equal(saved(path).agentThinkingLevels.scout, "high");
-		assert.deepEqual(saved(path).agentModels, {});
+		assert.deepEqual(saved(path), baseConfig({ agentModels: { critic: "test/reasoning" }, agentThinkingLevels: { critic: "low" } }));
 	});
 
-	it("offers an explicit role default that clears a thinking override", async (t) => {
-		const path = await scenario(t, baseConfig({ agentThinkingLevels: { scout: "high" } }), [
-			{ title: /Settings/u, act: (c) => press(c, KEY.down, KEY.enter) },
-			{ title: /scout · Thinking/u, act: (c) => press(c, "Role default", KEY.enter) },
-			close,
-		]);
-		assert.deepEqual(saved(path).agentThinkingLevels, {});
-	});
-
-	it("Esc from a picker returns without changing the saved config", async (t) => {
-		const initial = baseConfig({ agentModels: { scout: "test/reasoning" } });
+	it("Esc in a picker keeps the saved value and the focused cell", async (t) => {
+		const initial = baseConfig({ agentModels: { scout: "test/other" } });
 		const path = await scenario(t, initial, [
-			{ title: /Settings/u, act: (c) => press(c, KEY.enter) },
-			{ title: /scout · Model/u, act: (c) => press(c, "other", KEY.escape) },
-			close,
+			{ title: /Roles/u, act: (c) => press(c, KEY.enter) },
+			{ title: /scout · Model/u, act: (c) => press(c, "reasoning", KEY.escape) },
+			{ title: /Roles/u, act(c, screen) { assert.match(screen, /› scout +test\/other/u); press(c, KEY.escape); } },
 		]);
 		assert.deepEqual(saved(path), initial);
 	});
 
-	it("restores one role's defaults and preserves the other role", async (t) => {
-		const path = await scenario(t, baseConfig({
-			agentModels: { scout: "test/other", artisan: "test/reasoning" },
-			agentThinkingLevels: { scout: "high", artisan: "low" },
-		}), [
-			{ title: /Settings/u, act: (c) => press(c, KEY.down, KEY.down, KEY.enter) }, close,
-		]);
-		assert.deepEqual(saved(path), baseConfig({ agentModels: { artisan: "test/reasoning" }, agentThinkingLevels: { artisan: "low" } }));
+	it("shows a clamped thinking level without overwriting the preference", async (t) => {
+		const path = await scenario(t, baseConfig({ agentThinkingLevels: { scout: "high" } }), [
+			{ title: /Roles/u, act(c, screen) { assert.match(screen, /scout +Follow main +off \(high requested\)\*/u); press(c, RIGHT, KEY.enter); } },
+			{ title: /scout · Thinking/u, act(c, screen) { assert.match(screen, /low → off/u); press(c, KEY.escape); } },
+			{ title: /Roles/u, act: (c) => press(c, KEY.escape) },
+		], [model("plain", false)]);
+		assert.equal(saved(path).agentThinkingLevels.scout, "high");
 	});
 
-	it("shows effective thinking when the model cannot reason", async (t) => {
-		const path = await scenario(t, baseConfig({ agentThinkingLevels: { scout: "high" } }), [{
-			title: /Settings/u, act(c, screen) {
-				assert.match(screen, /off · override \(high requested\)/u);
-				assert.match(screen, /off · role default \(high requested\)/u);
-				press(c, KEY.down, KEY.enter);
-			},
-		}, {
-			title: /scout · Thinking/u, act(c, screen) {
-				assert.match(screen, /Role default/u);
-				assert.match(screen, /low → off/u);
-				assert.doesNotMatch(screen, /^\s*high$/mu);
-				press(c, KEY.escape);
-			},
-		}, close], [model("plain", false)]);
-		assert.equal(saved(path).agentThinkingLevels.scout, "high", "viewing clamped levels must not rewrite preferences");
-	});
-
-	it("identifies unavailable model overrides and the actual main fallback", async (t) => {
-		await scenario(t, baseConfig({ agentModels: { scout: "test/missing" } }), [{
-			title: /Settings/u, act(c, screen) {
-				assert.match(screen, /test\/missing \(unavailable\)/u);
-				assert.match(screen, /Unavailable selection; using main/u);
-				assert.match(screen, /Main: test\/reasoning/u);
-				press(c, KEY.escape);
-			},
-		}]);
-	});
-
-	it("opens the same panel on a fresh install and saves only a chosen field", async (t) => {
-		const path = await scenario(t, undefined, [
-			{ title: /Settings/u, act: (c) => press(c, KEY.enter) },
-			{ title: /scout · Model/u, act: (c) => press(c, KEY.enter) }, close,
-		]);
-		assert.deepEqual(saved(path), baseConfig());
+	it("keeps every row inside narrow terminal widths", async (t) => {
+		await scenario(t, baseConfig(), [{ title: /Roles/u, act(c) {
+			for (const width of [1, 12, 32, 60, 120]) assert.ok(c.render(width).every((line) => visibleWidth(line) <= width));
+			press(c, KEY.down, RIGHT, KEY.escape);
+		} }]);
 	});
 
 	it("fresh-install Esc leaves no config file", async (t) => {
-		const path = await scenario(t, undefined, [close]);
+		const path = await scenario(t, undefined, [{ title: /Roles/u, act: (c) => press(c, KEY.escape) }]);
 		assert.equal(existsSync(path), false);
-	});
-
-	it("keeps focus visible and lines within narrow terminal widths", async (t) => {
-		await scenario(t, baseConfig(), [{ title: /Settings/u, act(c) {
-			press(c, KEY.down, KEY.down, KEY.down, KEY.down);
-			for (const width of [1, 12, 32, 60, 120]) {
-				const lines = c.render(width);
-				assert.ok(lines.every((line) => visibleWidth(line) <= width), "overflow at " + width);
-				if (width >= 32) assert.match(lines.join("\n"), /› Thinking/u);
-			}
-			press(c, KEY.escape);
-		} }]);
 	});
 });
 
