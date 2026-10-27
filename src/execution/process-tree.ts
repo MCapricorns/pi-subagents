@@ -1,4 +1,4 @@
-/** Process-tree termination shared by RPC children and Git commands. */
+/** Process-tree termination shared by Pi children and Git commands. */
 
 import { spawn, type ChildProcess } from "node:child_process";
 

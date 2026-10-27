@@ -7,9 +7,10 @@ description: Research a question from independent angles, synthesise the answer,
 
 Three researchers take different angles, a synthesis node turns them into one
 answer, and a verification node checks the claims that would embarrass you if
-they were wrong.
+they were wrong. This template deliberately separates synthesis from challenge;
+combine them for a bounded question when main can verify the decisive sources.
 
-Set your question in the three researcher briefs (they run concurrently), then
+Replace every <QUESTION> in a copy of this file (the first three nodes run concurrently), then
 run `subagent_workflow({ "workflow": "research" })`.
 
 ```json
@@ -32,14 +33,14 @@ run `subagent_workflow({ "workflow": "research" })`.
     },
     {
       "id": "synthesis",
-      "agent": "artisan",
-      "task": "Answer <QUESTION> from these three research passes. Reconcile disagreements explicitly instead of averaging them, and prefer first-party evidence over practice reports when they conflict.\n\nFirst-party:\n{{primary}}\n\nPractice:\n{{practice}}\n\nThis repository:\n{{codebase}}\n\nWrite: the answer, the evidence behind it, the open questions, and what would change the answer.",
+      "agent": "scout",
+      "task": "Answer <QUESTION> from these three research passes. Reconcile disagreements explicitly instead of averaging them, and check dates, versions, and conditions when official claims conflict with observed practice; prefer the evidence that applies to this question.\n\nFirst-party:\n{{primary}}\n\nPractice:\n{{practice}}\n\nThis repository:\n{{codebase}}\n\nWrite: the answer, the evidence behind it, the open questions, and what would change the answer.",
       "dependsOn": ["primary", "practice", "codebase"]
     },
     {
       "id": "verify",
       "agent": "scout",
-      "task": "Check the decisive factual claims in this answer against their sources. Report only claims you could not confirm or that are stale, with what you found instead.\n\n{{synthesis}}",
+      "task": "Try to disprove the decisive claims in this answer: read the cited sources, seek counterexamples and conflicting versions, and distinguish factual mistakes from uncertainty. Return the corrected answer with citations, a concise list of changes, and claims that remain unverified. Do not claim execution-based reproduction; this role is read-only.\n\n{{synthesis}}",
       "dependsOn": ["synthesis"]
     }
   ]

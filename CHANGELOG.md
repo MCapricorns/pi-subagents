@@ -3,6 +3,38 @@
 Release notes for `@ferris1225/pi-subagents`. Only the most recent releases
 are kept here; every published version is preserved as a GitHub Release.
 
+## 5.0.0
+
+Behavior changes: child execution now uses Pi's native one-shot JSON CLI, and
+cancelling the parent stops its child work instead of transferring undelivered
+awaited results back to background completion. Conversation-tree navigation
+also stops unfinished work. New/resume/fork/reload retains interruption evidence
+without carrying old children or completion wake-ups into the new conversation.
+
+- Restore ordinary subagent completion delivery; workflow quiet mode had left
+  the normal completion constructed but unpublished. Add a dispatcher regression
+  and enable unused-local and unused-parameter checks.
+- Replace the custom RPC transport with Pi's native one-shot JSON CLI. Keep
+  process-tree cancellation, Pi session persistence, and one selected-to-main
+  model handoff. Use Pi's native retries and provider adapters; remove RPC
+  commands, handshake retries, delivery fallback state, and the provider shim.
+- Stop owned work on parent cancellation and conversation-tree navigation
+  without completion wake-ups. New/resume/fork teardown ends old children and
+  retains recovery evidence. Share the stop lifecycle between tools and graphs,
+  wait for worktree cleanup, and interrupt graph and standalone writers together.
+- Fix transitive result interpolation, bound upstream answers with full-result
+  artifacts, honor explicit isolation, propagate blocked nodes in any author
+  order, and checkpoint live graphs for crash recovery. Reserve pending phases
+  before run allocation and reject malformed or unfinished saved definitions.
+- Show workflow progress, pending dependencies, queue reasons, failures, and
+  blocked branches in the TUI widget, within the existing ten-line limit.
+- Keep adversarial review, independent confirmation, and synthesis available;
+  choose depth for risk instead of prescribing one pipeline. Keep fixes with
+  their regression tests, use command-capable roles for reproduction, and keep
+  discovery-dependent planning in main. Update templates and authoring guidance.
+- Verify the actual installed Pi CLI and same-session model handoff with an
+  offline fixture provider, alongside lifecycle and rendering regressions.
+
 ## 4.3.34
 
 - Reject a workflow that would reuse a phase this session already owns, before

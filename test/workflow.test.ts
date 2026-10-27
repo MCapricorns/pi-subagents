@@ -1,20 +1,29 @@
 import assert from "node:assert/strict";
-import { mkdtemp, mkdir, rm, writeFile } from "node:fs/promises";
+import { mkdtemp, mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, it } from "node:test";
 import type { SingleResult } from "../src/execution/spawn.ts";
 import type { SubagentRuntime } from "../src/lifecycle/runtime.ts";
-import { emptyUsage } from "../src/execution/rpc-control.ts";
+import { emptyUsage } from "../src/execution/run-control.ts";
 import type { CompletionMessageItem } from "../src/lifecycle/completion.ts";
-import { compileWorkflow, defaultPhaseId, renderNodeTask, WORKFLOW_NODE_LIMIT } from "../src/workflow/plan.ts";
-import { discoverWorkflows, resolveWorkflowDefinition } from "../src/workflow/files.ts";
+import { compileWorkflow, defaultPhaseId, renderNodeTask, WORKFLOW_NODE_LIMIT, UPSTREAM_OUTPUT_MAX_CHARS } from "../src/workflow/plan.ts";
+import { discoverWorkflows, readWorkflowFile, resolveWorkflowDefinition } from "../src/workflow/files.ts";
 import { findOwnedPhases, startWorkflow, stopWorkflow, persistInterruptedWorkflows, readRetainedWorkflows } from "../src/workflow/engine.ts";
 import type { WorkflowRun } from "../src/workflow/state.ts";
 import { createRuntime } from "../src/lifecycle/runtime.ts";
 import { registerWorkflowTool } from "../src/workflow/tool.ts";
 
 const AGENTS = ["scout", "artisan"];
+
+async function until(check: () => boolean, timeoutMs = 2_000): Promise<void> {
+	const deadline = Date.now() + timeoutMs;
+	while (!check()) {
+		if (Date.now() > deadline) throw new Error("condition not reached");
+		await new Promise((resolve) => setTimeout(resolve, 10));
+	}
+}
+
 
 function result(agent: string, task: string, runId: number, output: string, failed = false): SingleResult {
 	return {
@@ -393,7 +402,7 @@ describe("workflow runner", () => {
 				},
 				compileWorkflow({ name: "held", nodes: [{ id: "map", agent: "scout", task: "Map" }] }, root, AGENTS),
 			);
-			await Promise.resolve();
+			await until(() => handle.run.nodes[0]?.runId === 99);
 			await persistInterruptedWorkflows(harness.runtime);
 			const retained = await readRetainedWorkflows(harness.runtime, root);
 			assert.equal(retained.length, 1);
@@ -469,13 +478,6 @@ describe("subagent_workflow tool", () => {
 		return tool.execute("call-1", params, new AbortController().signal, () => undefined, ctx(cwd));
 	}
 
-	async function until(check: () => boolean, timeoutMs = 2_000): Promise<void> {
-		const deadline = Date.now() + timeoutMs;
-		while (!check()) {
-			if (Date.now() > deadline) throw new Error("condition not reached");
-			await new Promise((resolve) => setTimeout(resolve, 10));
-		}
-	}
 
 	it("registers as a model-only sequential tool and delivers one graph summary", async () => {
 		const root = await mkdtemp(join(tmpdir(), "pi-subagents-workflow-tool-"));
@@ -517,6 +519,31 @@ describe("subagent_workflow tool", () => {
 			await harness.runtime.shutdown();
 			await rm(root, { recursive: true, force: true });
 		}
+	});
+
+	it("rejects mixed sources, unfilled templates, and read-only worktrees before any node starts", async () => {
+		const root = await mkdtemp(join(tmpdir(), "pi-workflow-preflight-"));
+		const h = toolHarness(join(root, "config.json"));
+		try {
+			await assert.rejects(execute(h.tool, { workflow: "research" }, root), /Customize <QUESTION>/);
+			await assert.rejects(execute(h.tool, { workflow: "code-review", file: "graph.json" }, root), /exactly one graph source/);
+			await assert.rejects(execute(h.tool, { nodes: [{ id: "first", agent: "artisan", task: "First" }, { id: "bad", agent: "scout", task: "Inspect", isolation: "worktree" }] }, root), /read-only/);
+			assert.equal(h.started.length, 0);
+		} finally { await h.runtime.shutdown(); await rm(root, { recursive: true, force: true }); }
+	});
+
+	it("honors saved graph name and description overrides", async () => {
+		const root = await mkdtemp(join(tmpdir(), "pi-workflow-name-"));
+		const h = toolHarness(join(root, "config.json"));
+		try {
+			const file = join(root, "graph.md");
+			const fence = String.fromCharCode(96).repeat(3);
+			await writeFile(file, ["---", "name: original", "description: Frontmatter description", "---", "", fence + "json", JSON.stringify({ nodes: [{ id: "read", agent: "scout", task: "Read sources" }] }), fence].join("\n"));
+			const response = await h.tool.execute("saved-call", { file, name: "renamed", description: "Call description" }, new AbortController().signal, () => undefined, { ...ctx(root), isProjectTrusted: () => true }) as any;
+			assert.equal(response.details.workflow.name, "renamed");
+			assert.equal(response.details.workflow.description, "Call description");
+			await until(() => h.messages.length === 1);
+		} finally { await h.runtime.shutdown(); await rm(root, { recursive: true, force: true }); }
 	});
 
 	it("rejects the whole graph before dispatching any node when a phase is owned", async () => {
@@ -563,4 +590,82 @@ describe("workflow phase ownership", () => {
 		assert.deepEqual(owned, [{ nodeId: "probe", phaseId: "smoke.probe", runId: 7, agent: "scout", state: "parked" }]);
 	});
 
+});
+
+
+describe("workflow audit regressions", () => {
+	it("normalizes node ids and rejects malformed fields and repeated phases", () => {
+		const graph = compileWorkflow({ nodes: [{ id: " map ", agent: "scout", task: "Map" }, { id: "report", agent: "scout", task: "Use {{map}}", dependsOn: [" map "] }] }, process.cwd(), AGENTS);
+		assert.deepEqual(graph.nodes[1]!.ancestors, ["map"]);
+		for (const node of [null, { id: "bad", agent: "scout", task: "x", dependsOn: "map" }, { id: "bad", agent: "scout", task: "x", dependsOn: [3] }, { id: "bad", agent: "scout", task: "x", isolation: "typo" }]) assert.throws(() => compileWorkflow({ nodes: [node] } as never, process.cwd(), AGENTS));
+		assert.throws(() => compileWorkflow({ nodes: [{ id: "one", agent: "scout", task: "First", phaseId: "same" }, { id: "two", agent: "artisan", task: "Second", phaseId: "same", dependsOn: ["one"] }] }, process.cwd(), AGENTS), /reuse the same phase/);
+	});
+
+	it("preserves malformed saved dependencies for rejection and resolves trusted project files", async () => {
+		const root = await mkdtemp(join(tmpdir(), "pi-workflow-files-audit-"));
+		try {
+			const dir = join(root, ".pi", "workflows");
+			await mkdir(dir, { recursive: true });
+			const file = join(dir, "local.json");
+			await writeFile(file, JSON.stringify({ name: "local", nodes: [{ id: "bad", agent: "scout", task: "Never run", dependsOn: [123] }] }));
+			const { definition } = readWorkflowFile(file, "project");
+			assert.ok(definition);
+			assert.throws(() => compileWorkflow(definition.plan, root, AGENTS), /dependsOn/);
+			assert.equal(resolveWorkflowDefinition(root, { name: "local" }, { projectTrusted: true }).definition?.source, "project");
+			assert.equal(resolveWorkflowDefinition(root, { path: file }, { projectTrusted: true }).definition?.filePath, file);
+			assert.match(resolveWorkflowDefinition(root, { path: file }, { projectTrusted: false }).error ?? "", /trusted project/);
+			assert.match(resolveWorkflowDefinition(root, { path: file, name: "local" }, { projectTrusted: true }).error ?? "", /not both/);
+		} finally { await rm(root, { recursive: true, force: true }); }
+	});
+
+	it("passes transitive outputs, including dotted node ids, into downstream briefs", async () => {
+		const root = await mkdtemp(join(tmpdir(), "pi-workflow-ancestor-"));
+		try {
+			const harness = fakeRuntime(join(root, "config.json"), async (agent, task, id) => result(agent, task, id, "source evidence"));
+			const { tasks } = await runGraph(harness, { nodes: [{ id: "map.status", agent: "scout", task: "Map facts" }, { id: "middle", agent: "scout", task: "Inspect facts", dependsOn: ["map.status"] }, { id: "report", agent: "scout", task: "Ancestor: {{map.status}}", dependsOn: ["middle"] }] }, root);
+			assert.match(tasks[2]!, /Ancestor: source evidence/);
+			assert.doesNotMatch(tasks[2]!, /\{\{/);
+			assert.match(tasks[2]!, /untrusted evidence/);
+		} finally { await rm(root, { recursive: true, force: true }); }
+	});
+
+	it("blocks reverse-ordered failure chains without waiting forever", { timeout: 5_000 }, async () => {
+		const root = await mkdtemp(join(tmpdir(), "pi-workflow-block-"));
+		try {
+			const harness = fakeRuntime(join(root, "config.json"), async (agent, task, id) => result(agent, task, id, "broken", true));
+			const { run } = await runGraph(harness, { nodes: [{ id: "last", agent: "scout", task: "Final report", dependsOn: ["middle"] }, { id: "middle", agent: "scout", task: "Middle report", dependsOn: ["first"] }, { id: "first", agent: "scout", task: "Initial work" }] }, root);
+			assert.equal(run.state, "failed");
+			assert.deepEqual(run.nodes.map((node) => node.state), ["blocked", "blocked", "failed"]);
+		} finally { await rm(root, { recursive: true, force: true }); }
+	});
+
+	it("bounds upstream output and points to its complete readable artifact", async () => {
+		const root = await mkdtemp(join(tmpdir(), "pi-workflow-output-"));
+		try {
+			const output = "x".repeat(UPSTREAM_OUTPUT_MAX_CHARS + 400) + "THE-END";
+			const harness = fakeRuntime(join(root, "config.json"), async (agent, task, id) => result(agent, task, id, id === 1 ? output : "done"));
+			const { run, tasks } = await runGraph(harness, { nodes: [{ id: "map", agent: "scout", task: "Map everything" }, { id: "report", agent: "scout", task: "Use {{map}}", dependsOn: ["map"] }] }, root);
+			assert.ok(tasks[1]!.length < output.length);
+			assert.match(tasks[1]!, /Read the full answer:/);
+			assert.doesNotMatch(tasks[1]!, /THE-END/);
+			assert.equal(await readFile(run.nodes[0]!.result!.resultFile!, "utf8"), output);
+		} finally { await rm(root, { recursive: true, force: true }); }
+	});
+
+	it("forwards explicit isolation and checkpoints a live graph before shutdown", async () => {
+		const root = await mkdtemp(join(tmpdir(), "pi-workflow-isolation-"));
+		try {
+			const harness = fakeRuntime(join(root, "config.json"), async (agent, task, id) => result(agent, task, id, "ok"));
+			const modes: unknown[] = [];
+			const handle = startWorkflow({ runtime: harness.runtime, resultsRoot: join(root, "results"), notify: () => undefined, resolveIsolation: () => "worktree", startBackground: async (_agent, _task, _cwd, isolation) => {
+				modes.push(isolation);
+				return { agent: "artisan", task: "held", exitCode: -1, messages: [], stderr: "", usage: emptyUsage(), runId: 90 };
+			} }, compileWorkflow({ nodes: [{ id: "gate", agent: "artisan", task: "Run gate", isolation: "shared" }] }, root, AGENTS));
+			await until(() => handle.run.nodes[0]?.runId === 90);
+			assert.deepEqual(modes, ["shared"]);
+			assert.equal((await readRetainedWorkflows(harness.runtime, root))[0]?.state, "interrupted");
+			await stopWorkflow(harness.runtime, handle.run);
+			await handle.done;
+		} finally { await rm(root, { recursive: true, force: true }); }
+	});
 });

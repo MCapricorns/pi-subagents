@@ -5,7 +5,7 @@
  * The heavy lifting lives in focused modules:
  *   - delegation/    — built-in roles, routing prompts, and tool contract
  *   - configuration/ — persisted settings, model routes, and setup UI
- *   - execution/     — process queue, RPC transport/control, and model handoff
+ *   - execution/     — process queue, native JSON CLI/control, and model handoff
  *   - lifecycle/     — durable threads, restoration, controls, and delivery
  *   - workflow/      — dependency-graph plans, discovery, and the graph runner
  *   - isolation/     — Git worktrees, recovery, and temporary-state hygiene
@@ -29,6 +29,7 @@ import { registerSubagentTool } from "./src/delegation/dispatch.ts";
 import { buildDelegationDirective, installDelegationSections } from "./src/delegation/prompt.ts";
 import { currentSubagentDepth } from "./src/execution/spawn.ts";
 import { createDispatchCore } from "./src/lifecycle/dispatch-core.ts";
+import { registerCancellationHooks } from "./src/lifecycle/cancellation.ts";
 import { createRuntime } from "./src/lifecycle/runtime.ts";
 import { bootstrapDurableState } from "./src/lifecycle/thread-restore.ts";
 import { registerLookupTools } from "./src/lifecycle/tools.ts";
@@ -74,6 +75,7 @@ export default function (pi: ExtensionAPI): void {
 	registerSubagentTool(pi, runtime, dispatchCore);
 	registerWorkflowTool(pi, runtime, dispatchCore);
 	registerLookupTools(pi, runtime);
+	registerCancellationHooks(pi, runtime);
 
 	pi.registerCommand("subagents-setup", {
 		description: "Configure pi-subagents: model and thinking per role",
@@ -90,7 +92,7 @@ export default function (pi: ExtensionAPI): void {
 
 	// Install the routing contract as prompt sections when the host can diff them.
 	// A full systemPrompt return forces an opaque prompt and invalidates the cache.
-	pi.on("before_agent_start", async (event, ctx) => {
+	pi.on("before_agent_start", async (event) => {
 		await runtime.durableRestore;
 		const agents = loadBuiltinAgents();
 		const sources = [...runtime.threads.values()];

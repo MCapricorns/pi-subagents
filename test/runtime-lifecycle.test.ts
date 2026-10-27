@@ -10,7 +10,7 @@ import type { CompletionMessageItem } from "../src/lifecycle/completion.ts";
 import { readThreadRecords, upsertThreadRecord, type ThreadRecord } from "../src/lifecycle/durable.ts";
 import { monitor } from "../src/presentation/monitor.ts";
 import { createRuntime } from "../src/lifecycle/runtime.ts";
-import { emptyUsage } from "../src/execution/rpc-control.ts";
+import { emptyUsage } from "../src/execution/run-control.ts";
 import { restoreDurableThreads } from "../src/lifecycle/thread-restore.ts";
 
 function deferred(): { promise: Promise<void>; resolve: () => void } {
@@ -171,14 +171,11 @@ describe("completion delivery ownership", () => {
 		runtime.publishRunCompletion(1, completion("scout"), false);
 		assert.equal(sent.length, 0);
 		runtime.completeAwaitDelivery([1]);
-		runtime.fallbackAwaitDelivery([1]);
 		assert.equal(sent.length, 0);
 
-		runtime.claimRunDelivery(2, "await");
+		runtime.claimRunDelivery(2, "background");
 		runtime.publishRunCompletion(2, completion("artisan"), false);
-		runtime.fallbackAwaitDelivery([2]);
 		runtime.completionBatcher.flush();
-		runtime.fallbackAwaitDelivery([2]);
 		assert.equal(sent.length, 1);
 		assert.deepEqual(sent[0]?.options, { deliverAs: "steer", triggerTurn: true });
 	});

@@ -1,10 +1,9 @@
 /**
- * Sub-agent result handling and resilient RPC launch orchestration.
+ * Sub-agent result handling and native Pi CLI launch orchestration.
  *
- * The process transport itself lives in rpc-run.ts. Each attempt starts pi in
- * persistent `--mode rpc`, sends commands over strict LF-delimited JSONL, and
- * settles only on `agent_settled`. This module owns startup-race recovery,
- * selected-to-main model handoff, capability-clamped thinking, accounting, and
+ * The process transport lives in cli-run.ts. Each attempt uses Pi's native
+ * one-shot `--mode json` event stream and
+ * settles only on `agent_settled`. This module owns selected-to-main model handoff, capability-clamped thinking, accounting, and
  * result formatting around those attempts.
  */
 
@@ -17,22 +16,21 @@ import type { AgentConfig } from "../delegation/agents.ts";
 import { DEFAULT_THINKING_LEVEL, type ThinkingLevel } from "../configuration/config.ts";
 import {
 	emptyUsage,
-	RpcRunControl,
-	type RpcSingleResult,
+	RunControl,
+	type RunResult,
 	type SubagentLiveEvent,
 	type UsageStats,
-} from "./rpc-control.ts";
+} from "./run-control.ts";
 import {
 	currentSubagentDepth,
-	isRpcCommandTimeoutError,
-	runRpcAgentAttempt,
+	runCliAgentAttempt,
 	sessionExists,
-} from "./rpc-run.ts";
+} from "./cli-run.ts";
 import { writeTempOwnerMarker } from "../isolation/temp-hygiene.ts";
 
 export {
 	currentSubagentDepth,
-	RpcRunControl,
+	RunControl,
 	sessionExists,
 };
 export type { SubagentLiveEvent, UsageStats };
@@ -40,25 +38,7 @@ export type { SubagentLiveEvent, UsageStats };
 const SUBAGENT_THINKING_LEVEL: ThinkingLevel = DEFAULT_THINKING_LEVEL;
 /** 0 disables the watchdog; dispatch supplies the configured timeout. */
 const SUBAGENT_DEFAULT_IDLE_TIMEOUT_MS = 0;
-/** Base delays cover Pi's stale-lock window and leave headroom beyond the
- * default four-way launch fan-out. Additive jitter below reduces the chance
- * that contenders retry in the same lockstep waves. */
-const SUBAGENT_STARTUP_RETRY_DELAYS_MS = [250, 750, 1500, 3000, 6000] as const;
-const MAX_SUBAGENT_STARTUP_FAILURE_DURATION_MS = 2000;
-const MAX_SUBAGENT_STARTUP_RETRY_JITTER_MS = 1000;
-
-function normalizeStartupRetryDelay(delayMs: number): number {
-	return Number.isFinite(delayMs) && delayMs > 0 ? delayMs : 0;
-}
-
-function addStartupRetryJitter(delayMs: number, randomValue = Math.random()): number {
-	const baseDelay = Math.floor(normalizeStartupRetryDelay(delayMs));
-	if (baseDelay === 0) return 0;
-	const boundedRandom = Number.isFinite(randomValue) ? Math.max(0, Math.min(1, randomValue)) : 0;
-	return baseDelay + Math.floor(Math.min(baseDelay, MAX_SUBAGENT_STARTUP_RETRY_JITTER_MS) * boundedRandom);
-}
-
-export interface SingleResult extends RpcSingleResult {}
+export interface SingleResult extends RunResult {}
 
 export interface SubagentDetails {
 	mode: "single" | "parallel";
@@ -225,16 +205,6 @@ export function isModelLevelFailure(result: SingleResult): boolean {
 	if (!isFailedResult(result)) return false;
 	if (result.stopReason === "aborted") return false;
 	if (result.dispatchFailed) return false;
-	if (result.rpcStartupFailed) return false;
-	// A negative RPC response proves Pi rejected the prompt before execution. It
-	// remains safe to hand off even though dispatch was attempted; local write,
-	// close, timeout, and lost-ACK failures never set this explicit flag.
-	if (result.rpcPromptRejected) return true;
-	// The prompt write completed but its ACK never arrived. With no later activity
-	// we cannot know whether Pi started the model or tools, so neither startup
-	// retry nor selected→main fallback may replay this objective.
-	if (result.rpcPromptDispatched && !result.rpcPromptAccepted && !result.rpcActivity) return false;
-	if (isRpcCommandTimeoutError(result.errorMessage)) return false;
 	if (result.integrationStatus === "retained") return false;
 	if (result.errorMessage?.includes("idle timeout")) return true;
 
@@ -250,77 +220,7 @@ export function isModelLevelFailure(result: SingleResult): boolean {
 	}
 
 	if ((result.failedTools?.length ?? 0) > 0) return false;
-	// No accepted prompt, no activity, and no assistant turn means the provider
-	// was never reached. Stderr or an exit error here is a startup/transport miss.
-	if (!result.rpcPromptAccepted && !result.rpcActivity) return false;
-	return Boolean(
-		result.rpcPromptAccepted ||
-		result.rpcActivity ||
-		result.errorMessage?.trim() ||
-		result.stderr.trim(),
-	);
-}
-
-export function isRetryableStartupFailure(result: SingleResult, durationMs: number): boolean {
-	if (result.exitCode === 0) return false;
-	if (result.stopReason === "aborted") return false;
-	if (result.dispatchFailed) return false;
-	if (result.rpcPromptDispatched || result.rpcPromptAccepted || result.rpcActivity) return false;
-	if (result.errorMessage?.includes("idle timeout")) return false;
-	if (getFinalOutput(result.messages)) return false;
-	if (result.messages.length > 0) return false;
-	const usage = result.usage;
-	if (usage.turns || usage.input || usage.output || usage.cacheRead || usage.cacheWrite || usage.cost) return false;
-	if (result.rpcStartupFailed) return true;
-	if (durationMs > MAX_SUBAGENT_STARTUP_FAILURE_DURATION_MS) return false;
-	if (result.stderr.trim().length > 0) return false;
-	if (result.errorMessage && result.errorMessage.trim().length > 0) return false;
-	return true;
-}
-
-function formatStartupRetryExhaustedError(model: string, attempts: number): string {
-	return `Subagent failed to start after ${attempts} attempt${attempts === 1 ? "" : "s"} on ${model}: the child failed before its initial RPC prompt was dispatched and produced no model, tool, output, or usage activity. Main handles this phase; inspect launch diagnostics instead of redispatching it.`;
-}
-
-async function waitForStartupRetry(delayMs: number, signal?: AbortSignal): Promise<boolean> {
-	const normalizedDelay = normalizeStartupRetryDelay(delayMs);
-	if (normalizedDelay === 0) return !signal?.aborted;
-	if (!signal) {
-		return new Promise<boolean>((resolve) => {
-			const timer = setTimeout(() => resolve(true), normalizedDelay);
-			if (typeof timer.unref === "function") timer.unref();
-		});
-	}
-	if (signal.aborted) return false;
-	return new Promise<boolean>((resolve) => {
-		let settled = false;
-		const finish = (shouldRetry: boolean): void => {
-			if (settled) return;
-			settled = true;
-			clearTimeout(timer);
-			signal.removeEventListener("abort", onAbort);
-			resolve(shouldRetry);
-		};
-		const onAbort = (): void => finish(false);
-		const timer = setTimeout(() => finish(true), normalizedDelay);
-		if (typeof timer.unref === "function") timer.unref();
-		signal.addEventListener("abort", onAbort, { once: true });
-	});
-}
-
-async function waitForControlledRetry(
-	delayMs: number,
-	signal: AbortSignal | undefined,
-	control: RpcRunControl | undefined,
-): Promise<boolean> {
-	let remaining = normalizeStartupRetryDelay(delayMs);
-	while (remaining > 0) {
-		if (control?.isStopRequested()) return false;
-		const slice = Math.min(remaining, 50);
-		if (!(await waitForStartupRetry(slice, signal))) return false;
-		remaining -= slice;
-	}
-	return !signal?.aborted && !control?.isStopRequested();
+	return result.activityObserved === true;
 }
 
 /** Runtime/assistant diagnostics, never an inference from individual failed tools. */
@@ -378,28 +278,25 @@ export interface RunSingleOptions {
 	/** Resolve the effective level for each runtime model candidate. */
 	thinkingLevelForModel?: (modelRef?: string) => ThinkingLevel;
 	idleTimeoutMs?: number;
-	startupRetryDelaysMs?: readonly number[];
 	sessionDir?: string;
 	sessionId?: string;
 	/** Parent directory for a fresh session directory: the project-scoped
 	 * sessions root, so retained sessions survive reloads and restarts. */
 	sessionRoot: string;
-	/** Parent directory for per-attempt transient files (child prompt, retry
-	 * policy): the project-scoped tmp root, so nothing lands in the OS temp. */
+	/** Project-scoped temporary prompt files, separate from retained sessions. */
 	scratchRoot: string;
-	/** Initial RPC prompt. Kept under the old name to limit caller churn. */
+	/** Plain-text prompt passed to Pi over stdin. */
 	stdinText?: string;
-	/** Refresh parent-derived tools immediately before every startup retry and
+	/** Refresh parent-derived tools immediately before every selected model and
 	 * selected-to-main fallback process is spawned. */
 	resolveAgentForAttempt?: (agent: AgentConfig) => AgentConfig;
 	signal?: AbortSignal;
 	onLive?: (event: SubagentLiveEvent) => void;
 	makeDetails: (results: SingleResult[]) => SubagentDetails;
 	env?: NodeJS.ProcessEnv;
-	/** Stable logical-generation controller shared across retry attempts. */
-	control?: RpcRunControl;
-	rpcReadyTimeoutMs?: number;
-	rpcCommandTimeoutMs?: number;
+	/** Stable logical-generation controller shared across model attempts. */
+	control?: RunControl;
+	startupTimeoutMs?: number;
 }
 
 function controlledDisposition(options: RunSingleOptions, base?: SingleResult): SingleResult | undefined {
@@ -424,15 +321,7 @@ function controlledDisposition(options: RunSingleOptions, base?: SingleResult): 
 	return result;
 }
 
-function signalAbortDisposition(options: RunSingleOptions, base: SingleResult): SingleResult | undefined {
-	if (!options.signal?.aborted) return undefined;
-	base.exitCode = 1;
-	base.stopReason = "aborted";
-	base.errorMessage = "Subagent was aborted";
-	return base;
-}
-
-/** Spawn one RPC attempt and wait for stable settlement. */
+/** Spawn one native JSON CLI attempt and wait for stable settlement. */
 async function runSingleAgent(options: RunSingleOptions): Promise<SingleResult> {
 	const {
 		agent,
@@ -445,7 +334,7 @@ async function runSingleAgent(options: RunSingleOptions): Promise<SingleResult> 
 	if (disposition) return disposition;
 	const objective = control?.getObjective() ?? options.task;
 	const prompt = options.stdinText ?? `Task: ${objective}`;
-	const result = await runRpcAgentAttempt({
+	const result = await runCliAgentAttempt({
 		defaultCwd: options.defaultCwd,
 		agent,
 		agentName,
@@ -461,8 +350,7 @@ async function runSingleAgent(options: RunSingleOptions): Promise<SingleResult> 
 		onLive: options.onLive,
 		env: options.env,
 		control,
-		rpcReadyTimeoutMs: options.rpcReadyTimeoutMs,
-		rpcCommandTimeoutMs: options.rpcCommandTimeoutMs,
+		startupTimeoutMs: options.startupTimeoutMs,
 	});
 	result.task = control?.getObjective() ?? result.task;
 	return result;
@@ -470,8 +358,7 @@ async function runSingleAgent(options: RunSingleOptions): Promise<SingleResult> 
 
 /**
  * Run one logical generation on the selected model, then hand directly to the
- * current main model after any model/provider-level failure. Startup-race retries
- * remain process-level recovery; provider/model retries and extra candidates do not.
+ * current main model after any model/provider-level failure. A launch failure is returned to main without replaying an ambiguous prompt.
  * Both attempts resume the same retained Pi session.
  */
 export async function runSingleAgentWithMainFallback(
@@ -480,8 +367,6 @@ export async function runSingleAgentWithMainFallback(
 ): Promise<SingleResult> {
 	const agent = options.agent;
 	const launchedRef = agent?.model;
-	const customStartupDelays = options.startupRetryDelaysMs;
-	const startupDelays = customStartupDelays ?? SUBAGENT_STARTUP_RETRY_DELAYS_MS;
 
 	const sessionId = options.sessionId ?? randomUUID();
 	const sessionDir = options.sessionDir ?? (await createSessionDir(options.sessionRoot));
@@ -518,52 +403,16 @@ export async function runSingleAgentWithMainFallback(
 		};
 	};
 
-	const runWithStartupRetry = async (opts: RunSingleOptions): Promise<SingleResult> => {
-		let lastResult: SingleResult;
-		let retries = 0;
-		for (let attempt = 0; ; attempt++) {
-			const immediate = controlledDisposition(opts);
-			if (immediate) return immediate;
-			const start = Date.now();
-			try {
-				const attemptOptions = opts.resolveAgentForAttempt
-					? { ...opts, agent: opts.resolveAgentForAttempt(opts.agent) }
-					: opts;
-				lastResult = await runSingleAgent(attemptOptions);
-			} catch (error) {
-				const failed = await dispatchFailure(error);
-				return controlledDisposition(opts, failed) ?? failed;
-			}
-			const durationMs = Date.now() - start;
-			const controlled = controlledDisposition(opts, lastResult);
-			if (controlled) return controlled;
-			if (lastResult.stopReason === "aborted") return lastResult;
-			if (!isRetryableStartupFailure(lastResult, durationMs)) {
-				if (retries > 0 && !isFailedResult(lastResult)) lastResult.startupRetries = retries;
-				return lastResult;
-			}
-			const delay = startupDelays[attempt];
-			if (delay === undefined) {
-				const reason = getResultError(lastResult);
-				lastResult.errorMessage = [formatStartupRetryExhaustedError(
-					lastResult.model ?? opts.agent.model ?? "default",
-					attempt + 1,
-				), reason].filter(Boolean).join("\n");
-				lastResult.stopReason ??= "error";
-				lastResult.dispatchFailed = true;
-				return lastResult;
-			}
-			opts.control?.markRetrying();
-			try {
-				opts.onLive?.({ kind: "status", status: "running" });
-			} catch {
-				/* never throw from event handling */
-			}
-			const retryDelay = customStartupDelays ? delay : addStartupRetryJitter(delay);
-			if (!(await waitForControlledRetry(retryDelay, opts.signal, opts.control))) {
-				return controlledDisposition(opts, lastResult) ?? signalAbortDisposition(opts, lastResult) ?? lastResult;
-			}
-			retries++;
+	const runAttempt = async (opts: RunSingleOptions): Promise<SingleResult> => {
+		const immediate = controlledDisposition(opts);
+		if (immediate) return immediate;
+		try {
+			const attemptOptions = opts.resolveAgentForAttempt ? { ...opts, agent: opts.resolveAgentForAttempt(opts.agent) } : opts;
+			const result = await runSingleAgent(attemptOptions);
+			return controlledDisposition(opts, result) ?? result;
+		} catch (error) {
+			const failed = await dispatchFailure(error);
+			return controlledDisposition(opts, failed) ?? failed;
 		}
 	};
 
@@ -654,7 +503,7 @@ export async function runSingleAgentWithMainFallback(
 			/* never throw from event handling */
 		}
 
-		result = await runWithStartupRetry(candidateOptions);
+		result = await runAttempt(candidateOptions);
 		if (result.stopReason === "aborted") return finish(result);
 		if (!isModelLevelFailure(result)) return finish(result);
 		// Any model-level failure advances immediately to the sole fallback (the

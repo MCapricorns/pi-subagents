@@ -34,25 +34,25 @@ answer to know what phase two is, you cannot write the graph yet: run phase one
 with `subagent` and write the graph afterwards. If every phase is a one-line
 read, the graph is overhead — do it in main.
 
-A workflow is a forced choice, not a default. The user asking for "a workflow"
-or naming a saved one is binding; otherwise apply the table.
+Use a graph when it fits the task, and honor an explicit user choice. A graph
+schedules a fixed plan; it does not decide what a discovery result means. Main
+keeps decisions that depend on that result.
 
 ## 2. Shape
 
 ```ts
 subagent_workflow({
-  name: "auth-fix",                     // shown in the widget/status; namespaces phase ids
-  description: "Map the race, fix it, gate it.",  // one line, becomes the summary's subtitle
+  name: "auth-fix",
+  description: "Fix the refresh race and challenge the result.",
   nodes: [
-    { id: "map", agent: "scout", task: "Map the refresh race in src/auth. Cite path:line." },
-    { id: "fix", agent: "artisan", task: "Fix it. Evidence:\n{{map}}", dependsOn: ["map"],
-      scope: { paths: ["src/auth"] } },
-    { id: "tests", agent: "artisan", task: "Add regression tests for the race. Evidence:\n{{map}}",
-      dependsOn: ["map"], scope: { paths: ["test/auth.test.ts"] } },
-    { id: "gate", agent: "artisan", task: "Run the repository's checks and fix only what this change broke.\nFix:\n{{fix}}\nTests:\n{{tests}}",
-      dependsOn: ["fix", "tests"] },
+    { id: "map", agent: "scout", task: "Trace the refresh race in src/auth. Cite path:line and test coverage gaps." },
+    { id: "fix", agent: "artisan", task: "Fix the race and add its regression tests. Evidence:\n{{map}}", dependsOn: ["map"],
+      scope: { paths: ["src/auth", "test/auth.test.ts"] } },
+    { id: "review", agent: "artisan", isolation: "shared",
+      task: "Try to disprove the fix: inspect callers and edge cases, then run the documented checks. Report evidence and unresolved risks; do not edit files.\n{{fix}}",
+      dependsOn: ["fix"] },
   ],
-})
+});
 ```
 
 - `id` — identifies the node in `dependsOn` and in placeholders. Unique per graph.
@@ -70,22 +70,24 @@ completion message arrives when it settles. Do not poll it.
 The shapes that are worth writing, in the order they usually appear:
 
 - **Survey → act.** One read-only node establishes the facts; writers depend on it
-  and quote it. Never let a writer re-derive what a scout already established.
+  and quote it. Reuse established evidence and verify decisive or conflicting claims.
 - **Fan-out with a join.** Independent slices of one plan run at the same time; a
   join node depends on all of them. Declare disjoint `scope.paths` per slice —
   the compiler rejects overlapping scopes between nodes with no dependency edge.
-- **Independent confirmation.** A node that *produced* a finding cannot see its
-  own gap. Give every claim the user will act on a separate node that tries to
-  disprove it ("reproduce this, or say what the code actually does"), and a
-  different lens per reviewer rather than the same prompt twice.
+- **Adversarial review and confirmation.** Reviewers seek counterexamples;
+  confirmation tries to disprove their findings against callers, invariants,
+  and focused reproductions. Use different lenses for independent reviewers.
+  Distinguish reproduced, source-supported, disproved, and unverified findings.
+  Use artisan when commands are required; scout cannot execute a reproduction.
 - **A closing gate.** The last node runs the project's own checks. Prefer
   commands over opinions: the repository's test suite, typecheck, build, or the
   verification line its README names. Ask for the strongest tier it has, not the
   fastest one.
 
-One deliverable gets one confirmation mechanism. A reviewer loop plus a
-confirmer plus a reader on the same artifact is four sessions re-reading one
-piece of work.
+Choose depth for the risk. A reviewer, independent confirmer, and synthesis
+node are reasonable for a large or sensitive change; a focused review can
+combine stages or leave synthesis to main. Every extra node should answer a
+different question. Keep a fix and its regression tests with one owner.
 
 ## 4. What the runtime guarantees, and what it does not
 
@@ -104,7 +106,12 @@ piece of work.
 - **An interrupted graph is explained, not resumed.** If the session ends
   mid-graph, the next session's start notice and `subagent_status({ workflow })`
   report which nodes completed and which were still running, with their run ids.
-- **Capacity is pacing, not refusal.** `maxConcurrentAgents` limits simultaneous
+  Checkpoints are written during execution, so a process crash also leaves the
+  graph shape.
+- **Parent cancellation ends owned work.** Escape and conversation-tree navigation
+  stop unfinished graphs and runs without completion wake-ups. New/resume/fork
+  tears down the old Pi runtime and retains interruption evidence.
+- **Capacity is pacing, not refusal.** The automatic process limit bounds simultaneous
   child processes; a wider graph queues and starts as slots free. Queue position
   never changes dependency order.
 
@@ -167,6 +174,9 @@ node expects to write:
 A Markdown definition carries prose plus one ```json fenced block with the plan
 (or a bare node array); JSON carries the plan object. Project definitions load
 only in a trusted project. Same-name precedence: project > user > builtin.
+Explicit file paths also require project trust. A call-level `name` overrides a
+saved graph's name. Customize unfilled question, target, and slice placeholders
+in a copy of a shipped template before execution.
 
 Save a graph when it will run again, when a reviewer should read the plan before
 it runs, or when the phases are long enough that you want them in version
@@ -177,8 +187,9 @@ are `<workflow-slug>.<node-id>`; an interrupted run keeps its claim until it is
 retired. Re-running the same shape is therefore rejected **before any node
 starts**, naming the owning runs. Three ways forward: retire the owner with
 `subagent_stop({ id })` (destructive — it drops that run's retained session),
-give the reused nodes different ids or `phaseId`s, or run the graph under a
-different name. A new session alone does not help: a retained interrupted run is
+give a genuinely different deliverable its own brief and phase id. Renaming the
+graph does not bypass exact task matching. Prefer reusing the owner's evidence
+and finishing incomplete work in main. A new session alone does not help: a retained interrupted run is
 restored with its claim intact.
 
 ## 9. Cost
@@ -186,8 +197,8 @@ restored with its claim intact.
 Every node is a full model session with its own context, and the summary carries
 each node's answer. Budget accordingly:
 
-- Prefer the fewest nodes that still give each phase one owner and each claim one
-  confirmer.
+- Give each phase one owner. Add separate review, confirmation, and synthesis
+  when their distinct work justifies the cost; combine them for bounded tasks.
 - Keep node answers short: conclusions, paths, `command → result`.
 - Do not add a node to fill a free process slot, and do not split one tightly
   coupled change across nodes.
@@ -211,16 +222,15 @@ each node's answer. Budget accordingly:
 One completion message per graph:
 
 ```text
-### workflow auth-fix completed (4/4 completed)
+### workflow auth-fix completed (3/3 completed)
 - map (scout) completed · run #12 · 1m02s
 - fix (artisan) completed · run #13 · 4m11s
-- tests (artisan) completed · run #15 · 2m40s
-- gate (artisan) completed · run #16 · 6m05s
+- review (artisan) completed · run #15 · 2m40s
 
 Node answers:
 #### map
 …
-Totals: 4 nodes · anthropic/claude-sonnet-4: ↓48.0k $0.8200
+Totals: 3 nodes · anthropic/claude-sonnet-4: ↓48.0k $0.8200
 ```
 
 - Node answers are clipped here; the full report file is named when that happens.

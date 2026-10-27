@@ -16,12 +16,13 @@
  */
 
 import { isFailedResult, getResultError, getResultOutput, truncateResultOutput, writeResultArtifact, type SingleResult } from "../execution/spawn.ts";
-import { formatDuration, formatTaskSummary, monitor } from "../presentation/monitor.ts";
+import { formatDuration, formatTaskSummary, monitor, runWaitLabel } from "../presentation/monitor.ts";
 import { perModelTotals, type CompletionMessageItem } from "../lifecycle/completion.ts";
-import type { SubagentRuntime } from "../lifecycle/runtime.ts";
+import { findPendingWorkflowPhase, type SubagentRuntime } from "../lifecycle/runtime.ts";
 import type { StartBackgroundInternal } from "../lifecycle/thread-shared.ts";
+import { stopThreads } from "../lifecycle/stop.ts";
 import { findDuplicateDispatch } from "../delegation/prompt.ts";
-import { defaultPhaseId, renderNodeTask, type CompiledWorkflow, type UpstreamOutput } from "./plan.ts";
+import { defaultPhaseId, renderNodeTask, UPSTREAM_OUTPUT_MAX_CHARS, type CompiledWorkflow, type UpstreamOutput } from "./plan.ts";
 import {
 	readWorkflowRecords,
 	removeWorkflowRecord,
@@ -81,6 +82,7 @@ function upstreamView(node: WorkflowNodeRun): UpstreamOutput {
 		output,
 		...(node.runId !== undefined ? { runId: node.runId } : {}),
 		...(node.error ? { error: node.error } : {}),
+		...(result?.resultFile ? { resultFile: result.resultFile } : {}),
 	};
 }
 
@@ -133,17 +135,16 @@ function waitForNodeSettlement(
 async function dispatchNode(ctx: RunContext, node: WorkflowNodeRun): Promise<void> {
 	const { run } = ctx;
 	const upstream = new Map<string, UpstreamOutput>();
-	for (const dependency of node.dependsOn) {
+	for (const dependency of node.ancestors) {
 		const upstreamNode = nodeById(run, dependency);
 		if (upstreamNode) upstream.set(dependency, upstreamView(upstreamNode));
 	}
 	const task = renderNodeTask(node.task, upstream);
-	node.dispatchedTask = task;
 	node.state = "running";
 	node.startedAt = Date.now();
 	let started: SingleResult;
 	try {
-		started = await ctx.startBackground(node.agent, task, node.cwd, ctx.resolveIsolation(node.agent), {
+		started = await ctx.startBackground(node.agent, task, node.cwd, node.isolation ?? ctx.resolveIsolation(node.agent), {
 			phaseId: node.phaseId,
 			scope: node.scope,
 			deliveryRoute: "background",
@@ -166,10 +167,20 @@ async function dispatchNode(ctx: RunContext, node: WorkflowNodeRun): Promise<voi
 		return;
 	}
 	node.runId = started.runId;
+	await checkpoint(ctx);
+	if (run.state === "stopped") await stopThreads(ctx.runtime, [started.runId], run.stopReason);
 	const result = await waitForNodeSettlement(ctx.runtime, started.runId, run.controller.signal);
 	node.endedAt = Date.now();
 	node.result = result;
+	if (result && getResultOutput(result).length > UPSTREAM_OUTPUT_MAX_CHARS && !result.resultFile) {
+		try {
+			result.resultFile = writeResultArtifact(getResultOutput(result), `workflow-${run.slug}-${node.id}`, ctx.resultsRoot);
+		} catch {
+			/* The dependent brief explicitly reports an unavailable full answer. */
+		}
+	}
 	if (run.state !== "running") {
+		if (result && !isFailedResult(result)) { node.state = "completed"; return; }
 		node.state = "stopped";
 		node.error ??= run.stopReason ?? "workflow stopped";
 		return;
@@ -209,10 +220,18 @@ function blockDependents(run: WorkflowRun): boolean {
 	return changed;
 }
 
+async function checkpoint(ctx: RunContext): Promise<void> {
+	if (ctx.runtime.sessionActive) monitor.updateWorkflow(ctx.run);
+	if (ctx.run.state !== "running") return;
+	await upsertWorkflowRecord(ctx.runtime.configPath, workflowRecord(ctx.run, "running")).catch(() => undefined);
+}
+
 async function drive(ctx: RunContext): Promise<void> {
 	const { run } = ctx;
+	const inFlight = new Set<Promise<void>>();
+	await checkpoint(ctx);
 	while (run.state === "running") {
-		blockDependents(run);
+		while (blockDependents(run)) { /* Propagate through any author order. */ }
 		const ready = run.nodes.filter(
 			(node) =>
 				node.state === "pending" &&
@@ -221,7 +240,16 @@ async function drive(ctx: RunContext): Promise<void> {
 		for (const node of ready) {
 			// dispatchNode marks the node running synchronously, so the next pass
 			// cannot start it twice.
-			void dispatchNode(ctx, node).finally(ctx.wake);
+			const task = dispatchNode(ctx, node).catch((error: unknown) => {
+				node.state = "failed";
+				node.error = error instanceof Error ? error.message : String(error);
+				node.endedAt = Date.now();
+			}).finally(async () => {
+				await checkpoint(ctx);
+				inFlight.delete(task);
+				ctx.wake();
+			});
+			inFlight.add(task);
 		}
 		if (run.state !== "running") break;
 		const running = run.nodes.some((node) => node.state === "running");
@@ -230,6 +258,7 @@ async function drive(ctx: RunContext): Promise<void> {
 		// marked blocked frees the pass); wait for one wake-up instead of polling.
 		await ctx.waitForWake();
 	}
+	await Promise.all(inFlight);
 	await settle(ctx);
 }
 
@@ -287,6 +316,10 @@ export function formatWorkflowReport(run: WorkflowRun): string {
 		const output = node.result ? getResultOutput(node.result).trim() : "";
 		lines.push("", `## ${node.id} (${node.agent}) — ${nodeStateWord(node)}`, "");
 		lines.push(output || "(no answer recorded)");
+		if (node.error) lines.push("", `Error: ${node.error}`);
+		for (const [label, path] of [["Full result", node.result?.resultFile], ["Retained worktree", node.result?.integrationWorktreePath], ["Retained patch", node.result?.integrationPatchPath]]) {
+			if (path) lines.push(`${label}: ${path}`);
+		}
 	}
 	return lines.join("\n");
 }
@@ -334,8 +367,8 @@ export function formatWorkflowSummary(run: WorkflowRun, resultsRoot?: string): s
 		try {
 			const reportPath = writeResultArtifact(formatWorkflowReport(run), `workflow-${run.slug}`, resultsRoot);
 			lines.push(`⚠ Some node answers are clipped here. Read the complete report, including every node's full answer: ${reportPath}`);
-		} catch {
-			/* the summary is still useful without the artifact pointer */
+		} catch (error) {
+			lines.push(`⚠ The full report could not be written: ${error instanceof Error ? error.message : String(error)}. Inspect retained run evidence before relying on clipped answers.`);
 		}
 	}
 	const totals = perModelTotals(
@@ -381,9 +414,10 @@ async function settle(ctx: RunContext): Promise<void> {
 	// it is the evidence the next session explains, not a settled run.
 	const interrupted = run.state === "interrupted";
 	if (run.state === "running") {
-		run.state = run.nodes.some((node) => node.state === "failed" || node.state === "blocked") ? "failed" : "completed";
+		run.state = run.nodes.some((node) => node.state !== "completed") ? "failed" : "completed";
 	}
 	run.endedAt ??= Date.now();
+	if (runtime.sessionActive) monitor.updateWorkflow(run);
 	if (!interrupted) await removeWorkflowRecord(runtime.configPath, run.id, run.cwd).catch(() => undefined);
 	if (!runtime.sessionActive) return;
 	const item: CompletionMessageItem = {
@@ -399,7 +433,9 @@ async function settle(ctx: RunContext): Promise<void> {
 export interface OwnedPhase {
 	nodeId: string;
 	phaseId: string;
-	runId: number;
+	runId?: number;
+	workflowId?: number;
+	ownerNodeId?: string;
 	agent: string;
 	state: string;
 }
@@ -417,7 +453,11 @@ export function findOwnedPhases(runtime: SubagentRuntime, workflow: CompiledWork
 	for (const node of workflow.nodes) {
 		const phaseId = node.phaseId ?? defaultPhaseId(workflow, node);
 		const duplicate = findDuplicateDispatch(runtime.threads.values(), node.task, node.cwd, phaseId);
-		if (!duplicate) continue;
+		if (!duplicate) {
+			const pending = findPendingWorkflowPhase(runtime, node.task, node.cwd, phaseId);
+			if (pending) owned.push({ nodeId: node.id, phaseId, workflowId: pending.workflowId, ownerNodeId: pending.nodeId, agent: pending.agent, state: "pending" });
+			continue;
+		}
 		owned.push({
 			nodeId: node.id,
 			phaseId,
@@ -443,10 +483,11 @@ export function startWorkflow(deps: WorkflowRunDeps, workflow: CompiledWorkflow)
 		controller: new AbortController(),
 		nodes: workflow.nodes.map((node) => ({
 			id: node.id,
-			index: node.index,
 			agent: node.agent,
 			task: node.task,
 			dependsOn: [...node.dependsOn],
+			ancestors: [...node.ancestors],
+			...(node.isolation ? { isolation: node.isolation } : {}),
 			phaseId: node.phaseId ?? defaultPhaseId(workflow, node),
 			...(node.scope ? { scope: node.scope } : {}),
 			cwd: node.cwd,
@@ -494,6 +535,7 @@ export function startWorkflow(deps: WorkflowRunDeps, workflow: CompiledWorkflow)
 			return run;
 		},
 	);
+	run.done = done;
 	return { run, done };
 }
 
@@ -507,26 +549,17 @@ export async function stopWorkflow(
 	if (run.state !== "running" && run.state !== "interrupted") return [];
 	run.state = "stopped";
 	run.stopReason = reason;
-	run.controller.abort();
-	const cancelled: number[] = [];
-	const stopping: Array<Promise<void>> = [];
 	for (const node of run.nodes) {
-		if (node.state === "pending") {
-			node.state = "stopped";
-			node.error = "stopped before it started";
-			continue;
-		}
-		if (node.state !== "running") continue;
-		if (node.runId === undefined) {
-			node.state = "stopped";
-			continue;
-		}
-		const thread = runtime.threads.get(node.runId);
-		stopping.push(thread ? thread.control.stop(reason).catch(() => undefined) : Promise.resolve());
-		runtime.backgroundQueue.cancel(thread?.queueController ?? runtime.runControllers.get(node.runId));
-		cancelled.push(node.runId);
+		if (node.state !== "pending") continue;
+		node.state = "stopped";
+		node.error = "stopped before it started";
 	}
-	await Promise.all(stopping);
+	monitor.updateWorkflow(run);
+	const cancelled = run.nodes.flatMap((node) => node.state === "running" && node.runId !== undefined ? [node.runId] : []);
+	// The same stop owner as the control tool finalizes worktrees before the
+	// graph publishes its summary. A late dispatch stops itself on allocation.
+	await stopThreads(runtime, cancelled, reason);
+	run.controller.abort();
 	return cancelled;
 }
 
@@ -539,6 +572,7 @@ export async function persistInterruptedWorkflows(runtime: SubagentRuntime): Pro
 			run.state = "interrupted";
 			run.endedAt = Date.now();
 			run.stopReason ??= "the parent session ended before this workflow settled";
+			monitor.updateWorkflow(run);
 			await upsertWorkflowRecord(runtime.configPath, workflowRecord(run, "interrupted")).catch(() => undefined);
 			// Wake the runner's waiters so the graph unwinds instead of holding a
 			// promise past shutdown; settle() keeps the record and skips delivery.
@@ -564,7 +598,7 @@ export async function readRetainedWorkflows(runtime: SubagentRuntime, cwd: strin
 	return records.map((record) => ({
 		id: record.workflowId,
 		name: record.name,
-		state: record.state,
+		state: record.state === "running" ? "interrupted" : record.state,
 		...(record.stopReason ? { stopReason: record.stopReason } : {}),
 		updatedAt: record.updatedAt,
 		nodes: record.nodes,
@@ -612,7 +646,7 @@ export function workflowStatus(run: WorkflowRun): WorkflowStatusView {
 				...(node.runId !== undefined ? { runId: node.runId } : {}),
 				...(node.state === "pending" && node.dependsOn.length > 0 ? { waitingFor: [...node.dependsOn] } : {}),
 				...(node.error ? { error: node.error } : {}),
-				...(live?.activity ? { activity: live.activity } : {}),
+				...(live?.status === "queued" ? { activity: runWaitLabel(live) } : live?.integrationStatus === "finalizing" ? { activity: "integrating worktree" } : live?.activity ? { activity: live.activity } : {}),
 				...(node.startedAt !== undefined ? { elapsedMs: (node.endedAt ?? Date.now()) - node.startedAt } : {}),
 			};
 		}),

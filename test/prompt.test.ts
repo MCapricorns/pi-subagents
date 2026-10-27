@@ -36,7 +36,7 @@ describe("buildDelegationDirective", () => {
 
 	it("prefers the two built-in roles without inventing extra phases", () => {
 		const directive = buildDelegationDirective(loadBuiltinAgents());
-		assert.match(directive, /Delegate whenever the work has independent parts or a bounded job can be briefed self-contained/u);
+		assert.match(directive, /Delegate substantial, self-contained work when independent execution or a fresh context saves more than briefing and integration cost/u);
 		assert.match(directive, /Prefer `scout` for read-only lookups \(read-only tools, no shell — commands, tests, and builds stay in main\), and `artisan` for one substantial change with its checks/u);
 		// The routing contract states the live tool policy without naming tools.
 		assert.match(directive, /Children inherit this session's live tool surface/u);
@@ -46,13 +46,15 @@ describe("buildDelegationDirective", () => {
 		for (const role of loadBuiltinAgents()) {
 			assert.equal(directive.split(role.description).length - 1, 1);
 		}
-		assert.match(directive, /Route broad or unfamiliar lookups to a child instead of running the same searches serially in main/u);
+		assert.match(directive, /Delegate a substantial unfamiliar lookup when its answer will unblock other work/u);
 		assert.match(directive, /Keep a small edit already understood in the current context in main/u);
 		assert.match(directive, /Do not open a phase that repeats owned work, splits one tightly coupled change, or exists only to fill a free slot/u);
 		assert.match(directive, /one owner, a stable `phaseId`, and exact writer `scope`/u);
 		assert.match(directive, /Parallelize independent phases in one call/u);
 		assert.match(directive, /never overlap writers or duplicate an owned phase/u);
 		assert.match(directive, /Dependent phases wait for prerequisites/u);
+		assert.match(directive, /If a result determines the next task or its scope, dispatch that phase alone and decide in main/u);
+		assert.match(directive, /keep implementation and its regression tests with one owner/u);
 		assert.match(directive, /Scope is conflict metadata, not permissions or a sandbox/u);
 		assert.match(directive, /The user's task sets the outcome/u);
 		assert.match(directive, /Main owns architecture, integration, the final gate, and release/u);
@@ -82,7 +84,7 @@ describe("buildDelegationDirective", () => {
 		assert.match(directive, /Conclude the overall task only after every run settles or is stopped/u);
 		assert.match(directive, /Report only checks actually run/u);
 		assert.match(directive, /repeat or broaden checks only for new changes, failures, or unresolved concerns/u);
-		assert.match(directive, /A truncated completion carries no inline copy; read the full result file it names/u);
+		assert.match(directive, /Read the full result file whenever a completion says its output is truncated/u);
 	});
 
 	it("shows routing only for enabled roles", () => {

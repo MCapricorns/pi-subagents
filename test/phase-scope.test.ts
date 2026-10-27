@@ -15,7 +15,7 @@ import {
 	PHASE_ID_MAX_LENGTH,
 	PHASE_ID_PATTERN_SOURCE,
 } from "../src/delegation/phase-scope.ts";
-import { RpcRunControl } from "../src/execution/rpc-control.ts";
+import { RunControl } from "../src/execution/run-control.ts";
 import {
 	getThreadsManifestPath,
 	readThreadRecords,
@@ -92,7 +92,7 @@ function activeWriter(id: number, cwd: string, path: string): SubagentThread {
 		executionCwd: cwd,
 		isolation: "shared",
 		state: "parked",
-		control: new RpcRunControl("Existing writer", 1),
+		control: new RunControl("Existing writer", 1),
 		generationCompletion: Promise.resolve(),
 		lifecycleVersion: 0,
 		elapsedMs: 0,

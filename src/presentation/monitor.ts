@@ -12,7 +12,8 @@
 import { stripVTControlCharacters } from "node:util";
 import type { Theme } from "@earendil-works/pi-coding-agent";
 import { visibleWidth } from "@earendil-works/pi-tui";
-import { emptyUsage, type UsageStats } from "../execution/rpc-control.ts";
+import { emptyUsage, type UsageStats } from "../execution/run-control.ts";
+import type { WorkflowRun } from "../workflow/state.ts";
 import type { IsolationMode, WorktreeFinalizationStatus } from "../isolation/worktree.ts";
 
 // ---------------------------------------------------------------------------
@@ -462,10 +463,23 @@ export function formatToolActivity(toolName: string, args: unknown): string {
 
 export class MonitorStore {
 	private runs: RunView[] = [];
+	private workflows = new Map<number, WorkflowRun>();
+
+	updateWorkflow(run: WorkflowRun): void {
+		this.workflows.set(run.id, run);
+		this.notify();
+	}
+
+	getWorkflows(): WorkflowRun[] {
+		return [...this.workflows.values()];
+	}
 	private nextId = 1;
 	private subscribers = new Set<() => void>();
 
 	beginTurn(): void {
+		for (const [id, run] of this.workflows) {
+			if (run.state !== "running") this.workflows.delete(id);
+		}
 		// Clear finished runs from a previous turn, but keep active and parked
 		// threads so concurrent work is not wiped between parent turns.
 		this.runs = this.runs.filter(
@@ -645,6 +659,7 @@ export class MonitorStore {
 	 * finishRun calls from the old session remain safe no-ops. */
 	clear(): void {
 		this.runs = [];
+		this.workflows.clear();
 		this.notify();
 	}
 

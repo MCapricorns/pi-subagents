@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 import { formatCompletionMessage, perModelTotals, type CompletionMessageItem } from "../src/lifecycle/completion.ts";
-import { emptyUsage } from "../src/execution/rpc-control.ts";
+import { emptyUsage } from "../src/execution/run-control.ts";
 
 function item(agent: string, model?: string, cost = 0, output = 0): CompletionMessageItem {
 	const usage = emptyUsage();

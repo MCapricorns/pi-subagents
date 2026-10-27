@@ -12,13 +12,12 @@ export type WorkflowNodeState = RecordedNodeState;
 
 export interface WorkflowNodeRun {
 	id: string;
-	index: number;
 	agent: string;
 	/** Authored brief, still carrying its result placeholders. */
 	task: string;
-	/** Brief actually sent, after upstream interpolation. */
-	dispatchedTask?: string;
 	dependsOn: string[];
+	ancestors: string[];
+	isolation?: "shared" | "worktree";
 	phaseId: string;
 	scope?: PhaseScope;
 	cwd: string;
@@ -45,4 +44,6 @@ export interface WorkflowRun {
 	nodes: WorkflowNodeRun[];
 	/** Aborts the graph's waiters; node processes are stopped individually. */
 	controller: AbortController;
+	/** Settles after node cleanup and graph reporting, including cancellation. */
+	done?: Promise<WorkflowRun>;
 }

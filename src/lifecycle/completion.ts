@@ -8,7 +8,7 @@
  */
 
 import { formatUsageTokens, sumUsage, type RunWaitReason } from "../presentation/monitor.ts";
-import type { UsageStats } from "../execution/rpc-control.ts";
+import type { UsageStats } from "../execution/run-control.ts";
 export interface CompletionBatchTimings {
 	debounceMs: number;
 	maxWaitMs: number;

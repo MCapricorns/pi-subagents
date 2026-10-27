@@ -16,10 +16,12 @@
  *   process launches) instead of one catch-all "queued".
  */
 
+import type { WorkflowRun, WorkflowNodeRun } from "../workflow/state.ts";
 import type { ExtensionContext, Theme } from "@earendil-works/pi-coding-agent";
 import { truncateToWidth, visibleWidth } from "@earendil-works/pi-tui";
 import {
 	formatElapsed,
+	formatDuration,
 	formatTaskSummary,
 	formatUsageCompact,
 	isRunActiveStatus,
@@ -201,6 +203,46 @@ export function formatActiveRunLines(
 	return lines;
 }
 
+/** Workflow headers expose graph progress even before a node has a run id. */
+export function formatSubagentWidgetLines(
+	runs: readonly RunView[],
+	workflows: readonly WorkflowRun[],
+	theme: Theme,
+	width: number,
+	now: number = Date.now(),
+): string[] {
+	if (width <= 0) return [];
+	const rows: string[] = [];
+	const graphIds = new Set(workflows.map((graph) => graph.id));
+	for (const graph of workflows) {
+		const count = (state: WorkflowNodeRun["state"]) => graph.nodes.filter((node) => node.state === state).length;
+		const progress = [
+			count("completed") + "/" + graph.nodes.length + " completed",
+			...(["running", "pending", "failed", "blocked", "stopped"] as const)
+				.filter((state) => count(state) > 0)
+				.map((state) => count(state) + " " + (state === "pending" ? "waiting" : state)),
+		].join(SEPARATOR);
+		const color = graph.state === "failed" ? "error" : graph.state === "completed" ? "success" : "accent";
+		rows.push(theme.fg(color, theme.bold("workflow #" + graph.id + " " + graph.name)) + theme.fg("dim", SEPARATOR + graph.state + SEPARATOR + progress));
+		for (const node of graph.nodes) {
+			const live = runs.find((run) => run.id === node.runId);
+			const status = node.state === "pending" ? "queued" : node.state === "completed" ? "done" : node.state === "failed" || node.state === "blocked" ? "failed" : node.state === "stopped" ? "parked" : live?.status ?? "running";
+			const detail = node.state === "pending"
+				? node.dependsOn.length === 0 ? "starting" : "waits for " + node.dependsOn.filter((id) => graph.nodes.find((dependency) => dependency.id === id)?.state !== "completed").join(", ")
+				: node.error ? node.state + ": " + formatTaskSummary(node.error, 100, false)
+				: live?.status === "queued" ? waitWord(live)
+				: live?.integrationStatus === "finalizing" ? "integrating worktree"
+				: live?.activity ?? node.state;
+			const elapsed = node.startedAt === undefined ? "" : SEPARATOR + formatDuration((node.endedAt ?? now) - node.startedAt);
+			rows.push("  " + statusIcon(status, theme) + " " + theme.fg("accent", node.id) + theme.fg("dim", " (" + node.agent + ")" + (node.runId === undefined ? "" : " #" + node.runId) + SEPARATOR + detail + elapsed));
+		}
+	}
+	rows.push(...formatActiveRunLines(runs.filter((run) => !run.workflow || !graphIds.has(run.workflow.workflowId)), theme, width, now));
+	const shown = rows.length > MAX_WIDGET_LINES ? rows.slice(0, MAX_WIDGET_LINES - 1) : rows;
+	if (rows.length > MAX_WIDGET_LINES) shown.push(theme.fg("dim", "… +" + (rows.length - shown.length) + " rows · subagent_status for all"));
+	return shown.map((line) => truncateToWidth(line, width, "…"));
+}
+
 function hasActiveRun(): boolean {
 	return monitor.getRuns().some((run) => isRunActiveStatus(run.status) && run.activeSince !== undefined);
 }
@@ -217,7 +259,7 @@ export function installActiveRunsWidget(ctx: Pick<ExtensionContext, "mode" | "ui
 
 			const syncTimer = (): void => {
 				if (disposed) return;
-				if (hasActiveRun()) {
+				if (hasActiveRun() || monitor.getWorkflows().some((graph) => graph.state === "running")) {
 					if (timer) return;
 					timer = setInterval(() => tui.requestRender(), 1_000);
 					timer.unref?.();
@@ -234,7 +276,7 @@ export function installActiveRunsWidget(ctx: Pick<ExtensionContext, "mode" | "ui
 			syncTimer();
 
 			return {
-				render: (width: number) => formatActiveRunLines(monitor.getRuns(), theme, width, Date.now()),
+				render: (width: number) => formatSubagentWidgetLines(monitor.getRuns(), monitor.getWorkflows(), theme, width, Date.now()),
 				invalidate() {},
 				dispose() {
 					disposed = true;

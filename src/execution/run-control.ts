@@ -1,4 +1,4 @@
-/** Shared RPC result types and stable logical-run control. */
+/** Shared one-shot result types and stable logical-run control. */
 
 import type { Message } from "@earendil-works/pi-ai";
 import type { ThinkingLevel } from "../configuration/config.ts";
@@ -14,7 +14,7 @@ export interface UsageStats {
 	turns: number;
 }
 
-export interface RpcSingleResult {
+export interface RunResult {
 	agent: string;
 	task: string;
 	exitCode: number;
@@ -28,21 +28,8 @@ export interface RpcSingleResult {
 	/** Selected model when this result handed off to the current main model. */
 	modelFallbackFrom?: string;
 	dispatchFailed?: boolean;
-	/** An accepted generation failed because an RPC prompt was rejected before
-	 * model execution. This remains main-model handoff eligible even when an
-	 * earlier, aborted objective left assistant text in the session. */
-	rpcPromptRejected?: boolean;
-	/** Startup handshake failed before the initial prompt was dispatched. This
-	 * transport miss is safe to retry and is not a model/provider failure. */
-	rpcStartupFailed?: boolean;
-	/** The parent dispatched the initial prompt command. Until its response is
-	 * observed, Pi may already be running it, so startup retries must not replay it. */
-	rpcPromptDispatched?: boolean;
-	/** The child confirmed prompt acceptance (or emitted agent activity). */
-	rpcPromptAccepted?: boolean;
-	/** Pi emitted agent/turn/model/tool activity for this attempt. */
-	rpcActivity?: boolean;
-	startupRetries?: number;
+	/** Pi emitted agent, message, or tool activity for this attempt. */
+	activityObserved?: boolean;
 	failedTools?: Array<{ toolName: string; error: string }>;
 	sessionId?: string;
 	sessionDir?: string;
@@ -73,12 +60,11 @@ export type SubagentLiveEvent =
 	| { kind: "thinking" }
 	| { kind: "text" };
 
-export type RpcControlPhase =
+export type RunControlPhase =
 	| "queued"
 	| "starting"
 	| "running"
 	| "interrupting"
-	| "retrying"
 	| "settled"
 	| "stopped";
 
@@ -86,8 +72,8 @@ export interface AttemptControl {
 	stop(reason?: string): Promise<void>;
 }
 
-/** Prevent RPC prompt expansion when a message starts with a slash command. */
-export function asPlainTextRpcPrompt(message: string): string {
+/** Prevent CLI prompt expansion when a message starts with a slash command. */
+export function asPlainTextPrompt(message: string): string {
 	if (!message.trimStart().startsWith("/")) return message;
 	return `Treat the following as plain-text sub-agent instructions, not a Pi command:\n\n${message}`;
 }
@@ -95,11 +81,11 @@ export function asPlainTextRpcPrompt(message: string): string {
 /**
  * Stable control surface for a logical run generation. Startup/main-handoff attempts
  * attach and detach beneath it, so callers never retain a stale child handle.
- * Control calls are serialized to prevent overlapping abort/settle/prompt flows.
+ * Control calls are serialized to prevent overlapping stop and settlement flows.
  */
-export class RpcRunControl {
+export class RunControl {
 	private objective: string;
-	private phase: RpcControlPhase = "queued";
+	private phase: RunControlPhase = "queued";
 	private attempt?: { token: number; control: AttemptControl };
 	private nextToken = 1;
 	private serial: Promise<void> = Promise.resolve();
@@ -107,12 +93,12 @@ export class RpcRunControl {
 	private stopMessage = "Subagent was aborted";
 	private childPids = new Set<number>();
 	readonly generation: number;
-	private readonly onPhase?: (phase: RpcControlPhase) => void;
+	private readonly onPhase?: (phase: RunControlPhase) => void;
 
 	constructor(
 		objective: string,
 		generation: number,
-		onPhase?: (phase: RpcControlPhase) => void,
+		onPhase?: (phase: RunControlPhase) => void,
 	) {
 		this.objective = objective;
 		this.generation = generation;
@@ -123,7 +109,7 @@ export class RpcRunControl {
 		return this.objective;
 	}
 
-	getPhase(): RpcControlPhase {
+	getPhase(): RunControlPhase {
 		return this.phase;
 	}
 
@@ -150,10 +136,6 @@ export class RpcRunControl {
 		this.setPhase("starting");
 	}
 
-	markRetrying(): void {
-		if (!this.stopRequested) this.setPhase("retrying");
-	}
-
 	markSettled(): void {
 		this.attempt = undefined;
 		if (!this.stopRequested) this.setPhase("settled");
@@ -172,7 +154,7 @@ export class RpcRunControl {
 		if (this.attempt?.token === token) this.attempt = undefined;
 	}
 
-	updateAttemptPhase(token: number, phase: RpcControlPhase): void {
+	updateAttemptPhase(token: number, phase: RunControlPhase): void {
 		if (this.attempt?.token !== token) return;
 		this.setPhase(phase);
 	}
@@ -192,7 +174,7 @@ export class RpcRunControl {
 		});
 	}
 
-	private setPhase(phase: RpcControlPhase): void {
+	private setPhase(phase: RunControlPhase): void {
 		if (this.phase === phase) return;
 		this.phase = phase;
 		try {

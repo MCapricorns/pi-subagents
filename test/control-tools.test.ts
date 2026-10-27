@@ -4,7 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, it } from "node:test";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
-import { emptyUsage, RpcRunControl, type AttemptControl } from "../src/execution/rpc-control.ts";
+import { emptyUsage, RunControl, type AttemptControl } from "../src/execution/run-control.ts";
 import { createRuntime, type SubagentRuntime, type SubagentThread, type ThreadState } from "../src/lifecycle/runtime.ts";
 import { registerLookupTools } from "../src/lifecycle/tools.ts";
 import { formatCompletionBlock } from "../src/presentation/format.ts";
@@ -52,7 +52,7 @@ function makeThread(id: number, state: ThreadState = "running"): SubagentThread 
 		executionCwd: process.cwd(),
 		isolation: "shared",
 		state,
-		control: new RpcRunControl("Implement the original objective", 1),
+		control: new RunControl("Implement the original objective", 1),
 		generationCompletion: Promise.resolve(),
 		lifecycleVersion: 0,
 		elapsedMs: 0,
@@ -71,7 +71,7 @@ async function shutdown(runtime: SubagentRuntime): Promise<void> {
 	await runtime.shutdown();
 }
 
-function attachRunning(control: RpcRunControl, attempt: AttemptControl): void {
+function attachRunning(control: RunControl, attempt: AttemptControl): void {
 	const token = control.beginAttempt();
 	control.attach(token, attempt);
 	control.updateAttemptPhase(token, "running");

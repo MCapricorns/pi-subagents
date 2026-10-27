@@ -33,7 +33,7 @@ describe("loadBuiltinAgents", () => {
 			assert.ok(!("thinking" in agent));
 			assert.match(agent.systemPrompt, /loaded project instructions/u);
 			assert.match(agent.systemPrompt, /no interactive clarification/u);
-			assert.match(agent.systemPrompt, /Priority is the brief/u);
+			assert.match(agent.systemPrompt, /Follow the brief within loaded project instructions/u);
 			if (agent.name !== "scout") {
 				assert.match(agent.systemPrompt, /do not dispatch agents, bump versions, commit, push, publish, tag, or release/u);
 			}

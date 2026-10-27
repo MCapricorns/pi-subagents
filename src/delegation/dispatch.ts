@@ -33,7 +33,8 @@ import {
 	type PhaseScope,
 	type PhaseScopeInput,
 } from "./phase-scope.ts";
-import type { SubagentRuntime, SubagentThread } from "../lifecycle/runtime.ts";
+import { findPendingWorkflowPhase, type SubagentRuntime, type SubagentThread } from "../lifecycle/runtime.ts";
+import { cancelActiveWork } from "../lifecycle/cancellation.ts";
 import { createDispatchCore, type DispatchCore } from "../lifecycle/dispatch-core.ts";
 import {
 	getResultOutput,
@@ -76,7 +77,7 @@ export const ScopeSchema = Type.Optional(Type.Object({
 const WaitSchema = Type.Optional(
 	Type.Boolean({
 		description:
-			"Block until every run started by this call settles, then return each result exactly once in this tool response. If the tool call is aborted, undelivered results fall back to completion messages. Intended for one-shot (pi -p) sessions or an immediate dependent step.",
+			"Block until every run started by this call settles, then return each result exactly once in this tool response. Cancelling the parent stops its runs and suppresses background wake-ups. Intended for one-shot (pi -p) sessions or an immediate dependent step.",
 	}),
 );
 
@@ -233,7 +234,7 @@ function formatResultRow(r: SingleResult, theme: Theme): string {
  * model's spend into the main window's consumption line. */
 
 /** In-turn wait for a fresh dispatch. Registration resolves it without a model-chosen
- * timer; parent abort or removal ends the wait without losing background delivery. */
+ * timer; parent abort ends the wait and cancels its owned work. */
 async function awaitRunResults(
 	runtime: SubagentRuntime,
 	runIds: number[],
@@ -470,6 +471,8 @@ export function registerSubagentTool(
 				} catch (error) {
 					throw new Error(`Parallel admission rejected: ${error instanceof Error ? error.message : String(error)} No background tasks were started.`);
 				}
+				const pending = prepared.map((task) => findPendingWorkflowPhase(runtime, task.task, task.cwd, task.phaseId)).find(Boolean);
+				if (pending) throw new Error(`Workflow #${pending.workflowId} node "${pending.nodeId}" already owns a requested phase. No runs were started.`);
 				const conflict = parallelAdmissionConflict(prepared, runtime.threads.values());
 				if (conflict) {
 					throw new Error(`Parallel admission rejected: ${conflict}. No background tasks were started.`);
@@ -518,7 +521,7 @@ export function registerSubagentTool(
 				}
 				if (params.wait) {
 					const blocks = await awaitRunResults(runtime, startedIds, signal, DEFAULT_MAX_RESULT_LINES, ctx.cwd, makeProgress(makeDetails("parallel", true)(results)));
-					if (signal?.aborted) runtime.fallbackAwaitDelivery(startedIds);
+					if (signal?.aborted) await cancelActiveWork(runtime, "Parent run was cancelled.");
 					else runtime.completeAwaitDelivery(startedIds);
 					const resultText = failureLines.length > 0
 						? `${blocks}\n\nLaunch failures:\n${failureLines.join("\n")}`
@@ -575,7 +578,7 @@ export function registerSubagentTool(
 			}
 			if (params.wait && result.runId !== undefined) {
 				const blocks = await awaitRunResults(runtime, [result.runId], signal, DEFAULT_MAX_RESULT_LINES, ctx.cwd, makeProgress(makeDetails("single", true)([result])));
-				if (signal?.aborted) runtime.fallbackAwaitDelivery([result.runId]);
+				if (signal?.aborted) await cancelActiveWork(runtime, "Parent run was cancelled.");
 				else runtime.completeAwaitDelivery([result.runId]);
 				return {
 					content: [{ type: "text", text: blocks }],

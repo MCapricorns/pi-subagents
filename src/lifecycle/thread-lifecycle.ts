@@ -16,10 +16,10 @@ import { formatTaskSummary, monitor } from "../presentation/monitor.ts";
 import { findDuplicateDispatch } from "../delegation/prompt.ts";
 import { findWriterLeaseScopeOverlap, normalizePhaseId, normalizePhaseScope } from "../delegation/phase-scope.ts";
 import { persistRecoveryRecords, recoveryRecordFromFinalization } from "../isolation/recovery.ts";
-import type { SubagentRuntime, SubagentThread, ThreadState } from "./runtime.ts";
+import { findPendingWorkflowPhase, type SubagentRuntime, type SubagentThread, type ThreadState } from "./runtime.ts";
 import {
 	getProjectRoot,
-	RpcRunControl,
+	RunControl,
 	isFailedResult,
 	isModelLevelFailure,
 	runSingleAgentWithMainFallback,
@@ -123,6 +123,8 @@ export function createBackgroundDispatcher(options: BackgroundDispatcherOptions)
 				isolation,
 			};
 		}
+		const pendingOwner = findPendingWorkflowPhase(runtime, task, originalCwd, phaseId, startOptions.workflow?.workflowId);
+		if (pendingOwner) return failedStartResult(agentName, task, `Workflow #${pendingOwner.workflowId} node "${pendingOwner.nodeId}" already owns this pending phase. Inspect the graph with subagent_status; main handles follow-up work.`);
 		const duplicate = findDuplicateDispatch(runtime.threads.values(), task, originalCwd, phaseId);
 		if (duplicate) {
 			// A phase stays owned across reloads: an interrupted run keeps its claim
@@ -160,7 +162,7 @@ export function createBackgroundDispatcher(options: BackgroundDispatcherOptions)
 			isolation,
 			...(startOptions.workflow ? { workflow: startOptions.workflow } : {}),
 		});
-		runtime.claimRunDelivery(runId, startOptions.deliveryRoute ?? "background");
+		if (!quiet) runtime.claimRunDelivery(runId, startOptions.deliveryRoute ?? "background");
 		const generation = 1;
 		const pending: SingleResult = {
 			...queuedResult(route.agent, task, thinkingLevel),
@@ -171,7 +173,7 @@ export function createBackgroundDispatcher(options: BackgroundDispatcherOptions)
 		};
 
 		let thread!: SubagentThread;
-		const control = new RpcRunControl(task, generation, (phase) => {
+		const control = new RunControl(task, generation, (phase) => {
 			if (runtime.threads.get(runId)?.generation !== generation || phase === "settled") return;
 			const state: ThreadState =
 				phase === "queued" || phase === "starting"
@@ -195,6 +197,7 @@ export function createBackgroundDispatcher(options: BackgroundDispatcherOptions)
 			phaseId,
 			scope,
 			writeCapable,
+			...(startOptions.workflow ? { workflow: startOptions.workflow } : {}),
 			cwd: originalCwd,
 			executionCwd,
 			thinkingLevel,
@@ -314,14 +317,14 @@ export function createBackgroundDispatcher(options: BackgroundDispatcherOptions)
 			// result on the thread for that owner to finalize and deliver once.
 			if (lifecycleInterrupted()) return;
 
-			// A shutdown can win in the microtask gap after the child RPC
+			// A shutdown can win in the microtask gap after the child
 			// settles. Never replace the stable top-level session with an
 			// aborted partial.
 			if (backgroundSignal.aborted || !runtime.sessionActive) return;
 
 			if (thread.retireOnSettle) runtime.retireThreadSession(thread);
 			// Claim terminal settlement synchronously before the first slow await.
-			// Park therefore either wins while RPC is still active, or is rejected
+			// Shutdown therefore either wins while the child is still active, or is rejected
 			// once settlement owns the generation. Destructive stop may supersede
 			// this reservation; publication is revalidated after Git finalization.
 			const settlementVersion = ++thread.lifecycleVersion;
@@ -376,7 +379,8 @@ export function createBackgroundDispatcher(options: BackgroundDispatcherOptions)
 						runCtx.ui.notify(`✗ ${result.agent} dispatch failed: ${detail} — task handed to the main window`, "error");
 					} else if (dispatchFailed) {
 						runCtx.ui.notify(`✗ ${result.agent} dispatch failed: ${notifyDetail(result.errorMessage, "dispatch crashed")}`, "error");
-				}
+					}
+					runtime.publishRunCompletion(runId, completion, failed);
 				}
 			} finally {
 				if (ownsSettlement()) thread.lifecycleOperation = undefined;

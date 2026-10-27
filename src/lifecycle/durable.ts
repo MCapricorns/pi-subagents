@@ -18,7 +18,7 @@ import { existsSync, type Dirent, readdirSync, statSync } from "node:fs";
 import { mkdir, readFile, realpath, rename, rm, writeFile } from "node:fs/promises";
 import { uptime } from "node:os";
 import { dirname, isAbsolute, join, relative, resolve } from "node:path";
-import type { UsageStats } from "../execution/rpc-control.ts";
+import type { UsageStats } from "../execution/run-control.ts";
 import { normalizePhaseId, normalizePhaseScope, type PhaseScope } from "../delegation/phase-scope.ts";
 import type { SubagentThread } from "./runtime.ts";
 import { getResultOutput, isFailedResult, getProjectRoot, getSubagentsRoot, type SingleResult } from "../execution/spawn.ts";

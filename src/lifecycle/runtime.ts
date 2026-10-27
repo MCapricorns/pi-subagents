@@ -9,6 +9,7 @@
  */
 
 import type { ExtensionAPI, ToolInfo } from "@earendil-works/pi-coding-agent";
+import { findDuplicateDispatch } from "../delegation/prompt.ts";
 import type { PhaseScope } from "../delegation/phase-scope.ts";
 import { rmSync } from "node:fs";
 import { resolveSubagentConcurrency, BackgroundTaskQueue } from "../execution/background.ts";
@@ -21,8 +22,8 @@ import {
 } from "./completion.ts";
 import { type ThinkingLevel } from "../configuration/config.ts";
 import { removeThreadRecord, threadRecordFromThread, upsertThreadRecord, type ThreadRecord } from "./durable.ts";
-import { isRunActiveStatus, monitor } from "../presentation/monitor.ts";
-import type { RpcRunControl } from "../execution/rpc-control.ts";
+import { isRunActiveStatus, monitor, type RunWorkflowTag } from "../presentation/monitor.ts";
+import type { RunControl } from "../execution/run-control.ts";
 import { isFailedResult, type SingleResult } from "../execution/spawn.ts";
 import type { IsolationMode, WorktreeFinalization, WorktreeIsolation } from "../isolation/worktree.ts";
 import type { WorkflowRun } from "../workflow/state.ts";
@@ -40,6 +41,8 @@ export interface SubagentThread {
 	scope?: PhaseScope;
 	/** Capability snapshot used by declared-scope admission, including after restore. */
 	writeCapable?: boolean;
+	/** Live graph membership; graph summaries own delivery for these runs. */
+	workflow?: RunWorkflowTag;
 	/** Caller-facing cwd in the original worktree. */
 	cwd: string;
 	/** Actual child cwd (the equivalent path inside an isolated worktree). */
@@ -51,7 +54,7 @@ export interface SubagentThread {
 	/** Original durable evidence retained when its worktree handle is unavailable. */
 	restorationRecord?: ThreadRecord;
 	state: ThreadState;
-	control: RpcRunControl;
+	control: RunControl;
 	queueController?: AbortController;
 	/** Resolves after the child, isolation finalization, and queue work fully quiesce. */
 	generationCompletion: Promise<void>;
@@ -83,6 +86,9 @@ export interface SubagentRuntime {
 	getToolInfos: () => ToolInfo[];
 	/** False after session_shutdown; guards delivery and queue work. */
 	sessionActive: boolean;
+	/** Cancelling a parent must not wake it again with old child results. */
+	suppressCompletions: boolean;
+	discardCompletions: () => void;
 	/** Resolves when the load-time durable restore pass has finished. Everything
 	 * that answers "which threads exist" awaits it — the lookup tools, a fresh
 	 * dispatch before it allocates a run id, and the restored-thread notice — so
@@ -103,8 +109,6 @@ export interface SubagentRuntime {
 	publishRunCompletion: (runId: number, item: CompletionMessageItem, immediate: boolean) => void;
 	/** Mark awaited results as returned in the tool response. */
 	completeAwaitDelivery: (runIds: readonly number[]) => void;
-	/** Transfer aborted awaited calls back to completion delivery. */
-	fallbackAwaitDelivery: (runIds: readonly number[]) => void;
 	completionBatcher: CompletionBatcher<CompletionMessageItem>;
 	/** Abort controllers per active run, so subagent_stop can cancel a run in-turn. */
 	runControllers: Map<number, AbortController>;
@@ -133,6 +137,26 @@ export interface SubagentRuntime {
 	shutdown: () => Promise<void>;
 }
 
+/** Pending nodes reserve their phases before they allocate ordinary run ids. */
+export function findPendingWorkflowPhase(
+	runtime: Pick<SubagentRuntime, "workflows">,
+	task: string,
+	cwd: string,
+	phaseId?: string,
+	excludeWorkflowId?: number,
+): { workflowId: number; nodeId: string; agent: string } | undefined {
+	for (const graph of runtime.workflows.values()) {
+		if (graph.state !== "running" || graph.id === excludeWorkflowId) continue;
+		for (const node of graph.nodes) {
+			if (node.state !== "pending" && !(node.state === "running" && node.runId === undefined)) continue;
+			if (findDuplicateDispatch([{ id: graph.id, agentName: node.agent, task: node.task, cwd: node.cwd, phaseId: node.phaseId, state: "queued" }], task, cwd, phaseId)) {
+				return { workflowId: graph.id, nodeId: node.id, agent: node.agent };
+			}
+		}
+	}
+	return undefined;
+}
+
 export function createRuntime(pi: ExtensionAPI, configPath: string): SubagentRuntime {
 	const backgroundQueue = new BackgroundTaskQueue(resolveSubagentConcurrency());
 	let nextWorkflowId = 1;
@@ -143,22 +167,24 @@ export function createRuntime(pi: ExtensionAPI, configPath: string): SubagentRun
 	let compactionInFlight = false;
 	let heldCompletions: CompletionMessageItem[] = [];
 
-	const runDeliveries = new Map<number, {
-		route: "background" | "await";
-		completion?: CompletionMessageItem;
-		immediate: boolean;
-	}>();
+	const runDeliveries = new Map<number, "background" | "await">();
 	const runtime: SubagentRuntime = {
 		configPath,
 		backgroundQueue,
 		getActiveTools: () => pi.getActiveTools(),
 		getToolInfos: () => pi.getAllTools(),
 		sessionActive: true,
+		suppressCompletions: false,
+		discardCompletions: () => {
+			runtime.completionBatcher.dispose();
+			heldCompletions = [];
+			runDeliveries.clear();
+		},
 		durableRestore: Promise.resolve(),
 		restoredRunIds: [],
 		restoredNotified: false,
 		sendCompletionGroup: (items) => {
-			if (!runtime.sessionActive || items.length === 0) return;
+			if (!runtime.sessionActive || runtime.suppressCompletions || items.length === 0) return;
 			// Direct (immediate-failure/stop) delivery must follow successes already
 			// held by the debounce batcher. A batcher's own emit sees an empty batch.
 			runtime.completionBatcher?.flush();
@@ -190,14 +216,11 @@ export function createRuntime(pi: ExtensionAPI, configPath: string): SubagentRun
 			pi.sendMessage(message, { deliverAs: "steer", triggerTurn: true });
 		},
 		claimRunDelivery: (runId, route) => {
-			runDeliveries.set(runId, { route, immediate: false });
+			runDeliveries.set(runId, route);
 		},
 		publishRunCompletion: (runId, item, immediate) => {
-			const delivery = runDeliveries.get(runId) ?? { route: "background" as const, immediate: false };
-			delivery.completion = item;
-			delivery.immediate = immediate;
-			runDeliveries.set(runId, delivery);
-			if (delivery.route === "await") return;
+			if (runtime.suppressCompletions) { runDeliveries.delete(runId); return; }
+			if (runDeliveries.get(runId) === "await") return;
 			runDeliveries.delete(runId);
 			if (immediate) {
 				runtime.sendCompletionGroup([item]);
@@ -207,20 +230,10 @@ export function createRuntime(pi: ExtensionAPI, configPath: string): SubagentRun
 		},
 		completeAwaitDelivery: (runIds) => {
 			for (const runId of runIds) {
-				const delivery = runDeliveries.get(runId);
-				if (delivery?.route === "await") runDeliveries.delete(runId);
+				if (runDeliveries.get(runId) === "await") runDeliveries.delete(runId);
 			}
 		},
-		fallbackAwaitDelivery: (runIds) => {
-			for (const runId of runIds) {
-				const delivery = runDeliveries.get(runId);
-				if (!delivery || delivery.route !== "await") continue;
-				delivery.route = "background";
-				if (delivery.completion) {
-					runtime.publishRunCompletion(runId, delivery.completion, delivery.immediate);
-				}
-			}
-		},
+
 		completionBatcher: undefined as unknown as CompletionBatcher<CompletionMessageItem>,
 		runControllers: new Map<number, AbortController>(),
 		settledRuns: new Map<number, SingleResult>(),

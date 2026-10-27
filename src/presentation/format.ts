@@ -6,7 +6,7 @@
 
 import type { AgentConfig } from "../delegation/agents.ts";
 import { formatUsageCompact, runLabel, shrinkRunLabel } from "./monitor.ts";
-import { emptyUsage } from "../execution/rpc-control.ts";
+import { emptyUsage } from "../execution/run-control.ts";
 import {
 	RESULT_LINE_MAX,
 	getResultError,
@@ -87,16 +87,13 @@ export function formatCompletionBlock(
 	const fallbackNote = result.modelFallbackFrom
 		? ` (selected model ${result.modelFallbackFrom} failed → main ${result.model ?? "dynamic default"})`
 		: "";
-	const startupRetryNote = result.startupRetries
-		? ` (recovered after ${result.startupRetries} startup retr${result.startupRetries === 1 ? "y" : "ies"} — concurrent pi startup race)`
-		: "";
 	const runNote = result.runId !== undefined ? ` · run #${result.runId}` : "";
 	// A short task-derived label, not the task itself: the parent authored the
 	// task and still has it in context, but a wide fan-out of same-agent runs
 	// needs more than a run id to tell completions apart.
 	const label = shrinkRunLabel(runLabel(result.task), COMPLETION_LABEL_MAX);
 	const lines = [
-		`### [${result.agent}${label ? `·${label}` : ""}] ${status}${usage ? ` (${usage})` : ""}${fallbackNote}${startupRetryNote}${runNote}`,
+		`### [${result.agent}${label ? `·${label}` : ""}] ${status}${usage ? ` (${usage})` : ""}${fallbackNote}${runNote}`,
 		"",
 	];
 	if (result.isolation === "worktree") {

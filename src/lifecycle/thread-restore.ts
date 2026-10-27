@@ -13,12 +13,12 @@ import {
 	type ThreadRecord,
 } from "./durable.ts";
 import { monitor } from "../presentation/monitor.ts";
-import { emptyUsage } from "../execution/rpc-control.ts";
+import { emptyUsage } from "../execution/run-control.ts";
 import type { SubagentRuntime, SubagentThread, ThreadState } from "./runtime.ts";
 import {
 	getProjectRoot,
 	getSubagentsRoot,
-	RpcRunControl,
+	RunControl,
 	sessionExists,
 	sweepProjectResultArtifacts,
 	type SingleResult,
@@ -60,7 +60,7 @@ function createRestoredThread(
 		isolation: record.isolation,
 		worktree,
 		state,
-		control: new RpcRunControl(record.task, record.generation),
+		control: new RunControl(record.task, record.generation),
 		generationCompletion: Promise.resolve(),
 		lifecycleVersion: 0,
 		elapsedMs: record.elapsedMs,

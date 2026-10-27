@@ -3,7 +3,7 @@
  * extension creates under a project's durable root.
  *
  * Two classes live there and both are swept the same way. Transient per-run
- * files (child prompt copies, the no-retry policy extension) sit in `tmp/`;
+ * files (child prompt copies) sit in `tmp/`;
  * retained child sessions and isolated worktrees sit in `sessions/` and
  * `worktrees/`, where they must outlive the process that made them for manual
  * recovery after reload. Every mkdtemp directory gets an owner marker with the
@@ -28,8 +28,7 @@ import { join } from "node:path";
 export const TEMP_OWNER_FILE_NAME = "owner.json";
 
 /** Transient directories created under `<project>/tmp`: the child prompt
- * copies (`pi-subagents-*`) and the no-retry policy extension
- * (`pi-subagents-policy-*`). The singular `pi-subagent-` prefixes below belong
+ * copies (`pi-subagents-*`), including policy-shim leftovers from older releases. The singular `pi-subagent-` prefixes below belong
  * to the durable roots and are swept separately, under a reference guard. */
 const TEMP_DIR_PREFIXES = ["pi-subagents-"] as const;
 

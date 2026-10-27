@@ -1,50 +1,38 @@
 ---
 name: migration
-description: Map a migration, plan it, change disjoint slices in parallel, then run the project gate.
+description: Apply two already planned migration slices, then challenge the integrated result with the project gate.
 ---
 
 # Migration workflow
 
-One node finds the ground truth, one plans, two independent slices are changed
-at the same time, and one gate decides whether the migration is done.
-
-The two `apply` nodes run concurrently, so they must touch disjoint paths:
-replace the example `scope.paths` with the directories each slice owns. The
-compile step rejects the graph if those scopes overlap without a dependency
-between them.
+Use this template after main has established the target, interface contract,
+and disjoint writer scopes. If discovery determines those boundaries, run that
+discovery first and decide in main; a static graph cannot rewrite its own nodes.
+Replace <TARGET>, both slice briefs, and the example paths before running.
+Each slice owns its implementation and regression tests. Keep coupled changes
+with one owner. Add a separate adversarial reviewer for risk that the gate cannot
+cover; main still owns final integration and release.
 
 ```json
 {
   "nodes": [
     {
-      "id": "map",
-      "agent": "scout",
-      "task": "Map the migration to <TARGET>: every module that must change, where the old API is used, the tests that cover it, and the project's verification commands. Cite path:line. Do not change anything."
-    },
-    {
-      "id": "plan",
-      "agent": "artisan",
-      "task": "Plan the migration in slices that two agents can do concurrently without touching each other's files, in dependency order. For each slice: the paths it owns, the exact change, and the check that proves it.\n\n{{map}}",
-      "dependsOn": ["map"]
-    },
-    {
       "id": "apply-core",
       "agent": "artisan",
-      "task": "Implement the core slice of this plan and nothing outside the paths you own. Run the checks that slice needs.\n\n{{plan}}",
-      "dependsOn": ["plan"],
-      "scope": { "paths": ["src/core"] }
+      "task": "Migrate the core slice to <TARGET>. <CORE_CHANGE>. Follow the interface contract and paths main established. Implement the change and its regression tests together; run the relevant checks. Report changed paths, command results, and blockers. If the plan conflicts with the code or requires another slice's files, stop and report evidence rather than inventing a new scope.",
+      "scope": { "paths": ["src/core", "test/core"] }
     },
     {
       "id": "apply-adapters",
       "agent": "artisan",
-      "task": "Implement the adapter slice of this plan and nothing outside the paths you own. Run the checks that slice needs.\n\n{{plan}}",
-      "dependsOn": ["plan"],
-      "scope": { "paths": ["src/adapters"] }
+      "task": "Migrate the adapter slice to <TARGET>. <ADAPTER_CHANGE>. Follow the interface contract and paths main established. Implement the change and its regression tests together; run the relevant checks. Report changed paths, command results, and blockers. If the plan conflicts with the code or requires another slice's files, stop and report evidence rather than inventing a new scope.",
+      "scope": { "paths": ["src/adapters", "test/adapters"] }
     },
     {
       "id": "gate",
       "agent": "artisan",
-      "task": "Run the repository's own verification: install if needed, then the full test suite, typecheck, and build the project defines. Fix only what the migration broke, in the smallest correct way. Report each command with its result, and say plainly if something is still failing.\n\nCore slice:\n{{apply-core}}\n\nAdapter slice:\n{{apply-adapters}}",
+      "isolation": "shared",
+      "task": "Challenge the integrated migration using the project's documented required checks and the interface contract. Run the required commands; inspect cross-slice call sites for mismatches. Fix failures caused by this migration within its authorized scope. Report commands, results, and unverified risks.\n\nCore:\n{{apply-core}}\n\nAdapters:\n{{apply-adapters}}",
       "dependsOn": ["apply-core", "apply-adapters"]
     }
   ]

@@ -16,10 +16,10 @@
  */
 
 import { type Dirent, existsSync, readdirSync, readFileSync, statSync } from "node:fs";
-import { basename, dirname, join } from "node:path";
+import { basename, dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { CONFIG_DIR_NAME, getAgentDir, parseFrontmatter } from "@earendil-works/pi-coding-agent";
-import type { WorkflowNodeInput, WorkflowPlanInput } from "./plan.ts";
+import type { WorkflowPlanInput } from "./plan.ts";
 
 /** Which workflow directories discovery reads. Same precedence as the templates
  * they ship with: project > user > built-in for the same name. */
@@ -58,43 +58,19 @@ function findNearestProjectWorkflowsDir(cwd: string): string | null {
 	}
 }
 
-const NODE_ID_PATTERN = /^[A-Za-z][A-Za-z0-9._-]*$/u;
-
-function asNode(value: unknown): WorkflowNodeInput | undefined {
-	if (!value || typeof value !== "object") return undefined;
-	const raw = value as Record<string, unknown>;
-	if (typeof raw.id !== "string" || !NODE_ID_PATTERN.test(raw.id.trim())) return undefined;
-	if (typeof raw.agent !== "string" || raw.agent.trim().length === 0) return undefined;
-	if (typeof raw.task !== "string" || raw.task.trim().length === 0) return undefined;
-	const dependsOn = Array.isArray(raw.dependsOn)
-		? raw.dependsOn.filter((dep): dep is string => typeof dep === "string")
-		: undefined;
-	return {
-		id: raw.id.trim(),
-		agent: raw.agent.trim(),
-		task: raw.task,
-		...(dependsOn && dependsOn.length > 0 ? { dependsOn } : {}),
-		...(typeof raw.phaseId === "string" ? { phaseId: raw.phaseId } : {}),
-		...(raw.scope && typeof raw.scope === "object" ? { scope: raw.scope as WorkflowNodeInput["scope"] } : {}),
-		...(typeof raw.cwd === "string" ? { cwd: raw.cwd } : {}),
-		...(raw.isolation === "shared" || raw.isolation === "worktree" ? { isolation: raw.isolation } : {}),
-	};
-}
-
 /** Accept either the full plan object or a bare node array. */
 function asPlan(value: unknown, fallbackName: string): WorkflowPlanInput | undefined {
 	const raw = Array.isArray(value) ? { nodes: value } : value;
 	if (!raw || typeof raw !== "object") return undefined;
 	const record = raw as Record<string, unknown>;
 	if (!Array.isArray(record.nodes)) return undefined;
-	const nodes = record.nodes.map(asNode);
-	if (nodes.some((node) => node === undefined)) return undefined;
 	return {
 		name: typeof record.name === "string" && record.name.trim() ? record.name.trim() : fallbackName,
 		...(typeof record.description === "string" && record.description.trim()
 			? { description: record.description.trim() }
 			: {}),
-		nodes: nodes as WorkflowNodeInput[],
+		// The compiler validates every field; never sanitize away dependencies.
+		nodes: record.nodes as WorkflowPlanInput["nodes"],
 	};
 }
 
@@ -116,7 +92,7 @@ export function readWorkflowFile(
 	} catch (error) {
 		return { error: `${filePath}: ${error instanceof Error ? error.message : String(error)}` };
 	}
-	if (filePath.endsWith(".json")) {
+	if (/\.json$/iu.test(filePath)) {
 		let parsed: unknown;
 		try {
 			parsed = JSON.parse(content);
@@ -157,7 +133,7 @@ function loadDefinitionsFromDir(dir: string, source: WorkflowSource): WorkflowDe
 	}
 	const definitions: WorkflowDefinition[] = [];
 	for (const entry of entries) {
-		if (!entry.name.endsWith(".json") && !entry.name.endsWith(".md")) continue;
+		if (!/\.(?:json|md)$/iu.test(entry.name)) continue;
 		if (!entry.isFile() && !entry.isSymbolicLink()) continue;
 		const { definition } = readWorkflowFile(join(dir, entry.name), source);
 		if (definition) definitions.push(definition);
@@ -176,7 +152,7 @@ export interface DiscoverWorkflowsOptions {
  * builtin precedence for the same name and sorted by name.
  */
 export function discoverWorkflows(cwd: string, options: DiscoverWorkflowsOptions = {}): WorkflowDefinition[] {
-	const scope = options.scope ?? "user";
+	const scope = options.scope ?? "both";
 	const projectDir = findNearestProjectWorkflowsDir(cwd);
 	const builtin = loadDefinitionsFromDir(options.builtinDir ?? BUILTIN_WORKFLOWS_DIR, "builtin");
 	const user = scope === "project" ? [] : loadDefinitionsFromDir(join(getAgentDir(), "workflows"), "user");
@@ -198,8 +174,10 @@ export function resolveWorkflowDefinition(
 	request: { name?: string; path?: string },
 	options: DiscoverWorkflowsOptions = {},
 ): { definition?: WorkflowDefinition; error?: string } {
+	if (request.name?.trim() && request.path?.trim()) return { error: "provide a workflow name or file path, not both." };
 	if (request.path) {
-		const filePath = join(cwd, request.path);
+		if (options.projectTrusted !== true) return { error: "workflow files require a trusted project." };
+		const filePath = resolve(cwd, request.path);
 		if (!existsSync(filePath)) return { error: `workflow file not found: ${filePath}` };
 		const read = readWorkflowFile(filePath, "project");
 		if (read.error) return { error: read.error };

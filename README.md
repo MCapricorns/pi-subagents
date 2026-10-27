@@ -8,10 +8,17 @@
 
 On-demand delegation for [pi](https://github.com/earendil-works/pi): a lightweight
 reader and an implementer, durable threads, and Git worktree isolation. Main
-delegates whenever the work has independent parts or a bounded job can be briefed
-self-contained — parallel phases usually beat a serialized main.
+delegates substantial, self-contained work when independent execution or a fresh
+context earns the briefing and integration cost.
 
 ## What's new
+
+**5.0.0** — native `pi --mode json` children replace the custom RPC transport.
+Ordinary completions are delivered again; cancelling the parent or navigating
+back stops owned work without waking it again. Workflows honor isolation, pass
+transitive results with bounded artifacts, and show graph progress and pending
+dependencies in the widget. Review prompts stay adversarial, with confirmation
+and synthesis chosen for the task's risk.
 
 **4.3.34** — a workflow that would reuse a phase this session already owns (a
 settled run, or an interrupted one retained from an earlier session) is now
@@ -62,10 +69,9 @@ at "spawn a child with a prompt" and leave the hard parts — when to delegate, 
 wide to fan out, what happens when a model dies, how results come
 back — with you. This extension owns them:
 
-- Main delegates whenever the work has independent parts or a bounded job can be
-  briefed self-contained — parallel phases usually beat a serialized main, and
-  broad or unfamiliar lookups go to a child instead of the same searches run
-  serially.
+- Main delegates substantial independent work when it saves time or context.
+  Quick source checks and tightly coupled edits stay in main; implementation
+  and its regression tests stay with one owner.
   `scout` covers read-only code, documentation, and web
   lookup only — it has no shell, so work that needs execution stays in main;
   `artisan` covers one substantial change. A small edit already understood in
@@ -116,7 +122,7 @@ You can also call the tools directly when you want exact control.
 | Agent     | Access    | Owns |
 | --------- | --------- | ---- |
 | `scout`   | Read-only | Searching code and documentation, and looking up external facts on the web. Returns citations as retrieval leads. No shell — it cannot run commands, tests, or builds. |
-| `artisan` | Full      | One substantial implementation, fix, refactor, test, or docs change, including the checks that change needs. |
+| `artisan` | Full      | A substantial change with its checks, or a review or validation that needs commands. |
 
 Role prompts state the outcome, the priority of the brief, and the hard boundary.
 Scout stays read-only. Artisan implements the authorized change through affected
@@ -135,9 +141,13 @@ facts and available citations, boundaries, and needed output. Children cannot
 obtain interactive clarification, so they resolve routine details and report
 material assumptions or blockers.
 
-Children run the official `pi --mode rpc` server, using Pi's exported command/response
-types and its own session persistence. There is no separate subagent protocol. The
-host transport remains local.
+Children run the official `pi --mode json` CLI once, with Pi's native resource
+loader, tools, extensions, retries, and session persistence. The parent consumes
+Pi's typed JSON events and waits for process exit after `agent_settled`. Prompts
+travel over stdin; there is no RPC handshake or command-response layer. Native
+Pi recovery runs first; a settled provider failure can then hand off once to the
+main model in the same retained session. Launch failures are reported without
+replaying an ambiguous prompt.
 
 ## Dispatching work
 
@@ -217,20 +227,23 @@ establish the facts, change independent slices at the same time, then run one
 gate. `subagent_workflow` declares that graph once. The runtime starts each node
 the moment its prerequisites settle and a process slot frees, so no parent model
 turn sits between waves, and it wakes the main agent once with a summary of the
-whole graph.
+whole graph. This is a fixed scheduler: main still decides the plan. If a
+result will determine later tasks or writer scopes, run that phase first and
+decide in main. Review is adversarial: look for counterexamples and try to
+disprove findings. Independent confirmation and a separate synthesis are useful
+for risky changes; combine or omit stages when the task does not justify them.
 
 ```ts
 subagent_workflow({
   name: "auth-fix",
-  description: "Map the refresh race, fix it, gate it.",
+  description: "Fix the refresh race and challenge the result.",
   nodes: [
-    { id: "map", agent: "scout", task: "Map the refresh race in src/auth. Cite path:line." },
-    { id: "fix", agent: "artisan", task: "Fix it. Evidence:\n{{map}}", dependsOn: ["map"],
-      scope: { paths: ["src/auth"] } },
-    { id: "tests", agent: "artisan", task: "Add regression tests. Evidence:\n{{map}}",
-      dependsOn: ["map"], scope: { paths: ["test/auth.test.ts"] } },
-    { id: "gate", agent: "artisan", task: "Run the checks.\nFix:\n{{fix}}\nTests:\n{{tests}}",
-      dependsOn: ["fix", "tests"] },
+    { id: "map", agent: "scout", task: "Trace the refresh race in src/auth. Cite path:line and test coverage gaps." },
+    { id: "fix", agent: "artisan", task: "Fix the race and add its regression tests. Evidence:\n{{map}}", dependsOn: ["map"],
+      scope: { paths: ["src/auth", "test/auth.test.ts"] } },
+    { id: "review", agent: "artisan", isolation: "shared",
+      task: "Try to disprove the fix: inspect callers and edge cases, then run the documented checks. Report evidence and unresolved risks; do not edit files.\n{{fix}}",
+      dependsOn: ["fix"] },
   ],
 });
 ```
@@ -238,7 +251,8 @@ subagent_workflow({
 - `{{id}}` interpolates that node's final answer into a dependent's brief;
   `{{id.status}}`, `{{id.runId}}`, and `{{id.error}}` interpolate facts. A
   placeholder may only name a node the current one waits for, directly or through
-  its chain; anything else is rejected at compile time.
+  its chain; anything else is rejected at compile time. Answers are capped at
+  6,000 characters per interpolation with a readable full-result artifact when clipped.
 - The graph is validated before the first child starts: unique ids, existing
   dependencies, no cycles, resolvable placeholders, and no declared writer-scope
   overlap between nodes that no dependency orders.
@@ -269,6 +283,12 @@ subagent_workflow({ workflow: "code-review" });
 subagent_workflow({ file: ".pi/workflows/code-review.md" });
 ```
 
+Copy and customize templates with `<QUESTION>`, `<TARGET>`, or slice placeholders
+before running them. The migration template expects scopes already decided by
+main; the code-review template deliberately retains separate adversarial
+reviewers, confirmation, and a report. Explicit definition file paths require a
+trusted project, and `name` can override a saved graph's display name.
+
 A Markdown definition carries prose plus one `json` fenced block holding the plan
 object or a bare node array. The package also ships a `workflow` skill
 (`skills/workflow/SKILL.md`) with the authoring guidance: when a graph is worth
@@ -277,8 +297,11 @@ its cost, how to slice phases, how to write briefs, and the anti-patterns.
 Derived phase ids are `<workflow-slug>.<node-id>`, and a phase stays owned after it
 settles and across reloads — an interrupted run keeps its claim until it is retired.
 A graph that reuses one is rejected before any node starts, naming each owning run;
-retire the owner with `subagent_stop({ id })`, or give those nodes different ids or
-`phaseId`s, or run the graph under a different name.
+inspect the owning run or graph and reuse its evidence. Main handles unfinished
+work. Retiring an interrupted owner with `subagent_stop({ id })` discards its
+retained session. A different deliverable needs a distinct brief and phase id;
+renaming a graph alone does not bypass exact task matching. Pending graph nodes
+reserve their phases before they allocate run ids.
 
 `subagent_status({ workflow: id })` reports nodes and their wait reasons;
 `subagent_stop({ workflow: id })` stops a graph without starting its idle
@@ -376,12 +399,17 @@ A background dispatch returns a launch receipt, then its completion arrives at
 the next safe parent boundary — after current tool calls and before the next model
 call. `wait: true` instead holds the dispatch until its new runs settle, which is
 useful for one-shot `pi -p` sessions or an immediate dependency. Each run has one
-delivery route; aborting the waiting parent turn transfers delivery to the
-background path. Use status for on-demand inspection, not a polling or sleep loop.
+delivery route. Cancelling the parent stops its active runs and graphs, including
+queued nodes, and suppresses completion wake-ups from that work. Use status for on-demand inspection, not a polling or sleep loop.
 
-Stop drops messages still queued inside Pi, performs a bounded RPC abort, and
-terminates the child process tree. It retires the session; it never starts another
-attempt. Worktree integration failures keep their recovery artifacts.
+Stop terminates the child process tree, finalizes isolated changes, and retires
+the session; it never starts another attempt. Worktree integration failures keep
+their recovery artifacts. A graph waits for node cleanup before its summary.
+
+Cancelling the parent run (Escape) or navigating back in the conversation tree
+stops its unfinished work without waking the parent again. New/resume/fork/reload
+uses Pi's `session_shutdown`: old children end, undelivered completions are
+discarded, and interrupted artifacts remain available for manual recovery.
 
 Interrupted work retains a durable record and any session/worktree artifacts for
 manual recovery after reload or crash. Missing session files no longer discard
@@ -420,6 +448,22 @@ usage, model, thinking) while elapsed survives every width. Queued rows state
 what they actually wait for — `queued` for a free process slot, `repo lane`
 for shared-checkout write serialization, or `starting`. The widget is
 capped at ten lines: extra runs collapse into a `… +N more` marker.
+
+Workflow runs are grouped under their graph with overall state and node counts.
+Pending nodes appear before they have run ids, with the dependency they await;
+queued nodes distinguish process slots, repository lanes, and startup. Failures
+and blocked branches remain visible while independent work continues:
+
+```text
+workflow #3 auth-fix · running · 1/3 completed · 1 running · 1 waiting
+  ✓ map (scout) #12 · completed
+  ● fix (artisan) #13 · read src/auth.ts · 34s
+  ○ review (artisan) · waits for fix
+```
+
+Graph-only transitions refresh the widget immediately. Settled graphs remain
+until the next dispatch, and wide graphs show an overflow count within the same
+ten-line bound. Standalone run rows keep their model, usage, and thinking display.
 
 Completions resume the main agent on their own, with a compact block of at most 40
 lines by default. Longer output (or lines wider than 200 characters) is not inlined
@@ -463,7 +507,7 @@ Auto choice and no per-dispatch `thinking` flag. Precedence: your setup override
 role default, then the model clamp. There is no separate vision mode — assign
 a multimodal model and name the image paths in the task.
 
-Every dispatch, startup retry, and model fallback snapshots the parent's live
+Every dispatch and model fallback snapshots the parent's live
 tools, and all `subagent*` tools are removed so children remain leaves. A broad
 role inherits that snapshot — including `codemode` when the session runs it — so
 a code-mode parent produces code-mode children under the same `codemode.mode`.
@@ -573,7 +617,7 @@ that removes it, so this directory does not grow without bound:
 | `ferris-pi-subagents/<project>/worktrees/` | Isolated checkouts for parallel writers              | On integration, or when no thread/recovery record claims them  |
 | `ferris-pi-subagents/<project>/results/`   | Full text of truncated results                       | After 7 days, or beyond 50 per project                           |
 | `ferris-pi-subagents/<project>/pi-subagents-workflows.json` | Shape and node state of unfinished workflow graphs | When the graph settles, or after 30 days                         |
-| `ferris-pi-subagents/<project>/tmp/`       | Child prompt copies and the no-retry policy shim     | When its owning process exits                                    |
+| `ferris-pi-subagents/<project>/tmp/`       | Temporary child prompt files     | When its owning process exits                                    |
 | `ferris-pi-subagents/<project>/`           | All of the above for one checkout                     | After 3 idle days unless a thread/recovery record claims it      |
 
 Cleanup runs at session start and is deliberately conservative. A directory goes

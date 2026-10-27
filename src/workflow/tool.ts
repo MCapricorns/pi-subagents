@@ -80,10 +80,11 @@ export interface WorkflowToolDetails {
 }
 
 function launchReceipt(status: WorkflowStatusView): string {
-	const started = status.nodes.filter((node) => !node.waitingFor && node.state === "running").length;
-	const waiting = status.nodes.filter((node) => node.state === "pending").length;
+	const started = status.nodes.filter((node) => node.runId !== undefined).length;
+	const waiting = status.nodes.filter((node) => node.waitingFor).length;
+	const starting = status.nodes.length - started - waiting;
 	const lines = [
-		"workflow #" + status.id + " " + status.name + " started · " + status.nodes.length + " node" + (status.nodes.length === 1 ? "" : "s") + " (" + started + " started, " + waiting + " waiting on dependencies)",
+		"workflow #" + status.id + " " + status.name + " started · " + status.nodes.length + " node" + (status.nodes.length === 1 ? "" : "s") + " (" + started + " dispatched, " + starting + " starting, " + waiting + " waiting on dependencies)",
 		...(status.description ? [status.description] : []),
 		"",
 		"Nodes:",
@@ -95,7 +96,7 @@ function launchReceipt(status: WorkflowStatusView): string {
 			return parts.join(" · ");
 		}),
 		"",
-		"The graph dispatches each dependent the moment its prerequisites settle, with no further dispatch from you. One summary arrives when the whole graph settles; continue disjoint work or end your turn, and do not poll. maxConcurrentAgents paces nodes, so a wide graph queues instead of refusing.",
+		"The graph dispatches each dependent the moment its prerequisites settle, with no further dispatch from you. One summary arrives when the whole graph settles; continue disjoint work or end your turn, and do not poll. The automatic process limit paces nodes, so a wide graph queues instead of refusing.",
 	];
 	return lines.join("\n");
 }
@@ -135,7 +136,7 @@ export function registerWorkflowTool(pi: ExtensionAPI, runtime: SubagentRuntime,
 		name: "subagent_workflow",
 		label: "Subagent Workflow",
 		description:
-			"Run a dependency graph of sub-agent phases: declare nodes with dependsOn, and the runtime dispatches each dependent as soon as its prerequisites settle and a process slot frees. Use it when a request has several phases with real ordering (map, then parallel changes, then a gate) and you would otherwise dispatch wave after wave by hand. One summary arrives when the graph settles. Nodes are ordinary one-shot runs; main still owns integration, the final gate, and release.",
+			"Run a dependency graph of sub-agent phases: declare nodes with dependsOn, and the runtime dispatches each dependent as soon as its prerequisites settle and a process slot frees. Use only when substantial phases, their ordering, and writer scopes are already known. If a result must decide the next task or its scope, dispatch that phase alone and decide in main. A graph saves dispatch turns; it does not plan or judge success beyond process results. One summary arrives when the graph settles. Nodes are ordinary one-shot runs; main still owns integration, the final gate, and release.",
 		exposure: "model-only",
 		executionMode: "sequential",
 		annotations: {
@@ -157,9 +158,9 @@ export function registerWorkflowTool(pi: ExtensionAPI, runtime: SubagentRuntime,
 			const toolInfos = runtime.getToolInfos();
 			core.setEnvironment({ ctx, config, agents });
 
-			const hasInline = (params.nodes?.length ?? 0) > 0;
+			const hasInline = params.nodes !== undefined;
 			const hasReference = Boolean(params.workflow?.trim() || params.file?.trim());
-			if (hasInline === hasReference) {
+			if (Number(hasInline) + Number(Boolean(params.workflow?.trim())) + Number(Boolean(params.file?.trim())) !== 1) {
 				throw new Error(
 					"Provide exactly one graph source: inline nodes, or a saved workflow/file. No nodes were started.",
 				);
@@ -182,9 +183,9 @@ export function registerWorkflowTool(pi: ExtensionAPI, runtime: SubagentRuntime,
 				}
 				const definition = resolved.definition;
 				plan = {
-					name: definition.plan.name ?? definition.name,
-					...(definition.plan.description ?? params.description
-						? { description: definition.plan.description ?? params.description }
+					name: params.name ?? definition.plan.name ?? definition.name,
+					...(params.description ?? definition.description
+						? { description: params.description ?? definition.description }
 						: {}),
 					nodes: definition.plan.nodes,
 				};
@@ -200,19 +201,29 @@ export function registerWorkflowTool(pi: ExtensionAPI, runtime: SubagentRuntime,
 				);
 			}
 
+			if (_signal?.aborted) throw new Error("Workflow cancelled before any node started.");
+			if (hasReference) {
+				const unfilled = [...new Set(workflow.nodes.flatMap((node) => node.task.match(/<(?:QUESTION|TARGET|CORE_CHANGE|ADAPTER_CHANGE)>/gu) ?? []))];
+				if (unfilled.length) throw new Error(`Customize ${unfilled.join(", ")} in the saved template before running it. No nodes were started.`);
+			}
+			for (const node of workflow.nodes) {
+				const agent = agents.find((candidate) => candidate.name === node.agent)!;
+				if (node.isolation === "worktree" && !isWriteCapableAgent(agent, toolInfos)) throw new Error(`Node "${node.id}" is read-only and cannot use worktree isolation. No nodes were started.`);
+			}
+
 			// Re-using a phase another owner holds fails the first node and blocks the
 			// rest; reject the whole graph instead, with the owners named.
 			const owned = findOwnedPhases(runtime, workflow);
 			if (owned.length > 0) {
 				const lines = owned.map((owner) =>
-					"- node \"" + owner.nodeId + "\" → phase \"" + owner.phaseId + "\" is already owned by run #" + owner.runId +
+					"- node \"" + owner.nodeId + "\" → phase \"" + owner.phaseId + "\" is already owned by " + (owner.runId !== undefined ? "run #" + owner.runId : "workflow #" + owner.workflowId + " node " + owner.ownerNodeId) +
 					" (" + owner.agent + ", " + owner.state + ")",
 				);
 				throw new Error(
 					"Workflow \"" + workflow.name + "\" was not started: " + owned.length + " of " + workflow.nodes.length +
 					" node" + (owned.length === 1 ? " reuses" : "s reuse") + " a phase this session already owns.\n" +
 					lines.join("\n") +
-					"\nRetire the owner with subagent_stop({ id: <run id> }) (destructive: it drops that run's retained session), give those nodes different ids or phaseIds, or run the graph under a different name. No nodes were started.",
+					"\nInspect the owning run or workflow with subagent_status and reuse its evidence. Main handles follow-up work. Retire an interrupted run with subagent_stop({ id: <run id> }) only when discarding its retained session is intended. A genuinely different deliverable needs a distinct brief and phaseId. No nodes were started.",
 				);
 			}
 
