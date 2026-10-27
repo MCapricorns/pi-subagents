@@ -52,7 +52,6 @@ export default (pi) => pi.registerProvider("fixture", {
 					agentName: "artisan", task: "Test native session preservation", thinkingLevel: "off", idleTimeoutMs: 0,
 					sessionRoot: join(root, "sessions"), scratchRoot: join(root, "scratch"),
 					env: { ...process.env, PI_CODING_AGENT_DIR: agentDir }, signal: AbortSignal.timeout(25_000),
-					makeDetails: (results) => ({ mode: "single", results }),
 				}, fallback ? "fixture/main" : undefined);
 				assert.equal(isFailedResult(result), false, getResultOutput(result) + "\n" + result.stderr);
 				assert.match(getResultOutput(result), /native completed/);

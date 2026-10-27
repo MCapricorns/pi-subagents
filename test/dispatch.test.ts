@@ -50,7 +50,6 @@ function dispatcher(threads: PhaseLeaseSource[]) {
 		}),
 		finishRun: () => undefined,
 		makeLiveHandler: () => () => undefined,
-		makeDetails: (mode, background = false) => (results) => ({ mode, background, results }),
 	});
 	return { runtime, start };
 }
@@ -105,7 +104,6 @@ describe("fresh write capability", () => {
 			}),
 			finishRun: () => undefined,
 			makeLiveHandler: () => () => undefined,
-			makeDetails: (mode, background = false) => (results) => ({ mode, background, results }),
 		});
 		try {
 			const result = await start("scout", "Map the dispatch path", process.cwd(), "worktree");

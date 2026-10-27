@@ -292,7 +292,6 @@ export interface RunSingleOptions {
 	resolveAgentForAttempt?: (agent: AgentConfig) => AgentConfig;
 	signal?: AbortSignal;
 	onLive?: (event: SubagentLiveEvent) => void;
-	makeDetails: (results: SingleResult[]) => SubagentDetails;
 	env?: NodeJS.ProcessEnv;
 	/** Stable logical-generation controller shared across model attempts. */
 	control?: RunControl;

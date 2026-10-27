@@ -127,7 +127,6 @@ export function createDispatchCore(runtime: SubagentRuntime): DispatchCore {
 		},
 		finishRun,
 		makeLiveHandler,
-		makeDetails,
 	});
 
 	return {

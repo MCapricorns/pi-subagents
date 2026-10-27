@@ -24,7 +24,6 @@ import {
 	isModelLevelFailure,
 	runSingleAgentWithMainFallback,
 	type SingleResult,
-	type SubagentDetails,
 	type SubagentLiveEvent,
 } from "../execution/spawn.ts";
 import {
@@ -66,10 +65,6 @@ interface BackgroundDispatcherOptions {
 		runId: number,
 		generation?: number,
 	) => (event: SubagentLiveEvent) => void;
-	makeDetails: (
-		mode: "single" | "parallel",
-		background?: boolean,
-	) => (results: SingleResult[]) => SubagentDetails;
 }
 
 export function createBackgroundDispatcher(options: BackgroundDispatcherOptions): StartBackgroundInternal {
@@ -78,7 +73,6 @@ export function createBackgroundDispatcher(options: BackgroundDispatcherOptions)
 		getEnvironment,
 		finishRun,
 		makeLiveHandler,
-		makeDetails,
 	} = options;
 
 	const startBackground: StartBackgroundInternal = async (
@@ -273,7 +267,6 @@ export function createBackgroundDispatcher(options: BackgroundDispatcherOptions)
 						signal: backgroundSignal,
 						onLive,
 						control,
-						makeDetails: makeDetails("single", true),
 						idleTimeoutMs: activeIdleTimeoutMs,
 						sessionRoot: sessionsRoot,
 						scratchRoot,
