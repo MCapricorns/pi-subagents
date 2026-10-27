@@ -211,10 +211,15 @@ hygiene already drops temp leftovers, artifacts whose Pi process is gone, result
 files past their retention window, and project roots idle for three days. Parked
 recovery work and anything a manifest still references always survive.
 
-Long orchestration sessions still accumulate settled sessions and worktrees, so
-run `/subagents-cleanup` to reclaim them. It reports per-project usage and freed
-bytes, and keeps parked recovery records plus every referenced artifact. Use
-`/subagents-cleanup dry-run` to measure without deleting anything.
+Reclamation is automatic: a settlement may trigger one paced sweep (at most every
+five minutes) that drops dead-owner artifacts, expired result files, and settled
+session copies older than 30 minutes, then trims the oldest settled sessions
+until a project fits its 1.5 GB budget. Live runs, parked recovery work, recent
+sessions, and anything a manifest references are never touched, so rework within
+the last half hour can still continue its session.
+
+`/subagents-cleanup` runs the same pass immediately and reports per-project usage
+and freed bytes; `/subagents-cleanup dry-run` measures without deleting anything.
 
 ## Development
 

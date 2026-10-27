@@ -1,5 +1,14 @@
 # Changelog
 
+## 5.0.2
+
+### Changes
+
+- Reclaim disk automatically on settlement: one paced sweep per five minutes
+drops dead-owner artifacts, expired results and settled session copies older
+than 30 minutes, then keeps each project inside a 1.5 GB budget. Live runs,
+parked recovery work, recent sessions and every manifest-referenced path stay.
+
 ## 5.0.1
 
 ### Changes

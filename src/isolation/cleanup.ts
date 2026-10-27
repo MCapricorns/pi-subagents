@@ -13,6 +13,7 @@ import { existsSync, type Dirent, readdirSync, rmSync, statSync } from "node:fs"
 import { join } from "node:path";
 import { getSubagentsRoot, sweepProjectResultArtifacts } from "../execution/spawn.ts";
 import { pruneStaleProjectRoots, readReferencedDurablePaths, readThreadRecords } from "../lifecycle/durable.ts";
+import type { SubagentRuntime } from "../lifecycle/runtime.ts";
 import { isProcessAlive, sweepProjectDurableDirs, sweepProjectTempDirs } from "./temp-hygiene.ts";
 
 /** Bytes a directory tree occupies, without following symlinks. */
@@ -171,4 +172,161 @@ export function formatBytes(bytes: number): string {
 		unit++;
 	}
 	return value.toFixed(value >= 10 ? 0 : 1) + " " + units[unit];
+}
+
+/** Sessions of settled runs are kept only so a follow-up can resume them. After
+ * this window they are pure disk cost: `subagent_message` with
+ * `context: "summary"` still works, and rework usually starts long before it. */
+export const SETTLED_SESSION_MAX_AGE_MS = 30 * 60 * 1_000;
+
+/** Recent sessions are never reclaimed regardless of budget: a follow-up can
+ * legitimately arrive seconds after settlement. */
+const RECENT_SESSION_FLOOR_MS = 5 * 60 * 1_000;
+
+/** Automatic passes are paced by settlement, so a burst of finished runs costs
+ * one sweep instead of one per run. */
+const AUTO_CLEANUP_INTERVAL_MS = 5 * 60 * 1_000;
+
+/** Upper bound for one project's artifacts; the oldest settled sessions go
+ * first until the project fits. */
+export const PROJECT_BUDGET_BYTES = 1.5 * 1024 * 1024 * 1024;
+
+let lastAutomaticCleanupAt = 0;
+
+export interface AutomaticCleanupOptions {
+	now?: number;
+	/** Retained-session age before automatic reclamation. */
+	maxSessionAgeMs?: number;
+	/** Per-project artifact budget. */
+	budgetBytes?: number;
+	/** Ignore the pacing clock (tests, or an explicit pass). */
+	force?: boolean;
+}
+
+interface SettledSession {
+	path: string;
+	mtimeMs: number;
+	bytes: number;
+}
+
+function settledSessions(projectRoot: string): SettledSession[] {
+	const dir = join(projectRoot, "sessions");
+	let entries: Dirent[];
+	try {
+		entries = readdirSync(dir, { withFileTypes: true });
+	} catch {
+		return [];
+	}
+	return entries
+		.filter((entry) => entry.isDirectory() && !entry.isSymbolicLink() && entry.name.startsWith("pi-subagent-session-"))
+		.flatMap((entry) => {
+			const path = join(dir, entry.name);
+			try {
+				return [{ path, mtimeMs: statSync(path).mtimeMs, bytes: directoryBytes(path) }];
+			} catch {
+				return [];
+			}
+		});
+}
+
+/** Delete settled-session copies that nothing references: not a parked record,
+ * not a live or resumed thread, and older than the retention window. */
+function reclaimSettledSessions(
+	projectRoot: string,
+	protectedPaths: readonly string[],
+	now: number,
+	maxAgeMs: number,
+): number {
+	let freed = 0;
+	for (const session of settledSessions(projectRoot)) {
+		if (now - session.mtimeMs < Math.max(maxAgeMs, RECENT_SESSION_FLOOR_MS)) continue;
+		if (protectedPaths.some((kept) => kept.startsWith(session.path) || session.path.startsWith(kept))) continue;
+		try {
+			rmSync(session.path, { recursive: true, force: true });
+			freed += session.bytes;
+		} catch {
+			/* a locked directory waits for the next pass */
+		}
+	}
+	return freed;
+}
+
+/** Delete the oldest settled sessions until the project fits its budget. */
+function enforceProjectBudget(
+	projectRoot: string,
+	protectedPaths: readonly string[],
+	now: number,
+	budgetBytes: number,
+): number {
+	let used = directoryBytes(projectRoot);
+	if (used <= budgetBytes) return 0;
+	let freed = 0;
+	for (const session of settledSessions(projectRoot).sort((left, right) => left.mtimeMs - right.mtimeMs)) {
+		if (used - freed <= budgetBytes) break;
+		if (now - session.mtimeMs < RECENT_SESSION_FLOOR_MS) continue;
+		if (protectedPaths.some((kept) => kept.startsWith(session.path) || session.path.startsWith(kept))) continue;
+		try {
+			rmSync(session.path, { recursive: true, force: true });
+			freed += session.bytes;
+		} catch {
+			/* best-effort */
+		}
+	}
+	return freed;
+}
+
+function protectedSessionPaths(runtime: Pick<SubagentRuntime, "threads">, claimed: ReadonlySet<string>): string[] {
+	const protectedPaths = [...claimed];
+	for (const thread of runtime.threads.values()) {
+		// A parked or unfinished thread keeps its session for recovery; a live
+		// thread may be resumed by a follow-up that is already running.
+		if (thread.state === "queued" || thread.state === "running" || thread.state === "interrupting" || thread.state === "parked") {
+			if (thread.sessionDir) protectedPaths.push(thread.sessionDir);
+			continue;
+		}
+		if (thread.lifecycleOperation !== undefined && thread.sessionDir) protectedPaths.push(thread.sessionDir);
+	}
+	return protectedPaths;
+}
+
+/** Reclaim what nothing references, then keep each project inside its budget.
+ * Safe to call at any time: live runs, parked recovery work and recently
+ * settled sessions are all protected. */
+export async function runAutomaticCleanup(
+	runtime: Pick<SubagentRuntime, "configPath" | "threads">,
+	options: AutomaticCleanupOptions = {},
+): Promise<{ freedBytes: number; skipped: boolean }> {
+	const now = options.now ?? Date.now();
+	if (!options.force && now - lastAutomaticCleanupAt < AUTO_CLEANUP_INTERVAL_MS) return { freedBytes: 0, skipped: true };
+	lastAutomaticCleanupAt = now;
+	const root = getSubagentsRoot(runtime.configPath);
+	const claimed = await readReferencedDurablePaths(runtime.configPath).catch(() => new Set<string>());
+	const records = await readThreadRecords(runtime.configPath).catch(() => []);
+	for (const record of records) if (record.sessionDir) claimed.add(record.sessionDir);
+	const protectedPaths = protectedSessionPaths(runtime, claimed);
+	const keep = (path: string) => protectedPaths.some((kept) => path.startsWith(kept) || kept.startsWith(path));
+	const before = measureDurableUsage(root).totalBytes;
+
+	sweepProjectTempDirs(root);
+	sweepProjectDurableDirs(root, { keep, isAlive: isProcessAlive });
+	sweepProjectResultArtifacts(root);
+	let projects: Dirent[] = [];
+	try {
+		projects = readdirSync(root, { withFileTypes: true });
+	} catch {
+		projects = [];
+	}
+	for (const project of projects) {
+		if (!project.isDirectory() || project.isSymbolicLink()) continue;
+		const path = join(root, project.name);
+		reclaimSettledSessions(path, protectedPaths, now, options.maxSessionAgeMs ?? SETTLED_SESSION_MAX_AGE_MS);
+		enforceProjectBudget(path, protectedPaths, now, options.budgetBytes ?? PROJECT_BUDGET_BYTES);
+	}
+	const after = measureDurableUsage(root).totalBytes;
+	return { freedBytes: Math.max(0, before - after), skipped: false };
+}
+
+/** Reset the pacing clock so the next settlement performs a real pass. */
+export function resetAutomaticCleanupClock(): void {
+	lastAutomaticCleanupAt = 0;
 }

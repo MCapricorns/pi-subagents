@@ -14,6 +14,7 @@ import { formatTaskSummary, formatToolActivity, monitor } from "../presentation/
 import type { StartBackgroundInternal, DispatchEnvironment } from "./thread-shared.ts";
 import { persistThreadCheckpoint } from "./thread-shared.ts";
 import type { SubagentRuntime } from "./runtime.ts";
+import { runAutomaticCleanup } from "../isolation/cleanup.ts";
 
 export interface DispatchCore {
 	/** Publish the context/config/catalog a dispatch needs; every fresh call refreshes it. */
@@ -43,6 +44,9 @@ export function createDispatchCore(runtime: SubagentRuntime): DispatchCore {
 		const endedAt = monitor.findRun(runId)?.endedAt;
 		if (endedAt !== undefined && publishedEndedAt.get(runId) === endedAt) return;
 		if (endedAt !== undefined) publishedEndedAt.set(runId, endedAt);
+		// Settlement is the natural moment to reclaim disk: a burst of runs costs
+		// one paced sweep, and every live or parked thread stays protected.
+		void runAutomaticCleanup(runtime).catch(() => undefined);
 		if (opts?.silent || !runtime.sessionActive) return;
 		const icon = status === "done" ? "✓" : "✗";
 		const result = runtime.threads.get(runId)?.lastResult;
