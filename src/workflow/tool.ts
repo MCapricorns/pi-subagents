@@ -136,7 +136,7 @@ export function registerWorkflowTool(pi: ExtensionAPI, runtime: SubagentRuntime,
 		name: "subagent_workflow",
 		label: "Subagent Workflow",
 		description:
-			"Run a dependency graph of sub-agent phases: declare nodes with dependsOn, and the runtime dispatches each dependent as soon as its prerequisites settle and a process slot frees. Use only when substantial phases, their ordering, and writer scopes are already known. If a result must decide the next task or its scope, dispatch that phase alone and decide in main. A graph saves dispatch turns; it does not plan or judge success beyond process results. One summary arrives when the graph settles. Nodes are ordinary one-shot runs; main still owns integration, the final gate, and release.",
+			"Run a dependency graph of sub-agent phases: declare nodes with dependsOn, and the runtime dispatches each dependent as soon as its prerequisites settle and a process slot frees. Choose this proactively for two or more substantial phases with known dependencies and writer scopes, when scheduling saves coordination. Use subagent tasks for independent work with no dependency edges; keep small or tightly coupled work in main. If a result must decide the next task or its scope, dispatch that phase alone, decide in main, then reassess whether a graph fits. Never add research, review, or gate nodes by habit. A graph saves dispatch turns; it does not plan or judge success beyond process results. One summary arrives when the graph settles. Nodes are ordinary one-shot runs; main still owns integration, the final gate, and release.",
 		exposure: "model-only",
 		executionMode: "sequential",
 		annotations: {

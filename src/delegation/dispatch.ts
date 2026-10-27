@@ -385,7 +385,7 @@ export function registerSubagentTool(
 	pi.registerTool({
 		name: "subagent",
 		label: "Subagent",
-		description: "Start one-shot leaf runs for delegated phases: independent work in parallel, or one bounded job that can be briefed self-contained. Duplicate phases and declared writer overlaps are rejected before allocation; scope does not prove independence or grant permissions. Parallel tasks without scope report `independence not verified`. Results arrive automatically, or in-turn with wait:true. Main handles incomplete work.",
+		description: "Start one-shot leaf runs when substantial bounded work benefits from parallel progress, context isolation, or independent verification enough to offset startup and integration. Keep small or tightly coupled tasks in main. Use tasks for independent phases; use subagent_workflow for known dependent phases. Duplicate phases and declared writer overlaps are rejected before allocation; scope does not prove independence or grant permissions. Parallel tasks without scope report `independence not verified`. Results arrive automatically, or in-turn with wait:true. Main handles incomplete work.",
 		// Declared to the model, never callable from codemode scripts. Dispatch shares
 		// the in-memory lease table, so a batch that includes it runs one tool at a time.
 		exposure: "model-only",

@@ -46,12 +46,12 @@ export interface AgentProfile {
 
 export const AGENT_PROFILES: Record<(typeof BUILTIN_AGENT_NAMES)[number], AgentProfile> = {
 	scout: {
-		summary: "lightweight research",
-		remark: "Use for unfamiliar code, a wide lookup, or external facts. Read-only; returns citations.",
+		summary: "Research · read-only",
+		remark: "Bounded code, documentation, or web research with citations. No commands or edits.",
 	},
 	artisan: {
-		summary: "implement the change",
-		remark: "Use for one substantial implementation, fix, refactor, test, or docs change, including its checks.",
+		summary: "Engineering · implementation & checks",
+		remark: "One substantial change with its tests, or review and validation requiring commands.",
 	},
 };
 

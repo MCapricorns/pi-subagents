@@ -35,8 +35,9 @@ describe("formatActiveRunLines", () => {
 		};
 
 		const lines = formatActiveRunLines([run], plainTheme, 160, now);
-		assert.equal(lines.length, 1);
-		assert.match(lines[0], /think:high/u);
+		assert.equal(lines.length, 2);
+		assert.match(lines[0]!, /#7.*artisan.*running/u);
+		assert.match(lines[1]!, /openai\/gpt-5.4.*think:high/u);
 	});
 });
 
@@ -48,7 +49,8 @@ describe("workflow widget", () => {
 		graph.nodes[1]!.runId = 7;
 		const live: RunView = { id: 7, agent: "artisan", task: "Apply fix", status: "queued", waitReason: "repository-lane", usage: emptyUsage(), elapsedMs: 0, workflow: { workflowId: 3, name: "auth-fix", nodeId: "step1" } };
 		const lines = formatSubagentWidgetLines([live], [graph], plainTheme, 160, 10000);
-		assert.match(lines[0]!, /workflow #3 auth-fix.*1\/4 completed.*2 waiting/);
+		assert.match(lines[0]!, /Subagents.*1 queued.*1 workflow/u);
+		assert.match(lines[1]!, /Workflow #3 · auth-fix.*1\/4 completed.*2 waiting/u);
 		assert.match(lines.join("\n"), /step1.*#7.*repo lane/);
 		assert.match(lines.join("\n"), /step2.*waits for step1/);
 		assert.equal(lines.filter((line) => line.includes("#7")).length, 1);
@@ -69,7 +71,7 @@ describe("workflow widget", () => {
 		const text = formatSubagentWidgetLines([], [graph], plainTheme, 160).join("\n");
 		assert.match(text, /step0.*failed: typecheck failed/);
 		assert.match(text, /step1.*blocked: dependency step0 failed/);
-		assert.match(text, /more|rows/);
+		assert.match(text, /… \+17 tasks/u);
 	});
 
 	it("notifies on graph-only transitions and sweeps settled graphs at the next dispatch", () => {
@@ -86,6 +88,63 @@ describe("workflow widget", () => {
 		assert.equal(store.getWorkflows()[0]!.state, "failed");
 		store.beginTurn();
 		assert.equal(store.getWorkflows().length, 0);
+	});
+});
+
+describe("widget layout priorities", () => {
+	function run(id: number, status: RunView["status"] = "running"): RunView {
+		return { id, agent: "artisan", task: "Implement src/feature" + id + ".ts", status,
+			model: "test/reasoning", thinking: "high", activity: "read src/feature.ts",
+			usage: emptyUsage(), elapsedMs: 0, activeSince: 1_000, startedAt: 1_000 };
+	}
+
+	it("keeps sibling identities before allocating detail lines", () => {
+		const lines = formatSubagentWidgetLines(Array.from({ length: 8 }, (_, i) => run(i + 1)), [], plainTheme, 100, 10_000);
+		assert.equal(lines.length, 10);
+		for (let id = 1; id <= 8; id++) assert.match(lines.join("\n"), new RegExp("#" + id + " "));
+		assert.match(lines[0]!, /Subagents.*8 running/u);
+	});
+
+	it("shows a late failed task ahead of a full running batch", () => {
+		const runs = [...Array.from({ length: 14 }, (_, i) => run(i + 1)), run(99, "failed")];
+		const lines = formatSubagentWidgetLines(runs, [], plainTheme, 80, 10_000);
+		assert.match(lines[1]!, /#99.*failed/u);
+		assert.match(lines.at(-1)!, /tasks/u);
+		assert.ok(lines.length <= 10);
+	});
+
+	it("keeps a failure from a later workflow visible and shares space between groups", () => {
+		const first = graphFixture(20);
+		const failed = graphFixture(20);
+		failed.id = 4;
+		failed.name = "later-failure";
+		failed.nodes[19]!.state = "failed";
+		failed.nodes[19]!.error = "build failed";
+		const lines = formatSubagentWidgetLines([], [first, failed], plainTheme, 120, 10_000);
+		assert.match(lines[1]!, /Workflow #4/u);
+		assert.match(lines[2]!, /step19.*failed: build failed/u);
+		assert.match(lines.join("\n"), /Workflow #3/u);
+		assert.ok(lines.length <= 10);
+	});
+
+	it("reserves elapsed time and truthful queue state in a narrow row", () => {
+		const queued = { ...run(7, "queued"), waitReason: "repository-lane" as const };
+		const lines = formatActiveRunLines([queued], plainTheme, 42, 10_000);
+		assert.match(lines[0]!, /repo lane.*9s$/u);
+		assert.ok(lines.every((line) => visibleWidth(line) <= 42));
+		const busy = { ...run(8), activity: "read src/configuration/config.ts" };
+		const narrow = formatActiveRunLines([busy], plainTheme, 48, 10_000);
+		assert.match(narrow[1]!, /read src\/configuration\/config.ts/u);
+		assert.doesNotMatch(narrow[1]!, /test\//u, "omit metadata rather than showing half a model id");
+	});
+
+	it("summarizes completed graphs without flooding the board with finished nodes", () => {
+		const graph = graphFixture(20);
+		graph.state = "completed";
+		for (const node of graph.nodes) node.state = "completed";
+		const lines = formatSubagentWidgetLines([], [graph], plainTheme, 80, 10_000);
+		assert.equal(lines.length, 2);
+		assert.match(lines[1]!, /20\/20 completed/u);
 	});
 });
 

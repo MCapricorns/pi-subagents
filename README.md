@@ -11,10 +11,16 @@ Requires **Pi >= 1.0.0** and **Node.js >= 22.19.0**.
 pi install npm:@ferris1225/pi-subagents
 ```
 
-Run `/subagents-setup` to choose a model and thinking level for each role.
-Both follow the main model by default; thinking defaults to `low` for scout and
-`high` for artisan. Settings live in `~/.pi/agent/pi-subagents.json` as
-`agentModels` and `agentThinkingLevels`.
+Run `/subagents-setup` for a grouped role settings panel. Edit **Model** and
+**Thinking** independently; **Reset role** restores that role's defaults. Each
+selection saves immediately, Esc returns without applying a picker selection,
+and the panel keeps your focus. Model pickers support search, paste, and paging.
+
+Both roles follow the main model by default; thinking defaults to `low` for scout
+and `high` for artisan. The panel distinguishes defaults from overrides and
+shows the effective level when model capabilities clamp a preference. Changing
+a model preserves the thinking preference. Settings live in
+`~/.pi/agent/pi-subagents.json` as `agentModels` and `agentThinkingLevels`.
 
 ## Agents
 
@@ -29,7 +35,21 @@ and the final result. Keep a fix and its regression tests with one owner.
 
 ## Delegate
 
-Ask Pi to delegate, or call the tools directly:
+Pi chooses delegation from the task structure; no special request is required.
+Small, familiar, or tightly coupled work stays in main. A child earns its cost
+when substantial bounded work benefits from parallel progress, isolating noisy
+research, or an independent check. Free process slots are not a team-size target.
+
+Use one owner per deliverable, including its regression tests. Brief the child
+with the outcome, done condition, relevant paths, established evidence, write
+boundaries, required checks, and a compact expected result. Scout retrieves
+sources; artisan can execute commands. This policy applies the context-isolation,
+focused-role, and coordination-cost guidance in the official
+[Codex subagents](https://developers.openai.com/codex/subagents) and
+[Claude Code subagents](https://code.claude.com/docs/en/sub-agents) docs to Pi's
+one-shot leaf runs.
+
+Ask Pi to delegate explicitly, or call the tools directly:
 
 ```ts
 subagent({
@@ -68,8 +88,16 @@ across reloads. Repeating the same task in the same cwd is also rejected.
 
 ## Workflows
 
-Use `subagent_workflow` when the tasks, scopes, and dependencies are already known.
-If a result must determine the next task, run that phase first and decide in main.
+Main proactively chooses `subagent_workflow` for two or more substantial phases
+with known dependencies and write scopes when scheduling them saves coordination.
+Independent phases without dependency edges use `subagent` with `tasks`; a single
+justified phase uses one `subagent` run. Small work stays in main.
+
+If a research result must determine the next task or its scope, run that phase
+first, decide in main, then reassess whether the remaining work fits a graph.
+A workflow runs a fixed plan; it does not discover the plan or adapt its nodes
+while running. Research, implementation, review, and confirmation are added only
+when the task needs their distinct work.
 
 ```ts
 subagent_workflow({
@@ -124,8 +152,14 @@ See the [workflow skill](./skills/workflow/SKILL.md) for graph authoring details
 | `subagent_stop({ workflow: 3 })` | Stop a graph and finalize its active nodes |
 | `subagent_stop({ all: true })` | Stop all active runs and graphs |
 
-The widget shows activity, graph progress, queue reasons, failures, and blocked
-nodes. Execution uses 4–6 process slots; wider batches queue automatically.
+The widget is a compact task board capped at 10 lines: a status overview,
+workflow progress groups, and task rows with status and elapsed time at the right.
+Activity, model, thinking, token usage, and worktree state use secondary lines as
+space permits. Task identities take priority over detail; failed and blocked
+work takes priority over ordinary activity. Completed nodes collapse into graph
+progress, and overflow reports hidden tasks. Queue reasons distinguish process
+capacity, the repository write lane, and startup. Execution uses 4–6 process
+slots; wider batches queue automatically.
 
 Single writers use the shared checkout. Parallel writers and workflow writers
 default to detached worktrees, which require a committed `HEAD`. Set

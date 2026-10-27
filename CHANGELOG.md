@@ -18,9 +18,17 @@
   failure propagation. Checkpoint live graphs and reserve pending phases.
 - Share cancellation and worktree finalization across runs and graphs. Stop all
   writers before waiting for cleanup.
-- Show graph progress, dependency waits, queue reasons, failures, and blocked
-  nodes in the widget.
-- Keep adversarial review, independent confirmation, and synthesis flexible.
+- Redesign the widget as a 10-line task board with an overview, workflow
+  groups, stable status/time columns, and secondary activity/model details.
+  Keep task identities and failures visible before optional telemetry; collapse
+  completed nodes into progress and share space between groups.
+- Choose delegation from task structure and coordination cost. Keep small work
+  in main, use parallel tasks for independent work, and proactively choose a
+  workflow for substantial phases with known dependencies. Reassess after
+  discovery instead of imposing a research/implementation/review pipeline.
   Keep fixes with their tests and use command-capable roles for reproduction.
+- Replace the setup wizard with a grouped role panel. Edit model and thinking
+  separately, restore defaults per role, preserve focus, and show effective
+  reasoning levels. Add native input handling for search, paste, and IME.
 - Validate saved definitions before dispatch, reject unfilled templates, and
   honor call-level name and description overrides.

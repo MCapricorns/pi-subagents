@@ -34,9 +34,16 @@ answer to know what phase two is, you cannot write the graph yet: run phase one
 with `subagent` and write the graph afterwards. If every phase is a one-line
 read, the graph is overhead — do it in main.
 
-Use a graph when it fits the task, and honor an explicit user choice. A graph
-schedules a fixed plan; it does not decide what a discovery result means. Main
-keeps decisions that depend on that result.
+Choose proactively from task structure; the user does not need to name the
+tool. Use a graph for two or more substantial phases with known dependency
+edges and write scopes when scheduling saves coordination. Independent phases
+without edges use a parallel `subagent` batch. Honor an explicit user choice.
+
+After a discovery phase, reassess the remaining work: use a graph if its plan
+is now clear, or keep the next bounded step in main or a single child. A graph
+schedules a fixed plan; it does not decide what a discovery result means or
+change its nodes at runtime. Never add survey, implementation, review,
+confirmation, and gate nodes merely to follow a template.
 
 ## 2. Shape
 

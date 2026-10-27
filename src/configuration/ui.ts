@@ -1,19 +1,11 @@
-/**
- * TUI picker for /subagents-setup, built on @earendil-works/pi-tui.
- *
- * A single self-contained `Picker` component powers the model and thinking
- * selectors: type to fuzzy-filter, arrows to move, PageUp/PageDown to page,
- * Enter to choose, Esc to cancel.
- *
- * pi-tui's built-in SelectList only handles up/down/confirm/cancel (no paging),
- * so we render the list ourselves and use the injected keybinding manager. Every line
- * is passed through truncateToWidth() — pi hard-crashes if a rendered line is
- * wider than the terminal.
- */
+/** Searchable pickers and the grouped /subagents-setup settings panel. */
 
 import {
+	Input,
 	fuzzyFilter,
 	truncateToWidth,
+	visibleWidth,
+	wrapTextWithAnsi,
 	type Component,
 	type Focusable,
 	type KeybindingsManager,
@@ -22,189 +14,175 @@ import {
 } from "@earendil-works/pi-tui";
 import type { ExtensionCommandContext, Theme } from "@earendil-works/pi-coding-agent";
 
-/** The slice of the extension context the pickers need (mode + ui). */
 type PickerContext = Pick<ExtensionCommandContext, "mode" | "ui">;
-
-/** Rows shown at once; longer lists are reached with PageUp/PageDown. */
 const PAGE_SIZE = 8;
 
-interface PickerStyles {
-	border: (t: string) => string;
-	title: (t: string) => string;
-	hint: (t: string) => string;
-	cursorMark: (t: string) => string;
-	selectedLabel: (t: string) => string;
-	label: (t: string) => string;
-	dim: (t: string) => string;
-	filterEcho: (t: string) => string;
+interface PickerItem extends SelectItem {
+	group?: string;
+	currentValue?: string;
 }
 
-type PickerItem = SelectItem;
-
-function pickerItemSearchText(item: PickerItem): string {
-	return `${item.value} ${item.label} ${item.description ?? ""}`;
+export interface SettingsRow extends PickerItem {
+	group: string;
+	currentValue: string;
 }
 
-interface PickerCallbacks {
-	/** Fired with the highlighted value on Enter. */
-	onSelect: (value: string) => void;
-	onCancel: () => void;
+interface PickerOptions {
+	title: string;
+	hint: string;
+	searchable: boolean;
+	initialValue?: string;
+	footer?: string;
 }
 
+/** One keyboard path for settings and their nested pickers. Input supplies
+ * paste, Unicode editing, horizontal scrolling, and IME cursor placement. */
 class Picker implements Component, Focusable {
 	private _focused = false;
-	private query = "";
 	private cursor = 0;
 	private filtered: PickerItem[];
+	private readonly search = new Input({ prompt: "Search: ", placeholder: "type to filter" });
+
 	private readonly items: PickerItem[];
-	private readonly styles: PickerStyles;
-	private readonly headerLines: string[];
+	private readonly options: PickerOptions;
 	private readonly tui: TUI;
+	private readonly theme: Theme;
 	private readonly keybindings: KeybindingsManager;
-	private readonly cb: PickerCallbacks;
+	private readonly done: (value: string | undefined) => void;
 
 	constructor(
 		items: PickerItem[],
-		styles: PickerStyles,
-		headerLines: string[],
+		options: PickerOptions,
 		tui: TUI,
+		theme: Theme,
 		keybindings: KeybindingsManager,
-		cb: PickerCallbacks,
-		initialValue?: string,
+		done: (value: string | undefined) => void,
 	) {
 		this.items = items;
-		this.styles = styles;
-		this.headerLines = headerLines;
+		this.options = options;
 		this.tui = tui;
+		this.theme = theme;
 		this.keybindings = keybindings;
-		this.cb = cb;
+		this.done = done;
 		this.filtered = items;
-		const initialIndex = initialValue === undefined ? -1 : items.findIndex((item) => item.value === initialValue);
-		if (initialIndex >= 0) this.cursor = initialIndex;
+		const initial = items.findIndex((item) => item.value === options.initialValue);
+		if (initial >= 0) this.cursor = initial;
 	}
 
-	get focused(): boolean {
-		return this._focused;
-	}
+	get focused(): boolean { return this._focused; }
 	set focused(value: boolean) {
 		this._focused = value;
+		this.search.focused = value && this.options.searchable;
 	}
 
-	private recompute(): void {
-		const q = this.query.trim();
-		this.filtered = q ? fuzzyFilter(this.items, q, pickerItemSearchText) : this.items;
-		this.cursor = Math.max(0, Math.min(this.cursor, this.filtered.length - 1));
+	private pageSize(): number {
+		// Leave room for headings, help, and the selected item's details.
+		return Math.max(1, Math.min(PAGE_SIZE, (this.tui.terminal?.rows ?? 28) - 13));
 	}
 
 	render(width: number): string[] {
-		const s = this.styles;
-		const fit = (line: string): string => truncateToWidth(line, width, "");
-		const border = fit(s.border("─".repeat(Math.max(1, width))));
-
-		const lines: string[] = [border];
-		for (const h of this.headerLines) lines.push(fit(h));
-		lines.push(fit(this.query ? s.filterEcho(`filter: ${this.query}`) : s.dim("filter: (type to narrow)")));
-		lines.push(border);
-
-		if (this.filtered.length === 0) {
-			lines.push(fit(s.dim("  (no matches)")));
-		} else {
-			const start = Math.max(
-				0,
-				Math.min(this.cursor - Math.floor(PAGE_SIZE / 2), this.filtered.length - PAGE_SIZE),
-			);
-			const visible = this.filtered.slice(start, start + PAGE_SIZE);
-			for (let i = 0; i < visible.length; i++) {
-				const item = visible[i];
-				const isCursor = start + i === this.cursor;
-				const mark = isCursor ? s.cursorMark("❯ ") : "  ";
-				const label = isCursor ? s.selectedLabel(item.label) : s.label(item.label);
-				const description = item.description ? s.dim(` — ${item.description}`) : "";
-				lines.push(fit(mark + label + description));
+		if (width <= 0) return [""];
+		const theme = this.theme;
+		const dim = (text: string) => theme.fg("dim", text);
+		const fit = (text: string) => truncateToWidth(text, width, "");
+		const border = theme.fg("border", "─".repeat(width));
+		const lines = [border, theme.fg("accent", theme.bold(this.options.title)), dim(this.options.hint)];
+		if (this.options.searchable) lines.push(...this.search.render(width));
+		const pageSize = this.pageSize();
+		const start = Math.max(0, Math.min(this.cursor - Math.floor(pageSize / 2), this.filtered.length - pageSize));
+		const visible = this.filtered.slice(start, start + pageSize);
+		let lastGroup: string | undefined;
+		if (!visible.length) lines.push("", theme.fg("warning", "  No matches. Change or clear the search."));
+		for (const [index, item] of visible.entries()) {
+			if (item.group && item.group !== lastGroup) {
+				lines.push("", theme.bold("  " + item.group));
+				lastGroup = item.group;
 			}
-			const more = this.filtered.length > PAGE_SIZE ? "  ↑/↓ move • PgUp/PgDn page" : "";
-			lines.push(fit(s.dim(`  (${this.cursor + 1}/${this.filtered.length})${more}`)));
+			const selected = start + index === this.cursor;
+			const prefix = selected ? theme.fg("accent", "› ") : "  ";
+			const label = selected ? theme.fg("accent", theme.bold(item.label)) : item.label;
+			const value = item.currentValue === undefined ? "" : " ".repeat(Math.max(2, 12 - visibleWidth(item.label))) + item.currentValue;
+			lines.push(prefix + label + (selected ? value : dim(value)));
 		}
-
-		lines.push(border);
-		return lines;
+		const item = this.filtered[this.cursor];
+		lines.push("", border);
+		if (item) {
+			// Details have their own lines, so long model ids cannot hide capabilities.
+			const detail = [item.currentValue, item.description].filter(Boolean).join(" · ");
+			lines.push(...wrapTextWithAnsi(detail, Math.max(1, width)).slice(0, 3).map(dim));
+			if (this.options.searchable) lines.push(dim(
+				(this.cursor + 1) + "/" + this.filtered.length + " matches · ↑/↓ move · PgUp/PgDn page",
+			));
+		}
+		lines.push(dim(this.options.footer ?? "Enter select · Esc back"));
+		return lines.map(fit);
 	}
 
 	handleInput(data: string): void {
 		const kb = this.keybindings;
+		const count = this.filtered.length;
 		if (kb.matches(data, "tui.select.up")) {
-			if (this.filtered.length > 0) this.cursor = this.cursor === 0 ? this.filtered.length - 1 : this.cursor - 1;
+			if (count) this.cursor = (this.cursor - 1 + count) % count;
 		} else if (kb.matches(data, "tui.select.down")) {
-			if (this.filtered.length > 0) this.cursor = this.cursor === this.filtered.length - 1 ? 0 : this.cursor + 1;
+			if (count) this.cursor = (this.cursor + 1) % count;
 		} else if (kb.matches(data, "tui.select.pageUp")) {
-			this.cursor = Math.max(0, this.cursor - PAGE_SIZE);
+			this.cursor = Math.max(0, this.cursor - this.pageSize());
 		} else if (kb.matches(data, "tui.select.pageDown")) {
-			this.cursor = Math.min(Math.max(0, this.filtered.length - 1), this.cursor + PAGE_SIZE);
+			this.cursor = Math.max(0, Math.min(count - 1, this.cursor + this.pageSize()));
 		} else if (kb.matches(data, "tui.select.confirm")) {
 			const item = this.filtered[this.cursor];
-			if (item) this.cb.onSelect(item.value);
+			if (item) this.done(item.value);
 			return;
 		} else if (kb.matches(data, "tui.select.cancel")) {
-			this.cb.onCancel();
+			this.done(undefined);
 			return;
-		} else if (data === "\x7f" || data === "\b") {
-			this.query = this.query.slice(0, -1);
-			this.cursor = 0;
-			this.recompute();
-		} else if (isPrintable(data)) {
-			this.query += data;
-			this.cursor = 0;
-			this.recompute();
+		} else if (this.options.searchable) {
+			const before = this.search.getValue();
+			this.search.handleInput(data);
+			if (before !== this.search.getValue()) {
+				const query = this.search.getValue().trim();
+				this.filtered = query ? fuzzyFilter(this.items, query,
+					(item) => [item.value, item.label, item.description].join(" ")) : this.items;
+				this.cursor = 0;
+			}
 		}
 		this.tui.requestRender();
 	}
 
-	invalidate(): void {}
+	invalidate(): void { this.search.invalidate(); }
 }
 
-function isPrintable(data: string): boolean {
-	if (data.length === 0) return false;
-	// Reject ESC-led escape sequences and other control characters.
-	return data.charCodeAt(0) >= 0x20;
-}
-
-/** Build style functions from the pi theme. */
-function makeStyles(theme: Theme): PickerStyles {
-	return {
-		border: (t) => theme.fg("accent", t),
-		title: (t) => theme.fg("accent", theme.bold(t)),
-		hint: (t) => theme.fg("dim", t),
-		cursorMark: (t) => theme.fg("accent", t),
-		selectedLabel: (t) => theme.fg("accent", theme.bold(t)),
-		label: (t) => t,
-		dim: (t) => theme.fg("dim", t),
-		filterEcho: (t) => theme.fg("accent", t),
-	};
-}
-
-function requireTui(ctx: PickerContext): boolean {
+function openPicker(ctx: PickerContext, items: PickerItem[], options: PickerOptions): Promise<string | undefined> {
 	if (ctx.mode !== "tui") {
 		ctx.ui.notify("/subagents-setup requires Pi's interactive TUI.", "error");
-		return false;
+		return Promise.resolve(undefined);
 	}
-	return true;
+	return ctx.ui.custom<string | undefined>((tui, theme, keybindings, done) =>
+		new Picker(items, options, tui, theme, keybindings, done));
 }
 
-/** Single-select with fuzzy filter + paging. Resolves undefined on Esc. */
+/** Single-select with fuzzy search and paging. Esc returns without a change. */
 export function promptSelectOne(
 	ctx: PickerContext,
 	title: string,
 	hint: string,
-	items: PickerItem[],
+	items: SelectItem[],
 	initialValue?: string,
 ): Promise<string | undefined> {
-	if (!requireTui(ctx)) return Promise.resolve(undefined);
-	return ctx.ui.custom<string | undefined>((tui, theme, keybindings, done) => {
-		const styles = makeStyles(theme);
-		const header = [styles.title(title), styles.hint(hint)];
-		return new Picker(items, styles, header, tui, keybindings, {
-			onSelect: (value) => done(value),
-			onCancel: () => done(undefined),
-		}, initialValue);
+	return openPicker(ctx, items, { title, hint, searchable: true, initialValue });
+}
+
+export function promptSettings(
+	ctx: PickerContext,
+	items: SettingsRow[],
+	initialValue?: string,
+	status = "Changes save immediately",
+): Promise<string | undefined> {
+	return openPicker(ctx, items, {
+		title: "Subagents · Settings",
+		hint: "Model and thinking per role · " + status,
+		searchable: false,
+		initialValue,
+		footer: "↑/↓ move · Enter edit · Esc close",
 	});
 }
