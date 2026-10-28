@@ -1,10 +1,11 @@
 /**
  * Sub-agent result handling and native Pi CLI launch orchestration.
  *
- * The process transport lives in cli-run.ts. Each attempt uses Pi's native
- * one-shot `--mode json` event stream and
- * settles only on `agent_settled`. This module owns selected-to-main model handoff, capability-clamped thinking, accounting, and
- * result formatting around those attempts.
+ * The process transport lives in cli-run.ts: each attempt runs Pi's own CLI in
+ * `--mode rpc` with a session retained after settlement, and settles on
+ * `agent_settled`. This module owns selected-to-main model handoff,
+ * capability-clamped thinking, accounting, and result formatting around those
+ * attempts.
  */
 
 import { createHash, randomUUID } from "node:crypto";
@@ -43,7 +44,6 @@ export interface SingleResult extends RunResult {}
 export interface SubagentDetails {
 	mode: "single" | "parallel";
 	results: SingleResult[];
-	background?: boolean;
 }
 
 /** Text of the newest assistant message that has any. A final answer may be

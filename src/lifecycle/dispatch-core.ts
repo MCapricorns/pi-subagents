@@ -23,7 +23,7 @@ export interface DispatchCore {
 	/** Stamp a terminal monitor state and toast the result once. */
 	finishRun: (runId: number, status: "done" | "failed", opts?: { silent?: boolean }) => void;
 	makeLiveHandler: (runId: number, generation?: number) => (event: SubagentLiveEvent) => void;
-	makeDetails: (mode: "single" | "parallel", background?: boolean) => (results: SingleResult[]) => SubagentDetails;
+	makeDetails: (mode: "single" | "parallel") => (results: SingleResult[]) => SubagentDetails;
 }
 
 export function createDispatchCore(runtime: SubagentRuntime): DispatchCore {
@@ -118,8 +118,8 @@ export function createDispatchCore(runtime: SubagentRuntime): DispatchCore {
 	};
 
 	const makeDetails =
-		(mode: "single" | "parallel", background = false) =>
-		(results: SingleResult[]): SubagentDetails => ({ mode, results, background });
+		(mode: "single" | "parallel") =>
+		(results: SingleResult[]): SubagentDetails => ({ mode, results });
 
 	const startBackground = createBackgroundDispatcher({
 		runtime,

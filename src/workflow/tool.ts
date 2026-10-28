@@ -75,7 +75,6 @@ const WorkflowParams = Type.Object({
 
 export interface WorkflowToolDetails {
 	workflow: WorkflowStatusView;
-	runIds: number[];
 }
 
 function launchReceipt(status: WorkflowStatusView): string {
@@ -246,10 +245,7 @@ export function registerWorkflowTool(pi: ExtensionAPI, runtime: SubagentRuntime,
 			const status = workflowStatus(handle.run);
 			return {
 				content: [{ type: "text", text: launchReceipt(status) }],
-				details: {
-					workflow: status,
-					runIds: status.nodes.flatMap((node) => (node.runId === undefined ? [] : [node.runId])),
-				} satisfies WorkflowToolDetails,
+				details: { workflow: status } satisfies WorkflowToolDetails,
 			};
 		},
 

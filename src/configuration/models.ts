@@ -36,8 +36,6 @@ export interface ResolvedAgentModelRoute {
 	primaryRef?: string;
 	/** Current main-window model when it differs from the selection. */
 	mainFallbackRef?: string;
-	/** Runtime order, useful for status/tests. */
-	candidateRefs: string[];
 	/** Configured ref skipped because Pi does not currently report it available. */
 	unavailableSelectedRef?: string;
 }
@@ -156,7 +154,6 @@ export function resolveAgentModelRoute(input: AgentModelRouteInput): ResolvedAge
 	return {
 		primaryRef,
 		...(candidateRefs[1] ? { mainFallbackRef: candidateRefs[1] } : {}),
-		candidateRefs,
 		...(!selectedAvailable && selectedRef ? { unavailableSelectedRef: selectedRef } : {}),
 	};
 }

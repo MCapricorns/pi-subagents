@@ -462,7 +462,7 @@ describe("subagent_workflow tool", () => {
 			},
 			finishRun: () => undefined,
 			makeLiveHandler: () => () => undefined,
-			makeDetails: () => () => ({ mode: "single" as const, results: [], background: true }),
+			makeDetails: () => () => ({ mode: "single" as const, results: [] }),
 		};
 		registerWorkflowTool(pi, runtime, core as never);
 		return { runtime, tool: tools.get("subagent_workflow")!, messages, started };

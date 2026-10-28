@@ -38,29 +38,23 @@ export function roleThinkingLevel(agentName: string): ThinkingLevel {
 	}
 }
 
-/** Short responsibility line shown next to each built-in in setup lists. */
+/** Responsibility line shown for a built-in's selected setup row. */
 export interface AgentProfile {
-	/** A few words for picker rows. */
-	summary: string;
 	/** What this role owns, shown for its selected setup row. */
 	remark: string;
 }
 
 export const AGENT_PROFILES: Record<(typeof BUILTIN_AGENT_NAMES)[number], AgentProfile> = {
 	scout: {
-		summary: "Research · read-only",
 		remark: "Bounded code, documentation, or web research with citations. No commands or edits.",
 	},
 	artisan: {
-		summary: "Implement · code & checks",
 		remark: "Implement one substantial change with its tests and verification.",
 	},
 	reviewer: {
-		summary: "Review · correctness",
 		remark: "Review code for actionable defects and verify findings without editing files.",
 	},
 	critic: {
-		summary: "Challenge · adversarial review",
 		remark: "Challenge changes or findings with counterexamples and independent verification.",
 	},
 };
@@ -89,10 +83,8 @@ export interface SubagentsConfig {
 	agentThinkingLevels: Record<string, ThinkingLevel>;
 }
 
-export const DEFAULT_CONFIG: SubagentsConfig = {
-	agentModels: {},
-	agentThinkingLevels: {},
-};
+/** The default every load starts from; `defaultConfig` keeps the shape in one place. */
+export const DEFAULT_CONFIG: SubagentsConfig = defaultConfig();
 
 export function getConfigPath(agentDir: string = getAgentDir()): string {
 	return join(agentDir, CONFIG_FILE_NAME);

@@ -484,7 +484,7 @@ export function registerSubagentTool(
 					throw new Error(`No subagents started.\n${failureLines.join("\n")}`);
 				}
 				if (params.wait) {
-					const blocks = await awaitRunResults(runtime, startedIds, signal, DEFAULT_MAX_RESULT_LINES, ctx.cwd, makeProgress(makeDetails("parallel", true)(results)));
+					const blocks = await awaitRunResults(runtime, startedIds, signal, DEFAULT_MAX_RESULT_LINES, ctx.cwd, makeProgress(makeDetails("parallel")(results)));
 					if (signal?.aborted) await cancelActiveWork(runtime, "Parent run was cancelled.");
 					else runtime.completeAwaitDelivery(startedIds);
 					const resultText = failureLines.length > 0
@@ -493,7 +493,7 @@ export function registerSubagentTool(
 					const text = `${resultText}\n\n${admissionNote}`;
 					return {
 						content: [{ type: "text", text }],
-						details: makeDetails("parallel", true)(results),
+						details: makeDetails("parallel")(results),
 					};
 				}
 				const text = [
@@ -502,7 +502,7 @@ export function registerSubagentTool(
 				].join("\n");
 				return {
 					content: [{ type: "text", text }],
-					details: makeDetails("parallel", true)(results),
+					details: makeDetails("parallel")(results),
 				};
 			}
 
@@ -541,12 +541,12 @@ export function registerSubagentTool(
 				throw new Error(getResultOutput(result));
 			}
 			if (params.wait && result.runId !== undefined) {
-				const blocks = await awaitRunResults(runtime, [result.runId], signal, DEFAULT_MAX_RESULT_LINES, ctx.cwd, makeProgress(makeDetails("single", true)([result])));
+				const blocks = await awaitRunResults(runtime, [result.runId], signal, DEFAULT_MAX_RESULT_LINES, ctx.cwd, makeProgress(makeDetails("single")([result])));
 				if (signal?.aborted) await cancelActiveWork(runtime, "Parent run was cancelled.");
 				else runtime.completeAwaitDelivery([result.runId]);
 				return {
 					content: [{ type: "text", text: blocks }],
-					details: makeDetails("single", true)([result]),
+					details: makeDetails("single")([result]),
 				};
 			}
 			return {
@@ -554,7 +554,7 @@ export function registerSubagentTool(
 					type: "text",
 					text: phaseLeaseReceipt(result.runId === undefined ? [] : [result.runId], { mode: "single" }),
 				}],
-				details: makeDetails("single", true)([result]),
+				details: makeDetails("single")([result]),
 			};
 
 		},
