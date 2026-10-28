@@ -13,7 +13,9 @@ pi install npm:@ferris1225/pi-subagents
 
 Run `/subagents-setup` for a role grid: one row per role with **Model**,
 **Thinking**, and **Reset** as columns. ↑/↓ moves between roles, ←/→ between
-columns, and Enter edits the focused cell. Each selection saves immediately;
+columns, and Enter edits the highlighted value. Headers align with their values,
+and the footer names the focused role and field; **Thinking** selects reasoning
+effort. Each selection saves immediately;
 Esc returns without applying a picker selection, and the grid keeps the focused
 cell. Model pickers support search, paste, and paging.
 
@@ -44,7 +46,8 @@ and the final result. Keep a fix and its regression tests with one owner.
 Pi chooses delegation from the task structure; no special request is required.
 Small, familiar, or tightly coupled work stays in main. A child earns its cost
 when substantial bounded work benefits from parallel progress, isolating noisy
-research, or an independent check. Free process slots are not a team-size target.
+research, or an independent check. Choose team size from independent work.
+Explicit requests to work in main or avoid subagents take precedence.
 
 Use one owner per deliverable, including its regression tests. Brief the child
 with the outcome, done condition, relevant paths, established evidence, write
@@ -165,19 +168,25 @@ workflow progress groups, and task rows with status and elapsed time at the righ
 Activity, model, thinking, token usage, and worktree state use secondary lines as
 space permits. Task identities take priority over detail; failed and blocked
 work takes priority over ordinary activity. Completed nodes collapse into graph
-progress, and overflow reports hidden tasks. Queue reasons distinguish process
-capacity, the repository write lane, and startup. Execution uses 4–6 process
-slots; wider batches queue automatically.
+progress, and overflow reports hidden tasks. Runs preparing their child process
+show `starting`. There is no process-count limit or shared-checkout startup
+lock: independent runs start together, including separate dispatch calls while
+another call awaits results.
 
 Single writers use the shared checkout. Parallel writers and workflow writers
 default to detached worktrees, which require a committed `HEAD`. Set
-`isolation: "shared"` to use the checkout's serialized write lane. Declare exact
-write paths or symbols in `scope` to detect conflicts. Worktrees isolate Git
-changes, not tool permissions. Integration leaves your index untouched; failures
+`isolation: "shared"` to run directly in the checkout without a repository-wide
+launch lock. Declare exact write paths or symbols in `scope` to detect conflicts.
+Duplicate phases and declared writer overlaps are still rejected. Worktrees
+isolate Git changes, not tool permissions. Only final worktree integration into
+the original checkout is serialized; it leaves your index untouched, and failures
 retain recovery artifacts.
 
-Cancelling the parent run or navigating the conversation tree stops unfinished
-work without completion wake-ups. New/resume/fork/reload ends old children and retains interrupted work
+Cancelling the parent run with Escape stops unfinished work without waking the
+parent. A cancellation receipt is supplied on the next user turn with the stopped
+run and workflow ids, so main knows no additional `subagent_stop` is needed.
+Cancelled work must not restart automatically. Conversation-tree navigation also
+stops unfinished work. New/resume/fork/reload ends old children and retains interrupted work
 for manual recovery. Runs do not resume automatically; main finishes incomplete
 work from partial changes and artifacts.
 

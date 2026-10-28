@@ -13,7 +13,6 @@ import { Type } from "typebox";
 import { isWriteCapableAgent, loadBuiltinAgents } from "../delegation/agents.ts";
 import { defaultIsolationMode, IsolationSchema, PhaseIdSchema, ScopeSchema } from "../delegation/dispatch.ts";
 import { loadConfig } from "../configuration/config.ts";
-import { resolveSubagentConcurrency } from "../execution/background.ts";
 import type { SubagentRuntime } from "../lifecycle/runtime.ts";
 import type { DispatchCore } from "../lifecycle/dispatch-core.ts";
 import { projectResultsRoot } from "../lifecycle/thread-shared.ts";
@@ -96,7 +95,7 @@ function launchReceipt(status: WorkflowStatusView): string {
 			return parts.join(" · ");
 		}),
 		"",
-		"The graph dispatches each dependent the moment its prerequisites settle, with no further dispatch from you. One summary arrives when the whole graph settles; continue disjoint work or end your turn, and do not poll. The automatic process limit paces nodes, so a wide graph queues instead of refusing.",
+		"The graph dispatches each dependent the moment its prerequisites settle, with no further dispatch from you. One summary arrives when the whole graph settles; continue disjoint work or end your turn, and do not poll. Ready independent nodes start together without a process-count limit.",
 	];
 	return lines.join("\n");
 }
@@ -136,9 +135,9 @@ export function registerWorkflowTool(pi: ExtensionAPI, runtime: SubagentRuntime,
 		name: "subagent_workflow",
 		label: "Subagent Workflow",
 		description:
-			"Run a dependency graph of sub-agent phases: declare nodes with dependsOn, and the runtime dispatches each dependent as soon as its prerequisites settle and a process slot frees. Choose this proactively for two or more substantial phases with known dependencies and writer scopes, when scheduling saves coordination. Use subagent tasks for independent work with no dependency edges; keep small or tightly coupled work in main. If a result must decide the next task or its scope, dispatch that phase alone, decide in main, then reassess whether a graph fits. Never add research, review, or gate nodes by habit. A graph saves dispatch turns; it does not plan or judge success beyond process results. One summary arrives when the graph settles. Nodes are ordinary one-shot runs; main still owns integration, the final gate, and release.",
+			"Run a dependency graph of sub-agent phases: declare nodes with dependsOn, and the runtime dispatches each dependent as soon as its prerequisites settle. Choose this proactively for two or more substantial phases with known dependencies and writer scopes, when scheduling saves coordination. Use subagent tasks for independent work with no dependency edges; keep small or tightly coupled work in main. If a result must decide the next task or its scope, dispatch that phase alone, decide in main, then reassess whether a graph fits. Never add research, review, or gate nodes by habit. A graph saves dispatch turns; it does not plan or judge success beyond process results. One summary arrives when the graph settles. Nodes are ordinary one-shot runs; main still owns integration, the final gate, and release.",
 		exposure: "model-only",
-		executionMode: "sequential",
+		executionMode: "parallel",
 		annotations: {
 			readOnlyHint: false,
 			destructiveHint: true,
@@ -151,8 +150,7 @@ export function registerWorkflowTool(pi: ExtensionAPI, runtime: SubagentRuntime,
 			await runtime.durableRestore;
 			monitor.beginTurn();
 			const config = await loadConfig(runtime.configPath);
-			runtime.backgroundQueue.setConcurrency(resolveSubagentConcurrency());
-			// Both built-in roles are always available; the live tool metadata decides
+			// All built-in roles are always available; the live tool metadata decides
 			// which of them is write-capable in this session.
 			const agents = loadBuiltinAgents();
 			const toolInfos = runtime.getToolInfos();

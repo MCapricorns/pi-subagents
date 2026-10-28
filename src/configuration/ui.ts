@@ -1,4 +1,4 @@
-/** Searchable pickers and the grouped /subagents-setup settings panel. */
+/** Searchable pickers and the /subagents-setup role grid. */
 
 import {
 	Input,
@@ -18,22 +18,10 @@ import type { ExtensionCommandContext, Theme } from "@earendil-works/pi-coding-a
 type PickerContext = Pick<ExtensionCommandContext, "mode" | "ui">;
 const PAGE_SIZE = 8;
 
-interface PickerItem extends SelectItem {
-	group?: string;
-	currentValue?: string;
-}
-
-export interface SettingsRow extends PickerItem {
-	group: string;
-	currentValue: string;
-}
-
 interface PickerOptions {
 	title: string;
 	hint: string;
-	searchable: boolean;
 	initialValue?: string;
-	footer?: string;
 }
 
 /** One keyboard path for settings and their nested pickers. Input supplies
@@ -41,10 +29,10 @@ interface PickerOptions {
 class Picker implements Component, Focusable {
 	private _focused = false;
 	private cursor = 0;
-	private filtered: PickerItem[];
+	private filtered: SelectItem[];
 	private readonly search = new Input({ prompt: "Search: ", placeholder: "type to filter" });
 
-	private readonly items: PickerItem[];
+	private readonly items: SelectItem[];
 	private readonly options: PickerOptions;
 	private readonly tui: TUI;
 	private readonly theme: Theme;
@@ -52,7 +40,7 @@ class Picker implements Component, Focusable {
 	private readonly done: (value: string | undefined) => void;
 
 	constructor(
-		items: PickerItem[],
+		items: SelectItem[],
 		options: PickerOptions,
 		tui: TUI,
 		theme: Theme,
@@ -73,7 +61,7 @@ class Picker implements Component, Focusable {
 	get focused(): boolean { return this._focused; }
 	set focused(value: boolean) {
 		this._focused = value;
-		this.search.focused = value && this.options.searchable;
+		this.search.focused = value;
 	}
 
 	private pageSize(): number {
@@ -88,34 +76,28 @@ class Picker implements Component, Focusable {
 		const fit = (text: string) => truncateToWidth(text, width, "");
 		const border = theme.fg("border", "─".repeat(width));
 		const lines = [border, theme.fg("accent", theme.bold(this.options.title)), dim(this.options.hint)];
-		if (this.options.searchable) lines.push(...this.search.render(width));
+		lines.push(...this.search.render(width));
 		const pageSize = this.pageSize();
 		const start = Math.max(0, Math.min(this.cursor - Math.floor(pageSize / 2), this.filtered.length - pageSize));
 		const visible = this.filtered.slice(start, start + pageSize);
-		let lastGroup: string | undefined;
 		if (!visible.length) lines.push("", theme.fg("warning", "  No matches. Change or clear the search."));
 		for (const [index, item] of visible.entries()) {
-			if (item.group && item.group !== lastGroup) {
-				lines.push("", theme.bold("  " + item.group));
-				lastGroup = item.group;
-			}
 			const selected = start + index === this.cursor;
 			const prefix = selected ? theme.fg("accent", "› ") : "  ";
 			const label = selected ? theme.fg("accent", theme.bold(item.label)) : item.label;
-			const value = item.currentValue === undefined ? "" : " ".repeat(Math.max(2, 12 - visibleWidth(item.label))) + item.currentValue;
-			lines.push(prefix + label + (selected ? value : dim(value)));
+			lines.push(prefix + label);
 		}
 		const item = this.filtered[this.cursor];
 		lines.push("", border);
 		if (item) {
 			// Details have their own lines, so long model ids cannot hide capabilities.
-			const detail = [item.currentValue, item.description].filter(Boolean).join(" · ");
+			const detail = item.description ?? "";
 			lines.push(...wrapTextWithAnsi(detail, Math.max(1, width)).slice(0, 3).map(dim));
-			if (this.options.searchable) lines.push(dim(
+			lines.push(dim(
 				(this.cursor + 1) + "/" + this.filtered.length + " matches · ↑/↓ move · PgUp/PgDn page",
 			));
 		}
-		lines.push(dim(this.options.footer ?? "Enter select · Esc back"));
+		lines.push(dim("Enter select · Esc back"));
 		return lines.map(fit);
 	}
 
@@ -137,7 +119,7 @@ class Picker implements Component, Focusable {
 		} else if (kb.matches(data, "tui.select.cancel")) {
 			this.done(undefined);
 			return;
-		} else if (this.options.searchable) {
+		} else {
 			const before = this.search.getValue();
 			this.search.handleInput(data);
 			if (before !== this.search.getValue()) {
@@ -153,7 +135,7 @@ class Picker implements Component, Focusable {
 	invalidate(): void { this.search.invalidate(); }
 }
 
-function openPicker(ctx: PickerContext, items: PickerItem[], options: PickerOptions): Promise<string | undefined> {
+function openPicker(ctx: PickerContext, items: SelectItem[], options: PickerOptions): Promise<string | undefined> {
 	if (ctx.mode !== "tui") {
 		ctx.ui.notify("/subagents-setup requires Pi's interactive TUI.", "error");
 		return Promise.resolve(undefined);
@@ -170,7 +152,7 @@ export function promptSelectOne(
 	items: SelectItem[],
 	initialValue?: string,
 ): Promise<string | undefined> {
-	return openPicker(ctx, items, { title, hint, searchable: true, initialValue });
+	return openPicker(ctx, items, { title, hint, initialValue });
 }
 
 /** One role per row, with Model, Thinking and Reset side by side: the whole
@@ -251,22 +233,27 @@ class RoleGrid implements Component {
 		const cell = (text: string, size: number, active: boolean): string => {
 			const fitted = truncateToWidth(text, size, "…");
 			const pad = " ".repeat(Math.max(0, size - visibleWidth(fitted)));
-			return active ? theme.fg("accent", theme.bold(fitted)) + pad : fitted + pad;
+			return active ? theme.bg("selectedBg", theme.fg("accent", theme.bold(fitted + pad))) : fitted + pad;
 		};
 		const lines = [theme.fg("border", "─".repeat(width)), theme.fg("accent", theme.bold("Subagents · Roles")), dim("Model · Thinking · Reset per role · " + this.status), ""];
 		const header = ["Role", "Model", "Thinking", ""]
 			.map((title, index) => cell(title, [roleWidth, modelWidth, thinkingWidth, resetWidth][index]!, false))
 			.join("  ");
-		lines.push(dim(header));
+		lines.push("  " + dim(header));
 		for (const [index, row] of this.rows.entries()) {
 			const selected = index === this.row;
 			const cells = [row.role, row.model, row.thinking + (row.thinkingOverridden ? "*" : ""), "reset"]
-				.map((text, column) => cell(text, [roleWidth, modelWidth, thinkingWidth, resetWidth][column]!, selected && this.column === column));
+				.map((text, column) => cell(text, [roleWidth, modelWidth, thinkingWidth, resetWidth][column]!, selected && this.column === column - 1));
 			lines.push((selected ? theme.fg("accent", "› ") : "  ") + cells.join("  "));
 		}
 		const focused = this.rows[this.row];
 		lines.push("", theme.fg("border", "─".repeat(width)));
-		if (focused) lines.push(...wrapTextWithAnsi(focused.description, Math.max(1, width)).slice(0, 3).map(dim));
+		if (focused) {
+			const field = GRID_COLUMNS[this.column]!;
+			const label = field === "model" ? "Model" : field === "thinking" ? "Thinking (reasoning effort)" : "Reset";
+			lines.push(theme.fg("accent", `${focused.role} · ${label} · Enter ${field === "reset" ? "restore defaults" : "edit"}`));
+			lines.push(...wrapTextWithAnsi(focused.description, Math.max(1, width)).slice(0, 3).map(dim));
+		}
 		lines.push(dim("↑/↓ role · ←/→ column · Enter edit · Esc close"));
 		return lines.map((line) => truncateToWidth(line, width, "…"));
 	}
@@ -313,19 +300,4 @@ export function promptRoleGrid(
 	}
 	return ctx.ui.custom<RoleGridChoice | undefined>((tui, theme, keybindings, done) =>
 		new RoleGrid(rows, status, focus, tui, theme, keybindings, done));
-}
-
-export function promptSettings(
-	ctx: PickerContext,
-	items: SettingsRow[],
-	initialValue?: string,
-	status = "Changes save immediately",
-): Promise<string | undefined> {
-	return openPicker(ctx, items, {
-		title: "Subagents · Settings",
-		hint: "Model and thinking per role · " + status,
-		searchable: false,
-		initialValue,
-		footer: "↑/↓ move · Enter edit · Esc close",
-	});
 }

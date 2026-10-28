@@ -1,7 +1,7 @@
 /**
  * Detached Git worktree isolation for write-capable sub-agents.
  *
- * A handle is created in the bounded queue and stays owned by the logical run
+ * A handle is created by its background task and stays owned by the logical run
  * across startup retries and model candidates. Finalize
  * is idempotent: it records a binary patch, applies it to the original working
  * tree without touching its index, then removes/prunes the temporary worktree.

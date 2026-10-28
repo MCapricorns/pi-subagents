@@ -4,7 +4,7 @@
  * The `subagent` tool and the workflow runner start children through the same
  * dispatcher, live-activity projection, terminal-notification path, and tool-card
  * details builder. Keeping them here means a workflow node is an ordinary
- * managed run: same queue pacing, isolation, admission, durable checkpointing,
+ * managed run: same lifecycle ownership, isolation, admission, durable checkpointing,
  * and completion accounting.
  */
 

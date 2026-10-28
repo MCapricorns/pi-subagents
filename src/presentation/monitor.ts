@@ -22,15 +22,8 @@ import type { IsolationMode, WorktreeFinalizationStatus } from "../isolation/wor
 
 export type RunStatus = "queued" | "running" | "interrupting" | "parked" | "done" | "failed";
 
-/** Why a queued run has produced no output yet. Three genuinely different
- * situations used to be reported as one "queued": waiting for a free process
- * slot (real pool pacing), serialized behind the shared-checkout repository
- * write lane (a slot is free — the wait is write serialization), and already
- * starting its child process (a slot is held; output is seconds away).
- * Conflating them taught the parent model that the pool was exhausted when it
- * was not, so it stopped dispatching. Meaningful only while status is
- * "queued"; cleared on every transition out of it. */
-export type RunWaitReason = "process-slot" | "repository-lane" | "starting";
+/** A queued run is preparing its child process; execution has no capacity wait. */
+export type RunWaitReason = "starting";
 
 export function isRunActiveStatus(status: RunStatus): boolean {
 	return status === "queued" || status === "running" || status === "interrupting";
@@ -91,9 +84,7 @@ export interface RunChainMeta {
 	worktreeId?: string;
 	/** Set for nodes the workflow runner dispatches. */
 	workflow?: RunWorkflowTag;
-	/** Initial wait reason; defaults to "process-slot" (a fresh dispatch enters
-	 * the process queue). Children spawned outside the queue pass "starting"
-	 * because they never wait for a slot. */
+	/** Initial startup state before the child emits activity. */
 	waitReason?: RunWaitReason;
 }
 
@@ -527,7 +518,7 @@ export class MonitorStore {
 			model,
 			thinking,
 			status: "queued",
-			waitReason: meta?.waitReason ?? "process-slot",
+			waitReason: meta?.waitReason ?? "starting",
 			usage: emptyUsage(),
 			elapsedMs: 0,
 			...(meta?.isolation ? { isolation: meta.isolation, integrationStatus: meta.isolation === "worktree" ? "pending" : undefined, ...(meta.worktreeId ? { worktreeId: meta.worktreeId } : {}) } : {}),
@@ -741,9 +732,7 @@ export function statusIcon(status: RunStatus, theme: Theme): string {
 	}
 }
 
-/** User-facing status label used by tool/status rendering. Queued runs say
- * so: anything vaguer ("ready") reads like an unexplained cap and made models
- * stop dispatching while slots were merely pacing. */
+/** User-facing lifecycle label used by tool/status rendering. */
 export function statusLabel(status: RunStatus): string {
 	switch (status) {
 		case "queued":
@@ -761,17 +750,7 @@ export function statusLabel(status: RunStatus): string {
 	}
 }
 
-/** Truthful description of why a queued run has produced no output yet, so a
- * repository-lane wait or a starting child is never mistaken for an exhausted
- * process pool. Undefined for runs that are not queued. */
+/** Startup label for runs that have not emitted activity yet. */
 export function runWaitLabel(run: Pick<RunView, "status" | "waitReason">): string | undefined {
-	if (run.status !== "queued") return undefined;
-	switch (run.waitReason) {
-		case "repository-lane":
-			return "waiting for the repository write lane";
-		case "starting":
-			return "starting";
-		default:
-			return "queued for a free process slot";
-	}
+	return run.status === "queued" ? "starting" : undefined;
 }

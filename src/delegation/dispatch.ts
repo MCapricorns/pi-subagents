@@ -13,14 +13,12 @@ import { Text } from "@earendil-works/pi-tui";
 import { Type } from "typebox";
 import { isWriteCapableAgent, loadBuiltinAgents, type AgentConfig, type ToolMetadata } from "./agents.ts";
 import { DEFAULT_MAX_RESULT_LINES, loadConfig } from "../configuration/config.ts";
-import { resolveSubagentConcurrency } from "../execution/background.ts";
 import { formatCompletionBlock, formatUsage } from "../presentation/format.ts";
 import {
 	formatTaskSummary,
 	monitor,
 	statusIcon,
 	statusLabel,
-	type RunWaitReason,
 } from "../presentation/monitor.ts";
 import { findDuplicateDispatch, formatParallelScopeAdmissionNote, formatPhaseLeaseReceipt } from "./prompt.ts";
 import {
@@ -114,11 +112,8 @@ const SubagentParams = Type.Object({
  * worktree-capable agents join them via the live catalog on the execute path. */
 const WORKTREE_DEFAULT_AGENTS = new Set(["artisan"]);
 
-/** Resolve the default isolation for a dispatch. An explicit per-call request
- * wins; otherwise parallel write-capable agents get a detached worktree
- * because shared writers serialize on the repository lane, so defaulting them
- * to shared would turn one parallel batch into a convoy that also parks
- * process slots. */
+/** Explicit isolation wins. Parallel writers default to detached worktrees
+ * to keep their Git changes separate; shared runs may also start together. */
 export function defaultIsolationMode(
 	mode: "single" | "parallel",
 	agentName: string,
@@ -289,7 +284,7 @@ async function awaitRunResults(
 					}, 0);
 				}
 			};
-			const onAbort = (): void => finish({ note: "wait aborted" });
+			const onAbort = (): void => finish({ note: `Parent wait cancelled for run #${runId}; automatic cancellation stops unfinished child work. No additional subagent_stop is needed.` });
 			let listeners = runtime.settledListeners.get(runId);
 			if (!listeners) {
 				listeners = new Set();
@@ -353,43 +348,14 @@ export function registerSubagentTool(
 			options,
 		);
 
-	/** Pacing note appended to dispatch confirmations whenever runs are actually
-	 * waiting. Slot waits and repository-lane waits are stated separately with
-	 * the real capacity: a lane-serialized shared writer or a starting child
-	 * must never read as an exhausted pool. Empty when nothing is waiting. */
-	const queuePacingNote = (): string => {
-		const runs = monitor.getRuns();
-		const queuedWith = (reason: RunWaitReason): number =>
-			runs.filter((run) => run.status === "queued" && run.waitReason === reason).length;
-		const slotWaiting = queuedWith("process-slot");
-		const laneWaiting = queuedWith("repository-lane");
-		if (slotWaiting === 0 && laneWaiting === 0) return "";
-		const executing = runs.filter((run) =>
-			run.status === "running" || run.status === "interrupting" || (run.status === "queued" && run.waitReason === "starting"),
-		).length;
-		const capacity = runtime.backgroundQueue.capacity;
-		const freeSlots = Math.max(0, capacity - runtime.backgroundQueue.activeCount);
-		const parts = [`${executing} running`];
-		if (slotWaiting > 0) {
-			parts.push(`${slotWaiting} waiting for a free process slot (capacity ${capacity}); they start automatically as slots free`);
-		}
-		if (laneWaiting > 0) {
-			parts.push(
-				`${laneWaiting} shared-checkout writer${laneWaiting === 1 ? "" : "s"} waiting for the repository write lane — write serialization, not slot capacity` +
-					(slotWaiting === 0 ? ` (${freeSlots} of ${capacity} slots free; parallel writers avoid the lane via worktree isolation)` : ""),
-			);
-		}
-		return ` Pacing: ${parts.join(" · ")}.`;
-	};
-
 	pi.registerTool({
 		name: "subagent",
 		label: "Subagent",
 		description: "Start one-shot leaf runs when substantial bounded work benefits from parallel progress, context isolation, or independent verification enough to offset startup and integration. Keep small or tightly coupled tasks in main. Use tasks for independent phases; use subagent_workflow for known dependent phases. Duplicate phases and declared writer overlaps are rejected before allocation; scope does not prove independence or grant permissions. Parallel tasks without scope report `independence not verified`. Results arrive automatically, or in-turn with wait:true. Main handles incomplete work.",
-		// Declared to the model, never callable from codemode scripts. Dispatch shares
-		// the in-memory lease table, so a batch that includes it runs one tool at a time.
+		// Admission and lease reservation finish synchronously before child startup.
+		// Awaited runs must not block unrelated dispatch calls.
 		exposure: "model-only",
-		executionMode: "sequential",
+		executionMode: "parallel",
 		annotations: {
 			readOnlyHint: false,
 			destructiveHint: true,
@@ -411,7 +377,6 @@ export function registerSubagentTool(
 			await runtime.durableRestore;
 			monitor.beginTurn();
 			const config = await loadConfig(runtime.configPath);
-			runtime.backgroundQueue.setConcurrency(resolveSubagentConcurrency());
 			const agents = loadBuiltinAgents();
 			// One admission snapshot: role boundaries and writer capability must
 			// describe the same catalog the batch is validated against.
@@ -462,8 +427,7 @@ export function registerSubagentTool(
 
 			// Sub-agents run detached from the foreground turn: the editor stays
 			// available for disjoint orchestration while the launch receipt leases
-			// each delegated phase. The queue paces child processes without changing
-			// phase ownership or requiring a per-call task cap.
+			// each delegated phase. Independent child processes start without a cap.
 			if (params.tasks && params.tasks.length > 0) {
 				let prepared: PreparedDispatchTask[];
 				try {
@@ -535,7 +499,7 @@ export function registerSubagentTool(
 				const text = [
 					phaseLeaseReceipt(startedIds, { mode: "parallel", declaredScopesComplete }),
 					...(failureLines.length > 0 ? ["Launch failures:", ...failureLines] : []),
-				].join("\n") + queuePacingNote();
+				].join("\n");
 				return {
 					content: [{ type: "text", text }],
 					details: makeDetails("parallel", true)(results),
@@ -588,7 +552,7 @@ export function registerSubagentTool(
 			return {
 				content: [{
 					type: "text",
-					text: phaseLeaseReceipt(result.runId === undefined ? [] : [result.runId], { mode: "single" }) + queuePacingNote(),
+					text: phaseLeaseReceipt(result.runId === undefined ? [] : [result.runId], { mode: "single" }),
 				}],
 				details: makeDetails("single", true)([result]),
 			};

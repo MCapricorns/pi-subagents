@@ -3,7 +3,7 @@
  *
  * The rule this module exists for is "dispatch the next node the moment its
  * prerequisites settle, without waking the parent model". Each node is started
- * through the same dispatcher a `subagent` call uses — same queue pacing, same
+ * through the same dispatcher a `subagent` call uses — same lifecycle ownership, same
  * admission, same isolation, same durable checkpoint — and is `quiet`, meaning
  * it reports into this graph instead of sending its own completion message.
  * The parent is woken exactly once, with the graph's summary.

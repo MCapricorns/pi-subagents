@@ -479,12 +479,12 @@ describe("subagent_workflow tool", () => {
 	}
 
 
-	it("registers as a model-only sequential tool and delivers one graph summary", async () => {
+	it("registers as a model-only parallel tool and delivers one graph summary", async () => {
 		const root = await mkdtemp(join(tmpdir(), "pi-subagents-workflow-tool-"));
 		const harness = toolHarness(join(root, "pi-subagents.json"));
 		try {
 			assert.equal(harness.tool.exposure, "model-only");
-			assert.equal(harness.tool.executionMode, "sequential");
+			assert.equal(harness.tool.executionMode, "parallel");
 			const response = (await execute(harness.tool, {
 				name: "smoke",
 				nodes: [

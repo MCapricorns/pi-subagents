@@ -143,22 +143,12 @@ export interface ActiveRunFoot {
 	agent: string;
 	/** Optional content label (task-derived) shown next to the agent name. */
 	label?: string;
-	/** Why a not-yet-executing run is waiting. Stated precisely so a repository
-	 * lane wait or a starting child is never mistaken for an exhausted pool. */
+	/** Startup state before a child emits activity. */
 	wait?: RunWaitReason;
 }
 
 function activeRunWaitTag(wait: RunWaitReason | undefined): string {
-	switch (wait) {
-		case "process-slot":
-			return " (queued, starts when a process slot frees)";
-		case "repository-lane":
-			return " (waiting for the repository write lane, not for a slot)";
-		case "starting":
-			return " (starting)";
-		default:
-			return "";
-	}
+	return wait ? " (starting)" : "";
 }
 
 /**

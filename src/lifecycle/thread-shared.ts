@@ -54,28 +54,11 @@ async function canonicalManagedRepositoryRoot(cwd: string): Promise<string> {
 	}
 }
 
-/** Run one operation under the canonical original-repository lane.
- *
- * Shared write-capable generations use the abortable overload for their whole
- * run. Isolated generations use the non-abortable overload only for their
- * final worktree apply, so model work remains parallel while the original
- * checkout mutation cannot race a shared writer.
- */
+/** Serialize only worktree integration into the original checkout. */
 export async function runInManagedRepositoryLane<T>(
 	cwd: string,
 	task: () => Promise<T>,
-): Promise<T>;
-export async function runInManagedRepositoryLane<T>(
-	cwd: string,
-	task: () => Promise<T>,
-	signal: AbortSignal,
-): Promise<T | undefined>;
-export async function runInManagedRepositoryLane<T>(
-	cwd: string,
-	task: () => Promise<T>,
-	signal?: AbortSignal,
-): Promise<T | undefined> {
-	if (signal?.aborted) return undefined;
+): Promise<T> {
 	const root = await canonicalManagedRepositoryRoot(cwd);
 	const key = process.platform === "win32" ? root.toLowerCase() : root;
 	const previous = managedRepositoryRootTails.get(key) ?? Promise.resolve();
@@ -85,30 +68,11 @@ export async function runInManagedRepositoryLane<T>(
 	});
 	const tail = previous.catch(() => undefined).then(() => gate);
 	managedRepositoryRootTails.set(key, tail);
-	let onAbort: (() => void) | undefined;
 	try {
-		if (signal) {
-			await Promise.race([
-				previous.catch(() => undefined),
-				new Promise<void>((resolveAborted) => {
-					if (signal.aborted) resolveAborted();
-					else {
-						onAbort = resolveAborted;
-						signal.addEventListener("abort", onAbort, { once: true });
-					}
-				}),
-			]);
-		} else {
-			await previous.catch(() => undefined);
-		}
-		if (signal?.aborted) return undefined;
+		await previous.catch(() => undefined);
 		return await task();
 	} finally {
-		if (signal && onAbort) signal.removeEventListener("abort", onAbort);
 		release();
-		// An aborted waiter may finish before the prior owner. Keep its chained
-		// tail installed until that owner also settles, otherwise a newcomer could
-		// observe an empty map and race the still-running workflow.
 		void tail.then(() => {
 			if (managedRepositoryRootTails.get(key) === tail) managedRepositoryRootTails.delete(key);
 		});

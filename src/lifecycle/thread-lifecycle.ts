@@ -213,11 +213,7 @@ export function createBackgroundDispatcher(options: BackgroundDispatcherOptions)
 		if (isolation === "shared" || worktree) installCurrentLifecycle();
 
 		const onLive = makeLiveHandler(runId, generation);
-		// Shared write-capable runs serialize on the repository lane so their
-		// edits cannot race; the lane wait releases the process slot because it
-		// is write serialization, not pool pacing.
-		const reserveManagedLane = isolation === "shared" && writeCapable;
-		const runGeneration = async (backgroundSignal: AbortSignal, controller: AbortController): Promise<void> => {
+		const runGeneration = async (backgroundSignal: AbortSignal): Promise<void> => {
 			if (runtime.threads.get(runId)?.generation !== generation) return;
 			if (isolation === "worktree" && !worktree) {
 				const prepared = await createWorktreeIsolation(originalCwd, { tempBaseDir: worktreesRoot });
@@ -233,14 +229,9 @@ export function createBackgroundDispatcher(options: BackgroundDispatcherOptions)
 				monitor.setIsolation(runId, "worktree", "pending", worktreeGroup);
 				installCurrentLifecycle();
 			}
-			// The generation body owns a process slot from here (a lane wait, if
-			// any, was granted above). Recording the transition synchronously keeps
-			// every "queued" surface truthful: only runs still pending in the pool
-			// or behind the lane report a wait.
+			// Independent runs start immediately; only worktree integration serializes.
 			monitor.setWaitReason(runId, "starting");
-			// Model/thinking config may have changed while this generation sat
-			// queued behind the concurrency limit. Re-resolve the route at actual
-			// start so /subagents-setup edits apply to not-yet-started runs.
+			// Re-read model preferences after asynchronous worktree preparation.
 			let activeRoute = route;
 			const activeIdleTimeoutMs = DEFAULT_IDLE_TIMEOUT_SEC * 1000;
 			try {
@@ -332,9 +323,7 @@ export function createBackgroundDispatcher(options: BackgroundDispatcherOptions)
 				thread.lifecycleOperation === "settle" &&
 				!thread.retired;
 			try {
-				// The child process has exited. Isolated Git finalization remains
-				// lifecycle-owned and awaited, but no longer consumes a process slot.
-				if (isolation === "worktree") runtime.backgroundQueue.suspend(controller);
+				// Keep ownership until isolated Git finalization finishes.
 				await thread.finalizeIsolation(generation, result);
 				if (!ownsSettlement()) return;
 
@@ -382,26 +371,8 @@ export function createBackgroundDispatcher(options: BackgroundDispatcherOptions)
 				if (ownsSettlement()) thread.lifecycleOperation = undefined;
 			}
 		};
-		const queuedGeneration = reserveManagedLane
-			? async (backgroundSignal: AbortSignal, controller: AbortController): Promise<void> => {
-					// Waiting for repository serialization must not consume a process
-					// slot. Once the lane is granted, reacquire through the same FIFO
-					// scheduler before any child process can spawn.
-					runtime.backgroundQueue.suspend(controller);
-					monitor.setWaitReason(runId, "repository-lane");
-					await runInManagedRepositoryLane(
-						originalCwd,
-						async () => {
-							monitor.setWaitReason(runId, "process-slot");
-							if (!(await runtime.backgroundQueue.acquire(controller))) return;
-							await runGeneration(backgroundSignal, controller);
-						},
-						backgroundSignal,
-					);
-				}
-			: runGeneration;
 		const queueController = runtime.backgroundQueue.enqueue(
-			queuedGeneration,
+			runGeneration,
 			() => {
 				if (runtime.threads.get(runId)?.generation !== generation) return;
 				// A destructive stop owns publication and may still be finalizing an
@@ -455,7 +426,6 @@ export function createBackgroundDispatcher(options: BackgroundDispatcherOptions)
 						};
 					thread.lastResult = crashed;
 					runtime.retainSession(crashed);
-					if (isolation === "worktree" && thread.worktree) runtime.backgroundQueue.suspend(thread.queueController);
 					await thread.finalizeIsolation(generation, crashed);
 					if (!ownsSettlement()) return;
 					thread.state = "failed";

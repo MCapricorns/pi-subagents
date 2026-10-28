@@ -34,7 +34,7 @@ describe("buildDelegationDirective", () => {
 		assert.equal(buildDelegationDirective([]), "");
 	});
 
-	it("prefers the two built-in roles without inventing extra phases", () => {
+	it("routes the four built-in roles without inventing extra phases", () => {
 		const directive = buildDelegationDirective(loadBuiltinAgents());
 		assert.match(directive, /Work directly for small, familiar, or tightly coupled tasks/u);
 		assert.match(directive, /parallel progress, keeping noisy research out of main, or an independent check outweighs startup, briefing, and integration cost/u);
@@ -48,10 +48,11 @@ describe("buildDelegationDirective", () => {
 			assert.equal(directive.split(role.description).length - 1, 1);
 		}
 		assert.match(directive, /Keep a quick source check or a small understood edit in main/u);
-		assert.match(directive, /Capacity is a limit, never a team-size target/u);
-		assert.match(directive, /one justified phase uses `subagent`; independent phases use its parallel `tasks`; two or more substantial phases with known dependencies and writer scopes use `subagent_workflow`/u);
-		assert.match(directive, /No special user command is needed/u);
-		assert.match(directive, /decide in main, then reassess/u);
+		assert.match(directive, /Choose team size from independent work, not available capacity/u);
+		assert.match(directive, /Use `subagent` for one bounded phase, parallel `tasks` for independent phases, and `subagent_workflow` for substantial dependent phases/u);
+		assert.match(directive, /Honor requests to work in main or avoid subagents/u);
+		assert.match(directive, /no extra stop or automatic restart/u);
+		assert.match(directive, /do not add research, review, or gate phases by habit/u);
 		assert.match(directive, /smallest fix for each confirmed defect/u);
 		assert.match(directive, /apply those fixes in the same turn \(artisan or main\), then let that role confirm only the fix/u);
 		assert.match(directive, /Do not re-review the whole change/u);

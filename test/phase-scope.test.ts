@@ -6,7 +6,6 @@ import { describe, it } from "node:test";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { registerSubagentTool } from "../src/delegation/dispatch.ts";
 import { normalizeConfig, saveConfig } from "../src/configuration/config.ts";
-import { resolveSubagentConcurrency } from "../src/execution/background.ts";
 import {
 	findPhaseScopeOverlap,
 	findWriterLeaseScopeOverlap,
@@ -147,7 +146,7 @@ describe("phase and scope normalization", () => {
 		const { runtime, tool } = dispatchHarness(join(tmpdir(), `pi-subagents-phase-schema-${process.pid}.json`));
 		try {
 			assert.equal(tool.exposure, "model-only");
-			assert.equal(tool.executionMode, "sequential");
+			assert.equal(tool.executionMode, "parallel");
 			assert.equal(tool.annotations?.destructiveHint, true);
 			assert.equal(tool.annotations?.openWorldHint, true);
 			const single = tool.parameters?.properties;
@@ -169,7 +168,7 @@ describe("phase and scope normalization", () => {
 });
 
 describe("dispatch concurrency", () => {
-	it("always uses automatic capacity; a stale limit in an old config is ignored", async (t) => {
+	it("uses unlimited capacity even with a stale limit in an old config", async (t) => {
 		const root = await mkdtemp(join(tmpdir(), "pi-subagents-dispatch-capacity-"));
 		t.after(() => rm(root, { recursive: true, force: true }));
 		const configPath = join(root, "config.json");
@@ -179,7 +178,11 @@ describe("dispatch concurrency", () => {
 
 		await saveConfig(normalizeConfig({ maxConcurrentAgents: 1 }), configPath);
 		await assert.rejects(execute(tool, task, root), /Unknown agent: "missing-role"/);
-		assert.equal(runtime.backgroundQueue.capacity, resolveSubagentConcurrency());
+		const release = deferred();
+		for (let id = 0; id < 12; id++) runtime.backgroundQueue.enqueue(async () => release.promise);
+		assert.equal(runtime.backgroundQueue.activeCount, 12);
+		release.resolve();
+		await runtime.backgroundQueue.waitForIdle();
 		assert.equal(runtime.threads.size, 0, "unknown roles must not start children");
 	});
 });
@@ -327,11 +330,6 @@ describe("single scope admission", () => {
 	it("rejects active writer overlap before allocating a fresh run", async () => {
 		const root = await mkdtemp(join(tmpdir(), "pi-subagents-single-admission-"));
 		const { runtime, tool } = dispatchHarness(join(root, "config.json"));
-		const release = deferred();
-		for (let index = 0; index < runtime.backgroundQueue.capacity; index++) {
-			runtime.backgroundQueue.enqueue(async () => release.promise);
-		}
-		await new Promise<void>((resolve) => setImmediate(resolve));
 		runtime.threads.set(76, activeWriter(76, root, "src"));
 		try {
 			await assert.rejects(execute(tool, {
@@ -344,7 +342,6 @@ describe("single scope admission", () => {
 			assert.equal(monitor.getRuns().length, 0);
 		} finally {
 			runtime.threads.clear();
-			release.resolve();
 			await runtime.shutdown();
 			monitor.clear();
 			await rm(root, { recursive: true, force: true });
@@ -354,11 +351,8 @@ describe("single scope admission", () => {
 	it("omits independence wording from single receipts with or without scope", async () => {
 		const root = await mkdtemp(join(tmpdir(), "pi-subagents-single-receipt-"));
 		const { runtime, tool } = dispatchHarness(join(root, "config.json"));
-		const release = deferred();
-		for (let index = 0; index < runtime.backgroundQueue.capacity; index++) {
-			runtime.backgroundQueue.enqueue(async () => release.promise);
-		}
-		await new Promise<void>((resolve) => setImmediate(resolve));
+		// Admission receipts do not need a live child process.
+		runtime.backgroundQueue.enqueue = () => new AbortController();
 		try {
 			const withoutScope = await execute(tool, {
 				agent: "artisan", task: "Single without scope", phaseId: "single-no-scope",
@@ -372,7 +366,6 @@ describe("single scope admission", () => {
 			}
 		} finally {
 			runtime.threads.clear();
-			release.resolve();
 			await runtime.shutdown();
 			monitor.clear();
 			await rm(root, { recursive: true, force: true });

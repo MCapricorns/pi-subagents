@@ -47,11 +47,11 @@ describe("workflow widget", () => {
 		graph.nodes[0]!.state = "completed";
 		graph.nodes[1]!.state = "running";
 		graph.nodes[1]!.runId = 7;
-		const live: RunView = { id: 7, agent: "artisan", task: "Apply fix", status: "queued", waitReason: "repository-lane", usage: emptyUsage(), elapsedMs: 0, workflow: { workflowId: 3, name: "auth-fix", nodeId: "step1" } };
+		const live: RunView = { id: 7, agent: "artisan", task: "Apply fix", status: "queued", waitReason: "starting", usage: emptyUsage(), elapsedMs: 0, workflow: { workflowId: 3, name: "auth-fix", nodeId: "step1" } };
 		const lines = formatSubagentWidgetLines([live], [graph], plainTheme, 160, 10000);
 		assert.match(lines[0]!, /Subagents.*1 queued.*1 workflow/u);
 		assert.match(lines[1]!, /Workflow #3 · auth-fix.*1\/4 completed.*2 waiting/u);
-		assert.match(lines.join("\n"), /step1.*#7.*repo lane/);
+		assert.match(lines.join("\n"), /step1.*#7.*starting/);
 		assert.match(lines.join("\n"), /step2.*waits for step1/);
 		assert.equal(lines.filter((line) => line.includes("#7")).length, 1);
 	});
@@ -128,9 +128,9 @@ describe("widget layout priorities", () => {
 	});
 
 	it("reserves elapsed time and truthful queue state in a narrow row", () => {
-		const queued = { ...run(7, "queued"), waitReason: "repository-lane" as const };
+		const queued = { ...run(7, "queued"), waitReason: "starting" as const };
 		const lines = formatActiveRunLines([queued], plainTheme, 42, 10_000);
-		assert.match(lines[0]!, /repo lane.*9s$/u);
+		assert.match(lines[0]!, /starting.*9s$/u);
 		assert.ok(lines.every((line) => visibleWidth(line) <= 42));
 		const busy = { ...run(8), activity: "read src/configuration/config.ts" };
 		const narrow = formatActiveRunLines([busy], plainTheme, 48, 10_000);

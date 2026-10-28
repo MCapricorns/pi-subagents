@@ -1,6 +1,6 @@
 {
   "name": "@ferris1225/pi-subagents",
-  "version": "5.0.2",
+  "version": "5.0.3",
   "description": "A managed sub-agent team for pi: research, implementation, independent review, interactive follow-ups, and Git worktree isolation.",
   "type": "module",
   "license": "MIT",

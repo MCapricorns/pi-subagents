@@ -234,12 +234,12 @@ describe("subagent_status", () => {
 		stopping.lifecycleOperation = "stop";
 		runtime.threads.set(24, stopping);
 		monitor.restoreRun({ id: 21, agent: "artisan", task: queued.task, status: "queued" });
-		monitor.setWaitReason(21, "repository-lane");
+		monitor.setWaitReason(21, "starting");
 		try {
 			assert.ok(tools.has("subagent_status"), "the status interface must be registered");
 			const response = await execute(tools.get("subagent_status")!);
 			assert.deepEqual(response.details.runs.map((run: any) => run.state), ["queued", "settling", "interrupted", "interrupting"]);
-			assert.equal(response.details.runs[0].waitReason, "repository-lane");
+			assert.equal(response.details.runs[0].waitReason, "starting");
 		} finally { await shutdown(runtime); }
 	});
 });

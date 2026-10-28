@@ -11,7 +11,7 @@ import {
 } from "@earendil-works/pi-tui";
 import type { SubagentsConfig } from "../src/configuration/config.ts";
 import { ensureDefaultConfig, runSetup } from "../src/configuration/setup.ts";
-import { promptSelectOne } from "../src/configuration/ui.ts";
+import { promptRoleGrid, promptSelectOne } from "../src/configuration/ui.ts";
 
 const KEY = { enter: "\r", escape: "\x1b", down: "\x1b[B", up: "\x1b[A", pageDown: "\x1b[6~" };
 const theme = {
@@ -75,6 +75,31 @@ async function scenario(t: TestContext, initial: SubagentsConfig | undefined, st
 const RIGHT = "\x1b[C";
 
 describe("role grid", () => {
+	it("aligns headers and highlights the exact field Enter edits", async () => {
+		const highlighted: string[] = [];
+		const selectedTheme = { ...theme, bg: (_color: string, text: string) => { highlighted.push(text.trim()); return text; } } as Theme;
+		const context = { mode: "tui", ui: {
+			notify() {},
+			custom: async (factory: PickerFactory) => new Promise((resolve) => {
+				const c = factory(tui, selectedTheme, keybindings, resolve);
+				for (const [field, value] of [["Model", "test/model"], ["Thinking (reasoning effort)", "high"], ["Reset", "reset"]]) {
+					highlighted.length = 0;
+					const lines = c.render(120);
+					const header = lines.find((line) => /Role +Model +Thinking/u.test(line))!;
+					const row = lines.find((line) => line.startsWith("› scout"))!;
+					assert.equal(header.indexOf("Role"), row.indexOf("scout"));
+					assert.equal(header.indexOf("Model"), row.indexOf("test/model"));
+					assert.equal(header.indexOf("Thinking"), row.indexOf("high"));
+					assert.deepEqual(highlighted, [value]);
+					assert.ok(lines.includes(`scout · ${field} · Enter ${field === "Reset" ? "restore defaults" : "edit"}`));
+					if (field !== "Reset") press(c, RIGHT);
+				}
+				press(c, KEY.enter);
+			}),
+		} } as unknown as ExtensionContext;
+		assert.deepEqual(await promptRoleGrid(context, [{ role: "scout", model: "test/model", thinking: "high", description: "Research" }]), { row: 0, column: 2, role: "scout", field: "reset" });
+	});
+
 	it("shows every role with model and thinking side by side", async (t) => {
 		await scenario(t, baseConfig({ agentModels: { reviewer: "test/other" }, agentThinkingLevels: { critic: "medium" } }), [{
 			title: /Subagents · Roles/u, act(c, screen) {

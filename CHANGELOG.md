@@ -1,5 +1,22 @@
 # Changelog
 
+## 5.0.3
+
+### Changes
+
+- Align setup headers, selected cells, and keyboard actions; show the focused
+  role and field explicitly, with Thinking described as reasoning effort.
+- Remove the six-process cap, shared-repository startup lane, and sequential
+  dispatch-tool lock. Independent runs start together; duplicate phases and
+  declared scope conflicts remain rejected, and worktree integration stays
+  serialized. Remove obsolete scheduling and settings-panel code.
+- Record Escape cancellation for the next user turn without waking the parent,
+  including cancellation during an awaited dispatch. Main is told that the
+  runs are already stopped and must not restart automatically.
+- Tighten delegation and review prompts around user preferences, independent
+  work, and confirmed defects. Handle synchronous background-task exceptions
+  without stranding lifecycle ownership.
+
 ## 5.0.2
 
 ### Changes

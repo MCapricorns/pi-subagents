@@ -7,7 +7,7 @@ import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { emptyUsage, RunControl } from "../src/execution/run-control.ts";
 import { createRuntime, type SubagentThread } from "../src/lifecycle/runtime.ts";
 import { registerLookupTools } from "../src/lifecycle/tools.ts";
-import { registerCancellationHooks } from "../src/lifecycle/cancellation.ts";
+import { cancelActiveWork, registerCancellationHooks } from "../src/lifecycle/cancellation.ts";
 import { monitor } from "../src/presentation/monitor.ts";
 import { compileWorkflow } from "../src/workflow/plan.ts";
 import { findOwnedPhases, persistInterruptedWorkflows, startWorkflow, stopWorkflow } from "../src/workflow/engine.ts";
@@ -29,10 +29,10 @@ async function until(check: () => boolean): Promise<void> {
 async function harness() {
 	const root = await mkdtemp(join(tmpdir(), "pi-subagents-cancel-"));
 	const events = new Map<string, (event: any) => Promise<void> | void>();
-	const sent: unknown[] = [];
+	const sent: Array<{ message: any; options: any }> = [];
 	const pi = {
 		on: (event: string, handler: (event: any) => Promise<void> | void) => events.set(event, handler),
-		getActiveTools: () => [], getAllTools: () => [], sendMessage: (message: unknown) => sent.push(message),
+		getActiveTools: () => [], getAllTools: () => [], sendMessage: (message: unknown, options: unknown) => sent.push({ message, options }),
 	} as unknown as ExtensionAPI;
 	const runtime = createRuntime(pi, join(root, "config.json"));
 	registerCancellationHooks(pi, runtime);
@@ -115,11 +115,32 @@ describe("workflow stop and parent cancellation", () => {
 				h.runtime.completionBatcher.flush();
 				assert.equal(h.handle.run.state, "stopped");
 				assert.equal(h.started.length, 1);
-				assert.equal(h.sent.length, 0);
+				assert.equal(h.sent.length, event === "agent_settled" ? 1 : 0);
+				if (event === "agent_settled") {
+					assert.equal(h.sent[0]!.message.customType, "subagent-cancelled");
+					assert.match(h.sent[0]!.message.content, /already cancelled; no further subagent_stop is needed/u);
+					assert.deepEqual(h.sent[0]!.message.details.workflowIds, [h.handle.run.id]);
+					assert.deepEqual(h.sent[0]!.options, { deliverAs: "nextTurn", triggerTurn: false });
+					await h.events.get(event)!({ aborted: true });
+					assert.equal(h.sent.length, 1, "repeated Escape must not duplicate the receipt");
+				}
 				assert.equal(h.runtime.suppressCompletions, false);
 			} finally { h.cleanupRelease.resolve(); await h.runtime.shutdown(); await rm(h.root, { recursive: true, force: true }); }
 		});
 	}
+
+	it("records cancellation performed by an awaited tool before the settled hook", async () => {
+		const h = await harness();
+		try {
+			await until(() => h.handle.run.nodes[0]?.runId !== undefined);
+			h.cleanupRelease.resolve();
+			await cancelActiveWork(h.runtime, "Parent run was cancelled.");
+			assert.equal(h.sent.length, 1);
+			assert.match(h.sent[0]!.message.content, /no further subagent_stop is needed/u);
+			await h.events.get("agent_settled")!({ aborted: true });
+			assert.equal(h.sent.length, 1, "the settled hook must not lose or duplicate the receipt");
+		} finally { h.cleanupRelease.resolve(); await h.runtime.shutdown(); await rm(h.root, { recursive: true, force: true }); }
+	});
 
 	it("stop-all interrupts an unrelated writer before waiting for graph cleanup", { timeout: 5_000 }, async () => {
 		const h = await harness();

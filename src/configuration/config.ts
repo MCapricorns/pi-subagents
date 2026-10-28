@@ -3,7 +3,7 @@
  *
  * Config lives at <agentDir>/pi-subagents.json (agentDir defaults to ~/.pi/agent
  * and honors PI_CODING_AGENT_DIR). The only user-tunable surface is the model
- * and thinking level per role; the two built-in roles are always enabled and
+ * and thinking level per role; all built-in roles are always enabled and
  * every operational default is a constant. Parsing is defensive: invalid
  * fields fall back to defaults instead of throwing, so a hand-edited or
  * partially-written file can never break the extension at runtime. Unknown

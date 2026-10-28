@@ -13,7 +13,7 @@ const MAX_WIDGET_LINES = 10;
 const SEPARATOR = " · ";
 
 function waitWord(run: Pick<RunView, "waitReason">): string {
-	return run.waitReason === "repository-lane" ? "repo lane" : run.waitReason === "starting" ? "starting" : "queued";
+	return run.waitReason === "starting" ? "starting" : "queued";
 }
 
 function worktreeBadge(run: RunView): string | undefined {

@@ -12,7 +12,7 @@ import type { ExtensionAPI, ToolInfo } from "@earendil-works/pi-coding-agent";
 import { findDuplicateDispatch } from "../delegation/prompt.ts";
 import type { PhaseScope } from "../delegation/phase-scope.ts";
 import { rmSync } from "node:fs";
-import { resolveSubagentConcurrency, BackgroundTaskQueue } from "../execution/background.ts";
+import { BackgroundTaskQueue } from "../execution/background.ts";
 import {
 	createCompletionBatcher,
 	formatActiveRunsFooter,
@@ -89,6 +89,8 @@ export interface SubagentRuntime {
 	/** Cancelling a parent must not wake it again with old child results. */
 	suppressCompletions: boolean;
 	discardCompletions: () => void;
+	/** Record cancellation for the next user turn without waking the parent. */
+	recordCancellation: (runIds: number[], workflowIds: number[]) => void;
 	/** Resolves when the load-time durable restore pass has finished. Everything
 	 * that answers "which threads exist" awaits it — the lookup tools, a fresh
 	 * dispatch before it allocates a run id, and the restored-thread notice — so
@@ -158,7 +160,7 @@ export function findPendingWorkflowPhase(
 }
 
 export function createRuntime(pi: ExtensionAPI, configPath: string): SubagentRuntime {
-	const backgroundQueue = new BackgroundTaskQueue(resolveSubagentConcurrency());
+	const backgroundQueue = new BackgroundTaskQueue();
 	let nextWorkflowId = 1;
 	// Compaction reads the whole history, summarizes it, and replaces it. A
 	// completion injected into that window can be swallowed by the summary,
@@ -175,6 +177,18 @@ export function createRuntime(pi: ExtensionAPI, configPath: string): SubagentRun
 		getToolInfos: () => pi.getAllTools(),
 		sessionActive: true,
 		suppressCompletions: false,
+		recordCancellation: (runIds, workflowIds) => {
+			const targets = [
+				...(runIds.length ? ["runs " + runIds.map((id) => `#${id}`).join(", ")] : []),
+				...(workflowIds.length ? ["workflows " + workflowIds.map((id) => `#${id}`).join(", ")] : []),
+			].join("; ");
+			pi.sendMessage({
+				customType: "subagent-cancelled",
+				content: `Parent cancellation stopped ${targets}. These runs are already cancelled; no further subagent_stop is needed. Do not restart cancelled work unless the user requests it. Partial edits and retained integration artifacts may remain; inspect them only if continuing the task.`,
+				display: true,
+				details: { runIds, workflowIds },
+			}, { deliverAs: "nextTurn", triggerTurn: false });
+		},
 		discardCompletions: () => {
 			runtime.completionBatcher.dispose();
 			heldCompletions = [];

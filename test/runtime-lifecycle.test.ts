@@ -4,7 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, it } from "node:test";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
-import { BackgroundTaskQueue, resolveSubagentConcurrency } from "../src/execution/background.ts";
+import { BackgroundTaskQueue } from "../src/execution/background.ts";
 import { getProjectRoot } from "../src/execution/spawn.ts";
 import type { CompletionMessageItem } from "../src/lifecycle/completion.ts";
 import { readThreadRecords, upsertThreadRecord, type ThreadRecord } from "../src/lifecycle/durable.ts";
@@ -36,129 +36,60 @@ function completion(agent: string): CompletionMessageItem {
 	return { agent, block: `${agent} completed`, usage: emptyUsage() };
 }
 
-describe("resolveSubagentConcurrency", () => {
-	it("scales proactively without running more than six children", () => {
-		assert.equal(resolveSubagentConcurrency(1), 4);
-		assert.equal(resolveSubagentConcurrency(8), 4);
-		assert.equal(resolveSubagentConcurrency(10), 5);
-		assert.equal(resolveSubagentConcurrency(12), 6);
-		assert.equal(resolveSubagentConcurrency(128), 6);
+describe("unlimited background execution", () => {
+	it("starts every task without waiting for one of six slots", async () => {
+		const queue = new BackgroundTaskQueue();
+		const release = deferred();
+		const started: number[] = [];
+		const controllers = Array.from({ length: 12 }, (_, id) => queue.enqueue(async () => {
+			started.push(id);
+			await release.promise;
+		}));
+		try {
+			assert.equal(started.length, 12);
+			assert.equal(queue.activeCount, 12);
+			controllers.forEach((controller) => queue.cancel(controller));
+			assert.ok(controllers.every((controller) => controller.signal.aborted));
+		} finally { release.resolve(); await queue.waitForIdle(); }
+	});
+
+	it("reports a synchronous task exception and still releases ownership", async () => {
+		const queue = new BackgroundTaskQueue();
+		const errors: unknown[] = [];
+		const failure = new Error("synchronous failure");
+		const controller = queue.enqueue(() => { throw failure; }, undefined, (error) => { errors.push(error); });
+		await queue.waitForTask(controller);
+		assert.deepEqual(errors, [failure]);
+		assert.equal(queue.activeCount, 0);
 	});
 });
 
-describe("BackgroundTaskQueue slot ownership", () => {
-	it("lowers the limit without aborting active work and keeps pending work queued", async () => {
-		const queue = new BackgroundTaskQueue(2);
-		const firstDone = deferred();
-		const secondDone = deferred();
-		const started: number[] = [];
-		const first = queue.enqueue(async () => { started.push(1); await firstDone.promise; });
-		const second = queue.enqueue(async () => { started.push(2); await secondDone.promise; });
-		const third = queue.enqueue(async () => { started.push(3); });
-
-		queue.setConcurrency(1);
-		assert.equal(queue.capacity, 1);
-		assert.equal(first.signal.aborted, false);
-		assert.equal(second.signal.aborted, false);
-		assert.deepEqual(started, [1, 2]);
-		firstDone.resolve();
-		await queue.waitForTask(first);
-		assert.deepEqual(started, [1, 2], "one active task still owns the only slot");
-		secondDone.resolve();
-		await Promise.all([queue.waitForTask(second), queue.waitForTask(third)]);
-		assert.deepEqual(started, [1, 2, 3]);
-		assert.equal(queue.activeCount, 0);
-	});
-
-	it("increases the limit immediately and preserves FIFO order for slot reacquisition", async () => {
-		const queue = new BackgroundTaskQueue(1);
-		const laneGranted = deferred();
-		const releaseOther = deferred();
-		const releaseThird = deferred();
-		const order: string[] = [];
-		const writer = queue.enqueue(async (_signal, controller) => {
-			queue.suspend(controller);
-			await laneGranted.promise;
-			assert.equal(await queue.acquire(controller), true);
-			order.push("writer");
-		});
-		const other = queue.enqueue(async () => { order.push("other"); await releaseOther.promise; });
-		const third = queue.enqueue(async () => { order.push("third"); await releaseThird.promise; });
-		laneGranted.resolve();
+describe("background task ownership", () => {
+	it("waits for aborted work and its cleanup before becoming idle", async () => {
+		const queue = new BackgroundTaskQueue();
+		const release = deferred();
+		const controller = queue.enqueue(async () => release.promise);
+		queue.cancelAll();
+		assert.equal(controller.signal.aborted, true);
+		let idle = false;
+		void queue.waitForIdle().then(() => { idle = true; });
 		await Promise.resolve();
-
-		queue.setConcurrency(2);
-		assert.deepEqual(order, ["other", "third"]);
-		assert.equal(queue.activeCount, 2);
-		releaseThird.resolve();
-		await Promise.all([queue.waitForTask(third), queue.waitForTask(writer)]);
-		assert.deepEqual(order, ["other", "third", "writer"]);
-		releaseOther.resolve();
+		assert.equal(idle, false);
+		release.resolve();
+		await queue.waitForTask(controller);
 		await queue.waitForIdle();
-		await queue.waitForTask(other);
-	});
-
-	it("makes a suspended lane waiter reacquire a slot before child work", async () => {
-		const queue = new BackgroundTaskQueue(1);
-		const laneGranted = deferred();
-		const releaseOther = deferred();
-		const order: string[] = [];
-
-		const writer = queue.enqueue(async (_signal, controller) => {
-			order.push("writer-waiting");
-			queue.suspend(controller);
-			await laneGranted.promise;
-			assert.equal(await queue.acquire(controller), true);
-			order.push("writer-child");
-		});
-		const other = queue.enqueue(async () => {
-			order.push("other-child");
-			await releaseOther.promise;
-		});
-
-		assert.deepEqual(order, ["writer-waiting", "other-child"]);
-		assert.equal(queue.activeCount, 1);
-		laneGranted.resolve();
-		await Promise.resolve();
-		assert.deepEqual(order, ["writer-waiting", "other-child"]);
-
-		releaseOther.resolve();
-		await Promise.all([queue.waitForTask(writer), queue.waitForTask(other)]);
-		assert.deepEqual(order, ["writer-waiting", "other-child", "writer-child"]);
 		assert.equal(queue.activeCount, 0);
 	});
 
-	it("releases a finished child's slot while finalization remains owned", async () => {
-		const queue = new BackgroundTaskQueue(1);
-		const finalizationStarted = deferred();
-		const releaseFinalization = deferred();
-		const otherStarted = deferred();
-		const releaseOther = deferred();
-
-		const isolated = queue.enqueue(async (_signal, controller) => {
-			queue.suspend(controller);
-			finalizationStarted.resolve();
-			await releaseFinalization.promise;
-		});
-		await finalizationStarted.promise;
-		const other = queue.enqueue(async () => {
-			otherStarted.resolve();
-			await releaseOther.promise;
-		});
-		await otherStarted.promise;
-
-		assert.equal(queue.activeCount, 1);
-		let isolatedSettled = false;
-		void queue.waitForTask(isolated).then(() => {
-			isolatedSettled = true;
-		});
-		await Promise.resolve();
-		assert.equal(isolatedSettled, false);
-
-		releaseFinalization.resolve();
-		releaseOther.resolve();
-		await Promise.all([queue.waitForTask(isolated), queue.waitForTask(other)]);
-		assert.equal(queue.activeCount, 0);
+	it("rejects new work after shutdown and tolerates cancellation callback failures", async () => {
+		const queue = new BackgroundTaskQueue();
+		queue.cancelAll();
+		let ran = false;
+		const controller = queue.enqueue(async () => { ran = true; }, () => { throw new Error("callback failed"); });
+		assert.equal(controller.signal.aborted, true);
+		assert.equal(ran, false);
+		await queue.waitForTask(controller);
+		await queue.waitForIdle();
 	});
 });
 

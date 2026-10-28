@@ -7,7 +7,7 @@ description: Plan and run a multi-phase sub-agent job as a dependency graph with
 
 `subagent_workflow` runs a graph of ordinary sub-agent phases. You declare the
 nodes and their prerequisites once; the runtime starts each node the moment its
-prerequisites settle and a process slot frees, and wakes you once with a summary
+prerequisites settle, and wakes you once with a summary
 of the whole graph. Nothing dispatches the next wave on your behalf except the
 runtime.
 
@@ -116,11 +116,13 @@ different question. Keep a fix and its regression tests with one owner.
   Checkpoints are written during execution, so a process crash also leaves the
   graph shape.
 - **Parent cancellation ends owned work.** Escape and conversation-tree navigation
-  stop unfinished graphs and runs without completion wake-ups. New/resume/fork
-  tears down the old Pi runtime and retains interruption evidence.
-- **Capacity is pacing, not refusal.** The automatic process limit bounds simultaneous
-  child processes; a wider graph queues and starts as slots free. Queue position
-  never changes dependency order.
+  stop unfinished graphs and runs without completion wake-ups. Escape records
+  stopped ids for the next user turn; do not send another stop or automatically
+  restart cancelled work. New/resume/fork tears down the old Pi runtime and
+  retains interruption evidence.
+- **Independent nodes start together.** There is no process-count limit or shared
+  repository startup lock. Only dependencies delay ready work; final worktree
+  integration into the original checkout remains serialized.
 
 ## 5. Briefs
 
@@ -207,8 +209,8 @@ each node's answer. Budget accordingly:
 - Give each phase one owner. Add separate review, confirmation, and synthesis
   when their distinct work justifies the cost; combine them for bounded tasks.
 - Keep node answers short: conclusions, paths, `command → result`.
-- Do not add a node to fill a free process slot, and do not split one tightly
-  coupled change across nodes.
+- Choose nodes from independent work; do not split one tightly coupled change
+  across nodes just to increase concurrency.
 
 ## 10. Anti-patterns
 

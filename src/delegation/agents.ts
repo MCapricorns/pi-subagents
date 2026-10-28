@@ -99,7 +99,7 @@ export function resolveAgentTools(
 	return { ...agent, tools };
 }
 
-/** Filesystem-write capability used by worktree admission and repository-lane
+/** Filesystem-write capability used by worktree admission and writer-scope
  * safety. Scout is a hard read-only boundary. An unresolved tools list means
  * the child inherits arbitrary active tools and is therefore mutable; for a
  * resolved list only proven read-only tools count as safe — shells,
