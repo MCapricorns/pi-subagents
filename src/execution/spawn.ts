@@ -167,11 +167,21 @@ export function sweepProjectResultArtifacts(
 
 function resultArtifactProjectKey(cwd?: string): string {
 	if (!cwd) return "default";
-	let canonical: string;
-	try {
-		canonical = realpathSync.native(cwd);
-	} catch {
-		canonical = resolve(cwd);
+	let ancestor = resolve(cwd);
+	let canonical = ancestor;
+	const missing: string[] = [];
+	for (;;) {
+		try {
+			canonical = join(realpathSync.native(ancestor), ...missing);
+			break;
+		} catch {
+			// Keep aliases in existing parents canonical when the checkout is
+			// unavailable (for example macOS /var and Windows short paths).
+			const parent = dirname(ancestor);
+			if (parent === ancestor) break;
+			missing.unshift(basename(ancestor));
+			ancestor = parent;
+		}
 	}
 	if (process.platform === "win32") canonical = canonical.toLowerCase();
 	const slug = basename(canonical).replace(/[^\w.-]+/g, "_") || "project";

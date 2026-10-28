@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { execFile, spawn, type ChildProcess } from "node:child_process";
 import { existsSync } from "node:fs";
-import fsPromises, { mkdir, mkdtemp, readFile, rename, rm, writeFile } from "node:fs/promises";
+import fsPromises, { mkdir, mkdtemp, readFile, rename, rm, symlink, writeFile } from "node:fs/promises";
 import { syncBuiltinESMExports } from "node:module";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -203,30 +203,38 @@ describe("durable identity across Pi windows", () => {
 });
 
 describe("temporarily unavailable recovery sources", () => {
-	for (const unavailable of ["checkout", "git"] as const) {
+	for (const unavailable of ["checkout", "git", "aliased checkout"] as const) {
 		it(`preserves managed edits when the source ${unavailable} is unavailable`, async () => {
 			await fixture(async (root, configPath, repository) => {
+				let recordedCwd = repository;
+				if (unavailable === "aliased checkout") {
+					const alias = join(root, "source-alias");
+					await symlink(root, alias, process.platform === "win32" ? "junction" : "dir");
+					recordedCwd = join(alias, "repository");
+				}
+				const storageRoot = getProjectRoot(configPath, recordedCwd);
 				await writeFile(join(repository, "tracked.txt"), "original\n");
 				await execFileAsync("git", ["init"], { cwd: repository });
 				await execFileAsync("git", ["add", "."], { cwd: repository });
 				await execFileAsync("git", ["-c", "user.name=Recovery Test", "-c", "user.email=recovery@example.invalid", "commit", "-m", "initial"], { cwd: repository });
-				const worktree = await createWorktreeIsolation(repository, { tempBaseDir: join(getProjectRoot(configPath, repository), "worktrees") });
+				const worktree = await createWorktreeIsolation(recordedCwd, { tempBaseDir: join(storageRoot, "worktrees") });
 				const pending = join(worktree.cwd, "pending.txt");
 				await writeFile(pending, "unintegrated edit\n");
 				await writeFile(join(worktree.tempDir, TEMP_OWNER_FILE_NAME), JSON.stringify({ pid: 2147483647, createdAt: 1 }));
 				await upsertThreadRecord(configPath, {
-					...legacyRecord(repository, Date.now()), isolation: "worktree", executionCwd: worktree.cwd,
+					...legacyRecord(recordedCwd, Date.now()), isolation: "worktree", executionCwd: worktree.cwd,
 					worktree: worktreeSnapshot(worktree),
 				});
-				const source = unavailable === "checkout" ? repository : join(repository, ".git");
+				const source = unavailable === "git" ? join(repository, ".git") : repository;
 				const moved = `${source}-unavailable`;
 				await rename(source, moved);
 				const runtime = createRuntime(fakePi(), configPath);
 				try {
+					assert.equal(getProjectRoot(configPath, recordedCwd), storageRoot, "source unavailability must not change the durable project key");
 					await bootstrapDurableState(runtime, root);
 					assert.equal(await readFile(pending, "utf8"), "unintegrated edit\n");
 					assert.equal((await readThreadRecords(configPath)).length, 1);
-					await restoreDurableThreads(runtime, repository);
+					await restoreDurableThreads(runtime, recordedCwd);
 					assert.equal(runtime.threads.get(7)?.state, "failed");
 					assert.ok(runtime.threads.get(7)?.restorationRecord);
 					await runtime.shutdown();

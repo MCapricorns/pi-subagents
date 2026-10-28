@@ -32,6 +32,7 @@
   unavailable. Use stable durable identities and cross-process manifest locks
   so separate windows cannot overwrite or delete each other's recovery records.
   Match recovered workflow children by durable identity after local renumbering,
+  keep project keys stable through unavailable checkouts with aliased parent paths,
   and exclude lock directories from project scans.
 - Preserve concurrent recovery additions during announcements and keep newly
   settled long-running sessions inside their follow-up retention window.
