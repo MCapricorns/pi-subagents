@@ -4,12 +4,14 @@ import { type ThinkingLevel } from "../configuration/config.ts";
 import {
 	discardRecordArtifacts,
 	isCurrentBoot,
+	isThreadSourceAvailable,
 	pruneStaleProjectRoots,
 	pruneThreadRecords,
 	readReferencedDurablePaths,
 	readThreadRecords,
 	removeThreadRecord,
 	restoredResultFromSummary,
+	threadRecordIdentity,
 	type ThreadRecord,
 } from "./durable.ts";
 import { monitor } from "../presentation/monitor.ts";
@@ -37,7 +39,7 @@ import { installThreadLifecycle } from "./thread-lifecycle.ts";
 async function discardRestoredRecord(runtime: SubagentRuntime, record: ThreadRecord): Promise<void> {
 	await discardRecordArtifacts(record);
 	if (record.sessionDir) runtime.sessionDirs.delete(record.sessionDir);
-	await removeThreadRecord(runtime.configPath, record.runId, record.cwd).catch(() => undefined);
+	await removeThreadRecord(runtime.configPath, threadRecordIdentity(record), record.cwd).catch(() => undefined);
 }
 
 function createRestoredThread(
@@ -47,6 +49,7 @@ function createRestoredThread(
 	state: ThreadState,
 ): SubagentThread {
 	const thread: SubagentThread = {
+		durableId: threadRecordIdentity(record),
 		id: record.runId,
 		generation: record.generation,
 		agentName: record.agentName,
@@ -86,9 +89,11 @@ function belongsToSessionProject(configPath: string, cwd: string, record: Thread
 export async function restoreDurableThreads(runtime: SubagentRuntime, cwd: string): Promise<number[]> {
 	const records = await readThreadRecords(runtime.configPath);
 	const restoredIds: number[] = [];
-	for (const record of records) {
-		if (!belongsToSessionProject(runtime.configPath, cwd, record)) continue;
-		if (runtime.threads.has(record.runId) || monitor.findRun(record.runId)) continue;
+	const localRecords = records.filter((record) => belongsToSessionProject(runtime.configPath, cwd, record));
+	for (const record of localRecords) monitor.ensureNextIdAbove(record.runId);
+	for (let record of localRecords) {
+		const identity = threadRecordIdentity(record);
+		if ([...runtime.threads.values()].some((thread) => thread.durableId === identity)) continue;
 		// Another Pi window may own this checkpoint, and PID reuse means a live
 		// recorded child is not proof of ownership. Never kill either on restore.
 		if (isCurrentBoot(record) && (
@@ -99,12 +104,17 @@ export async function restoreDurableThreads(runtime: SubagentRuntime, cwd: strin
 			await discardRestoredRecord(runtime, record);
 			continue;
 		}
+		if (runtime.threads.has(record.runId) || monitor.findRun(record.runId)) {
+			record = { ...record, durableId: identity, runId: monitor.reserveRunId() };
+		}
+		// Freeze a legacy identity before dropping missing session metadata.
+		record = { ...record, durableId: identity };
 		const sessionValid =
 			record.sessionId !== undefined &&
 			record.sessionDir !== undefined &&
 			sessionExists(record.sessionDir, record.sessionId);
 		const restoredRecord = sessionValid ? record : { ...record, sessionId: undefined, sessionDir: undefined };
-		const worktree = record.worktree
+		const worktree = record.worktree && await isThreadSourceAvailable(record)
 			? await restoreWorktreeIsolation(record.worktree).catch(() => undefined)
 			: undefined;
 		const restorationFailed = record.isolation === "worktree" && record.worktree !== undefined && !worktree;

@@ -44,7 +44,7 @@ async function harness() {
 	const plan = compileWorkflow({ name: "cancel-test", nodes: [
 		{ id: "apply", agent: "artisan", task: "Apply change" },
 		{ id: "gate", agent: "artisan", task: "Run gate", dependsOn: ["apply"] },
-	] }, root, ["artisan"]);
+	] }, root, ["artisan", "sentinel"]);
 	const handle = startWorkflow({ runtime, resultsRoot: join(root, "results"), notify: () => undefined, resolveIsolation: () => "shared",
 		startBackground: async (agent, task, _cwd, _isolation, options) => {
 			started.push(task);
@@ -71,7 +71,7 @@ describe("workflow stop and parent cancellation", () => {
 	it("reserves pending phases before run ids exist", async () => {
 		const h = await harness();
 		try {
-			const owned = findOwnedPhases(h.runtime, compileWorkflow({ name: "other", nodes: [{ id: "gate", agent: "artisan", task: "Run gate" }] }, h.root, ["artisan"]));
+			const owned = findOwnedPhases(h.runtime, compileWorkflow({ name: "other", nodes: [{ id: "gate", agent: "artisan", task: "Run gate" }] }, h.root, ["artisan", "sentinel"]));
 			assert.equal(owned[0]?.workflowId, h.handle.run.id);
 			assert.equal(owned[0]?.ownerNodeId, "gate");
 			h.cleanupRelease.resolve();

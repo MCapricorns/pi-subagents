@@ -1,12 +1,13 @@
 /** Shared contracts and coordination primitives for logical sub-agent threads. */
 
+import { utimesSync } from "node:fs";
 import { realpath } from "node:fs/promises";
 import { join, resolve } from "node:path";
 import type { ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { isWriteCapableAgent, type AgentConfig, type ToolMetadata } from "../delegation/agents.ts";
 import type { PhaseScope } from "../delegation/phase-scope.ts";
 import { roleThinkingLevel, type SubagentsConfig, type ThinkingLevel } from "../configuration/config.ts";
-import { removeThreadRecord, threadRecordFromThread, upsertThreadRecord } from "./durable.ts";
+import { removeThreadRecord, threadRecordFromThread, threadRecordIdentity, upsertThreadRecord } from "./durable.ts";
 import {
 	availableModelsInScope,
 	currentModelRef,
@@ -86,9 +87,20 @@ export function persistThreadCheckpoint(
 	thread: SubagentThread,
 	state: "parked" | "completed" | "failed",
 ): void {
+	if (state !== "parked" && thread.sessionDir) {
+		// Transcript appends do not touch the directory. Start the follow-up
+		// retention window at settlement, including slow isolation finalization.
+		try {
+			const now = new Date();
+			utimesSync(thread.sessionDir, now, now);
+		} catch {
+			/* A missing or locked session must not prevent settlement. */
+		}
+	}
+	const record = threadRecordFromThread(thread, state);
 	const write = state === "parked"
-		? upsertThreadRecord(runtime.configPath, threadRecordFromThread(thread, state))
-		: removeThreadRecord(runtime.configPath, thread.id, thread.cwd);
+		? upsertThreadRecord(runtime.configPath, record)
+		: removeThreadRecord(runtime.configPath, threadRecordIdentity(record), thread.cwd);
 	void write.catch(() => undefined);
 }
 

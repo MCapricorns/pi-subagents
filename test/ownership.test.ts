@@ -71,6 +71,13 @@ function graph(cwd: string): WorkflowRun {
 	};
 }
 
+function migrationFor(path: string) {
+	return { workflow: "migration", inputs: {
+		TARGET: "the parser interface", CONTRACT: "docs/contract.md", CORE_CHANGE: "Implement parser", ADAPTER_CHANGE: "Update docs",
+		CORE_SCOPE: path, CORE_TEST_SCOPE: "test/core", ADAPTER_SCOPE: "docs", ADAPTER_TEST_SCOPE: "test/adapters",
+	} };
+}
+
 describe("main and delegated ownership", () => {
 	it("blocks main writes, including nested calls, while allowing reads and disjoint paths", async (t) => {
 		const h = await harness(t);
@@ -114,10 +121,7 @@ describe("main and delegated ownership", () => {
 		await assert.rejects(h.execute("subagent", { tasks: [
 			{ agent: "artisan", task: "Disjoint first phase", scope: { paths: ["docs"] } }, task,
 		] }), /main edit.*No background tasks were started/s);
-		await assert.rejects(h.execute("subagent_workflow", { nodes: [
-			{ id: "research", agent: "scout", task: "Research parser" },
-			{ ...task, id: "fix", dependsOn: ["research"] },
-		] }), /main edit.*No nodes were started/s);
+		await assert.rejects(h.execute("subagent_workflow", migrationFor("src")), /main edit.*No nodes were started/s);
 		assert.equal(h.runtime.threads.size, 0);
 		assert.equal(h.runtime.workflows.size, 0);
 		h.end("main-call", true);
@@ -133,9 +137,7 @@ describe("main and delegated ownership", () => {
 		await assert.rejects(h.execute("subagent", { tasks: [
 			{ agent: "artisan", task: "Disjoint work", scope: { paths: ["docs"] } }, task,
 		] }), /workflow #3 node "fix"/);
-		await assert.rejects(h.execute("subagent_workflow", { name: "another", nodes: [
-			{ id: "research", agent: "scout", task: "Read docs" }, { ...task, id: "fix", dependsOn: ["research"] },
-		] }), /workflow #3 node "fix"/);
+		await assert.rejects(h.execute("subagent_workflow", migrationFor("src/parser.ts")), /workflow #3 node "fix"/);
 		assert.equal(h.runtime.threads.size, 0);
 		assert.equal(h.runtime.workflows.size, 1);
 	});
@@ -195,7 +197,8 @@ createInterface({ input: process.stdin }).on("line", (line) => {
   if (command.type !== "prompt") return;
   send({ type: "response", id: command.id, command: "prompt", success: true, data: { disposition: "started" } });
   send({ type: "agent_start" });
-  send({ type: "message_end", message: { role: "assistant", content: [{ type: "text", text: "Completed phase" }], stopReason: "stop" } });
+  const text = command.message.includes("Act as the independent acceptance officer") ? "Checked evidence.\\nWORKFLOW_ACCEPTANCE: PASS" : "Completed phase";
+  send({ type: "message_end", message: { role: "assistant", content: [{ type: "text", text }], stopReason: "stop" } });
   send({ type: "agent_settled" });
 });`);
 		const previousScript = process.argv[1];
@@ -204,10 +207,11 @@ createInterface({ input: process.stdin }).on("line", (line) => {
 			const plan = compileWorkflow({ name: "ordered", nodes: [
 				{ id: "fix", agent: "artisan", task: "Implement parser", scope: { paths: ["src"] } },
 				{ id: "extend", agent: "artisan", task: "Extend parser from {{fix}}", dependsOn: ["fix"], scope: { paths: ["src"] } },
-			] }, h.root, ["artisan"]);
+			] }, h.root, ["artisan", "sentinel"]);
 			const handle = startWorkflow({ runtime: h.runtime, startBackground: h.core.startBackground, resolveIsolation: () => "shared", resultsRoot: join(h.root, "results"), notify: () => undefined }, plan);
 			assert.equal((await handle.done).state, "completed");
-			assert.equal(h.runtime.threads.size, 2);
+			assert.equal(h.runtime.threads.size, plan.nodes.length);
+			assert.equal([...h.runtime.threads.values()].filter((thread) => thread.agentName === "artisan").length, 2);
 			assert.equal(await h.call("edit", "src/parser.ts"), undefined);
 		} finally {
 			process.argv[1] = previousScript;

@@ -10,10 +10,11 @@
  * and disappears on its own. Records are small path/state snapshots, never
  * full transcripts; the retained Pi session files and worktrees they point at
  * remain the actual context. Writes are atomic (tmp+rename) and serialized
- * through the same withFileMutationQueue as the recovery manifest.
+ * through the same cross-process manifest lock as recovery records.
  */
 
-import { withFileMutationQueue } from "@earendil-works/pi-coding-agent";
+import { createHash, randomUUID } from "node:crypto";
+import { withManifestMutation } from "../isolation/manifest-mutation.ts";
 import { existsSync, type Dirent, readdirSync, statSync } from "node:fs";
 import { mkdir, readFile, realpath, rename, rm, writeFile } from "node:fs/promises";
 import { uptime } from "node:os";
@@ -71,6 +72,8 @@ export interface ThreadResultSummary {
 }
 
 export interface ThreadRecord {
+	/** Stable identity across windows and locally renumbered restores. Absent in legacy records. */
+	durableId?: string;
 	runId: number;
 	createdAt: number;
 	updatedAt: number;
@@ -180,6 +183,7 @@ function normalizeRecord(value: unknown): ThreadRecord | undefined {
 		return undefined;
 	}
 	return {
+		...(typeof raw.durableId === "string" && raw.durableId ? { durableId: raw.durableId } : {}),
 		runId: raw.runId,
 		createdAt: raw.createdAt,
 		updatedAt: raw.updatedAt,
@@ -262,23 +266,52 @@ async function validateThreadRecord(
 	}
 	const worktree = record.worktree;
 	if (!worktree || !await isManagedWorktreeLayout(configPath, record.cwd, worktree)) return false;
-	try {
-		const canonicalCwd = await realpath(record.cwd);
-		const canonicalRoot = await resolveRepositoryRoot(record.cwd);
-		if (!samePath(worktree.originalCwd, canonicalCwd) || !samePath(worktree.originalRoot, canonicalRoot)) {
+	if (
+		!isAbsolute(worktree.originalCwd) || worktree.originalCwd !== resolve(worktree.originalCwd) ||
+		!isAbsolute(worktree.originalRoot) || worktree.originalRoot !== resolve(worktree.originalRoot) ||
+		!isPathInside(worktree.originalRoot, worktree.originalCwd)
+	) return false;
+	const restoredCwd = join(worktree.worktreePath, relative(worktree.originalRoot, worktree.originalCwd));
+	if (!samePath(worktree.cwd, restoredCwd) || !samePath(record.executionCwd, restoredCwd)) return false;
+	if (existsSync(worktree.cwd)) {
+		try {
+			const [realWorktree, realCwd] = await Promise.all([realpath(worktree.worktreePath), realpath(worktree.cwd)]);
+			if (!samePath(realCwd, join(realWorktree, relative(worktree.originalRoot, worktree.originalCwd)))) return false;
+		} catch {
 			return false;
 		}
-		if (!isPathInside(canonicalRoot, canonicalCwd)) return false;
-		const restoredCwd = join(worktree.worktreePath, relative(canonicalRoot, canonicalCwd));
-		if (!samePath(worktree.cwd, restoredCwd) || !samePath(record.executionCwd, restoredCwd)) return false;
-		if (existsSync(worktree.cwd)) {
-			const [realWorktree, realCwd] = await Promise.all([realpath(worktree.worktreePath), realpath(worktree.cwd)]);
-			if (!samePath(realCwd, join(realWorktree, relative(canonicalRoot, canonicalCwd)))) return false;
-		}
+	}
+	// Managed recovery references survive a missing checkout or failed Git
+	// discovery. A successfully resolved source must still match the snapshot.
+	try {
+		if (!samePath(worktree.originalCwd, await realpath(record.cwd))) return false;
+	} catch {
 		return true;
+	}
+	try {
+		return samePath(worktree.originalRoot, await resolveRepositoryRoot(record.cwd));
+	} catch {
+		return true;
+	}
+}
+
+export async function isThreadSourceAvailable(record: ThreadRecord): Promise<boolean> {
+	if (!record.worktree) return true;
+	try {
+		return samePath(await realpath(record.cwd), record.worktree.originalCwd) &&
+			samePath(await resolveRepositoryRoot(record.cwd), record.worktree.originalRoot);
 	} catch {
 		return false;
 	}
+}
+
+/** Legacy identities include immutable source/artifact metadata, so adopting a
+ * record does not let a fresh run with the same display id overwrite it. */
+export function threadRecordIdentity(record: ThreadRecord): string {
+	return record.durableId ?? `legacy-${createHash("sha256").update(JSON.stringify([
+		record.cwd, record.runId, record.createdAt, record.ownerPid, record.bootId,
+		record.sessionDir, record.worktree?.tempDir,
+	])).digest("hex")}`;
 }
 
 async function validatedManifestRecords(
@@ -294,7 +327,7 @@ async function validatedManifestRecords(
 function projectManifestPaths(durableRoot: string): string[] {
 	try {
 		return readdirSync(durableRoot, { withFileTypes: true })
-			.filter((entry) => entry.isDirectory() && !entry.isSymbolicLink())
+			.filter((entry) => entry.isDirectory() && !entry.isSymbolicLink() && !entry.name.endsWith(".lock"))
 			.map((entry) => join(durableRoot, entry.name, THREADS_MANIFEST_FILE_NAME));
 	} catch {
 		return [];
@@ -306,7 +339,7 @@ function projectManifestPaths(durableRoot: string): string[] {
 export async function readThreadRecords(configPath: string): Promise<ThreadRecord[]> {
 	const manifests = await Promise.all(
 		projectManifestPaths(getSubagentsRoot(configPath))
-			.map((path) => withFileMutationQueue(path, async () => {
+			.map((path) => withManifestMutation(path, async () => {
 				const manifest = await readManifest(path);
 				const validated = await validatedManifestRecords(configPath, path, manifest.records);
 				if (!manifest.valid || manifest.rolesMigrated || validated.length !== manifest.sourceCount) await writeManifest(path, validated);
@@ -337,23 +370,24 @@ async function writeManifest(path: string, records: readonly ThreadRecord[]): Pr
 
 export async function upsertThreadRecord(configPath: string, record: ThreadRecord): Promise<void> {
 	const path = getThreadsManifestPath(configPath, record.cwd);
-	await withFileMutationQueue(path, async () => {
+	await withManifestMutation(path, async () => {
 		const records = await readManifestRecords(path);
-		const index = records.findIndex((candidate) => candidate.runId === record.runId);
+		const identity = threadRecordIdentity(record);
+		const index = records.findIndex((candidate) => threadRecordIdentity(candidate) === identity);
 		const merged: ThreadRecord = index === -1
-			? record
-			: { ...record, createdAt: records[index]!.createdAt };
+			? { ...record, durableId: identity }
+			: { ...record, durableId: identity, createdAt: records[index]!.createdAt };
 		if (index === -1) records.push(merged);
 		else records[index] = merged;
 		await writeManifest(path, records);
 	});
 }
 
-export async function removeThreadRecord(configPath: string, runId: number, cwd: string): Promise<void> {
+export async function removeThreadRecord(configPath: string, identity: string, cwd: string): Promise<void> {
 	const path = getThreadsManifestPath(configPath, cwd);
-	await withFileMutationQueue(path, async () => {
+	await withManifestMutation(path, async () => {
 		const records = await readManifestRecords(path);
-		const next = records.filter((record) => record.runId !== runId);
+		const next = records.filter((record) => threadRecordIdentity(record) !== identity);
 		if (next.length === records.length) return;
 		await writeManifest(path, next);
 	});
@@ -389,7 +423,9 @@ export function threadRecordFromThread(
 	now = Date.now(),
 ): ThreadRecord {
 	const worktree = thread.worktree ? worktreeSnapshot(thread.worktree) : undefined;
+	thread.durableId ??= previous ? threadRecordIdentity(previous) : randomUUID();
 	return {
+		durableId: thread.durableId,
 		runId: thread.id,
 		createdAt: previous?.createdAt ?? now,
 		updatedAt: now,
@@ -447,7 +483,7 @@ export async function discardRecordArtifacts(record: ThreadRecord): Promise<void
 	if (record.sessionDir) {
 		await rm(record.sessionDir, { recursive: true, force: true }).catch(() => undefined);
 	}
-	if (record.worktree && (record.worktree.state === "active" || record.worktree.state === "retained")) {
+	if (record.worktree && (record.worktree.state === "active" || record.worktree.state === "retained") && await isThreadSourceAvailable(record)) {
 		const worktree = await restoreWorktreeIsolation(record.worktree).catch(() => undefined);
 		await worktree?.discard().catch(() => undefined);
 	}
@@ -461,7 +497,7 @@ export async function pruneThreadRecords(
 ): Promise<void> {
 	const durableRoot = getSubagentsRoot(configPath);
 	for (const path of projectManifestPaths(durableRoot)) {
-		await withFileMutationQueue(path, async () => {
+		await withManifestMutation(path, async () => {
 			const manifest = await readManifest(path);
 			const records = manifest.records;
 			if (manifest.valid && records.length === 0) return;
@@ -565,7 +601,7 @@ export async function pruneStaleProjectRoots(
 	}
 	const removed: string[] = [];
 	for (const project of projects) {
-		if (!project.isDirectory() || project.isSymbolicLink()) continue;
+		if (!project.isDirectory() || project.isSymbolicLink() || project.name.endsWith(".lock")) continue;
 		const projectDir = join(root, project.name);
 		if (containsReferencedPath(projectDir, referenced)) continue;
 		if (!isIdleSince(projectDir, now - PROJECT_ROOT_MAX_AGE_MS, now)) continue;

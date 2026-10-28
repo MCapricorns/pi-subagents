@@ -1,6 +1,6 @@
 /** Durable handoff for worktree integration/cleanup failures across sessions. */
 
-import { withFileMutationQueue } from "@earendil-works/pi-coding-agent";
+import { withManifestMutation } from "./manifest-mutation.ts";
 import { existsSync } from "node:fs";
 import { mkdir, readFile, rename, rm, writeFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
@@ -13,6 +13,7 @@ const RECOVERY_MANIFEST_FILE_NAME = "pi-subagents-recovery.json";
 const RECOVERY_MANIFEST_VERSION = 1;
 
 export interface RecoveryRecord {
+	durableId?: string;
 	runId: number;
 	createdAt: number;
 	integrated: boolean;
@@ -38,6 +39,7 @@ function normalizeRecord(value: unknown): RecoveryRecord | undefined {
 	if (typeof raw.runId !== "number" || !Number.isInteger(raw.runId) || raw.runId < 1) return undefined;
 	if (typeof raw.createdAt !== "number" || !Number.isFinite(raw.createdAt)) return undefined;
 	return {
+		...(typeof raw.durableId === "string" && raw.durableId ? { durableId: raw.durableId } : {}),
 		runId: raw.runId,
 		createdAt: raw.createdAt,
 		integrated: raw.integrated === true,
@@ -86,7 +88,7 @@ export async function referencedRecoveryPaths(
 
 export async function readRecoveryRecords(configPath: string): Promise<RecoveryRecord[]> {
 	const path = getRecoveryManifestPath(configPath);
-	return withFileMutationQueue(path, async () => {
+	return withManifestMutation(path, async () => {
 		const manifest = await readManifest(path);
 		const records = await validatedRecords(configPath, manifest.records);
 		if (!manifest.valid || records.length !== manifest.sourceCount) await writeManifest(path, records);
@@ -100,7 +102,7 @@ export async function relocateRecoveryManifest(configPath: string): Promise<void
 	const legacyPath = join(dirname(configPath), RECOVERY_MANIFEST_FILE_NAME);
 	const currentPath = getRecoveryManifestPath(configPath);
 	if (legacyPath === currentPath || !existsSync(legacyPath)) return;
-	await withFileMutationQueue(legacyPath, async () => {
+	await withManifestMutation(legacyPath, async () => {
 		const legacy = await readManifest(legacyPath);
 		if (!legacy.valid) {
 			await rm(legacyPath, { force: true });
@@ -112,7 +114,7 @@ export async function relocateRecoveryManifest(configPath: string): Promise<void
 }
 
 function recoveryKey(record: RecoveryRecord): string {
-	return `${record.runId}\0${record.worktreePath ?? ""}\0${record.patchPath ?? ""}\0${record.error ?? ""}`;
+	return `${record.durableId ?? record.runId}\0${record.worktreePath ?? ""}\0${record.patchPath ?? ""}\0${record.error ?? ""}`;
 }
 
 async function writeManifest(path: string, records: readonly RecoveryRecord[]): Promise<void> {
@@ -141,7 +143,7 @@ export async function persistRecoveryRecords(
 ): Promise<void> {
 	if (records.length === 0) return;
 	const path = getRecoveryManifestPath(configPath);
-	await withFileMutationQueue(path, async () => {
+	await withManifestMutation(path, async () => {
 		const merged = new Map<string, RecoveryRecord>();
 		const existing = await readManifest(path);
 		for (const record of await validatedRecords(configPath, existing.records)) {
@@ -158,8 +160,10 @@ export function recoveryRecordFromFinalization(
 	runId: number,
 	finalization: WorktreeFinalization,
 	now = Date.now(),
+	durableId?: string,
 ): RecoveryRecord {
 	return {
+		...(durableId ? { durableId } : {}),
 		runId,
 		createdAt: now,
 		integrated: finalization.integrated,
@@ -195,11 +199,11 @@ export async function announceRecoveryRecords(
 	if (ctx.hasUI === false) return;
 	const records = await readRecoveryRecords(configPath);
 	if (records.length === 0) return;
-	const local = new Set<RecoveryRecord>();
+	const local = new Set<string>();
 	for (const record of records) {
 		const groupDir = await managedRecoveryGroup(configPath, record);
 		if (!groupDir || !recoveryBelongsToSession(configPath, ctx.cwd, groupDir)) continue;
-		local.add(record);
+		local.add(recoveryKey(record));
 		if (!record.integrated || !record.worktreePath) continue;
 		if (!existsSync(record.worktreePath) && !(record.patchPath ? existsSync(record.patchPath) : false)) continue;
 		await removeWorktreeGroup({
@@ -207,16 +211,20 @@ export async function announceRecoveryRecords(
 			tempDir: groupDir,
 		});
 	}
-	const live = records.filter((record) =>
-		(record.worktreePath ? existsSync(record.worktreePath) : false) ||
-		(record.patchPath ? existsSync(record.patchPath) : false),
-	);
-	if (live.length !== records.length) {
-		const path = getRecoveryManifestPath(configPath);
-		await withFileMutationQueue(path, () => writeManifest(path, live)).catch(() => undefined);
-	}
+	const path = getRecoveryManifestPath(configPath);
+	const live = await withManifestMutation(path, async () => {
+		// Cleanup awaits Git/filesystem work outside the queue. Re-read here so
+		// failures persisted during those awaits survive this pruning pass.
+		const current = await readManifest(path);
+		const remaining = (await validatedRecords(configPath, current.records)).filter((record) =>
+			(record.worktreePath ? existsSync(record.worktreePath) : false) ||
+			(record.patchPath ? existsSync(record.patchPath) : false),
+		);
+		if (!current.valid || remaining.length !== current.sourceCount) await writeManifest(path, remaining);
+		return remaining;
+	});
 	for (const record of live) {
-		if (!local.has(record)) continue;
+		if (!local.has(recoveryKey(record))) continue;
 		const paths = [
 			record.worktreePath ? `worktree ${stripVTControlCharacters(record.worktreePath)}` : undefined,
 			record.patchPath ? `patch ${stripVTControlCharacters(record.patchPath)}` : undefined,

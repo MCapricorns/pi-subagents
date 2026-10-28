@@ -1,5 +1,43 @@
 # Changelog
 
+## 6.0.0
+
+### Breaking changes
+
+- Support only the built-in `code-review`, `research`, and `migration` workflows
+  through `workflow` plus `inputs`. Remove inline graphs, custom names, workflow
+  files, and user/project workflow discovery. Keep old interrupted records
+  readable for recovery.
+- Embed routing guidance and workflow templates in the extension. Remove the
+  separately loaded workflow skill and root workflow resource directory.
+
+### Changes
+
+- Append one mandatory independent sentinel acceptance officer to every
+  workflow. Review all settled work and integration evidence, including failed
+  branches; require an explicit terminal PASS, and reject missing, ambiguous,
+  malformed, or FAIL verdicts. Cancellation skips acceptance.
+- Replace ambiguous graph-source selection with direct built-in input errors.
+  Give different template inputs distinct phase identities while retaining
+  duplicate ownership for the same deliverable. Preserve brace syntax in task
+  inputs as literal text instead of interpreting it as graph dependencies.
+- Redesign the terminal board around work progress, blocking reasons, and a
+  separate required-acceptance row. Keep failures visible within the 10-line
+  budget, preserve narrow-screen identity, and correct hidden-task counts.
+- Redesign setup as a role selector with focused model/thinking details, using
+  side-by-side or stacked layouts. Preserve search, paging, focus, and default
+  versus override information. Budget setup height with the host's widget and
+  footer so required acceptance remains visible in a 24-row terminal.
+- Preserve managed recovery references when the original checkout is temporarily
+  unavailable. Use stable durable identities and cross-process manifest locks
+  so separate windows cannot overwrite or delete each other's recovery records.
+  Match recovered workflow children by durable identity after local renumbering,
+  and exclude lock directories from project scans.
+- Preserve concurrent recovery additions during announcements and keep newly
+  settled long-running sessions inside their follow-up retention window.
+- Remove duplicate manifest scans and model-catalog lookups. Stop idle widget
+  refreshes and fix zero-width summaries and ANSI-contaminated task labels.
+
 ## 5.0.6
 
 ### Changes

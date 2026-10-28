@@ -34,6 +34,8 @@ export type ThreadState = "queued" | "running" | "interrupting" | "parked" | "co
 export type ThreadLifecycleOperation = "stop" | "settle";
 
 export interface SubagentThread {
+	/** Stable manifest identity; display ids are local to a Pi window. */
+	durableId?: string;
 	id: number;
 	generation: number;
 	agentName: string;
@@ -127,6 +129,8 @@ export interface SubagentRuntime {
 	mainWrites: Map<string, { toolName: string; scope: PhaseScope }>;
 	/** Workflow graphs started in this parent session, live and settled. */
 	workflows: Map<number, WorkflowRun>;
+	/** Stable mapping from persisted identities to this window's display ids. */
+	workflowRecordIds: Map<string, number>;
 	/** Allocate a graph id that no retained or live workflow record owns. */
 	reserveWorkflowId: () => number;
 	/** Raise the graph-id allocator above an id restored from a durable record. */
@@ -251,6 +255,7 @@ export function createRuntime(pi: ExtensionAPI, configPath: string): SubagentRun
 		threads: new Map<number, SubagentThread>(),
 		mainWrites: new Map(),
 		workflows: new Map<number, WorkflowRun>(),
+		workflowRecordIds: new Map(),
 		reserveWorkflowId: () => nextWorkflowId++,
 		ensureWorkflowIdAbove: (id) => {
 			if (id >= nextWorkflowId) nextWorkflowId = id + 1;
@@ -331,7 +336,7 @@ export function createRuntime(pi: ExtensionAPI, configPath: string): SubagentRun
 			// thread whose settlement finished during the wait above already
 			// wrote (or removed) its own record; the lastResult-derived state
 			// below matches it.
-			const settled: Array<{ runId: number; cwd: string }> = [];
+			const settled: Array<{ identity: string; cwd: string }> = [];
 			const records: ThreadRecord[] = [];
 			for (const thread of runtime.threads.values()) {
 				if (thread.retired) continue;
@@ -354,11 +359,11 @@ export function createRuntime(pi: ExtensionAPI, configPath: string): SubagentRun
 					state = "parked";
 				}
 				if (state === "parked") records.push(threadRecordFromThread(thread, state));
-				else settled.push({ runId: thread.id, cwd: thread.cwd });
+				else if (thread.durableId) settled.push({ identity: thread.durableId, cwd: thread.cwd });
 			}
 			await Promise.all([
 				...records.map((record) => upsertThreadRecord(runtime.configPath, record).catch(() => undefined)),
-				...settled.map(({ runId, cwd }) => removeThreadRecord(runtime.configPath, runId, cwd).catch(() => undefined)),
+				...settled.map(({ identity, cwd }) => removeThreadRecord(runtime.configPath, identity, cwd).catch(() => undefined)),
 			]);
 			// Retained-failure recovery records are persisted by the finalization
 			// itself; shutdown only drops sessions no record claims anymore.
@@ -394,6 +399,7 @@ export function createRuntime(pi: ExtensionAPI, configPath: string): SubagentRun
 			runtime.threads.clear();
 			runtime.mainWrites.clear();
 			runtime.workflows.clear();
+			runtime.workflowRecordIds.clear();
 			runtime.shutdownHooks = [];
 			monitor.clear();
 		},

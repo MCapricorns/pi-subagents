@@ -15,6 +15,7 @@
  * as for a failed one-shot run.
  */
 
+import { randomUUID } from "node:crypto";
 import { isFailedResult, getResultError, getResultOutput, truncateResultOutput, writeResultArtifact, type SingleResult } from "../execution/spawn.ts";
 import { formatDuration, formatTaskSummary, monitor, runWaitLabel } from "../presentation/monitor.ts";
 import { perModelTotals, type CompletionMessageItem } from "../lifecycle/completion.ts";
@@ -27,11 +28,13 @@ import {
 	readWorkflowRecords,
 	removeWorkflowRecord,
 	upsertWorkflowRecord,
+	workflowRecordIdentity,
 	type RecordedNodeState,
 	type WorkflowRecord,
 } from "./durable.ts";
 import type { WorkflowNodeRun, WorkflowRun, WorkflowRunState } from "./state.ts";
 import type { PhaseScope } from "../delegation/phase-scope.ts";
+import { buildAcceptanceBrief, parseAcceptanceVerdict, WORKFLOW_ACCEPTANCE_AGENT, WORKFLOW_ACCEPTANCE_ID } from "./acceptance.ts";
 
 /** Lines of one node's answer inlined into the graph summary. The complete text
  * of every node is always written to a single workflow artifact, so nothing is
@@ -133,16 +136,27 @@ function waitForNodeSettlement(
 	});
 }
 
+function canDispatch(ctx: RunContext): boolean {
+	return ctx.run.state === "running" && !ctx.run.controller.signal.aborted && ctx.runtime.sessionActive;
+}
+
 async function dispatchNode(ctx: RunContext, node: WorkflowNodeRun): Promise<void> {
 	const { run } = ctx;
-	const upstream = new Map<string, UpstreamOutput>();
-	for (const dependency of node.ancestors) {
-		const upstreamNode = nodeById(run, dependency);
-		if (upstreamNode) upstream.set(dependency, upstreamView(upstreamNode));
-	}
-	const task = renderNodeTask(node.task, upstream);
+	if (!canDispatch(ctx)) return;
 	node.state = "running";
 	node.startedAt = Date.now();
+	let task: string;
+	if (node.kind === "acceptance") {
+		node.evidenceFile = writeResultArtifact(formatWorkflowReport(run), `workflow-${run.slug}-acceptance-evidence`, ctx.resultsRoot);
+		task = buildAcceptanceBrief(run, node.evidenceFile);
+	} else {
+		const upstream = new Map<string, UpstreamOutput>();
+		for (const dependency of node.ancestors) {
+			const upstreamNode = nodeById(run, dependency);
+			if (upstreamNode) upstream.set(dependency, upstreamView(upstreamNode));
+		}
+		task = renderNodeTask(node.task, upstream);
+	}
 	let started: SingleResult;
 	try {
 		started = await ctx.startBackground(node.agent, task, node.cwd, node.isolation ?? ctx.resolveIsolation(node.agent), {
@@ -169,20 +183,21 @@ async function dispatchNode(ctx: RunContext, node: WorkflowNodeRun): Promise<voi
 		return;
 	}
 	node.runId = started.runId;
+	node.durableRunId = ctx.runtime.threads.get(started.runId)?.durableId;
 	await checkpoint(ctx);
 	if (run.state === "stopped") await stopThreads(ctx.runtime, [started.runId], run.stopReason);
 	const result = await waitForNodeSettlement(ctx.runtime, started.runId, run.controller.signal);
 	node.endedAt = Date.now();
 	node.result = result;
-	if (result && getResultOutput(result).length > UPSTREAM_OUTPUT_MAX_CHARS && !result.resultFile) {
+	if (result && (node.kind === "acceptance" || getResultOutput(result).length > UPSTREAM_OUTPUT_MAX_CHARS) && !result.resultFile) {
 		try {
 			result.resultFile = writeResultArtifact(getResultOutput(result), `workflow-${run.slug}-${node.id}`, ctx.resultsRoot);
 		} catch {
 			/* The dependent brief explicitly reports an unavailable full answer. */
 		}
 	}
-	if (run.state !== "running") {
-		if (result && !isFailedResult(result)) { node.state = "completed"; return; }
+	if (run.state !== "running" || run.controller.signal.aborted || !ctx.runtime.sessionActive) {
+		if (node.kind !== "acceptance" && result && !isFailedResult(result)) { node.state = "completed"; return; }
 		node.state = "stopped";
 		node.error ??= run.stopReason ?? "workflow stopped";
 		return;
@@ -201,6 +216,15 @@ async function dispatchNode(ctx: RunContext, node: WorkflowNodeRun): Promise<voi
 		);
 		return;
 	}
+	if (node.kind === "acceptance") {
+		const review = parseAcceptanceVerdict(getResultOutput(result));
+		if (review.verdict !== "PASS") {
+			node.state = "failed";
+			node.error = review.error ?? "Required acceptance rejected the integrated outcome (WORKFLOW_ACCEPTANCE: FAIL). Read the review result for blockers and limitations.";
+			ctx.notify(`✗ workflow ${run.name} · required acceptance rejected: ${formatTaskSummary(node.error, 200, false)}`, "error");
+			return;
+		}
+	}
 	node.state = "completed";
 }
 
@@ -209,7 +233,7 @@ async function dispatchNode(ctx: RunContext, node: WorkflowNodeRun): Promise<voi
 function blockDependents(run: WorkflowRun): boolean {
 	let changed = false;
 	for (const node of run.nodes) {
-		if (node.state !== "pending") continue;
+		if (node.state !== "pending" || node.kind === "acceptance") continue;
 		const broken = node.dependsOn.find((dependency) => {
 			const state = nodeById(run, dependency)?.state;
 			return state !== undefined && terminalFailure(state);
@@ -233,13 +257,23 @@ async function drive(ctx: RunContext): Promise<void> {
 	const inFlight = new Set<Promise<void>>();
 	await checkpoint(ctx);
 	while (run.state === "running") {
+		if (!ctx.runtime.sessionActive) {
+			await persistInterruptedWorkflows(ctx.runtime);
+			break;
+		}
 		while (blockDependents(run)) { /* Propagate through any author order. */ }
 		const ready = run.nodes.filter(
 			(node) =>
 				node.state === "pending" &&
-				node.dependsOn.every((dependency) => nodeById(run, dependency)?.state === "completed"),
+				node.dependsOn.every((dependency) => {
+					const state = nodeById(run, dependency)?.state;
+					return node.kind === "acceptance"
+						? state !== undefined && state !== "pending" && state !== "running"
+						: state === "completed";
+				}),
 		);
 		for (const node of ready) {
+			if (!canDispatch(ctx)) break;
 			// dispatchNode marks the node running synchronously, so the next pass
 			// cannot start it twice.
 			const task = dispatchNode(ctx, node).catch((error: unknown) => {
@@ -279,7 +313,10 @@ function stateLabel(state: WorkflowRunState): string {
 	}
 }
 
-function nodeStateWord(node: WorkflowNodeRun): string {
+function nodeStateWord(node: Pick<WorkflowNodeRun, "kind" | "state">): string {
+	if (node.kind === "acceptance") {
+		return `required acceptance ${node.state === "completed" ? "accepted" : node.state === "failed" ? "rejected" : node.state}`;
+	}
 	return node.state === "blocked" ? "never ran (blocked)" : node.state;
 }
 
@@ -317,9 +354,13 @@ export function formatWorkflowReport(run: WorkflowRun): string {
 	for (const node of run.nodes) {
 		const output = node.result ? getResultOutput(node.result).trim() : "";
 		lines.push("", `## ${node.id} (${node.agent}) — ${nodeStateWord(node)}`, "");
+		lines.push(`Phase: ${node.phaseId}`, `Working directory: ${node.cwd}`, `Dependencies: ${node.dependsOn.join(", ") || "none"}`);
+		if (node.scope) lines.push(`Declared scope: ${JSON.stringify(node.scope)}`);
+		if (node.result?.integrationStatus) lines.push(`Integration: ${node.result.integrationStatus}`);
+		lines.push(`Task / done condition:\n${node.task}`, "");
 		lines.push(output || "(no answer recorded)");
 		if (node.error) lines.push("", `Error: ${node.error}`);
-		for (const [label, path] of [["Full result", node.result?.resultFile], ["Retained worktree", node.result?.integrationWorktreePath], ["Retained patch", node.result?.integrationPatchPath]]) {
+		for (const [label, path] of [["Acceptance evidence report", node.evidenceFile], ["Full result", node.result?.resultFile], ["Retained worktree", node.result?.integrationWorktreePath], ["Retained patch", node.result?.integrationPatchPath]]) {
 			if (path) lines.push(`${label}: ${path}`);
 		}
 	}
@@ -360,7 +401,8 @@ export function formatWorkflowSummary(run: WorkflowRun, resultsRoot?: string): s
 		const inline = inlineNodeAnswer(node);
 		if (!inline.text) continue;
 		if (inline.truncated) anyTruncated = true;
-		answers.push(`#### ${node.id} (${node.agent})`, inline.text, "");
+		answers.push(`#### ${node.id} (${node.agent})${node.kind === "acceptance" ? " — required acceptance review" : ""}`, inline.text, "");
+		if (node.kind === "acceptance" && node.result?.resultFile) answers.push(`Full acceptance review: ${node.result.resultFile}`, "");
 	}
 	if (answers.length > 0) {
 		lines.push("", "Node answers:", "", ...answers);
@@ -389,7 +431,9 @@ export function formatWorkflowSummary(run: WorkflowRun, resultsRoot?: string): s
 }
 
 function workflowRecord(run: WorkflowRun, state: WorkflowRecord["state"]): WorkflowRecord {
+	run.durableId ??= randomUUID();
 	return {
+		durableId: run.durableId,
 		workflowId: run.id,
 		name: run.name,
 		...(run.description ? { description: run.description } : {}),
@@ -403,8 +447,12 @@ function workflowRecord(run: WorkflowRun, state: WorkflowRecord["state"]): Workf
 			agent: node.agent,
 			task: node.task,
 			dependsOn: [...node.dependsOn],
+			...(node.kind ? { kind: node.kind } : {}),
+			...(node.evidenceFile ? { evidenceFile: node.evidenceFile } : {}),
+			...(node.result?.resultFile ? { resultFile: node.result.resultFile } : {}),
 			state: node.state as RecordedNodeState,
 			...(node.runId !== undefined ? { runId: node.runId } : {}),
+			...(node.durableRunId ? { durableRunId: node.durableRunId } : {}),
 			...(node.error ? { error: node.error } : {}),
 		})),
 	};
@@ -416,11 +464,12 @@ async function settle(ctx: RunContext): Promise<void> {
 	// it is the evidence the next session explains, not a settled run.
 	const interrupted = run.state === "interrupted";
 	if (run.state === "running") {
-		run.state = run.nodes.some((node) => node.state !== "completed") ? "failed" : "completed";
+		const accepted = run.nodes.some((node) => node.kind === "acceptance" && node.state === "completed");
+		run.state = !accepted || run.nodes.some((node) => node.state !== "completed") ? "failed" : "completed";
 	}
 	run.endedAt ??= Date.now();
 	if (runtime.sessionActive) monitor.updateWorkflow(run);
-	if (!interrupted) await removeWorkflowRecord(runtime.configPath, run.id, run.cwd).catch(() => undefined);
+	if (!interrupted && run.durableId) await removeWorkflowRecord(runtime.configPath, run.durableId, run.cwd).catch(() => undefined);
 	if (!runtime.sessionActive) return;
 	const item: CompletionMessageItem = {
 		agent: `workflow:${run.name}`,
@@ -473,8 +522,18 @@ export function findOwnedPhases(runtime: SubagentRuntime, workflow: CompiledWork
 
 /** Start a compiled graph. Nodes dispatch as their prerequisites settle. */
 export function startWorkflow(deps: WorkflowRunDeps, workflow: CompiledWorkflow): WorkflowHandle {
+	const work = workflow.nodes.filter((node) => node.kind !== "acceptance");
+	const reviews = workflow.nodes.filter((node) => node.kind === "acceptance");
+	const review = reviews[0];
+	if (reviews.length !== 1 || !review || review.id !== WORKFLOW_ACCEPTANCE_ID || review.agent !== WORKFLOW_ACCEPTANCE_AGENT ||
+		review.cwd !== workflow.cwd || review.isolation !== "shared" || review.scope ||
+		review.dependsOn.length !== work.length || work.some((node) => !review.dependsOn.includes(node.id))) {
+		throw new Error("A workflow requires exactly one compiler-owned independent acceptance node covering all authored work.");
+	}
 	const runtime = deps.runtime;
+	const durableId = randomUUID();
 	const run: WorkflowRun = {
+		durableId,
 		id: runtime.reserveWorkflowId(),
 		name: workflow.name,
 		slug: workflow.slug,
@@ -485,6 +544,7 @@ export function startWorkflow(deps: WorkflowRunDeps, workflow: CompiledWorkflow)
 		controller: new AbortController(),
 		nodes: workflow.nodes.map((node) => ({
 			id: node.id,
+			...(node.kind ? { kind: node.kind } : {}),
 			agent: node.agent,
 			task: node.task,
 			dependsOn: [...node.dependsOn],
@@ -497,6 +557,7 @@ export function startWorkflow(deps: WorkflowRunDeps, workflow: CompiledWorkflow)
 		})),
 	};
 	runtime.workflows.set(run.id, run);
+	runtime.workflowRecordIds.set(durableId, run.id);
 
 	let wakeRequested = false;
 	let wakeResolver: (() => void) | undefined;
@@ -533,7 +594,7 @@ export function startWorkflow(deps: WorkflowRunDeps, workflow: CompiledWorkflow)
 			run.endedAt = Date.now();
 			run.stopReason = error instanceof Error ? error.message : String(error);
 			deps.notify(`✗ workflow ${run.name} crashed: ${run.stopReason}`, "error");
-			void removeWorkflowRecord(runtime.configPath, run.id, run.cwd).catch(() => undefined);
+			void removeWorkflowRecord(runtime.configPath, durableId, run.cwd).catch(() => undefined);
 			return run;
 		},
 	);
@@ -585,26 +646,44 @@ export async function persistInterruptedWorkflows(runtime: SubagentRuntime): Pro
 
 export interface RetainedWorkflow {
 	id: number;
+	durableId: string;
 	name: string;
 	state: WorkflowRecord["state"];
 	stopReason?: string;
 	updatedAt: number;
-	nodes: WorkflowRecord["nodes"];
+	nodes: Array<WorkflowRecord["nodes"][number] & { originalRunId?: number }>;
 }
 
-/** Retained records for this checkout, offered to the status view and to the
- * session-start notice. Also raises the id allocator above restored graphs. */
+/** Reconcile persisted identities with this window's ids. Never attach an old
+ * node to an unrelated run merely because their display numbers match. */
 export async function readRetainedWorkflows(runtime: SubagentRuntime, cwd: string): Promise<RetainedWorkflow[]> {
 	const records = await readWorkflowRecords(runtime.configPath, cwd);
 	for (const record of records) runtime.ensureWorkflowIdAbove(record.workflowId);
-	return records.map((record) => ({
-		id: record.workflowId,
-		name: record.name,
-		state: record.state === "running" ? "interrupted" : record.state,
-		...(record.stopReason ? { stopReason: record.stopReason } : {}),
-		updatedAt: record.updatedAt,
-		nodes: record.nodes,
-	}));
+	const threadsByIdentity = new Map([...runtime.threads.values()].filter((thread) => thread.durableId)
+		.map((thread) => [thread.durableId!, thread.id]));
+	const allocated = new Set([...runtime.workflowRecordIds.values(), ...runtime.workflows.keys()]);
+	return records.map((record) => {
+		const durableId = workflowRecordIdentity(record);
+		let id = runtime.workflowRecordIds.get(durableId);
+		if (id === undefined) {
+			id = allocated.has(record.workflowId) ? runtime.reserveWorkflowId() : record.workflowId;
+			runtime.workflowRecordIds.set(durableId, id);
+			allocated.add(id);
+		}
+		return {
+			id, durableId, name: record.name,
+			state: record.state === "running" ? "interrupted" : record.state,
+			...(record.stopReason ? { stopReason: record.stopReason } : {}),
+			updatedAt: record.updatedAt,
+			nodes: record.nodes.map((node) => {
+				const { runId: originalRunId, ...facts } = node;
+				const runId = node.durableRunId ? threadsByIdentity.get(node.durableRunId) : undefined;
+				return { ...facts, ...(runId === undefined
+					? originalRunId === undefined ? {} : { originalRunId }
+					: { runId }) };
+			}),
+		};
+	});
 }
 
 /** Status-facing projection of a live or settled graph. */
@@ -619,6 +698,9 @@ export interface WorkflowStatusView {
 	endedAt?: number;
 	nodes: Array<{
 		id: string;
+		kind?: "acceptance";
+		evidenceFile?: string;
+		resultFile?: string;
 		agent: string;
 		state: WorkflowNodeRun["state"];
 		task: string;
@@ -647,6 +729,9 @@ export function workflowStatus(run: WorkflowRun): WorkflowStatusView {
 			const live = node.runId === undefined ? undefined : monitor.findRun(node.runId);
 			return {
 				id: node.id,
+				...(node.kind ? { kind: node.kind } : {}),
+				...(node.evidenceFile ? { evidenceFile: node.evidenceFile } : {}),
+				...(node.result?.resultFile ? { resultFile: node.result.resultFile } : {}),
 				agent: node.agent,
 				state: node.state,
 				task: formatTaskSummary(node.task, 160, false),
@@ -672,7 +757,7 @@ export function formatWorkflowStatus(run: WorkflowRun): string[] {
 	if (view.description) lines.push(`  ${view.description}`);
 	if (view.stopReason) lines.push(`  stop reason: ${formatTaskSummary(view.stopReason, 200, false)}`);
 	for (const node of view.nodes) {
-		const parts = [`${node.id} (${node.agent}) ${node.state}`];
+		const parts = [`${node.id} (${node.agent}) ${nodeStateWord(node)}`];
 		if (node.runId !== undefined) parts.push(`run #${node.runId}`);
 		if (node.waitingFor) parts.push(`waiting for ${node.waitingFor.join(", ")}`);
 		if (node.elapsedMs !== undefined) parts.push(formatDuration(node.elapsedMs));
@@ -695,10 +780,13 @@ export function formatRetainedWorkflow(record: RetainedWorkflow): string[] {
 	];
 	if (record.stopReason) lines.push("  stop reason: " + formatTaskSummary(record.stopReason, 200, false));
 	for (const node of record.nodes) {
-		const parts = [node.id + " (" + node.agent + ") " + node.state];
+		const parts = [node.id + " (" + node.agent + ") " + nodeStateWord(node)];
 		if (node.runId !== undefined) parts.push("run #" + node.runId);
+		else if (node.originalRunId !== undefined) parts.push("original run #" + node.originalRunId + " (not restored in this window)");
 		if (node.dependsOn.length > 0) parts.push("after " + node.dependsOn.join(", "));
 		if (node.error) parts.push("error: " + formatTaskSummary(node.error, 160, false));
+		if (node.evidenceFile) parts.push("acceptance evidence: " + node.evidenceFile);
+		if (node.resultFile) parts.push("full result: " + node.resultFile);
 		lines.push("  - " + parts.join(" · "));
 	}
 	lines.push("  A retained graph is not resumed automatically: main finishes the unfinished nodes from their run evidence.");

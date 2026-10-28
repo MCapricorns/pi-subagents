@@ -36,9 +36,8 @@ describe("buildDelegationDirective", () => {
 
 	it("routes the four built-in roles without inventing extra phases", () => {
 		const directive = buildDelegationDirective(loadBuiltinAgents());
-		assert.match(directive, /Proactively delegate worthwhile bounded phases/u);
+		assert.match(directive, /Delegate worthwhile phases/u);
 		assert.match(directive, /focused ownership, isolated context, parallel progress, or independent verification/u);
-		assert.match(directive, /Substantial implementation merits a child without parallel work/u);
 		assert.match(directive, /`scout` for cited research, `artisan` for implementation, `sentinel` to inspect implementations, and `skeptic` to test named claims/u);
 		assert.match(directive, /Default to one review role: sentinel finds defects; skeptic tests a stated assumption or finding/u);
 		// The routing contract states the live tool policy without naming tools.
@@ -49,22 +48,26 @@ describe("buildDelegationDirective", () => {
 		for (const role of loadBuiltinAgents()) {
 			assert.equal(directive.split(role.description).length - 1, 1);
 		}
-		assert.match(directive, /Keep a quick source check or a small understood edit in main/u);
+		assert.match(directive, /Keep quick checks and small edits in main/u);
 		assert.match(directive, /Choose team size from independent work, not available capacity/u);
-		assert.match(directive, /Use `subagent` for one bounded phase, parallel `tasks` for independent phases, and `subagent_workflow` for substantial dependent phases/u);
+		assert.match(directive, /Use `subagent` for one bounded phase and parallel `tasks` for independent phases/u);
+		assert.match(directive, /accepts only built-in code-review, research, or migration with named inputs/u);
+		assert.match(directive, /custom graphs and workflow files are unsupported/u);
+		assert.match(directive, /Every workflow ends with runtime-managed sentinel acceptance/u);
+		assert.match(directive, /Only explicit PASS succeeds; missing verdicts fail/u);
 		assert.match(directive, /Honor requests to work in main or avoid subagents/u);
 		assert.match(directive, /no extra stop or automatic restart/u);
-		assert.match(directive, /do not add research, review, or gate phases by habit/u);
-		assert.match(directive, /smallest fix for each confirmed defect/u);
-		assert.match(directive, /Apply fixes only when authorized; otherwise report them/u);
-		assert.match(directive, /Request focused confirmation only for material uncertainty/u);
+		assert.match(directive, /Reuse its review instead of adding a duplicate reviewer/u);
+		assert.match(directive, /smallest fix/u);
+		assert.match(directive, /Apply fixes when authorized; otherwise report them/u);
+		assert.match(directive, /Ask only for material uncertainty/u);
 		assert.match(directive, /Do not re-review the whole change/u);
 		assert.match(directive, /one owner across main, `subagent`, and workflow, including pending nodes/u);
 		assert.match(directive, /Parallelize independent phases in one call/u);
 		assert.match(directive, /never overlap writers or duplicate an owned phase/u);
 		assert.match(directive, /Dependent phases wait for prerequisites/u);
 		assert.match(directive, /If a result determines the next task or its scope, dispatch that phase alone and decide in main/u);
-		assert.match(directive, /Keep implementation and its regression tests with one owner/u);
+		assert.match(directive, /implementation and its regression tests share one owner/u);
 		assert.match(directive, /Scope is conflict metadata, not permissions or a sandbox/u);
 		assert.match(directive, /The user's task sets the outcome/u);
 		assert.match(directive, /Main owns architecture, integration, the final gate, and release/u);
@@ -80,8 +83,8 @@ describe("buildDelegationDirective", () => {
 			assert.ok(!directive.includes(role.systemPrompt));
 		}
 		assert.match(directive, /Children have no parent conversation/u);
-		assert.match(directive, /brief outcome, done condition, paths, existing findings\/checks, boundaries, and output/u);
-		assert.match(directive, /Pass completed main work forward; assign only gaps/u);
+		assert.match(directive, /brief outcome, done condition, paths, existing evidence, boundaries, and output/u);
+		assert.match(directive, /Pass completed work forward; assign only gaps/u);
 		assert.match(directive, /Do not redo delegated research, edits, or checks in main/u);
 	});
 

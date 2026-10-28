@@ -193,8 +193,9 @@ function tailGraphemes(segments: string[], maxWidth: number): string {
  * Grapheme-safe — CJK, ZWJ emoji and combining sequences are never split.
  */
 export function formatTaskSummary(task: string, maxWidth: number = TASK_SUMMARY_MAX, keysOnly = true): string {
+	if (maxWidth <= 0) return "";
 	const oneLine = stripVTControlCharacters(task).replace(/\s+/g, " ").trim();
-	if (maxWidth <= 0 || visibleWidth(oneLine) <= maxWidth) return oneLine;
+	if (visibleWidth(oneLine) <= maxWidth) return oneLine;
 
 	const segments = [...graphemeSegmenter.segment(oneLine)].map((s) => s.segment);
 	const ellipsisWidth = visibleWidth(TASK_SUMMARY_ELLIPSIS);
@@ -248,9 +249,10 @@ const RUN_LABEL_MAX = 32;
  * head slice of its prose. Grapheme-safe.
  */
 export function runLabel(task: string): string {
-	const fragments = extractKeyFragments(task);
+	const oneLine = stripVTControlCharacters(task).replace(/\s+/g, " ").trim();
+	const fragments = extractKeyFragments(oneLine);
 	const fragment = fragments.find((candidate) => /[\\/]|\.[A-Za-z0-9]{1,5}$/.test(candidate)) ?? fragments[0];
-	const src = fragment ?? stripVTControlCharacters(task).replace(/\s+/g, " ").trim();
+	const src = fragment ?? oneLine;
 	if (visibleWidth(src) <= RUN_LABEL_MAX) return src;
 	const chars = [...graphemeSegmenter.segment(src)].map((s) => s.segment);
 	// A path/symbol fragment keeps its tail (filename/symbol is recognisable);

@@ -3,6 +3,29 @@ import { describe, it } from "node:test";
 import { formatCompletionBlock } from "../src/presentation/format.ts";
 import { RESULT_LINE_MAX, truncateResultOutput } from "../src/execution/spawn.ts";
 import { emptyUsage } from "../src/execution/run-control.ts";
+import { formatTaskSummary, runLabel } from "../src/presentation/monitor.ts";
+import { visibleWidth } from "@earendil-works/pi-tui";
+
+describe("terminal task identities", () => {
+	it("honors zero budgets and grapheme widths for ANSI and CJK summaries", () => {
+		const task = "\x1b[31m修复 src/认证配置.ts 与 👩‍💻 e\u0301 宽度\x1b[0m";
+		assert.equal(formatTaskSummary(task, 0), "");
+		assert.equal(formatTaskSummary(task, -1), "");
+		for (const width of [1, 2, 3, 8, 20, 40]) {
+			for (const keysOnly of [true, false]) {
+				const summary = formatTaskSummary(task, width, keysOnly);
+				assert.ok(visibleWidth(summary) <= width, `${width}: ${summary}`);
+				assert.doesNotMatch(summary, /\x1b/u);
+				if (summary.includes("👩") || summary.includes("💻")) assert.ok(summary.includes("👩‍💻"));
+			}
+		}
+	});
+
+	it("extracts a path from styled tasks without incorporating the ANSI color code", () => {
+		assert.equal(runLabel("\x1b[31msrc/feature.ts\x1b[0m"), "src/feature.ts");
+		assert.equal(runLabel("\x1b[32mImplement `resolveModel`\x1b[0m"), "resolveModel");
+	});
+});
 
 describe("truncateResultOutput", () => {
 	it("does not claim a line budget when only a long line was clipped", () => {

@@ -14,7 +14,8 @@
  * unfinished work needs explaining.
  */
 
-import { withFileMutationQueue } from "@earendil-works/pi-coding-agent";
+import { createHash } from "node:crypto";
+import { withManifestMutation } from "../isolation/manifest-mutation.ts";
 import { readdirSync } from "node:fs";
 import { mkdir, readFile, rename, rm, writeFile } from "node:fs/promises";
 import { dirname, isAbsolute, join, resolve } from "node:path";
@@ -29,15 +30,21 @@ export type RecordedNodeState = "pending" | "running" | "completed" | "failed" |
 
 export interface WorkflowRecordNode {
 	id: string;
+	kind?: "acceptance";
+	evidenceFile?: string;
+	resultFile?: string;
 	agent: string;
 	task: string;
 	dependsOn: string[];
 	state: RecordedNodeState;
 	runId?: number;
+	/** Identifies the run across windows and local restore renumbering. */
+	durableRunId?: string;
 	error?: string;
 }
 
 export interface WorkflowRecord {
+	durableId?: string;
 	workflowId: number;
 	name: string;
 	description?: string;
@@ -76,6 +83,9 @@ function normalizeNode(value: unknown): WorkflowRecordNode | undefined {
 	if (typeof raw.state !== "string" || !NODE_STATES.has(raw.state as RecordedNodeState)) return undefined;
 	return {
 		id: raw.id,
+		...(raw.kind === "acceptance" ? { kind: "acceptance" as const } : {}),
+		...(typeof raw.evidenceFile === "string" && raw.evidenceFile ? { evidenceFile: raw.evidenceFile } : {}),
+		...(typeof raw.resultFile === "string" && raw.resultFile ? { resultFile: raw.resultFile } : {}),
 		agent: raw.agent,
 		task: typeof raw.task === "string" ? raw.task : "",
 		dependsOn: Array.isArray(raw.dependsOn)
@@ -83,6 +93,7 @@ function normalizeNode(value: unknown): WorkflowRecordNode | undefined {
 			: [],
 		state: raw.state as RecordedNodeState,
 		...(typeof raw.runId === "number" && Number.isInteger(raw.runId) && raw.runId > 0 ? { runId: raw.runId } : {}),
+		...(typeof raw.durableRunId === "string" && raw.durableRunId ? { durableRunId: raw.durableRunId } : {}),
 		...(typeof raw.error === "string" && raw.error ? { error: raw.error } : {}),
 	};
 }
@@ -100,6 +111,7 @@ function normalizeRecord(value: unknown): WorkflowRecord | undefined {
 	const nodes = raw.nodes.map(normalizeNode);
 	if (nodes.some((node) => node === undefined)) return undefined;
 	return {
+		...(typeof raw.durableId === "string" && raw.durableId ? { durableId: raw.durableId } : {}),
 		workflowId: raw.workflowId,
 		name: raw.name,
 		...(typeof raw.description === "string" && raw.description ? { description: raw.description } : {}),
@@ -148,25 +160,33 @@ async function writeManifest(path: string, records: readonly WorkflowRecord[]): 
 	}
 }
 
+/** Display ids are local to a window; old manifests retain a deterministic key. */
+export function workflowRecordIdentity(record: WorkflowRecord): string {
+	return record.durableId ?? `legacy-${createHash("sha256").update(JSON.stringify([
+		record.cwd, record.workflowId, record.startedAt, record.name,
+	])).digest("hex")}`;
+}
+
 export async function upsertWorkflowRecord(configPath: string, record: WorkflowRecord): Promise<void> {
 	const path = getWorkflowsManifestPath(configPath, record.cwd);
-	await withFileMutationQueue(path, async () => {
+	await withManifestMutation(path, async () => {
 		const records = await readManifestRecords(path);
-		const index = records.findIndex((candidate) => candidate.workflowId === record.workflowId);
-		const merged: WorkflowRecord = index === -1
-			? record
-			: { ...record, startedAt: records[index]!.startedAt };
+		const identity = workflowRecordIdentity(record);
+		const index = records.findIndex((candidate) => workflowRecordIdentity(candidate) === identity);
+		const merged: WorkflowRecord = {
+			...record, durableId: identity, startedAt: index === -1 ? record.startedAt : records[index]!.startedAt,
+		};
 		if (index === -1) records.push(merged);
 		else records[index] = merged;
 		await writeManifest(path, records);
 	});
 }
 
-export async function removeWorkflowRecord(configPath: string, workflowId: number, cwd: string): Promise<void> {
+export async function removeWorkflowRecord(configPath: string, identity: string, cwd: string): Promise<void> {
 	const path = getWorkflowsManifestPath(configPath, cwd);
-	await withFileMutationQueue(path, async () => {
+	await withManifestMutation(path, async () => {
 		const records = await readManifestRecords(path);
-		const next = records.filter((record) => record.workflowId !== workflowId);
+		const next = records.filter((record) => workflowRecordIdentity(record) !== identity);
 		if (next.length === records.length) return;
 		await writeManifest(path, next);
 	});
@@ -175,7 +195,7 @@ export async function removeWorkflowRecord(configPath: string, workflowId: numbe
 /** Records for one checkout, newest first. */
 export async function readWorkflowRecords(configPath: string, cwd: string): Promise<WorkflowRecord[]> {
 	const path = getWorkflowsManifestPath(configPath, cwd);
-	const migrated = await withFileMutationQueue(path, async () => {
+	const migrated = await withManifestMutation(path, async () => {
 		const manifest = await readManifest(path);
 		if (manifest.rolesMigrated) await writeManifest(path, manifest.records);
 		return manifest.records;
@@ -193,13 +213,13 @@ export async function pruneWorkflowRecords(configPath: string, now = Date.now())
 	let projects: string[];
 	try {
 		projects = readdirSync(getSubagentsRoot(configPath), { withFileTypes: true })
-			.filter((entry) => entry.isDirectory() && !entry.isSymbolicLink())
+			.filter((entry) => entry.isDirectory() && !entry.isSymbolicLink() && !entry.name.endsWith(".lock"))
 			.map((entry) => join(getSubagentsRoot(configPath), entry.name, WORKFLOWS_MANIFEST_FILE_NAME));
 	} catch {
 		return;
 	}
 	for (const path of projects) {
-		await withFileMutationQueue(path, async () => {
+		await withManifestMutation(path, async () => {
 			const records = await readManifestRecords(path);
 			const kept = records.filter((record) => now - record.updatedAt <= PARKED_RECORD_MAX_AGE_MS);
 			if (kept.length !== records.length) await writeManifest(path, kept);

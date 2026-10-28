@@ -7,6 +7,7 @@
  * recovery artifacts, and guarded one-time terminal publication.
  */
 
+import { randomUUID } from "node:crypto";
 import { join, resolve } from "node:path";
 import { isWriteCapableAgent, resolveAgentTools, type AgentConfig } from "../delegation/agents.ts";
 import type { CompletionMessageItem } from "./completion.ts";
@@ -187,6 +188,7 @@ export function createBackgroundDispatcher(options: BackgroundDispatcherOptions)
 
 		thread = {
 			id: runId,
+			durableId: randomUUID(),
 			generation,
 			agentName: agent.name,
 			task,
@@ -485,6 +487,7 @@ export function createBackgroundDispatcher(options: BackgroundDispatcherOptions)
 /** Install the shared settlement hook for a fresh run or recovered worktree. */
 export function installThreadLifecycle(thread: SubagentThread, deps: ThreadLifecycleDeps): void {
 	const { runtime } = deps;
+	thread.durableId ??= randomUUID();
 	const runId = thread.id;
 
 	thread.notifyIsolationFailure = (finalization) => {
@@ -556,7 +559,7 @@ export function installThreadLifecycle(thread: SubagentThread, deps: ThreadLifec
 			// Every retained finalization gets a durable recovery record, so the
 			// artifacts stay findable even when the owning process dies next.
 			void persistRecoveryRecords(runtime.configPath, [
-				recoveryRecordFromFinalization(runId, finalization),
+				recoveryRecordFromFinalization(runId, finalization, Date.now(), thread.durableId),
 			]).catch(() => undefined);
 		}
 		return finalization;

@@ -1,17 +1,18 @@
 /**
- * The subagent_workflow tool: declare a dependency graph of sub-agent phases
- * once and let the runtime dispatch dependents as prerequisites settle.
+ * The subagent_workflow tool runs a built-in plan with named task inputs.
+ * Scheduling, isolation, and independent acceptance are owned by the runtime.
  *
  * The graph is validated before anything starts (see plan.ts), so an invalid
  * plan costs zero child processes. A valid plan returns a launch receipt
  * immediately; one completion message summarises the whole graph.
  */
 
+import { StringEnum } from "@earendil-works/pi-ai";
 import type { ExtensionAPI, ExtensionContext, Theme } from "@earendil-works/pi-coding-agent";
 import { Text } from "@earendil-works/pi-tui";
 import { Type } from "typebox";
 import { isWriteCapableAgent, loadBuiltinAgents } from "../delegation/agents.ts";
-import { defaultIsolationMode, IsolationSchema, PhaseIdSchema, ScopeSchema } from "../delegation/dispatch.ts";
+import { defaultIsolationMode } from "../delegation/dispatch.ts";
 import { findRuntimeWriterConflict } from "../delegation/ownership.ts";
 import { loadConfig } from "../configuration/config.ts";
 import type { SubagentRuntime } from "../lifecycle/runtime.ts";
@@ -27,51 +28,15 @@ import {
 	workflowStatus,
 	type WorkflowStatusView,
 } from "./engine.ts";
-import { migrateWorkflowDefinition, resolveWorkflowDefinition } from "./files.ts";
-import { compileWorkflow, WORKFLOW_NODE_ID_MAX_LENGTH, type WorkflowPlanInput } from "./plan.ts";
-
-const WorkflowNodeSchema = Type.Object({
-	id: Type.String({
-		minLength: 1,
-		maxLength: WORKFLOW_NODE_ID_MAX_LENGTH,
-		pattern: "^[A-Za-z][A-Za-z0-9._-]*$",
-		description: "Stable node id. Dependents name it in dependsOn and in result placeholders.",
-	}),
-	agent: Type.String({ minLength: 1, description: "Name of an enabled agent." }),
-	task: Type.String({
-		minLength: 1,
-		pattern: "\\S",
-		description:
-			"Self-contained brief. {{<dependency-id>}} interpolates an upstream node's answer; {{<id>.status}}, {{<id>.runId}} and {{<id>.error}} interpolate facts. Only declared dependencies may be referenced.",
-	}),
-	dependsOn: Type.Optional(
-		Type.Array(Type.String({ minLength: 1 }), {
-			description: "Node ids that must complete before this one starts. Omit for a node that starts immediately.",
-		}),
-	),
-	phaseId: PhaseIdSchema,
-	scope: ScopeSchema,
-	cwd: Type.Optional(Type.String({ description: "Working directory for this node; defaults to the caller cwd." })),
-	isolation: IsolationSchema,
-});
+import { compileBuiltinWorkflow } from "./templates.ts";
 
 const WorkflowParams = Type.Object({
-	name: Type.Optional(
-		Type.String({
-			maxLength: 60,
-			description: "Workflow name: shown in the widget and status, and the namespace for derived phase ids.",
-		}),
-	),
-	description: Type.Optional(Type.String({ description: "One line stating what the graph delivers." })),
-	nodes: Type.Optional(
-		Type.Array(WorkflowNodeSchema, { description: "Inline graph. Mutually exclusive with workflow/file." }),
-	),
-	workflow: Type.Optional(
-		Type.String({ description: "Name of a saved workflow under .pi/workflows/ or ~/.pi/agent/workflows/." }),
-	),
-	file: Type.Optional(
-		Type.String({ description: "Workflow definition file (JSON, or Markdown with a json fenced block)." }),
-	),
+	workflow: StringEnum(["code-review", "research", "migration"] as const, {
+		description: "Built-in plan: code-review inspects a target; research answers a question; migration applies two planned slices. Every plan ends with independent acceptance.",
+	}),
+	inputs: Type.Record(Type.String(), Type.String({ minLength: 1, pattern: "\\S" }), {
+		description: "Named inputs. code-review: TARGET. research: QUESTION. migration: TARGET, CONTRACT, CORE_CHANGE, ADAPTER_CHANGE, CORE_SCOPE, CORE_TEST_SCOPE, ADAPTER_SCOPE, ADAPTER_TEST_SCOPE. Scope values are exact paths relative to cwd. Include existing evidence and done conditions in task inputs.",
+	}),
 });
 
 export interface WorkflowToolDetails {
@@ -88,14 +53,14 @@ function launchReceipt(status: WorkflowStatusView): string {
 		"",
 		"Nodes:",
 		...status.nodes.map((node) => {
-			const parts = ["- " + node.id + " (" + node.agent + ")"];
+			const parts = ["- " + node.id + " (" + node.agent + ")" + (node.kind === "acceptance" ? " · required independent acceptance" : "")];
 			if (node.runId !== undefined) parts.push("run #" + node.runId);
 			else if (node.waitingFor) parts.push("waits for " + node.waitingFor.join(", "));
 			else parts.push(node.state);
 			return parts.join(" · ");
 		}),
 		"",
-		"Every node is owned by this graph, including nodes waiting on dependencies. Do not perform or redispatch their work in main or another agent. The graph dispatches dependents automatically and sends one summary; continue only disjoint work or end your turn, and do not poll.",
+		"Every node is owned by this graph, including nodes waiting on dependencies. Do not perform or redispatch their work in main or another agent. Required independent acceptance runs after all authored work settles and integrates, including failed branches; the graph succeeds only when all work and acceptance pass. The graph sends one summary; continue only disjoint work or end your turn, and do not poll.",
 	];
 	return lines.join("\n");
 }
@@ -135,7 +100,7 @@ export function registerWorkflowTool(pi: ExtensionAPI, runtime: SubagentRuntime,
 		name: "subagent_workflow",
 		label: "Subagent Workflow",
 		description:
-			"Run a fixed dependency graph for substantial phases with known scopes. dependsOn starts a node after prerequisites finish and integrate. Pending nodes already own their work; main must not execute or redispatch it. Duplicate phases and external writer conflicts reject the graph before any child starts. Independent work without dependency edges uses subagent tasks. If a result must decide the next phase, dispatch it alone and decide in main. Omit isolation for automatic selection. One summary arrives after settlement; main checks outcomes, integrates, and releases.",
+			"Run a built-in workflow with named inputs: code-review, research, or migration. Custom graphs and workflow files are unsupported. The runtime schedules dependencies, integrates work, and requires an independent sentinel acceptance PASS. Pending nodes own their work; main must not duplicate it. Duplicate deliverables and writer conflicts reject the plan before dispatch. One final summary arrives automatically. Use subagent for a single phase or independent tasks.",
 		exposure: "model-only",
 		executionMode: "parallel",
 		annotations: {
@@ -156,58 +121,15 @@ export function registerWorkflowTool(pi: ExtensionAPI, runtime: SubagentRuntime,
 			const toolInfos = runtime.getToolInfos();
 			core.setEnvironment({ ctx, config, agents });
 
-			const hasInline = params.nodes !== undefined;
-			const hasReference = Boolean(params.workflow?.trim() || params.file?.trim());
-			if (Number(hasInline) + Number(Boolean(params.workflow?.trim())) + Number(Boolean(params.file?.trim())) !== 1) {
-				throw new Error(
-					"Provide exactly one graph source: inline nodes, or a saved workflow/file. No nodes were started.",
-				);
-			}
-
-			let plan: WorkflowPlanInput = {
-				...(params.name ? { name: params.name } : {}),
-				...(params.description ? { description: params.description } : {}),
-				nodes: params.nodes ?? [],
-			};
-			let fallbackName = params.name ?? "workflow";
-			if (hasReference) {
-				const resolved = resolveWorkflowDefinition(
-					ctx.cwd,
-					{ ...(params.workflow ? { name: params.workflow } : {}), ...(params.file ? { path: params.file } : {}) },
-					{ projectTrusted: ctx.isProjectTrusted?.() === true },
-				);
-				if (resolved.error || !resolved.definition) {
-					throw new Error((resolved.error ?? "workflow definition could not be read") + ". No nodes were started.");
-				}
-				const definition = await migrateWorkflowDefinition(resolved.definition);
-				plan = {
-					name: params.name ?? definition.plan.name ?? definition.name,
-					...(params.description ?? definition.description
-						? { description: params.description ?? definition.description }
-						: {}),
-					nodes: definition.plan.nodes,
-				};
-				fallbackName = definition.name;
-			}
-
-			let workflow;
-			try {
-				workflow = compileWorkflow(plan, ctx.cwd, agents.map((agent) => agent.name), { fallbackName });
-			} catch (error) {
-				throw new Error(
-					"Workflow rejected before any node started:\n" + (error instanceof Error ? error.message : String(error)),
-				);
-			}
-
+			// Ignore empty legacy placeholders, which previously triggered ambiguous
+			// source errors. A supplied custom definition is always rejected.
+			const unsupported = Object.entries(params as Record<string, unknown>).filter(([key, value]) =>
+				key !== "workflow" && key !== "inputs" && value !== undefined && value !== null && value !== ""
+				&& !(Array.isArray(value) && value.length === 0),
+			).map(([key]) => key);
+			if (unsupported.length) throw new Error(`Custom workflow fields are unsupported: ${unsupported.join(", ")}. Use only workflow and inputs. No nodes were started.`);
+			const workflow = compileBuiltinWorkflow(params.workflow, params.inputs, ctx.cwd, agents.map((agent) => agent.name));
 			if (_signal?.aborted) throw new Error("Workflow cancelled before any node started.");
-			if (hasReference) {
-				const unfilled = [...new Set(workflow.nodes.flatMap((node) => node.task.match(/<(?:QUESTION|TARGET|CORE_CHANGE|ADAPTER_CHANGE)>/gu) ?? []))];
-				if (unfilled.length) throw new Error(`Customize ${unfilled.join(", ")} in the saved template before running it. No nodes were started.`);
-			}
-			for (const node of workflow.nodes) {
-				const agent = agents.find((candidate) => candidate.name === node.agent)!;
-				if (node.isolation === "worktree" && !isWriteCapableAgent(agent, toolInfos)) throw new Error(`Node "${node.id}" is read-only and cannot use worktree isolation. No nodes were started.`);
-			}
 
 			// Re-using a phase another owner holds fails the first node and blocks the
 			// rest; reject the whole graph instead, with the owners named.
@@ -221,7 +143,7 @@ export function registerWorkflowTool(pi: ExtensionAPI, runtime: SubagentRuntime,
 					"Workflow \"" + workflow.name + "\" was not started: " + owned.length + " of " + workflow.nodes.length +
 					" node" + (owned.length === 1 ? " reuses" : "s reuse") + " a phase this session already owns.\n" +
 					lines.join("\n") +
-					"\nInspect the owning run or workflow with subagent_status and reuse its evidence. Main handles follow-up work. Retire an interrupted run with subagent_stop({ id: <run id> }) only when discarding its retained session is intended. A genuinely different deliverable needs a distinct brief and phaseId. No nodes were started.",
+					"\nInspect the owning run or workflow with subagent_status and reuse its evidence. Main handles follow-up work. Retire an interrupted run with subagent_stop({ id: <run id> }) only when discarding its retained session is intended. Different deliverables need different task inputs. No nodes were started.",
 				);
 			}
 
@@ -257,11 +179,8 @@ export function registerWorkflowTool(pi: ExtensionAPI, runtime: SubagentRuntime,
 		},
 
 		renderCall(args, theme) {
-			const count = args.nodes?.length ?? 0;
-			const label = args.name ?? args.workflow ?? args.file ?? "inline";
-			const graph = count > 0 ? " " + count + " nodes" : "";
 			return new Text(
-				theme.fg("toolTitle", theme.bold("subagent_workflow ")) + theme.fg("accent", label) + theme.fg("dim", graph),
+				theme.fg("toolTitle", theme.bold("subagent_workflow ")) + theme.fg("accent", args.workflow ?? "?"),
 				0,
 				0,
 			);

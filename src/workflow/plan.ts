@@ -20,9 +20,10 @@ import {
 	type PhaseScopeInput,
 } from "../delegation/phase-scope.ts";
 import type { IsolationMode } from "../isolation/worktree.ts";
+import { acceptanceTask, WORKFLOW_ACCEPTANCE_AGENT, WORKFLOW_ACCEPTANCE_ID } from "./acceptance.ts";
 
-/** Nodes per graph. A workflow pays for one model session per node, so this is
- * a guard against a graph nobody will read, not a concurrency limit. */
+/** Authored nodes per graph, plus one mandatory internal acceptance session.
+ * This bounds graph size rather than concurrency. */
 export const WORKFLOW_NODE_LIMIT = 24;
 
 export const WORKFLOW_NODE_ID_MAX_LENGTH = 40;
@@ -56,6 +57,8 @@ export interface WorkflowPlanInput {
 
 export interface CompiledWorkflowNode {
 	id: string;
+	/** Compiler-owned required review; authored work omits kind. */
+	kind?: "acceptance";
 	agent: string;
 	task: string;
 	/** Direct prerequisites, in author order. */
@@ -82,7 +85,7 @@ export interface CompiledWorkflow {
 }
 
 /** Placeholder syntax accepted in a node's task. */
-const PLACEHOLDER = /\{\{\s*([^{}]+?)\s*\}\}/gu;
+const PLACEHOLDER = /(?<!\\)\{\{\s*([^{}]+?)\s*\}\}/gu;
 const FACT_SUFFIXES = [".status", ".runId", ".error"] as const;
 type PlaceholderFact = "output" | "status" | "runId" | "error";
 
@@ -207,6 +210,7 @@ export function compileWorkflow(
 		throw new Error(error instanceof Error ? error.message : String(error));
 	}
 
+	if (!knownAgents.includes(WORKFLOW_ACCEPTANCE_AGENT)) problems.push(`Required acceptance agent "${WORKFLOW_ACCEPTANCE_AGENT}" is not an enabled agent.`);
 	const ids: string[] = [];
 	const seenIds = new Set<string>();
 	for (const [index, node] of rawNodes.entries()) {
@@ -218,6 +222,7 @@ export function compileWorkflow(
 			);
 			continue;
 		}
+		if (id === WORKFLOW_ACCEPTANCE_ID) problems.push(`${label}.id "${id}" is reserved for required workflow acceptance.`);
 		if (seenIds.has(id)) {
 			problems.push(`${label}.id "${id}" is declared twice; node ids identify results and dependencies.`);
 			continue;
@@ -303,6 +308,19 @@ export function compileWorkflow(
 		});
 	}
 
+	// Append before ownership checks so authored phase ids cannot collide with
+	// the mandatory reviewer. The authored node limit remains unchanged.
+	nodes.push({
+		id: WORKFLOW_ACCEPTANCE_ID,
+		kind: "acceptance",
+		agent: WORKFLOW_ACCEPTANCE_AGENT,
+		task: acceptanceTask(name),
+		dependsOn: [...ids],
+		ancestors: [...ids],
+		cwd: resolve(callerCwd),
+		isolation: "shared",
+	});
+
 	for (const [index, node] of nodes.entries()) {
 		const phaseId = node.phaseId ?? defaultPhaseId({ slug: slugify(name) }, node);
 		const duplicate = nodes.slice(0, index).find((other) => {
@@ -362,7 +380,10 @@ function boundOutput(view: UpstreamOutput): string {
 
 /** Render a node's brief, substituting facts from the nodes it waited for. */
 export function renderNodeTask(task: string, upstream: ReadonlyMap<string, UpstreamOutput>): string {
-	const rendered = task.replace(PLACEHOLDER, (whole, rawToken: string) => {
+	const rendered = task.replace(/\\\{\{|\{\{\s*([^{}]+?)\s*\}\}/gu, (whole, rawToken: string | undefined) => {
+		// Literal task inputs are unescaped in this pass, never interpreted as
+		// dependencies or reprocessed after an upstream answer is inserted.
+		if (rawToken === undefined) return "{{";
 		const { id, fact } = splitPlaceholder(rawToken.trim(), (id) => upstream.has(id));
 		const view = upstream.get(id);
 		if (!view) return whole;

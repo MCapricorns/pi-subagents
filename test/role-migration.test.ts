@@ -1,12 +1,10 @@
 import assert from "node:assert/strict";
-import { chmod, mkdir, mkdtemp, readFile, rm, stat, utimes, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, rm, stat, utimes, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { describe, it, type TestContext } from "node:test";
 import { getThreadsManifestPath, readThreadRecords } from "../src/lifecycle/durable.ts";
 import { getWorkflowsManifestPath, readWorkflowRecords } from "../src/workflow/durable.ts";
-import { migrateWorkflowDefinition, readWorkflowFile } from "../src/workflow/files.ts";
-import { compileWorkflow } from "../src/workflow/plan.ts";
 
 async function fixture(t: TestContext) {
 	const root = await mkdtemp(join(tmpdir(), "pi-role-migration-"));
@@ -60,39 +58,4 @@ describe("stored role migration", () => {
 		assert.equal(saved.records[0].nodes[0].runId, 11);
 		await assertNoRewrite(path, () => readWorkflowRecords(configPath, root));
 	});
-
-	for (const shape of ["json", "array", "markdown"] as const) {
-		it(`migrates selected ${shape} definitions on disk and leaves non-role content intact`, async (t) => {
-			const { root } = await fixture(t);
-			const path = join(root, shape === "markdown" ? "review.md" : "review.json");
-			const nodes = [
-				{ id: "reviewer", agent: " reviewer ", task: "Inspect implementation; keep reviewer in this sentence" },
-				{ id: "critic", agent: "critic", task: "Verify claims from {{reviewer}}", dependsOn: ["reviewer"] },
-			];
-			const value = shape === "array" ? nodes : { name: "saved", nodes, metadata: { agent: "reviewer" } };
-			const prefix = "---\r\nname: saved\r\ndescription: reviewer in prose\r\n---\r\n\r\nKeep this prose.\r\n```json\r\n";
-			const suffix = "```\r\n\r\nKeep critic in prose.\r\n";
-			const content = shape === "markdown" ? prefix + JSON.stringify(value, null, 4).replace(/\n/gu, "\r\n") + "\r\n" + suffix : JSON.stringify(value, null, 4) + "\n";
-			await writeFile(path, content, { mode: 0o600 });
-			if (shape === "markdown") await chmod(path, 0o660);
-			const originalMode = (await stat(path)).mode;
-			const original = readWorkflowFile(path, "project").definition!;
-			assert.ok(original);
-			assert.equal(await readFile(path, "utf8"), content, "discovery must remain read-only");
-			assert.throws(() => compileWorkflow(original.plan, root, ["sentinel", "skeptic"]), /not an enabled agent/);
-			const migrated = await migrateWorkflowDefinition(original);
-			assert.deepEqual(migrated.plan.nodes.map((node) => node.agent), ["sentinel", "skeptic"]);
-			assert.deepEqual(migrated.plan.nodes.map((node) => [node.id, node.task, node.dependsOn]), nodes.map((node) => [node.id, node.task, node.dependsOn]));
-			assert.equal(compileWorkflow(migrated.plan, root, ["sentinel", "skeptic"]).nodes.length, 2);
-			const saved = await readFile(path, "utf8");
-			assert.equal((await stat(path)).mode, originalMode);
-			if (shape === "markdown") {
-				assert.ok(saved.startsWith(prefix));
-				assert.ok(saved.endsWith(suffix));
-				assert.equal(saved.replace(/\r\n/gu, "").includes("\n"), false);
-			}
-			if (shape !== "array") assert.match(saved, /"metadata":\s*\{\s*"agent": "reviewer"/u);
-			await assertNoRewrite(path, () => migrateWorkflowDefinition(migrated));
-		});
-	}
 });

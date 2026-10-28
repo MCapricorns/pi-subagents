@@ -1,11 +1,13 @@
 import assert from "node:assert/strict";
 import { existsSync, utimesSync } from "node:fs";
-import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
+import { appendFile, mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, it } from "node:test";
 import { formatBytes, measureDurableUsage, resetAutomaticCleanupClock, runAutomaticCleanup, runStorageCleanup } from "../src/isolation/cleanup.ts";
-import type { SubagentThread } from "../src/lifecycle/runtime.ts";
+import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
+import { createRuntime, type SubagentThread } from "../src/lifecycle/runtime.ts";
+import { persistThreadCheckpoint } from "../src/lifecycle/thread-shared.ts";
 import { RunControl } from "../src/execution/run-control.ts";
 import { getProjectRoot, getSubagentsRoot } from "../src/execution/spawn.ts";
 import { getThreadsManifestPath } from "../src/lifecycle/durable.ts";
@@ -100,6 +102,7 @@ describe("automatic cleanup", () => {
 			for (const dir of [settled, parked, live]) {
 				await mkdir(dir, { recursive: true });
 				await writeFile(join(dir, "transcript.jsonl"), "x".repeat(2_048));
+				utimesSync(join(dir, "transcript.jsonl"), old, old);
 				utimesSync(dir, old, old);
 			}
 			const runtime = {
@@ -116,6 +119,64 @@ describe("automatic cleanup", () => {
 			assert.equal(existsSync(settled), false);
 			assert.equal(existsSync(parked), true);
 			assert.equal(existsSync(live), true);
+		});
+	});
+
+	it("keeps a long run's freshly appended transcript for the full follow-up window", async () => {
+		await fixture(async (configPath, cwd) => {
+			const session = join(getProjectRoot(configPath, cwd), "sessions", "pi-subagent-session-long-run");
+			await mkdir(session, { recursive: true });
+			await writeFile(join(session, "owner.json"), JSON.stringify({ pid: process.pid, createdAt: 1 }));
+			const transcript = join(session, "transcript.jsonl");
+			await writeFile(transcript, "initial\n");
+			const old = new Date(Date.now() - 40 * 60_000);
+			for (const path of [join(session, "owner.json"), transcript, session]) utimesSync(path, old, old);
+			await appendFile(transcript, "finished\n");
+			const now = Date.now();
+			const runtime = { configPath, threads: new Map<number, SubagentThread>() };
+			await runAutomaticCleanup(runtime, { force: true, now });
+			assert.equal(existsSync(transcript), true);
+			await runAutomaticCleanup(runtime, { force: true, now: now + 31 * 60_000 });
+			assert.equal(existsSync(session), false);
+		});
+	});
+
+	it("starts session retention at settlement even when the transcript is old", async () => {
+		await fixture(async (configPath, cwd) => {
+			const session = join(getProjectRoot(configPath, cwd), "sessions", "pi-subagent-session-slow-finalization");
+			await mkdir(session, { recursive: true });
+			await writeFile(join(session, "owner.json"), JSON.stringify({ pid: process.pid, createdAt: 1 }));
+			await writeFile(join(session, "transcript.jsonl"), "finished before slow Git integration\n");
+			const old = new Date(Date.now() - 40 * 60_000);
+			for (const path of [join(session, "owner.json"), join(session, "transcript.jsonl"), session]) utimesSync(path, old, old);
+			const runtime = createRuntime({ getActiveTools: () => [], getAllTools: () => [], on: () => undefined } as unknown as ExtensionAPI, configPath);
+			const settled = thread(1, "completed", session);
+			settled.cwd = settled.executionCwd = cwd;
+			runtime.threads.set(1, settled);
+			persistThreadCheckpoint(runtime, settled, "completed");
+			const now = Date.now();
+			await runAutomaticCleanup(runtime, { force: true, now: now + 60_000 });
+			assert.equal(existsSync(session), true);
+			await runAutomaticCleanup(runtime, { force: true, now: now + 31 * 60_000 });
+			assert.equal(existsSync(session), false);
+			await runtime.shutdown();
+		});
+	});
+
+	it("uses recent transcript activity for the budget's minimum retention floor", async () => {
+		await fixture(async (configPath, cwd) => {
+			const session = join(getProjectRoot(configPath, cwd), "sessions", "pi-subagent-session-budget");
+			await mkdir(session, { recursive: true });
+			await writeFile(join(session, "owner.json"), JSON.stringify({ pid: process.pid, createdAt: 1 }));
+			await writeFile(join(session, "transcript.jsonl"), "recent transcript\n");
+			const old = new Date(Date.now() - 40 * 60_000);
+			utimesSync(session, old, old);
+			const runtime = { configPath, threads: new Map<number, SubagentThread>() };
+			const now = Date.now();
+			await runAutomaticCleanup(runtime, { force: true, budgetBytes: 0, now: now + 4 * 60_000 });
+			assert.equal(existsSync(session), true);
+			await runAutomaticCleanup(runtime, { force: true, budgetBytes: 0, now: now + 6 * 60_000 });
+			assert.equal(existsSync(session), false);
 		});
 	});
 

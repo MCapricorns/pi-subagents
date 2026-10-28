@@ -73,7 +73,7 @@ export function measureDurableUsage(root: string): CleanupUsage {
 		return { root, projects: [], totalBytes: 0 };
 	}
 	const measured = projects
-		.filter((entry) => entry.isDirectory() && !entry.isSymbolicLink())
+		.filter((entry) => entry.isDirectory() && !entry.isSymbolicLink() && !entry.name.endsWith(".lock"))
 		.map((entry) => {
 			const path = join(root, entry.name);
 			return {
@@ -222,7 +222,13 @@ function settledSessions(projectRoot: string): SettledSession[] {
 		.flatMap((entry) => {
 			const path = join(dir, entry.name);
 			try {
-				return [{ path, mtimeMs: statSync(path).mtimeMs, bytes: directoryBytes(path) }];
+				// Pi appends the transcript in place, leaving the parent mtime
+				// unchanged. Settlement also refreshes the directory timestamp.
+				let mtimeMs = statSync(path).mtimeMs;
+				for (const file of readdirSync(path, { withFileTypes: true })) {
+					if (file.isFile()) mtimeMs = Math.max(mtimeMs, statSync(join(path, file.name)).mtimeMs);
+				}
+				return [{ path, mtimeMs, bytes: directoryBytes(path) }];
 			} catch {
 				return [];
 			}
@@ -301,8 +307,6 @@ export async function runAutomaticCleanup(
 	lastAutomaticCleanupAt = now;
 	const root = getSubagentsRoot(runtime.configPath);
 	const claimed = await readReferencedDurablePaths(runtime.configPath).catch(() => new Set<string>());
-	const records = await readThreadRecords(runtime.configPath).catch(() => []);
-	for (const record of records) if (record.sessionDir) claimed.add(record.sessionDir);
 	const protectedPaths = protectedSessionPaths(runtime, claimed);
 	const keep = (path: string) => protectedPaths.some((kept) => path.startsWith(kept) || kept.startsWith(path));
 	const before = measureDurableUsage(root).totalBytes;
@@ -317,7 +321,7 @@ export async function runAutomaticCleanup(
 		projects = [];
 	}
 	for (const project of projects) {
-		if (!project.isDirectory() || project.isSymbolicLink()) continue;
+		if (!project.isDirectory() || project.isSymbolicLink() || project.name.endsWith(".lock")) continue;
 		const path = join(root, project.name);
 		reclaimSettledSessions(path, protectedPaths, now, options.maxSessionAgeMs ?? SETTLED_SESSION_MAX_AGE_MS);
 		enforceProjectBudget(path, protectedPaths, now, options.budgetBytes ?? PROJECT_BUDGET_BYTES);

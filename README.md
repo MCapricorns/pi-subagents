@@ -11,13 +11,15 @@ Requires **Pi >= 1.0.0** and **Node.js >= 22.19.0**.
 pi install npm:@ferris1225/pi-subagents
 ```
 
-Run `/subagents-setup` for a role grid: one row per role with **Model**,
-**Thinking**, and **Reset** as columns. ↑/↓ moves between roles, ←/→ between
-columns, and Enter edits the highlighted value. Headers align with their values,
-and the footer names the focused role and field; **Thinking** selects reasoning
-effort. Each selection saves immediately;
-Esc returns without applying a picker selection, and the grid keeps the focused
-cell. Model pickers support search, paste, and paging.
+Run `/subagents-setup` for a role selector and focused settings editor. Wide
+terminals place them side by side; narrow terminals stack them. ↑/↓ changes the
+role, ←/→ selects **Model**, **Thinking**, or **Reset**, and Enter edits it.
+The selected role shows its full model reference, effective reasoning level,
+requested level when clamped, and default/override source. Each selection saves
+immediately; Esc returns without applying a picker selection and keeps focus.
+Model pickers support search, paste, and paging. On short terminals, PgUp/PgDn
+scrolls the settings while the selected role and field stay pinned. Setup
+reserves space for the workflow's required-acceptance row.
 
 All roles follow the main model by default; thinking defaults to `low` for scout
 and `high` for artisan, sentinel, and skeptic. The panel distinguishes defaults from overrides and
@@ -48,9 +50,8 @@ and valid checks, filling gaps rather than repeating main or upstream work.
 Only `scout`, `artisan`, `sentinel`, and `skeptic` are valid runtime role names.
 Existing model/thinking settings and interrupted run records migrate on load
 and are saved with the new names. Explicit valid settings under the new names
-win. A selected trusted saved workflow is migrated on disk before compilation;
-its briefs, node ids, and dependency edges are preserved. Discovery remains
-read-only. New tool calls and inline graphs using retired names are rejected.
+win. Custom roles and user-defined workflows are not supported. Retained records
+from older releases remain available for recovery.
 
 Children receive a self-contained brief and project instructions, but no parent
 conversation. They cannot delegate or release. Main owns planning, integration,
@@ -134,63 +135,77 @@ phase/scope ownership; an exact run id also retrieves its retained result for re
 
 ## Workflows
 
-Main proactively chooses `subagent_workflow` for two or more substantial phases
-with known dependencies and write scopes when scheduling them saves coordination.
-Independent phases without dependency edges use `subagent` with `tasks`; a single
-justified phase uses one `subagent` run. Small work stays in main.
+`subagent_workflow` runs a built-in plan with named task inputs. Its only source
+is the catalog in [templates.ts](./src/workflow/templates.ts): no inline `nodes`,
+`file`, custom graph name, user directory, or project directory is loaded.
+The model's routing rules are embedded in [prompt.ts](./src/delegation/prompt.ts),
+so no separate workflow skill needs to be loaded.
 
-If a research result must determine the next task or its scope, run that phase
-first, decide in main, then reassess whether the remaining work fits a graph.
-A workflow runs a fixed plan; it does not discover the plan or adapt its nodes
-while running. Research, implementation, review, and confirmation are added only
-when the task needs their distinct work.
+| Workflow | Work before acceptance | Required inputs |
+| --- | --- | --- |
+| `code-review` | Sentinel inspects the target and produces supported findings | `TARGET` |
+| `research` | Three scouts investigate first-party sources, practice, and the repository; a fourth synthesizes the answer | `QUESTION` |
+| `migration` | Two artisans implement disjoint slices; an integrated gate checks and fixes their combined result | `TARGET`, `CONTRACT`, `CORE_CHANGE`, `ADAPTER_CHANGE`, `CORE_SCOPE`, `CORE_TEST_SCOPE`, `ADAPTER_SCOPE`, `ADAPTER_TEST_SCOPE` |
 
 ```ts
 subagent_workflow({
-  name: "auth-fix",
-  nodes: [
-    {
-      id: "fix",
-      agent: "artisan",
-      task: "Fix the refresh race in src/auth and add regression tests. Run the relevant checks.",
-      scope: { paths: ["src/auth", "test/auth.test.ts"] },
-    },
-    {
-      id: "review",
-      agent: "sentinel",
-      dependsOn: ["fix"],
-      task: "Inspect the implementation against the refresh contract and callers. Reuse valid checks and investigate concrete gaps. Do not edit files.\n{{fix}}",
-    },
-  ],
+  workflow: "code-review",
+  inputs: { TARGET: "HEAD~1..HEAD; inspect the cache invalidation fix" },
+});
+
+subagent_workflow({
+  workflow: "research",
+  inputs: { QUESTION: "How should this repository invalidate its HTTP cache?" },
 });
 ```
 
-`dependsOn` starts a node after its prerequisites complete and integrate.
-`{{id}}` inserts an upstream answer; `.status`, `.runId`, and `.error` expose its
-facts. Long answers include a full-result file. A failed node blocks its
-dependents; independent branches continue. The graph delivers one summary.
-
-Reviews inspect implementations; claim verification tests named findings or
-assumptions. Add independent verification only when its distinct work earns the cost.
-
-Saved definitions use JSON or Markdown with a `json` fenced block:
+Migration inputs must name the shared interface contract, both slice briefs, and
+exact write paths. Each slice owns its implementation and regression tests;
+shared paths are rejected before any child starts. The integrated gate waits
+for both slices and can edit their combined scope. For example:
 
 ```ts
-subagent_workflow({ workflow: "code-review" });
-subagent_workflow({ file: ".pi/workflows/code-review.md" });
+subagent_workflow({
+  workflow: "migration",
+  inputs: {
+    TARGET: "the version 2 cache API",
+    CONTRACT: "docs/cache-v2.md",
+    CORE_CHANGE: "Update storage and its invalidation rules",
+    ADAPTER_CHANGE: "Update HTTP callers to the new interface",
+    CORE_SCOPE: "src/core",
+    CORE_TEST_SCOPE: "test/core",
+    ADAPTER_SCOPE: "src/adapters",
+    ADAPTER_TEST_SCOPE: "test/adapters",
+  },
+});
 ```
 
-Definitions load from `.pi/workflows/`, `~/.pi/agent/workflows/`, and the shipped
-[templates](./workflows), in that order of precedence. Project definitions and
-explicit file paths require project trust. Customize template questions, targets,
-and scopes before running them. The `code-review` template has two nodes:
-sentinel reviews the target, then skeptic verifies only the reported claims and
-returns the final review. An ordinary review uses one sentinel. The `migration`
-template passes the shared interface contract to every slice and declares the
-closing gate's write scope. Run the full integrated gate once in main or a closing
-node, and repeat it when later edits or unresolved failures warrant it.
+Choose a built-in workflow when its fixed phases fit the task. For one bounded
+phase use `subagent`; for independent work use `subagent({ tasks: [...] })`.
+If research must determine the next task or its scope, run it first and decide
+in main. Missing, unknown, or unused template inputs are rejected with the exact
+parameter names before a child starts. Task inputs remain literal, including
+`{{...}}` text.
 
-See the [workflow skill](./skills/workflow/SKILL.md) for graph authoring details.
+Every workflow ends with an independent **sentinel acceptance officer**. The
+runtime adds this node, waits until all work has settled and integrated, and
+passes a bounded evidence brief plus the complete report. Failed and blocked
+branches are included. The officer reviews the delivered outcome, reuses valid
+checks, and may run focused checks to close evidence gaps. It does not edit or
+release. A successful code review can report defects in the target; acceptance
+judges the accuracy and completeness of that review.
+
+The final answer must end with `WORKFLOW_ACCEPTANCE: PASS` or
+`WORKFLOW_ACCEPTANCE: FAIL`. A missing, ambiguous, malformed, or negative verdict
+fails the workflow even when the reviewer process exits normally. A PASS cannot
+clear failures in earlier work. Explicit cancellation or session interruption
+stops the graph without starting acceptance. The graph sends one final summary
+containing its acceptance result; main still owns remediation, the final gate,
+and release.
+
+Phase identity includes the built-in plan and its inputs. The same deliverable
+remains owned within its workspace; different questions or targets can run in
+the same session. Inspect retained results instead of repeating completed work.
 
 ## Status, cancellation, and recovery
 
@@ -204,18 +219,20 @@ See the [workflow skill](./skills/workflow/SKILL.md) for graph authoring details
 | `subagent_stop({ workflow: 3 })` | Stop a graph and finalize its active nodes |
 | `subagent_stop({ all: true })` | Stop all active runs and graphs |
 
-The widget is a compact task board capped at 10 lines: a status overview,
-workflow progress groups, and task rows with status and elapsed time at the right.
-Activity, model, thinking, token usage, and worktree state use secondary lines as
-space permits. Task identities take priority over detail; failed and blocked
-work takes priority over ordinary activity. Completed nodes collapse into graph
-progress while their workflow is running. Successfully completed workflows hide
-automatically, while failed or blocked work stays visible until the next dispatch.
+The widget is a terminal task board capped at 10 lines: a quiet overview,
+workflow identity and work progress, then task rows with status/time at the
+right. Failures and blocked reasons get space before optional telemetry; narrow
+terminals keep task identity visible. Model, thinking, token usage, and worktree
+state appear as secondary detail. Each workflow has a separate **Acceptance
+required** row showing pending, running, PASS, or FAIL. Acceptance does not
+inflate the ordinary work count or hidden-task total. Completed work collapses
+into progress while acceptance is pending; a successfully accepted workflow
+hides automatically. Failed or blocked work stays until the next dispatch.
 Completion messages and status lookups retain the results. Overflow reports
-hidden tasks. Runs preparing their child process show `starting`. There is no
-process-count limit or shared-checkout startup
-lock: independent runs start together, including separate dispatch calls while
-another call awaits results.
+hidden tasks. Runs preparing their child process show `starting`. The refresh
+timer runs only while visible active work needs it. There is no process-count
+limit or shared-checkout startup lock: independent runs start together, including
+separate dispatch calls while another call awaits results.
 
 Usually omit `isolation`: implementation tasks use detached Git worktrees in
 single calls, parallel batches, and workflows. Reading and review use the current
@@ -295,6 +312,17 @@ the last half hour can still continue its session.
 and freed bytes; `/subagents-cleanup dry-run` measures without deleting anything.
 
 ## Development
+
+Runtime code lives under `src/`; the package has no skill or workflow resource
+directories. Built-in prompts and plans change with the code and its tests.
+
+| Module | Responsibility |
+| --- | --- |
+| `delegation/` | Built-in roles, parent routing prompt, and phase/scope ownership |
+| `workflow/` | Built-in templates, parameter validation, scheduling, and mandatory acceptance |
+| `configuration/` | Model and thinking settings, plus the setup interface |
+| `presentation/` | Running task board, activity, status, and result formatting |
+| `execution/`, `lifecycle/`, `isolation/` | Child processes, durable state, cancellation, worktrees, and recovery |
 
 ```bash
 npm ci

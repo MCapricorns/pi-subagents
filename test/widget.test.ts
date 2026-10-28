@@ -1,16 +1,21 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 import type { Theme } from "@earendil-works/pi-coding-agent";
-import { MonitorStore, type RunView } from "../src/presentation/monitor.ts";
+import { MonitorStore, monitor, type RunView } from "../src/presentation/monitor.ts";
 import { emptyUsage } from "../src/execution/run-control.ts";
-import { visibleWidth } from "@earendil-works/pi-tui";
-import { compileWorkflow, defaultPhaseId } from "../src/workflow/plan.ts";
+import { visibleWidth, type Component, type TUI } from "@earendil-works/pi-tui";
+import type { ExtensionContext } from "@earendil-works/pi-coding-agent";
 import type { WorkflowRun } from "../src/workflow/state.ts";
-import { formatActiveRunLines, formatSubagentWidgetLines } from "../src/presentation/widget.ts";
+import { formatActiveRunLines, formatSubagentWidgetLines, installActiveRunsWidget } from "../src/presentation/widget.ts";
 
 function graphFixture(count = 4): WorkflowRun {
-	const plan = compileWorkflow({ name: "auth-fix", nodes: Array.from({ length: count }, (_,index) => ({ id: "step" + index, agent: "artisan", task: "Task " + index, ...(index ? { dependsOn: ["step" + (index - 1)] } : {}) })) }, process.cwd(), ["artisan"]);
-	return { id: 3, name: plan.name, slug: plan.slug, cwd: plan.cwd, state: "running", startedAt: 1000, controller: new AbortController(), nodes: plan.nodes.map((node) => ({ ...node, phaseId: defaultPhaseId(plan, node), state: "pending" })) };
+	return {
+		id: 3, name: "auth-fix", slug: "auth-fix", cwd: process.cwd(), state: "running", startedAt: 1000,
+		controller: new AbortController(), nodes: Array.from({ length: count }, (_, index) => ({
+			id: "step" + index, agent: "artisan", task: "Task " + index, phaseId: "phase" + index,
+			cwd: process.cwd(), ancestors: [], dependsOn: index ? ["step" + (index - 1)] : [], state: "pending",
+		})),
+	};
 }
 
 const plainTheme = {
@@ -50,7 +55,8 @@ describe("workflow widget", () => {
 		const live: RunView = { id: 7, agent: "artisan", task: "Apply fix", status: "queued", waitReason: "starting", usage: emptyUsage(), elapsedMs: 0, workflow: { workflowId: 3, name: "auth-fix", nodeId: "step1" } };
 		const lines = formatSubagentWidgetLines([live], [graph], plainTheme, 160, 10000);
 		assert.match(lines[0]!, /Subagents.*1 queued.*1 workflow/u);
-		assert.match(lines[1]!, /Workflow #3 · auth-fix.*1\/4 completed.*2 waiting/u);
+		assert.match(lines[1]!, /Workflow #3 · auth-fix.*1\/4 work passed/u);
+		assert.match(lines[0]!, /2 waiting/u);
 		assert.match(lines.join("\n"), /step1.*#7.*starting/);
 		assert.match(lines.join("\n"), /step2.*waits for step1/);
 		assert.equal(lines.filter((line) => line.includes("#7")).length, 1);
@@ -69,9 +75,9 @@ describe("workflow widget", () => {
 			assert.ok(lines.every((line) => visibleWidth(line) <= width));
 		}
 		const text = formatSubagentWidgetLines([], [graph], plainTheme, 160).join("\n");
-		assert.match(text, /step0.*failed: typecheck failed/);
-		assert.match(text, /step1.*blocked: dependency step0 failed/);
-		assert.match(text, /… \+17 tasks/u);
+		assert.match(text, /step0.*failed\n.*typecheck failed/u);
+		assert.match(text, /step1.*blocked\n.*dependency step0 failed/u);
+		assert.match(text, /… \+19 tasks/u);
 	});
 
 	it("notifies on graph-only transitions and sweeps settled graphs at the next dispatch", () => {
@@ -129,7 +135,8 @@ describe("widget layout priorities", () => {
 		failed.nodes[19]!.error = "build failed";
 		const lines = formatSubagentWidgetLines([], [first, failed], plainTheme, 120, 10_000);
 		assert.match(lines[1]!, /Workflow #4/u);
-		assert.match(lines[2]!, /step19.*failed: build failed/u);
+		assert.match(lines[2]!, /step19.*failed/u);
+		assert.match(lines[3]!, /build failed/u);
 		assert.match(lines.join("\n"), /Workflow #3/u);
 		assert.ok(lines.length <= 10);
 	});
@@ -143,6 +150,20 @@ describe("widget layout priorities", () => {
 		const narrow = formatActiveRunLines([busy], plainTheme, 48, 10_000);
 		assert.match(narrow[1]!, /read src\/configuration\/config.ts/u);
 		assert.doesNotMatch(narrow[1]!, /test\//u, "omit metadata rather than showing half a model id");
+	});
+
+	it("fits ANSI-styled CJK identities and causes at every width without dropping the line bound", () => {
+		const graph = graphFixture(15);
+		graph.name = "\x1b[31m认证迁移 · auth-fix\x1b[0m";
+		graph.nodes[14]!.state = "failed";
+		graph.nodes[14]!.error = "\x1b[31m类型检查失败：缺少必需的 export\x1b[0m";
+		const ansiTheme = { fg: (_color: string, value: string) => "\x1b[38;2;220;220;220m" + value + "\x1b[39m",
+			bold: (value: string) => "\x1b[1m" + value + "\x1b[22m" } as unknown as Theme;
+		for (const width of [0, 1, 2, 20, 40, 80, 120]) {
+			const lines = formatSubagentWidgetLines([], [graph], ansiTheme, width);
+			assert.ok(lines.length <= 10);
+			assert.ok(lines.every((line) => visibleWidth(line) <= width));
+		}
 	});
 
 	it("hides a stopped graph and its failed node rows", () => {
@@ -180,9 +201,158 @@ describe("widget layout priorities", () => {
 		assert.match(text, /2 workflows/u);
 		assert.match(text, /Workflow #4/u);
 		assert.match(text, /Workflow #5/u);
-		assert.match(text, /step0.*failed: build failed/u);
+		assert.match(text, /step0.*failed\n.*build failed/u);
 		assert.match(text, /step1.*blocked/u);
 		assert.match(text, /#99.*running/u);
+	});
+});
+
+describe("acceptance presentation", () => {
+	function acceptance(graph: WorkflowRun, state: WorkflowRun["nodes"][number]["state"]) {
+		const node = { ...graph.nodes[0]!, id: "acceptance", kind: "acceptance" as const, agent: "sentinel",
+			state, dependsOn: graph.nodes.map((work) => work.id), runId: undefined as number | undefined,
+			startedAt: undefined as number | undefined, error: undefined as string | undefined };
+		graph.nodes.push(node);
+		return node;
+	}
+
+	it("counts work separately and waits for settlement rather than dependency success", () => {
+		const graph = graphFixture(2);
+		const reviewer = acceptance(graph, "pending");
+		graph.nodes[0]!.state = "completed";
+		graph.nodes[1]!.state = "running";
+		let text = formatSubagentWidgetLines([], [graph], plainTheme, 80, 10_000).join("\n");
+		assert.match(text, /1\/2 work passed/u);
+		assert.match(text, /Acceptance required · pending\n.*after 1 work node settles/u);
+		graph.nodes[1]!.state = "failed";
+		graph.nodes[1]!.error = "build failed";
+		text = formatSubagentWidgetLines([], [graph], plainTheme, 80, 10_000).join("\n");
+		assert.match(text, /Acceptance required · pending\n.*ready · all work settled/u);
+		assert.doesNotMatch(text, /waits for step1/u);
+		assert.equal(reviewer.state, "pending", "rendering must not advance acceptance");
+	});
+
+	it("shows the acceptance officer once and never counts it as ordinary live or failed work", () => {
+		const graph = graphFixture(2);
+		for (const work of graph.nodes) work.state = "completed";
+		const reviewer = acceptance(graph, "running");
+		reviewer.runId = 12;
+		reviewer.startedAt = 1000;
+		const live: RunView = { id: 12, agent: "sentinel", task: "Required acceptance", status: "running", usage: emptyUsage(), elapsedMs: 0,
+			activeSince: 1000, startedAt: 1000, workflow: { workflowId: graph.id, name: graph.name, nodeId: reviewer.id } };
+		let lines = formatSubagentWidgetLines([live], [graph], plainTheme, 80, 10_000);
+		assert.doesNotMatch(lines[0]!, /running/u);
+		assert.match(lines.join("\n"), /2\/2 work passed/u);
+		assert.match(lines.join("\n"), /Acceptance required · running/u);
+		assert.equal(lines.filter((line) => line.includes("#12")).length, 1);
+		reviewer.state = "failed";
+		reviewer.error = "No explicit PASS: regression check failed";
+		graph.state = "failed";
+		lines = formatSubagentWidgetLines([live], [graph], plainTheme, 40, 10_000);
+		assert.doesNotMatch(lines[0]!, /1 failed/u);
+		assert.equal(lines.filter((line) => line.includes("Acceptance required")).length, 1);
+		assert.match(lines.join("\n"), /Acceptance required · FAIL.*\n.*No explicit PASS/u);
+	});
+
+	it("retains PASS beside failed work and hides the panel only when the whole graph completes", () => {
+		const graph = graphFixture(2);
+		graph.nodes[0]!.state = "failed";
+		graph.nodes[0]!.error = "build failed";
+		graph.nodes[1]!.state = "blocked";
+		graph.nodes[1]!.error = "dependency step0 failed";
+		acceptance(graph, "completed");
+		graph.state = "failed";
+		const lines = formatSubagentWidgetLines([], [graph], plainTheme, 80);
+		assert.match(lines[0]!, /1 failed · 1 blocked/u);
+		assert.match(lines.join("\n"), /Acceptance required · PASS/u);
+		graph.state = "completed";
+		assert.deepEqual(formatSubagentWidgetLines([], [graph], plainTheme, 80), []);
+	});
+
+	it("budgets required acceptance and failure causes before overflow, excluding the officer from hidden tasks", () => {
+		const graph = graphFixture(30);
+		graph.nodes[0]!.state = "failed";
+		graph.nodes[0]!.error = "typecheck failed";
+		graph.nodes[1]!.state = "blocked";
+		graph.nodes[1]!.error = "dependency step0 failed";
+		graph.nodes[2]!.state = "running";
+		acceptance(graph, "pending");
+		for (const width of [40, 80, 120]) {
+			const lines = formatSubagentWidgetLines([], [graph], plainTheme, width);
+			assert.equal(lines.length, 10);
+			assert.match(lines.join("\n"), /typecheck failed/u);
+			assert.match(lines.join("\n"), /dependency step0 failed/u);
+			assert.match(lines.join("\n"), /step2/u);
+			assert.match(lines.join("\n"), /Acceptance required · pending/u);
+			assert.match(lines.at(-1)!, /\+27 tasks/u);
+			assert.ok(lines.every((line) => visibleWidth(line) <= width));
+		}
+	});
+
+	it("reports hidden empty workflows without inventing zero hidden tasks", () => {
+		const graphs = Array.from({ length: 20 }, (_, index) => ({ ...graphFixture(0), id: index + 1 }));
+		const lines = formatSubagentWidgetLines([], graphs, plainTheme, 80);
+		assert.equal(lines.length, 10);
+		assert.match(lines.at(-1)!, /12 workflows hidden/u);
+		assert.doesNotMatch(lines.at(-1)!, /tasks/u);
+	});
+});
+
+describe("widget clocks", () => {
+	it("ticks only changing clocks and cleans up its timer and subscription", (t) => {
+		monitor.clear();
+		t.mock.timers.enable({ apis: ["setInterval"] });
+		let renders = 0;
+		let widget: Component & { dispose(): void };
+		const context = { mode: "tui", ui: { setWidget(_id: string, factory: (tui: TUI, theme: Theme) => typeof widget) {
+			widget = factory({ requestRender() { renders++; } } as TUI, plainTheme);
+		} } } as unknown as ExtensionContext;
+		installActiveRunsWidget(context);
+		t.after(() => { widget.dispose(); monitor.clear(); });
+		const graph = graphFixture(1);
+		monitor.updateWorkflow(graph);
+		let before = renders;
+		t.mock.timers.tick(3000);
+		assert.equal(renders, before, "a pending graph has no changing elapsed time");
+		graph.nodes[0]!.state = "running";
+		graph.nodes[0]!.startedAt = 1000;
+		monitor.updateWorkflow(graph);
+		before = renders;
+		t.mock.timers.tick(2000);
+		assert.equal(renders, before + 2, "orphan live nodes still have a clock");
+		graph.nodes[0]!.state = "failed";
+		monitor.updateWorkflow(graph);
+		before = renders;
+		t.mock.timers.tick(3000);
+		assert.equal(renders, before, "a failure without endedAt must not keep a clock alive");
+		graph.state = "completed";
+		monitor.updateWorkflow(graph);
+		const hidden = monitor.addRun("artisan", "Retained child", undefined, undefined, {
+			workflow: { workflowId: graph.id, name: graph.name, nodeId: "step0" },
+		});
+		monitor.setStatus(hidden, "running");
+		before = renders;
+		t.mock.timers.tick(2000);
+		assert.equal(renders, before, "hidden children of a completed graph must not keep the widget ticking");
+		monitor.removeRun(hidden);
+		const id = monitor.addRun("artisan", "Start worker");
+		before = renders;
+		t.mock.timers.tick(2000);
+		assert.equal(renders, before, "queued workers do not tick");
+		monitor.setStatus(id, "running");
+		before = renders;
+		t.mock.timers.tick(1000);
+		assert.equal(renders, before + 1);
+		monitor.setStatus(id, "parked");
+		before = renders;
+		t.mock.timers.tick(2000);
+		assert.equal(renders, before);
+		monitor.setStatus(id, "running");
+		widget!.dispose();
+		before = renders;
+		monitor.setActivity(id, "thinking");
+		t.mock.timers.tick(2000);
+		assert.equal(renders, before, "disposing removes both the clock and monitor subscription");
 	});
 });
 

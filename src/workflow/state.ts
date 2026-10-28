@@ -12,6 +12,9 @@ export type WorkflowNodeState = RecordedNodeState;
 
 export interface WorkflowNodeRun {
 	id: string;
+	kind?: "acceptance";
+	/** Complete pre-review graph evidence retained for independent acceptance. */
+	evidenceFile?: string;
 	agent: string;
 	/** Authored brief, still carrying its result placeholders. */
 	task: string;
@@ -23,6 +26,7 @@ export interface WorkflowNodeRun {
 	cwd: string;
 	state: WorkflowNodeState;
 	runId?: number;
+	durableRunId?: string;
 	startedAt?: number;
 	endedAt?: number;
 	result?: SingleResult;
@@ -32,6 +36,8 @@ export interface WorkflowNodeRun {
 export type WorkflowRunState = "running" | "completed" | "failed" | "stopped" | "interrupted";
 
 export interface WorkflowRun {
+	/** Stable persisted identity; id is local to this Pi window. */
+	durableId?: string;
 	id: number;
 	name: string;
 	slug: string;

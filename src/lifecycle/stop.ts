@@ -159,7 +159,7 @@ export async function stopThreads(runtime: SubagentRuntime, targets: readonly nu
 							...(existsSync(worktree.worktreePath) ? { worktreePath: worktree.worktreePath } : {}),
 							...(existsSync(worktree.patchPath) ? { patchPath: worktree.patchPath } : {}),
 							error: "subagent_stop timed out waiting for worktree integration; it continues in the background",
-						}),
+						}, Date.now(), thread.durableId),
 					]).catch(() => undefined);
 					pendingIntegration.push(`#${runId}`);
 				}
@@ -176,7 +176,7 @@ export async function stopThreads(runtime: SubagentRuntime, targets: readonly nu
 		runtime.retireThreadSession(thread);
 		// The destructive retire removes the durable record with the session;
 		// an id never resurrects after subagent_stop.
-		await removeThreadRecord(runtime.configPath, runId, thread.cwd).catch(() => undefined);
+		if (thread.durableId) await removeThreadRecord(runtime.configPath, thread.durableId, thread.cwd).catch(() => undefined);
 		// Returning from a bounded stop retires context, but cannot release a
 		// writer or phase lease while a child or Git tail can still change files.
 		void Promise.allSettled([interruptionPromises[claimIndex]!, completion, finalizationCompletion]).then(() => {

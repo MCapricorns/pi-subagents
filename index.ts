@@ -7,7 +7,7 @@
  *   - configuration/ — persisted settings, model routes, and setup UI
  *   - execution/     — background tasks, native RPC transport, and model handoff
  *   - lifecycle/     — durable threads, restoration, controls, and delivery
- *   - workflow/      — dependency-graph plans, discovery, and the graph runner
+ *   - workflow/      — built-in plans, dependency runner, and acceptance
  *   - isolation/     — Git worktrees, recovery, and temporary-state hygiene
  *   - presentation/  — announcements, formatting, monitor, and the active-run
  *     widget

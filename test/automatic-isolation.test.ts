@@ -7,7 +7,7 @@ import { join } from "node:path";
 import { describe, it, type TestContext } from "node:test";
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { defaultIsolationMode, registerSubagentTool } from "../src/delegation/dispatch.ts";
-import { createRuntime } from "../src/lifecycle/runtime.ts";
+import { createRuntime, type SubagentThread } from "../src/lifecycle/runtime.ts";
 import { monitor } from "../src/presentation/monitor.ts";
 import { getResultOutput, type SingleResult } from "../src/execution/spawn.ts";
 import { compileWorkflow } from "../src/workflow/plan.ts";
@@ -59,10 +59,11 @@ createInterface({ input: process.stdin }).on("line", (line) => {
 		monitor.clear();
 		await rm(root, { recursive: true, force: true });
 	});
-	return { project, runtime, async run(params: Record<string, unknown>) {
+	return { project, runtime, async run(params: Record<string, unknown>, onPending?: (thread: SubagentThread) => void) {
 		const response = await tool.execute("call", params, new AbortController().signal, undefined, ctx);
 		const pending = response.details.results[0] as SingleResult;
 		const thread = runtime.threads.get(pending.runId!)!;
+		onPending?.(thread);
 		await thread.generationCompletion;
 		return { thread, result: thread.lastResult! };
 	} };
@@ -81,7 +82,13 @@ describe("automatic isolation and current roles", () => {
 	it("uses and integrates a worktree for a single implementation without an override", async (t) => {
 		const h = await harness(t, "committed");
 		const head = git(h.project, "rev-parse", "HEAD");
-		const { thread, result } = await h.run({ agent: "artisan", task: "Write output", scope: { paths: ["output.txt"] } });
+		let dispatchedIdentity: string | undefined;
+		const { thread, result } = await h.run({ agent: "artisan", task: "Write output", scope: { paths: ["output.txt"] } }, (pending) => {
+			assert.equal(pending.worktree, undefined, "dispatch returns before asynchronous worktree preparation finishes");
+			assert.ok(pending.durableId, "workflow recovery needs the identity as soon as dispatch returns");
+			dispatchedIdentity = pending.durableId;
+		});
+		assert.equal(thread.durableId, dispatchedIdentity, "preparation and settlement preserve the dispatched identity");
 		assert.equal(result.exitCode, 0);
 		assert.equal(thread.isolation, "worktree");
 		assert.notEqual(thread.executionCwd.toLowerCase(), h.project.toLowerCase());

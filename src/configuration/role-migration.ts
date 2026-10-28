@@ -30,8 +30,8 @@ function migrateField(value: unknown, key: string): boolean {
 	return true;
 }
 
-/** Accept saved plans or bare node arrays; never rewrite briefs or node ids. */
-export function migrateStoredWorkflowRoles(value: unknown): boolean {
+/** Retained graph nodes keep their original briefs, ids, and dependencies. */
+function migrateStoredWorkflowRoles(value: unknown): boolean {
 	const nodes = Array.isArray(value) ? value : value && typeof value === "object" ? (value as { nodes?: unknown }).nodes : undefined;
 	if (!Array.isArray(nodes)) return false;
 	let changed = false;

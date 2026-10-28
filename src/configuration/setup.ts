@@ -53,12 +53,14 @@ function roleModel(ctx: ExtensionContext, config: SubagentsConfig, name: string)
 /** One row per role: every model and thinking choice stays visible together. */
 function roleRows(ctx: ExtensionContext, config: SubagentsConfig): RoleGridRow[] {
 	const mainRef = currentModelRef(ctx) ?? "Pi default";
+	const models = availableModelsInScope(ctx);
 	return BUILTIN_AGENT_NAMES.map((name) => {
 		const profile = agentProfile(name)!;
 		const selected = config.agentModels[name];
-		const available = !selected || Boolean(findModelByRef(availableModelsInScope(ctx), selected));
+		const model = findModelByRef(models, selected);
+		const available = !selected || Boolean(model);
 		const preferred = config.agentThinkingLevels[name] ?? roleThinkingLevel(name);
-		const effective = resolveThinkingLevel(roleModel(ctx, config, name), preferred);
+		const effective = resolveThinkingLevel(model ?? ctx.model, preferred);
 		const clamped = effective !== preferred ? " (" + preferred + " requested)" : "";
 		const overridden = Boolean(config.agentThinkingLevels[name]);
 		return {
