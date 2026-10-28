@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
 import { existsSync } from "node:fs";
-import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { mkdtemp, readFile, realpath, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, it, type TestContext } from "node:test";
@@ -123,7 +123,8 @@ describe("automatic isolation and current roles", () => {
 			assert.equal(thread.agentName, name);
 			assert.equal(thread.isolation, "shared");
 			assert.equal(result.agent, name);
-			assert.equal(getResultOutput(result), h.project);
+			// macOS getcwd resolves /var to /private/var in temporary paths.
+			assert.equal(getResultOutput(result), await realpath(h.project));
 		}
 	});
 });
