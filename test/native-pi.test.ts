@@ -20,7 +20,15 @@ describe("native Pi CLI integration", () => {
 				await mkdir(join(agentDir, "extensions"), { recursive: true });
 				await writeFile(join(agentDir, "extensions", "fixture.js"), `
 import { createAssistantMessageEventStream } from ${JSON.stringify(import.meta.resolve("@earendil-works/pi-ai"))};
-export default (pi) => pi.registerProvider("fixture", {
+export default async (pi) => {
+ if (${mode === "normal"}) {
+  const windows = process.platform === "win32";
+  const shell = await pi.exec(windows ? "powershell.exe" : "/bin/sh", windows
+   ? ["-NoLogo", "-NoProfile", "-NonInteractive", "-Command", "[Console]::Write('fixture shell')"]
+   : ["-c", "printf 'fixture shell'"]);
+  if (shell.code !== 0 || shell.stdout !== "fixture shell") throw new Error("Extension shell failed: " + JSON.stringify(shell));
+ }
+ pi.registerProvider("fixture", {
  baseUrl: "http://127.0.0.1", apiKey: "fixture-not-a-secret", api: "fixture-native",
  models: ["selected", "main"].map((id) => ({ id, name: id, reasoning: false, input: ["text"], cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 }, contextWindow: 128000, maxTokens: 1000 })),
  streamSimple(model, context) {
@@ -46,7 +54,8 @@ export default (pi) => pi.registerProvider("fixture", {
   }, 250);
   return stream;
  }
-});
+ });
+};
 `, "utf8");
 				process.argv[1] = fileURLToPath(new URL("./cli.js", import.meta.resolve("@earendil-works/pi-coding-agent")));
 				const control = new RunControl("Test native session preservation", 1);

@@ -1,5 +1,20 @@
 # Changelog
 
+## 5.0.6
+
+### Changes
+
+- Hide Windows console windows for process launches inside child tools and
+  extensions, including `pi.exec` and inherited Node descendants. Preserve RPC
+  pipes, existing Node options, and macOS/Linux process-group cancellation.
+- Prefer useful bounded delegation, including one artisan for a substantial
+  implementation without parallel work. Keep single runs, independent batches,
+  dependency workflows, and the two review roles distinct.
+- Skip unused orchestration runtime creation in leaf processes and remove
+  duplicated delegation guidance. Correct transport and lifecycle comments.
+- Gate publishing on checks across Windows, macOS, and Linux, with regression
+  coverage for shell visibility, process APIs, inherited preloads, and native Pi.
+
 ## 5.0.5
 
 ### Changes

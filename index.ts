@@ -5,7 +5,7 @@
  * The heavy lifting lives in focused modules:
  *   - delegation/    — built-in roles, routing prompts, and tool contract
  *   - configuration/ — persisted settings, model routes, and setup UI
- *   - execution/     — process queue, native JSON CLI/control, and model handoff
+ *   - execution/     — background tasks, native RPC transport, and model handoff
  *   - lifecycle/     — durable threads, restoration, controls, and delivery
  *   - workflow/      — dependency-graph plans, discovery, and the graph runner
  *   - isolation/     — Git worktrees, recovery, and temporary-state hygiene
@@ -41,9 +41,6 @@ import { formatBytes, measureDurableUsage, runStorageCleanup } from "./src/isola
 import { getSubagentsRoot } from "./src/execution/spawn.ts";
 
 export default function (pi: ExtensionAPI): void {
-	const configPath = getConfigPath(getAgentDir());
-	const runtime = createRuntime(pi, configPath);
-
 	// Recursion guard: sub-agent children are leaf processes. The `subagent` tool is
 	// excluded from their toolset at spawn (--exclude-tools); this check is defense
 	// in depth so a child can never expose the tool back to its model, even if
@@ -57,6 +54,9 @@ export default function (pi: ExtensionAPI): void {
 		});
 		return;
 	}
+
+	const configPath = getConfigPath(getAgentDir());
+	const runtime = createRuntime(pi, configPath);
 
 	pi.registerMessageRenderer("subagent-result", (message, _options, theme) =>
 		new Text(
@@ -72,7 +72,7 @@ export default function (pi: ExtensionAPI): void {
 	});
 
 	// One dispatcher serves both delegation tools, so a workflow node is an
-	// ordinary managed run: same queue pacing, admission, isolation, and
+	// ordinary managed run: same lifecycle ownership, admission, isolation, and
 	// durable checkpointing.
 	const dispatchCore = createDispatchCore(runtime);
 	registerSubagentTool(pi, runtime, dispatchCore);

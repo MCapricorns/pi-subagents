@@ -14,6 +14,7 @@ async function withChild(
 	verify: (result: Awaited<ReturnType<typeof runCliAgentAttempt>>) => void,
 	stopOnStart = false,
 	onSteer?: string,
+	env?: NodeJS.ProcessEnv,
 ): Promise<void> {
 	const root = await mkdtemp(join(tmpdir(), "pi-subagents-cli-test-"));
 	const child = join(root, "child.mjs");
@@ -46,7 +47,7 @@ process.stdin.on("data", chunk => {
 		const result = await runCliAgentAttempt({
 			defaultCwd: root, agent: { name: "artisan", description: "test", systemPrompt: "" },
 			agentName: "artisan", task: "Test native Pi", thinkingLevel: "off", idleTimeoutMs: 0,
-			scratchRoot: join(root, "tmp"), prompt: "Test native Pi", control,
+			scratchRoot: join(root, "tmp"), prompt: "Test native Pi", control, env,
 			signal: AbortSignal.timeout(10_000), startupTimeoutMs: 5_000,
 			onLive: (event) => {
 				if (stopOnStart && event.kind === "status" && event.status === "running") void control.stop("User cancelled");
@@ -88,6 +89,13 @@ describe("child launch arguments", () => {
 		assert.equal(valueOf(named, "--tools"), "read,mcp__docs__search");
 		// `--tools` filters MCP tools once an entry names one.
 		assert.equal(valueOf(named, "--exclude-tools"), "subagent,subagent_workflow,subagent_status,subagent_message,subagent_stop");
+	});
+
+	it("installs the console policy as an explicit extension only on Windows", () => {
+		const args = buildChildLaunchArgs({ ...base, agent: {} });
+		const extension = valueOf(args, "--extension");
+		if (process.platform === "win32") assert.match(extension ?? "", /hidden-console\.cjs$/u);
+		else assert.equal(extension, undefined);
 	});
 
 	it("starts a child without tools when the role resolved to none", () => {
@@ -148,6 +156,22 @@ describe("native RPC child lifecycle", () => {
 		assert.equal(launches[0]!.shell, false);
 		assert.deepEqual(launches[0]!.stdio, ["pipe", "pipe", "pipe"]);
 		assert.equal(launches[0]!.detached, process.platform !== "win32");
+	});
+
+	it("preloads descendant console handling without replacing the inherited environment", async () => {
+		const env = { ...process.env, NODE_OPTIONS: "--no-warnings", PI_SUBAGENT_DEPTH: "2", FIXTURE_VALUE: "kept" };
+		await withChild(`assistant("stop", JSON.stringify({
+ nodeOptions: process.env.NODE_OPTIONS, depth: process.env.PI_SUBAGENT_DEPTH, value: process.env.FIXTURE_VALUE
+})); send({type:"agent_settled"});`, (result) => {
+			assert.equal(result.exitCode, 0, result.stderr);
+			const inherited = JSON.parse(getResultOutput(result));
+			assert.equal(inherited.depth, "3");
+			assert.equal(inherited.value, "kept");
+			if (process.platform === "win32") assert.match(inherited.nodeOptions, /^--no-warnings --require .*hidden-console\.cjs/u);
+			else assert.equal(inherited.nodeOptions, "--no-warnings");
+		}, false, undefined, env);
+		assert.equal(env.NODE_OPTIONS, "--no-warnings");
+		assert.equal(env.PI_SUBAGENT_DEPTH, "2");
 	});
 
 	it("uses the official RPC mode", () => {

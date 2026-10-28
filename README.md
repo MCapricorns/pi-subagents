@@ -36,7 +36,7 @@ a model preserves the thinking preference. Settings live in
 
 The main model chooses from these role descriptions; names alone do not route a
 task. Use `sentinel` for "inspect this diff" and `skeptic` for "does this claim
-hold?" Default to one. Both are justified only by distinct questions, such as
+hold?" Default to one review role. Both are justified only by distinct questions, such as
 reviewing an implementation and then testing its specific findings. A skeptic
 without a named claim reports the gap and stops instead of starting another review.
 
@@ -58,11 +58,13 @@ and the final result. Keep a fix and its regression tests with one owner.
 
 ## Delegate
 
-Pi chooses delegation from the task structure; no special request is required.
-Small, familiar, or tightly coupled work stays in main. A child earns its cost
-when substantial bounded work benefits from parallel progress, isolating noisy
-research, or an independent check. Choose team size from independent work.
-Explicit requests to work in main or avoid subagents take precedence.
+Pi proactively looks for useful bounded phases to delegate; no special request
+is required. Focused ownership, isolated context, parallel progress, and an
+independent check can each justify a child. A substantial self-contained fix can
+go to one artisan together with its regression tests, even when there is nothing
+to parallelize. Quick source checks and small understood edits stay in main.
+Choose team size from independent work. Explicit requests to work in main or
+avoid subagents take precedence.
 
 Use one owner per deliverable, including its regression tests. Brief the child
 with the outcome, done condition, relevant paths, established evidence, write
@@ -259,9 +261,17 @@ Both start a new run with the role, workspace and scope preserved. Queueing,
 admission and isolation still apply. Pending runs cannot be steered, and fixed
 workflow graphs cannot be edited.
 
-Children use Pi's native `--mode rpc` CLI, retries, and session persistence.
-On Windows, background child console windows stay hidden; RPC communication and
-process-tree cancellation remain active.
+Children use Pi's native `--mode rpc` CLI with piped input/output, retries, and
+session persistence. On Windows, console hiding covers the Pi child and Node
+process launches made by its tools and extensions, including `pi.exec`, `pwsh`,
+and `powershell`. The child preloads this policy before Pi starts and passes it
+to Node descendants through `NODE_OPTIONS`, preserving existing options. An
+explicit child extension installs the same policy for runtimes without Node
+preloading. Windows launches stay attached so detachment cannot open a console.
+On macOS and Linux, the policy leaves shell options unchanged; the Pi child uses
+a separate process group for cancellation and does not launch a terminal app.
+RPC communication and process-tree cancellation remain active. Commands that
+explicitly open a terminal or GUI control their own windows.
 A settled provider failure can hand off once to the main model in the same
 session. State and full-result files live under
 `~/.pi/agent/ferris-pi-subagents/`, grouped by project. `PI_CODING_AGENT_DIR`
@@ -291,7 +301,8 @@ npm ci
 npm run check
 ```
 
-Pushing an unpublished package version to `main` triggers
+Pushing an unpublished package version to `main` runs the checks on Windows,
+macOS, and Linux before triggering
 [publishing and a GitHub Release](./.github/workflows/publish.yml).
 
 [Changelog](./CHANGELOG.md) · [MIT license](./LICENSE)

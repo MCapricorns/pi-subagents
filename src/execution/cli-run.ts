@@ -5,6 +5,7 @@ import { existsSync, readdirSync } from "node:fs";
 import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { basename, join } from "node:path";
 import { StringDecoder } from "node:string_decoder";
+import { fileURLToPath } from "node:url";
 import type { Message, Usage } from "@earendil-works/pi-ai";
 import type { JsonAgentSessionEvent } from "@earendil-works/pi-coding-agent";
 import { SUBAGENT_TOOL_NAMES, type AgentConfig } from "../delegation/agents.ts";
@@ -19,7 +20,17 @@ const MCP_TOOL_PREFIX = "mcp__";
 const SUBAGENT_KILL_GRACE_MS = 5_000;
 const CLI_STARTUP_TIMEOUT_MS = 60_000;
 export const CHILD_STDERR_MAX_CHARS = 32_000;
+const HIDDEN_CONSOLE_PATH = fileURLToPath(new URL("./hidden-console.cjs", import.meta.url));
 
+/** Preload before Node starts Pi; descendants inherit the same console policy. */
+function childEnvironment(env: NodeJS.ProcessEnv = process.env): NodeJS.ProcessEnv {
+	const childEnv: NodeJS.ProcessEnv = { ...env, [DEPTH_ENV_VAR]: String(currentSubagentDepth(env) + 1) };
+	if (process.platform === "win32") {
+		const preload = `--require ${JSON.stringify(HIDDEN_CONSOLE_PATH.replaceAll("\\", "/"))}`;
+		childEnv.NODE_OPTIONS = [env.NODE_OPTIONS, preload].filter(Boolean).join(" ");
+	}
+	return childEnv;
+}
 
 /** Append child stderr while keeping only the newest bounded tail. */
 export function appendBoundedStderr(current: string, chunk: string, maxChars = CHILD_STDERR_MAX_CHARS): string {
@@ -139,6 +150,8 @@ export function buildChildLaunchArgs(options: ChildLaunchOptions): string[] {
 		}
 	}
 	args.push("--exclude-tools", excludedTools.join(","));
+	// Compiled Pi runtimes may ignore NODE_OPTIONS; install before tools run too.
+	if (process.platform === "win32") args.push("--extension", HIDDEN_CONSOLE_PATH);
 	if (options.promptPath) args.push("--append-system-prompt", options.promptPath);
 	return args;
 }
@@ -187,7 +200,7 @@ export async function runCliAgentAttempt(options: RunCliAttemptOptions): Promise
 		const proc = spawn(invocation.command, invocation.args, {
 			cwd: options.cwd ?? options.defaultCwd, shell: false, stdio: ["pipe", "pipe", "pipe"],
 			windowsHide: true,
-			env: { ...(options.env ?? process.env), [DEPTH_ENV_VAR]: String(currentSubagentDepth(options.env) + 1) },
+			env: childEnvironment(options.env),
 			detached: processGroup,
 		});
 		const token = control?.beginAttempt();

@@ -349,7 +349,7 @@ export function registerSubagentTool(
 	pi.registerTool({
 		name: "subagent",
 		label: "Subagent",
-		description: "Delegate bounded work when parallel progress, isolated context, or independent verification earns a child session. Use tasks for independent phases and subagent_workflow for known dependencies. Duplicate phases and declared writer overlaps with runs, pending nodes, or main writes are rejected before allocation. Scope is coordination metadata, not permissions. Omit isolation for automatic selection. Results arrive automatically or with wait:true; main reuses completed work and handles gaps.",
+		description: "Delegate worthwhile bounded work for focused implementation, isolated research, parallel progress, or independent verification. Use tasks for independent phases and subagent_workflow for known dependencies. Duplicate phases and declared writer overlaps with runs, pending nodes, or main writes are rejected before allocation. Scope is coordination metadata, not permissions. Omit isolation for automatic selection. Results arrive automatically or with wait:true; main reuses completed work and handles gaps.",
 		// Admission and lease reservation finish synchronously before child startup.
 		// Awaited runs must not block unrelated dispatch calls.
 		exposure: "model-only",
