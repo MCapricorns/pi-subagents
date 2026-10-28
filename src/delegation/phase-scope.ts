@@ -162,11 +162,13 @@ export interface WriterLeaseScopeOverlap {
 
 const SCOPE_ADMISSION_STATES = new Set<WriterScopeLease["state"]>(["queued", "running", "interrupting", "parked"]);
 
-/** An active, non-retired lease that may still change repository content. */
+/** Retirement drops session context; a stopping generation can still write
+ * until its child and finalization quiesce. */
 function isActiveWriterLease(lease: WriterScopeLease): boolean {
+	const stopping = lease.lifecycleOperation === "stop";
 	const active = lease.lifecycleOperation === "settle" || SCOPE_ADMISSION_STATES.has(lease.state);
 	const writes = lease.writeCapable ?? lease.agentName !== "scout";
-	return active && !lease.retired && writes;
+	return (stopping || (active && !lease.retired)) && writes;
 }
 
 /** Compare absolute normalized claims against active writer leases across caller cwds. */

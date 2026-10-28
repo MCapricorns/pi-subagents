@@ -1,5 +1,24 @@
 # Changelog
 
+## 5.0.4
+
+### Changes
+
+- Initialize isolated worktrees from the caller's current files so dependent
+  workflow nodes and follow-ups see integrated uncommitted changes. Use the same
+  snapshot as the integration base and preserve the caller's index and HEAD.
+- Keep stopped writer and phase leases until children and finalization quiesce,
+  including after control timeouts and repeated stop calls.
+- Keep review requests within their authorized outcome, focus change reviews on
+  introduced defects, and request confirmation only for material uncertainty.
+  Main checks done conditions and blockers before claiming a delegated task is done.
+- Reduce the broad code-review workflow from five nodes to four: its critic
+  verifies findings and writes the final review. Use both review roles only when
+  their distinct questions justify the extra session.
+- Pass the shared interface contract to every migration node and declare the
+  closing gate's write scope. Reuse completed integrated checks when still valid.
+- Clarify retained-session follow-ups and phase ownership in the workflow skill.
+
 ## 5.0.3
 
 ### Changes

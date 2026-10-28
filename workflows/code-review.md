@@ -1,14 +1,14 @@
 ---
 name: code-review
-description: Review a change with independent eyes, confirm each finding, and report what was verified.
+description: Review a change from independent angles and return evidence-checked findings.
 ---
 
 # Code review workflow
 
-Two reviewers read the same change from different angles, a third agent then
-tries to *disprove* every finding against the code, and the last node writes the
-report the user keeps. This saved template chooses a thorough adversarial review;
-for a small diff, combine the map with a reviewer and let main write the report.
+A mapping node establishes the target, two reviewers inspect it from different
+angles, and a critic checks their findings and returns the final review. Use this
+four-node template for a broad change that warrants independent review lenses;
+for a small diff, use one reviewer and let main assess the findings.
 
 Copy this file to `.pi/workflows/code-review.md` in the repository you are
 reviewing. Two things are yours to set before you run it:
@@ -48,14 +48,8 @@ Run it with `subagent_workflow({ "workflow": "code-review" })`, or by path with
       "id": "confirm",
       "agent": "critic",
       "isolation": "shared",
-      "task": "Two reviewers reported findings. Your job is to try to disprove them, not to agree.\n\nCorrectness findings:\n{{correctness}}\n\nRisk findings:\n{{risk}}\n\nFor each finding, look for a counterexample in callers, invariants, and tests. Run a safe focused reproduction when needed and available. Do not edit files, install dependencies, or change Git state. Classify it as reproduced (command and result), source-supported (code evidence, not executed), disproved (counterevidence), or unverified (missing evidence). Return surviving findings with severity and the evidence that would falsify them.",
+      "task": "Two reviewers reported findings. Try to disprove each one against callers, invariants, and tests. A review with no surviving findings is valid.\n\nCorrectness findings:\n{{correctness}}\n\nRisk findings:\n{{risk}}\n\nRun a safe focused reproduction when needed and available. Do not edit files, install dependencies, or change Git state. Classify each finding as reproduced (command and result), source-supported (code evidence, not executed), disproved (counterevidence), or unverified (missing evidence). Return the final review: a concise verdict, surviving actionable findings ordered by severity with path:line, trigger, consequence, evidence and smallest fix, then checks performed and material gaps. Keep rejected findings brief; do not promote unverified concerns to confirmed defects.",
       "dependsOn": ["correctness", "risk"]
-    },
-    {
-      "id": "report",
-      "agent": "scout",
-      "task": "Write the review the user acts on, from the surviving findings and evidence:\n\n{{confirm}}\n\nStructure it as: a two-sentence verdict, then each surviving finding as where / what / evidence / severity, then what was checked and how, then what the review did not cover. Say plainly which findings were confirmed and which stayed unverified. Do not edit code; this node produces the report only.",
-      "dependsOn": ["confirm"]
     }
   ]
 }

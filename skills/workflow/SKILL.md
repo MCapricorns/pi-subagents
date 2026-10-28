@@ -86,15 +86,18 @@ The shapes that are worth writing, in the order they usually appear:
   and focused reproductions. Use different lenses for independent reviewers.
   Distinguish reproduced, source-supported, disproved, and unverified findings.
   Use reviewer or critic when commands are required; scout cannot execute a reproduction.
-- **A closing gate.** The last node runs the project's own checks. Prefer
-  commands over opinions: the repository's test suite, typecheck, build, or the
-  verification line its README names. Ask for the strongest tier it has, not the
-  fastest one.
+- **A closing gate.** Run the project's required checks on the integrated result
+  in main or one closing node. Keep focused regression checks with the writer;
+  reuse a completed full gate unless later edits, failures, or unresolved
+  concerns invalidate it. A separate gate node must justify its own session.
 
 Choose depth for the risk. A reviewer, independent confirmer, and synthesis
 node are reasonable for a large or sensitive change; a focused review can
 combine stages or leave synthesis to main. Every extra node should answer a
-different question. Keep a fix and its regression tests with one owner.
+different question. Keep a fix and its regression tests with one owner. Choose
+reviewer or critic for the question at hand; use both only for distinct risks.
+A review request authorizes findings; apply fixes only when changes are also
+authorized. Request focused confirmation when material uncertainty remains.
 
 ## 4. What the runtime guarantees, and what it does not
 
@@ -133,6 +136,11 @@ A node has no access to your conversation. Its brief carries:
 3. the boundary (what not to touch, what not to decide),
 4. the output you want back.
 
+Include shared interface contracts or their file paths in every brief that needs
+them; saying main already established a contract does not transmit it. A settled
+run can still report a blocker: dependents must check prerequisite outputs, and
+main checks done conditions before claiming success.
+
 Write the brief the way you would brief a competent colleague who was not in the
 meeting. Name paths and symbols; do not paste file contents — every node has its
 own file tools, and a pasted file costs tokens it could have read.
@@ -168,10 +176,12 @@ node expects to write:
   intentional (a fix, then its own test file).
 - Externally, declared scopes are still checked against live runs at dispatch
   time, so a node that conflicts with unrelated work fails alone.
-- Write-capable nodes default to a detached Git worktree in a graph, and their
-  changes are integrated once, when the node settles. The checkout therefore
-  always looks like the graph's completed work — which is exactly what the next
-  node needs to read.
+- Write-capable nodes default to a detached Git worktree in a graph, initialized
+  from the caller's current tracked and non-ignored untracked files. That snapshot
+  is also the integration base, so each node sees integrated prerequisites even
+  before they are committed, and only its own delta is applied on settlement.
+- A stopped run retains phase and writer leases while its child or finalization
+  can still change files, including after the stop call's bounded wait expires.
 
 ## 8. Saved definitions
 
@@ -191,15 +201,16 @@ Save a graph when it will run again, when a reviewer should read the plan before
 it runs, or when the phases are long enough that you want them in version
 control. Run it by name; do not restate it inline.
 
-**A phase stays owned after it settles, and across reloads.** Derived phase ids
-are `<workflow-slug>.<node-id>`; an interrupted run keeps its claim until it is
-retired. Re-running the same shape is therefore rejected **before any node
-starts**, naming the owning runs. Three ways forward: retire the owner with
-`subagent_stop({ id })` (destructive — it drops that run's retained session),
-give a genuinely different deliverable its own brief and phase id. Renaming the
-graph does not bypass exact task matching. Prefer reusing the owner's evidence
-and finishing incomplete work in main. A new session alone does not help: a retained interrupted run is
-restored with its claim intact.
+**Settled phases stay owned for the parent session; interrupted phases keep
+ownership across reloads.** Derived phase ids are `<workflow-slug>.<node-id>`.
+Re-running the same shape is rejected **before any node starts**, naming the
+owning runs. For a successfully completed phase, use `subagent_message` to
+continue the same deliverable with its retained context. Finish incomplete or
+interrupted work in main from the retained evidence. Retire the owner with
+`subagent_stop({ id })` only when intentionally discarding its retained session;
+give a different deliverable its own brief and phase id. Renaming the graph does
+not bypass exact task matching. A new session alone does not clear an interrupted
+run's claim.
 
 ## 9. Cost
 
@@ -234,7 +245,7 @@ One completion message per graph:
 ### workflow auth-fix completed (3/3 completed)
 - map (scout) completed · run #12 · 1m02s
 - fix (artisan) completed · run #13 · 4m11s
-- review (artisan) completed · run #15 · 2m40s
+- review (critic) completed · run #15 · 2m40s
 
 Node answers:
 #### map

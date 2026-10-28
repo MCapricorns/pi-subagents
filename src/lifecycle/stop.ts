@@ -22,6 +22,7 @@ export async function stopThreads(runtime: SubagentRuntime, targets: readonly nu
 		generation: number;
 		controller: AbortController | undefined;
 		completion: Promise<void>;
+		releaseQuiescence: () => void;
 		stopVersion: number;
 		stopMessage: string;
 	}> = [];
@@ -36,6 +37,12 @@ export async function stopThreads(runtime: SubagentRuntime, targets: readonly nu
 		thread.retired = true;
 		thread.retireOnSettle = true;
 		thread.state = "stopped";
+		const completion = thread.generationCompletion;
+		let releaseQuiescence!: () => void;
+		const stopCompletion = new Promise<void>((resolve) => { releaseQuiescence = resolve; });
+		// A repeated stop must also wait for this owner's finalization, even if
+		// the bounded control call has already returned a partial result.
+		thread.generationCompletion = Promise.allSettled([completion, stopCompletion]).then(() => undefined);
 		const stopMessage = reason ?? (wasQueued
 			? "Stopped by subagent_stop before the run started."
 			: wasActive ? "Stopped by subagent_stop."
@@ -45,7 +52,7 @@ export async function stopThreads(runtime: SubagentRuntime, targets: readonly nu
 			runId, thread, run: monitor.findRun(runId), previousState, wasQueued, wasActive,
 			generation: thread.generation,
 			controller: thread.queueController,
-			completion: thread.generationCompletion,
+			completion, releaseQuiescence,
 			stopVersion, stopMessage,
 		});
 	}
@@ -74,6 +81,7 @@ export async function stopThreads(runtime: SubagentRuntime, targets: readonly nu
 			generation,
 			controller,
 			completion,
+			releaseQuiescence,
 			stopVersion,
 			stopMessage,
 		} = claim;
@@ -91,6 +99,7 @@ export async function stopThreads(runtime: SubagentRuntime, targets: readonly nu
 		// lifecycle. Synthesize and publish the one aborted result here only when
 		// this stop actually interrupted unfinished work.
 		let stoppedResult: SingleResult | undefined;
+		let finalizationCompletion: Promise<WorktreeFinalization | undefined> = Promise.resolve(undefined);
 		if (
 			wasQueued ||
 			previousState === "parked" ||
@@ -123,8 +132,9 @@ export async function stopThreads(runtime: SubagentRuntime, targets: readonly nu
 			const worktree = thread.worktree;
 			let finalization: WorktreeFinalization | undefined;
 			try {
+				finalizationCompletion = thread.finalizeIsolation(generation, stoppedResult);
 				finalization = await Promise.race([
-					thread.finalizeIsolation(generation, stoppedResult),
+					finalizationCompletion,
 					new Promise<undefined>((resolve) => {
 						const timer = setTimeout(() => resolve(undefined), CONTROL_QUIESCE_TIMEOUT_MS);
 						if (typeof timer.unref === "function") timer.unref();
@@ -167,9 +177,14 @@ export async function stopThreads(runtime: SubagentRuntime, targets: readonly nu
 		// The destructive retire removes the durable record with the session;
 		// an id never resurrects after subagent_stop.
 		await removeThreadRecord(runtime.configPath, runId, thread.cwd).catch(() => undefined);
-		if (thread.lifecycleVersion === stopVersion && thread.lifecycleOperation === "stop") {
-			thread.lifecycleOperation = undefined;
-		}
+		// Returning from a bounded stop retires context, but cannot release a
+		// writer or phase lease while a child or Git tail can still change files.
+		void Promise.allSettled([interruptionPromises[claimIndex]!, completion, finalizationCompletion]).then(() => {
+			if (thread.lifecycleVersion === stopVersion && thread.lifecycleOperation === "stop") {
+				thread.lifecycleOperation = undefined;
+			}
+			releaseQuiescence();
+		});
 		stopped.push(`#${runId} ${thread.agentName}${wasQueued ? " (queued)" : wasActive ? "" : ` (${previousState})`}`);
 	}
 	return { stopped, retainedIntegration, pendingIntegration, completionResults };

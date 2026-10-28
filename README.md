@@ -35,7 +35,9 @@ a model preserves the thinking preference. Settings live in
 | `critic` | Adversarial review of changes or findings | Parent's tool surface; instructed not to edit |
 
 Reviewer and critic may run checks, so their no-edit boundary is an instruction,
-not a tool-enforced restriction. Configure each role independently.
+not a tool-enforced restriction. Configure each role independently. Choose the
+reviewer or critic for the question at hand; use both only for distinct risks.
+Change reviews focus on introduced defects; a wider audit needs an explicit brief.
 
 Children receive a self-contained brief and project instructions, but no parent
 conversation. They cannot delegate or release. Main owns planning, integration,
@@ -57,6 +59,11 @@ focused-role, and coordination-cost guidance in the official
 [Codex subagents](https://developers.openai.com/codex/subagents) and
 [Claude Code subagents](https://code.claude.com/docs/en/sub-agents) docs to Pi's
 one-shot leaf runs.
+
+A review request produces findings. Main applies fixes when changes are
+authorized and requests focused confirmation only when material uncertainty
+remains. Before reporting success, main checks each done condition and any
+blockers in the child's answer as well as the integrated diff.
 
 Ask Pi to delegate explicitly, or call the tools directly:
 
@@ -147,7 +154,11 @@ subagent_workflow({ file: ".pi/workflows/code-review.md" });
 Definitions load from `.pi/workflows/`, `~/.pi/agent/workflows/`, and the shipped
 [templates](./workflows), in that order of precedence. Project definitions and
 explicit file paths require project trust. Customize template questions, targets,
-and scopes before running them.
+and scopes before running them. The broad `code-review` template uses four nodes;
+its critic verifies findings and returns the final review. The `migration`
+template passes the shared interface contract to every slice and declares the
+closing gate's write scope. Run the full integrated gate once in main or a closing
+node, and repeat it when later edits or unresolved failures warrant it.
 
 See the [workflow skill](./skills/workflow/SKILL.md) for graph authoring details.
 
@@ -174,9 +185,12 @@ lock: independent runs start together, including separate dispatch calls while
 another call awaits results.
 
 Single writers use the shared checkout. Parallel writers and workflow writers
-default to detached worktrees, which require a committed `HEAD`. Set
-`isolation: "shared"` to run directly in the checkout without a repository-wide
-launch lock. Declare exact write paths or symbols in `scope` to detect conflicts.
+default to detached worktrees, which require a committed `HEAD`. Each worktree
+starts from the caller's current tracked files and non-ignored untracked files,
+including uncommitted changes. Its initial snapshot is also the integration base,
+so dependent tasks and follow-ups see earlier results without reapplying them.
+The caller's index, branch, and `HEAD` stay unchanged. Set `isolation: "shared"`
+to run directly in the checkout without a repository-wide launch lock. Declare exact write paths or symbols in `scope` to detect conflicts.
 Duplicate phases and declared writer overlaps are still rejected. Worktrees
 isolate Git changes, not tool permissions. Only final worktree integration into
 the original checkout is serialized; it leaves your index untouched, and failures
@@ -185,7 +199,9 @@ retain recovery artifacts.
 Cancelling the parent run with Escape stops unfinished work without waking the
 parent. A cancellation receipt is supplied on the next user turn with the stopped
 run and workflow ids, so main knows no additional `subagent_stop` is needed.
-Cancelled work must not restart automatically. Conversation-tree navigation also
+Cancelled work must not restart automatically. A stopped run keeps its phase
+and declared writer leases until its child and Git finalization quiesce, even if
+the stop call reaches its wait deadline. Conversation-tree navigation also
 stops unfinished work. New/resume/fork/reload ends old children and retains interrupted work
 for manual recovery. Runs do not resume automatically; main finishes incomplete
 work from partial changes and artifacts.

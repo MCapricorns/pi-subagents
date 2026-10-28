@@ -49,7 +49,7 @@ import type { IsolationMode } from "../isolation/worktree.ts";
 const NON_BLANK_TASK_OPTIONS = { minLength: 1, pattern: "\\S" } as const;
 
 const ISOLATION_DESCRIPTION =
-	"Git isolation (not a sandbox): shared uses the caller's checkout; worktree creates a detached temporary worktree for write-capable agents only.";
+	"Git isolation (not a sandbox): shared uses the caller's checkout; worktree snapshots its current files into a detached temporary worktree for write-capable agents only.";
 
 export const IsolationSchema = Type.Optional(
 	StringEnum(["shared", "worktree"] as const, { description: ISOLATION_DESCRIPTION }),

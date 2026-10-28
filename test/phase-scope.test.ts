@@ -15,6 +15,9 @@ import {
 	PHASE_ID_PATTERN_SOURCE,
 } from "../src/delegation/phase-scope.ts";
 import { RunControl } from "../src/execution/run-control.ts";
+import { findDuplicateDispatch } from "../src/delegation/prompt.ts";
+import { stopThreads } from "../src/lifecycle/stop.ts";
+import { CONTROL_QUIESCE_TIMEOUT_MS } from "../src/lifecycle/thread-shared.ts";
 import {
 	getThreadsManifestPath,
 	readThreadRecords,
@@ -344,6 +347,80 @@ describe("single scope admission", () => {
 			runtime.threads.clear();
 			await runtime.shutdown();
 			monitor.clear();
+			await rm(root, { recursive: true, force: true });
+		}
+	});
+
+	for (const timeout of [false, true]) {
+		it(`holds stopped writer and phase leases until finalization quiesces${timeout ? " after the control timeout" : ""}`, async (t) => {
+			const root = await mkdtemp(join(tmpdir(), "pi-subagents-stop-lease-"));
+			const { runtime, tool } = dispatchHarness(join(root, "config.json"));
+			runtime.backgroundQueue.enqueue = () => new AbortController();
+			const thread = activeWriter(77, root, "src");
+			const started = deferred();
+			const release = deferred();
+			thread.isolation = "worktree";
+			thread.finalizeIsolation = async () => {
+				started.resolve();
+				await release.promise;
+				return { status: "no_changes", integrated: false, hadChanges: false };
+			};
+			runtime.threads.set(thread.id, thread);
+			if (timeout) t.mock.timers.enable({ apis: ["setTimeout"] });
+			const stopping = stopThreads(runtime, [thread.id]);
+			try {
+				await started.promise;
+				if (timeout) {
+					t.mock.timers.tick(CONTROL_QUIESCE_TIMEOUT_MS);
+					await stopping;
+				}
+				await assert.rejects(execute(tool, {
+					agent: "artisan", task: "Edit during stopped integration", phaseId: "stop-lease-conflict",
+					scope: { paths: ["src/parser.ts"] },
+				}, root), /scope.*overlaps active run #77/i);
+				assert.equal(runtime.threads.size, 1);
+				assert.equal(findDuplicateDispatch(runtime.threads.values(), thread.task, root, thread.phaseId)?.kind, "active");
+				release.resolve();
+				await stopping;
+				await thread.generationCompletion;
+				assert.equal(findWriterLeaseScopeOverlap(normalizePhaseScope({ paths: ["src/parser.ts"] }, root)!, runtime.threads.values()), undefined);
+				assert.equal(findDuplicateDispatch(runtime.threads.values(), thread.task, root, thread.phaseId), undefined);
+			} finally {
+				release.resolve();
+				await stopping;
+				runtime.threads.clear();
+				await runtime.shutdown();
+				monitor.clear();
+				await rm(root, { recursive: true, force: true });
+			}
+		});
+	}
+
+	it("keeps a stopped shared writer claimed across repeated timeouts until its child quiesces", async (t) => {
+		const root = await mkdtemp(join(tmpdir(), "pi-subagents-stop-child-"));
+		const { runtime } = dispatchHarness(join(root, "config.json"));
+		const thread = activeWriter(78, root, "src");
+		const release = deferred();
+		thread.generationCompletion = release.promise;
+		runtime.threads.set(thread.id, thread);
+		t.mock.timers.enable({ apis: ["setTimeout"] });
+		try {
+			for (let attempt = 0; attempt < 2; attempt++) {
+				const stopping = stopThreads(runtime, [thread.id]);
+				await new Promise<void>((resolve) => setImmediate(resolve));
+				t.mock.timers.tick(CONTROL_QUIESCE_TIMEOUT_MS);
+				await stopping;
+				assert.equal(findWriterLeaseScopeOverlap(thread.scope!, runtime.threads.values())?.lease.id, thread.id);
+				assert.equal(findDuplicateDispatch(runtime.threads.values(), thread.task, root, thread.phaseId)?.kind, "active");
+			}
+			release.resolve();
+			await thread.generationCompletion;
+			assert.equal(findWriterLeaseScopeOverlap(thread.scope!, runtime.threads.values()), undefined);
+		} finally {
+			release.resolve();
+			await thread.generationCompletion;
+			runtime.threads.clear();
+			await runtime.shutdown();
 			await rm(root, { recursive: true, force: true });
 		}
 	});

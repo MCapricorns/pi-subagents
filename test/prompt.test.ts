@@ -54,7 +54,8 @@ describe("buildDelegationDirective", () => {
 		assert.match(directive, /no extra stop or automatic restart/u);
 		assert.match(directive, /do not add research, review, or gate phases by habit/u);
 		assert.match(directive, /smallest fix for each confirmed defect/u);
-		assert.match(directive, /apply those fixes in the same turn \(artisan or main\), then let that role confirm only the fix/u);
+		assert.match(directive, /Apply fixes only when authorized; otherwise report them/u);
+		assert.match(directive, /Request focused confirmation only for material uncertainty/u);
 		assert.match(directive, /Do not re-review the whole change/u);
 		assert.match(directive, /one owner, a stable `phaseId`, and exact writer `scope`/u);
 		assert.match(directive, /Parallelize independent phases in one call/u);

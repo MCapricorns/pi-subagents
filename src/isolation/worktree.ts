@@ -587,9 +587,67 @@ async function linkNodeModules(
 	}
 }
 
+/** Capture the caller's current files without staging into its real index or
+ * advancing any ref. The detached worktree keeps this synthetic commit alive
+ * and uses it as both its initial checkout and its integration diff base. */
+async function createWorktreeBaseline(
+	target: WorktreeTarget,
+	tempDir: string,
+	runner: CommandRunner,
+): Promise<string> {
+	const indexCopy = join(tempDir, "baseline-index");
+	const env = { GIT_INDEX_FILE: indexCopy };
+	try {
+		const indexPath = resolve(
+			target.originalRoot,
+			(await runGit(
+				runner,
+				target.originalRoot,
+				["rev-parse", "--git-path", "index"],
+				"Resolving caller baseline index path",
+			)).stdout.toString("utf8").trim(),
+		);
+		if (existsSync(indexPath)) {
+			await copyFile(indexPath, indexCopy);
+		} else {
+			await runGit(
+				runner, target.originalRoot, ["read-tree", target.head],
+				"Initializing caller baseline index", undefined, env,
+			);
+		}
+		await runGit(
+			runner, target.originalRoot, ["add", "-A", "--", "."],
+			"Capturing caller working tree baseline", undefined, env,
+		);
+		const tree = await runGit(
+			runner, target.originalRoot, ["write-tree"],
+			"Writing caller baseline tree", undefined, env,
+		);
+		const treeId = tree.stdout.toString("utf8").trim();
+		if (!treeId) throw new Error("Git returned no caller baseline tree id.");
+		const commit = await runGit(
+			runner,
+			target.originalRoot,
+			[
+				"-c", "user.name=pi-subagents",
+				"-c", "user.email=pi-subagents@example.invalid",
+				"commit-tree", treeId,
+				"-p", target.head,
+				"-m", "pi-subagents caller baseline",
+			],
+			"Creating caller baseline commit",
+		);
+		const commitId = commit.stdout.toString("utf8").trim();
+		if (!commitId) throw new Error("Git returned no caller baseline commit id.");
+		return commitId;
+	} finally {
+		await rm(indexCopy, { force: true });
+	}
+}
+
 /**
- * Create a detached worktree at repository HEAD. The returned cwd mirrors the
- * caller's subdirectory inside that new worktree.
+ * Create a detached worktree from the caller's current non-ignored files. The
+ * returned cwd mirrors the caller's subdirectory inside that new worktree.
  */
 export async function createWorktreeIsolation(
 	cwd: string,
@@ -607,10 +665,11 @@ export async function createWorktreeIsolation(
 	const patchPath = join(tempDir, "changes.patch");
 	let added = false;
 	try {
+		const baseline = await createWorktreeBaseline(target, tempDir, runner);
 		await runGit(
 			runner,
 			target.originalRoot,
-			["worktree", "add", "--detach", worktreePath, "HEAD"],
+			["worktree", "add", "--detach", worktreePath, baseline],
 			`Creating detached worktree from ${target.originalRoot}`,
 		);
 		added = true;
@@ -627,7 +686,7 @@ export async function createWorktreeIsolation(
 			worktreePath,
 			tempDir,
 			patchPath,
-			target.head,
+			baseline,
 			runner,
 		);
 	} catch (error) {
