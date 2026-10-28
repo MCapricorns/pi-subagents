@@ -123,8 +123,8 @@ describe("automatic isolation and current roles", () => {
 			assert.equal(thread.agentName, name);
 			assert.equal(thread.isolation, "shared");
 			assert.equal(result.agent, name);
-			// macOS getcwd resolves /var to /private/var in temporary paths.
-			assert.equal(getResultOutput(result), await realpath(h.project));
+			// Resolve macOS /var aliases and Windows short paths on both sides.
+			assert.equal(await realpath(getResultOutput(result)), await realpath(h.project));
 		}
 	});
 });
