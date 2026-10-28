@@ -60,7 +60,7 @@ describe("isolation policy", () => {
 		assert.ok(scout);
 		assert.equal(isWorktreeCapableAgent(scout), false);
 		assert.equal(
-			defaultIsolationMode("parallel", scout.name, undefined, isWorktreeCapableAgent(scout)),
+			defaultIsolationMode(scout.name, undefined, isWorktreeCapableAgent(scout)),
 			"shared",
 		);
 	});

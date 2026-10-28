@@ -31,6 +31,7 @@ import {
 	type WorkflowRecord,
 } from "./durable.ts";
 import type { WorkflowNodeRun, WorkflowRun, WorkflowRunState } from "./state.ts";
+import type { PhaseScope } from "../delegation/phase-scope.ts";
 
 /** Lines of one node's answer inlined into the graph summary. The complete text
  * of every node is always written to a single workflow artifact, so nothing is
@@ -147,6 +148,7 @@ async function dispatchNode(ctx: RunContext, node: WorkflowNodeRun): Promise<voi
 		started = await ctx.startBackground(node.agent, task, node.cwd, node.isolation ?? ctx.resolveIsolation(node.agent), {
 			phaseId: node.phaseId,
 			scope: node.scope,
+			automaticIsolation: node.isolation === undefined,
 			deliveryRoute: "background",
 			quiet: true,
 			workflow: { workflowId: run.id, name: run.name, nodeId: node.id },
@@ -619,6 +621,10 @@ export interface WorkflowStatusView {
 		id: string;
 		agent: string;
 		state: WorkflowNodeRun["state"];
+		task: string;
+		phaseId: string;
+		scope?: PhaseScope;
+		cwd: string;
 		runId?: number;
 		waitingFor?: string[];
 		error?: string;
@@ -643,6 +649,10 @@ export function workflowStatus(run: WorkflowRun): WorkflowStatusView {
 				id: node.id,
 				agent: node.agent,
 				state: node.state,
+				task: formatTaskSummary(node.task, 160, false),
+				phaseId: node.phaseId,
+				scope: node.scope,
+				cwd: node.cwd,
 				...(node.runId !== undefined ? { runId: node.runId } : {}),
 				...(node.state === "pending" && node.dependsOn.length > 0 ? { waitingFor: [...node.dependsOn] } : {}),
 				...(node.error ? { error: node.error } : {}),
@@ -669,6 +679,8 @@ export function formatWorkflowStatus(run: WorkflowRun): string[] {
 		if (node.activity) parts.push(node.activity);
 		if (node.error) parts.push(`error: ${formatTaskSummary(node.error, 200, false)}`);
 		lines.push(`  - ${parts.join(" · ")}`);
+		lines.push(`    phase: ${node.phaseId} · task: ${node.task}`);
+		if (node.scope) lines.push(`    scope: ${JSON.stringify(node.scope)}`);
 	}
 	return lines;
 }

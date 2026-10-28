@@ -146,15 +146,10 @@ export function resolveAgentModelRoute(input: AgentModelRouteInput): ResolvedAge
 		? new Set(input.availableRefs.map((ref) => ref.trim()).filter(Boolean))
 		: undefined;
 	const resolvedSelectedRef = selectedRef ? resolveLiveModelRef(selectedRef, available) : undefined;
-	const selectedAvailable = !selectedRef || resolvedSelectedRef !== undefined;
-	const usableSelectedRef = selectedAvailable ? resolvedSelectedRef : undefined;
-	const primaryRef = usableSelectedRef ?? mainRef;
-	const ordered = [primaryRef, usableSelectedRef && usableSelectedRef !== mainRef ? mainRef : undefined];
-	const candidateRefs = [...new Set(ordered.filter((ref): ref is string => Boolean(ref)))];
 	return {
-		primaryRef,
-		...(candidateRefs[1] ? { mainFallbackRef: candidateRefs[1] } : {}),
-		...(!selectedAvailable && selectedRef ? { unavailableSelectedRef: selectedRef } : {}),
+		primaryRef: resolvedSelectedRef ?? mainRef,
+		...(resolvedSelectedRef && mainRef && resolvedSelectedRef !== mainRef ? { mainFallbackRef: mainRef } : {}),
+		...(selectedRef && !resolvedSelectedRef ? { unavailableSelectedRef: selectedRef } : {}),
 	};
 }
 

@@ -20,6 +20,7 @@ import { mkdir, readFile, rename, rm, writeFile } from "node:fs/promises";
 import { dirname, isAbsolute, join, resolve } from "node:path";
 import { getProjectRoot, getSubagentsRoot } from "../execution/spawn.ts";
 import { PARKED_RECORD_MAX_AGE_MS } from "../lifecycle/durable.ts";
+import { migrateStoredRecordRoles } from "../configuration/role-migration.ts";
 
 export const WORKFLOWS_MANIFEST_FILE_NAME = "pi-subagents-workflows.json";
 const WORKFLOWS_MANIFEST_VERSION = 1;
@@ -111,17 +112,24 @@ function normalizeRecord(value: unknown): WorkflowRecord | undefined {
 	};
 }
 
-async function readManifestRecords(path: string): Promise<WorkflowRecord[]> {
+async function readManifest(path: string): Promise<{ records: WorkflowRecord[]; rolesMigrated: boolean }> {
 	try {
 		const parsed = JSON.parse(await readFile(path, "utf8")) as { records?: unknown };
-		if (!Array.isArray(parsed.records)) return [];
-		return parsed.records.flatMap((record) => {
+		if (!Array.isArray(parsed.records)) return { records: [], rolesMigrated: false };
+		let rolesMigrated = false;
+		for (const record of parsed.records) rolesMigrated = migrateStoredRecordRoles(record) || rolesMigrated;
+		const records = parsed.records.flatMap((record) => {
 			const normalized = normalizeRecord(record);
 			return normalized ? [normalized] : [];
 		});
+		return { records, rolesMigrated };
 	} catch {
-		return [];
+		return { records: [], rolesMigrated: false };
 	}
+}
+
+async function readManifestRecords(path: string): Promise<WorkflowRecord[]> {
+	return (await readManifest(path)).records;
 }
 
 async function writeManifest(path: string, records: readonly WorkflowRecord[]): Promise<void> {
@@ -167,7 +175,12 @@ export async function removeWorkflowRecord(configPath: string, workflowId: numbe
 /** Records for one checkout, newest first. */
 export async function readWorkflowRecords(configPath: string, cwd: string): Promise<WorkflowRecord[]> {
 	const path = getWorkflowsManifestPath(configPath, cwd);
-	const records = (await readManifestRecords(path)).filter(
+	const migrated = await withFileMutationQueue(path, async () => {
+		const manifest = await readManifest(path);
+		if (manifest.rolesMigrated) await writeManifest(path, manifest.records);
+		return manifest.records;
+	});
+	const records = migrated.filter(
 		(record) => process.platform === "win32"
 			? record.cwd.toLowerCase() === resolve(cwd).toLowerCase()
 			: record.cwd === resolve(cwd),

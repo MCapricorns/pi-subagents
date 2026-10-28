@@ -6,6 +6,8 @@ import {
 	filterUnavailableModelOverrides,
 	findModelByRef,
 	resolveAgentModelRoute,
+	type AgentModelRouteInput,
+	type ResolvedAgentModelRoute,
 } from "../src/configuration/models.ts";
 
 function model(provider: string, id: string): Model<Api> {
@@ -22,6 +24,23 @@ function model(provider: string, id: string): Model<Api> {
 		maxTokens: 8_192,
 	};
 }
+
+describe("agent model route boundaries", () => {
+	const cases: Array<{ name: string; input: AgentModelRouteInput; expected: ResolvedAgentModelRoute }> = [
+		{ name: "main only", input: { mainRef: "test/main", availableRefs: [] }, expected: { primaryRef: "test/main" } },
+		{ name: "identical selection", input: { selectedRef: "test/main", mainRef: "test/main", availableRefs: ["test/main"] }, expected: { primaryRef: "test/main" } },
+		{ name: "selection without main", input: { selectedRef: "test/worker", availableRefs: ["test/worker"] }, expected: { primaryRef: "test/worker" } },
+		{ name: "distinct fallback", input: { selectedRef: " test/worker ", mainRef: " test/main ", availableRefs: ["test/worker"] }, expected: { primaryRef: "test/worker", mainFallbackRef: "test/main" } },
+		{ name: "unavailable selection", input: { selectedRef: "test/missing", mainRef: "test/main", availableRefs: [] }, expected: { primaryRef: "test/main", unavailableSelectedRef: "test/missing" } },
+		{ name: "unavailable selection without main", input: { selectedRef: "test/missing", availableRefs: [] }, expected: { primaryRef: undefined, unavailableSelectedRef: "test/missing" } },
+		{ name: "missing catalog", input: { selectedRef: "test/worker", mainRef: "test/main" }, expected: { primaryRef: "test/worker", mainFallbackRef: "test/main" } },
+		{ name: "empty references", input: { selectedRef: " ", mainRef: " " }, expected: { primaryRef: undefined } },
+		{ name: "alias resolves to main", input: { selectedRef: "azure-openai-responses/gpt-5.4", mainRef: "azure/gpt-5.4", availableRefs: ["azure/gpt-5.4"] }, expected: { primaryRef: "azure/gpt-5.4" } },
+	];
+	for (const { name, input, expected } of cases) {
+		it(name, () => assert.deepEqual(resolveAgentModelRoute(input), expected));
+	}
+});
 
 describe("Pi 1.0.3 provider id rename", () => {
 	const azure = model("azure", "gpt-5.4");

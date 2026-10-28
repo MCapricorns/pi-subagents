@@ -14,7 +14,8 @@ import { DEFAULT_IDLE_TIMEOUT_SEC, DEFAULT_MAX_RESULT_LINES, loadConfig } from "
 import { dispatchFailedResult, failedStartResult, formatCompletionBlock, modelLevelTakeoverNote, queuedResult } from "../presentation/format.ts";
 import { formatTaskSummary, monitor } from "../presentation/monitor.ts";
 import { findDuplicateDispatch } from "../delegation/prompt.ts";
-import { findWriterLeaseScopeOverlap, normalizePhaseId, normalizePhaseScope } from "../delegation/phase-scope.ts";
+import { normalizePhaseId, normalizePhaseScope } from "../delegation/phase-scope.ts";
+import { findRuntimeWriterConflict } from "../delegation/ownership.ts";
 import { persistRecoveryRecords, recoveryRecordFromFinalization } from "../isolation/recovery.ts";
 import { findPendingWorkflowPhase, type SubagentRuntime, type SubagentThread, type ThreadState } from "./runtime.ts";
 import {
@@ -40,6 +41,7 @@ import {
 } from "./thread-shared.ts";
 import {
 	createWorktreeIsolation,
+	WorktreeUnavailableError,
 	worktreeGroupId,
 	type IsolationMode,
 	type WorktreeFinalization,
@@ -134,10 +136,10 @@ export function createBackgroundDispatcher(options: BackgroundDispatcherOptions)
 				`Run #${owner.id} (${owner.agentName}) already owns this logical phase (${owner.state}). ${remedy}`);
 		}
 		if (writeCapable && scope) {
-			const conflict = findWriterLeaseScopeOverlap(scope, runtime.threads.values());
+			const conflict = findRuntimeWriterConflict(runtime, scope, { excludeWorkflowId: startOptions.workflow?.workflowId });
 			if (conflict) {
 				return failedStartResult(agentName, task,
-					`Declared writer scope ${conflict.overlap.left} overlaps active run #${conflict.lease.id} scope ${conflict.overlap.right}; no run was started.`);
+					`Declared writer scope ${conflict.overlap.left} overlaps ${conflict.owner} scope ${conflict.overlap.right}; no run was started.`);
 			}
 		}
 		const projectRoot = getProjectRoot(runtime.configPath, originalCwd);
@@ -148,7 +150,7 @@ export function createBackgroundDispatcher(options: BackgroundDispatcherOptions)
 		let executionCwd = originalCwd;
 		let worktreeGroup: string | undefined;
 		const resolvedRoute = resolveDispatchModelRoute(agent, runConfig, runCtx);
-		const route = isolation === "worktree"
+		let route = isolation === "worktree"
 			? { ...resolvedRoute, agent: withWorktreeSystemPrompt(resolvedRoute.agent) }
 			: resolvedRoute;
 		const thinkingLevel = route.thinkingLevel;
@@ -216,18 +218,35 @@ export function createBackgroundDispatcher(options: BackgroundDispatcherOptions)
 		const runGeneration = async (backgroundSignal: AbortSignal): Promise<void> => {
 			if (runtime.threads.get(runId)?.generation !== generation) return;
 			if (isolation === "worktree" && !worktree) {
-				const prepared = await createWorktreeIsolation(originalCwd, { tempBaseDir: worktreesRoot });
-				if (runtime.threads.get(runId)?.generation !== generation || backgroundSignal.aborted) {
-					await prepared.discard().catch(() => undefined);
-					return;
+				let prepared: WorktreeIsolation | undefined;
+				try {
+					prepared = await createWorktreeIsolation(originalCwd, { tempBaseDir: worktreesRoot });
+				} catch (error) {
+					if (!startOptions.automaticIsolation || !(error instanceof WorktreeUnavailableError)) throw error;
+					if (runtime.threads.get(runId)?.generation !== generation || backgroundSignal.aborted) return;
+					isolation = "shared";
+					thread.isolation = "shared";
+					pending.isolation = "shared";
+					delete pending.integrationStatus;
+					pending.isolationNote = `Using the caller's directory: ${error.reason}; automatic worktree isolation is unavailable.`;
+					route = resolvedRoute;
+					monitor.setIsolation(runId, "shared");
+					runCtx.ui.notify(`#${runId}: ${pending.isolationNote}`, "info");
+					installCurrentLifecycle();
 				}
-				worktree = prepared;
-				executionCwd = prepared.cwd;
-				worktreeGroup = worktreeGroupId(prepared);
-				thread.worktree = prepared;
-				thread.executionCwd = executionCwd;
-				monitor.setIsolation(runId, "worktree", "pending", worktreeGroup);
-				installCurrentLifecycle();
+				if (prepared) {
+					if (runtime.threads.get(runId)?.generation !== generation || backgroundSignal.aborted) {
+						await prepared.discard().catch(() => undefined);
+						return;
+					}
+					worktree = prepared;
+					executionCwd = prepared.cwd;
+					worktreeGroup = worktreeGroupId(prepared);
+					thread.worktree = prepared;
+					thread.executionCwd = executionCwd;
+					monitor.setIsolation(runId, "worktree", "pending", worktreeGroup);
+					installCurrentLifecycle();
+				}
 			}
 			// Independent runs start immediately; only worktree integration serializes.
 			monitor.setWaitReason(runId, "starting");
@@ -285,6 +304,7 @@ export function createBackgroundDispatcher(options: BackgroundDispatcherOptions)
 			result.runId = runId;
 			result.projectCwd = originalCwd;
 			result.isolation = isolation;
+			if (pending.isolationNote) result.isolationNote = pending.isolationNote;
 			thread.task = result.task;
 			thread.sessionId = result.sessionId;
 			thread.sessionDir = result.sessionDir;

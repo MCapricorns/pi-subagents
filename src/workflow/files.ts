@@ -16,9 +16,11 @@
  */
 
 import { type Dirent, existsSync, readdirSync, readFileSync, statSync } from "node:fs";
+import { chmod, readFile, rename, rm, stat, writeFile } from "node:fs/promises";
 import { basename, dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
-import { CONFIG_DIR_NAME, getAgentDir, parseFrontmatter } from "@earendil-works/pi-coding-agent";
+import { CONFIG_DIR_NAME, getAgentDir, parseFrontmatter, withFileMutationQueue } from "@earendil-works/pi-coding-agent";
+import { migrateStoredAgentName, migrateStoredWorkflowRoles } from "../configuration/role-migration.ts";
 import type { WorkflowPlanInput } from "./plan.ts";
 
 /** Which workflow directories discovery reads. Same precedence as the templates
@@ -74,9 +76,10 @@ function asPlan(value: unknown, fallbackName: string): WorkflowPlanInput | undef
 	};
 }
 
+const JSON_FENCE = /^[ \t]*```json[ \t]*\r?\n([\s\S]*?)^[ \t]*```/mu;
+
 function fencedJson(body: string): string | undefined {
-	const match = /^[ \t]*```json[ \t]*\r?\n([\s\S]*?)^[ \t]*```/mu.exec(body);
-	return match?.[1];
+	return JSON_FENCE.exec(body)?.[1];
 }
 
 /** Read one definition file. Returns an error string instead of throwing so a
@@ -121,6 +124,44 @@ export function readWorkflowFile(
 	return {
 		definition: { name: plan.name ?? name, ...(description ? { description } : {}), plan, filePath, source },
 	};
+}
+
+/** Migrate an already trusted, selected saved definition on disk. Discovery
+ * stays read-only; inline input is never translated into a different role. */
+export async function migrateWorkflowDefinition(definition: WorkflowDefinition): Promise<WorkflowDefinition> {
+	if (definition.source === "builtin" || !definition.plan.nodes.some((node) =>
+		typeof node?.agent === "string" && migrateStoredAgentName(node.agent.trim()) !== node.agent.trim(),
+	)) return definition;
+
+	return withFileMutationQueue(definition.filePath, async () => {
+		const content = await readFile(definition.filePath, "utf8");
+		const isJson = /\.json$/iu.test(definition.filePath);
+		// parseFrontmatter normalizes newlines and trims the body; retain the raw
+		// prefix here so migration changes only the JSON block.
+		const bodyOffset = /^\uFEFF?---[\s\S]*?\r?\n---[^\r\n]*(?:\r?\n|$)/u.exec(content)?.[0].length ?? 0;
+		const body = content.slice(bodyOffset);
+		const json = isJson ? content : fencedJson(body);
+		if (json === undefined) throw new Error(`Cannot migrate workflow ${definition.filePath}: missing JSON block.`);
+		const parsed: unknown = JSON.parse(json);
+		if (migrateStoredWorkflowRoles(parsed)) {
+			const newline = content.includes("\r\n") ? "\r\n" : "\n";
+			const serialized = JSON.stringify(parsed, null, 2).replace(/\n/gu, newline) + newline;
+			const nextBody = body.replace(JSON_FENCE, (block, source: string) => block.replace(source, () => serialized));
+			const next = isJson ? serialized : content.slice(0, bodyOffset) + nextBody;
+			const temporary = `${definition.filePath}.${process.pid}.${Date.now()}.tmp`;
+			try {
+				const { mode } = await stat(definition.filePath);
+				await writeFile(temporary, next, { encoding: "utf8", mode });
+				await chmod(temporary, mode);
+				await rename(temporary, definition.filePath);
+			} finally {
+				await rm(temporary, { force: true }).catch(() => undefined);
+			}
+		}
+		const current = readWorkflowFile(definition.filePath, definition.source);
+		if (!current.definition) throw new Error(current.error ?? `Cannot read migrated workflow ${definition.filePath}.`);
+		return current.definition;
+	});
 }
 
 function loadDefinitionsFromDir(dir: string, source: WorkflowSource): WorkflowDefinition[] {

@@ -91,7 +91,7 @@ function renderBoard(groups: TaskGroup[], theme: Theme, width: number, overview?
 		selected.add(row);
 		used += cost;
 	}
-	// Completed graphs still report their progress without listing every completed node.
+	// Keep graph status visible even when no actionable node rows remain.
 	for (const group of sorted) {
 		if (!group.rows.length && group.header && used < capacity) { included.add(group); used++; }
 	}
@@ -120,7 +120,7 @@ function workflowGroup(graph: WorkflowRun, runs: readonly RunView[], theme: Them
 	const count = (state: WorkflowNodeRun["state"]) => graph.nodes.filter((node) => node.state === state).length;
 	const completed = count("completed");
 	const progress = completed + "/" + graph.nodes.length + " completed";
-	const color = graph.state === "failed" ? "error" : graph.state === "completed" ? "success" : "accent";
+	const color = graph.state === "failed" ? "error" : "accent";
 	const name = theme.fg(color, theme.bold("Workflow #" + graph.id + " · " + graph.name));
 	const parts = [progress, ...(["failed", "blocked", "pending"] as const).filter((state) => count(state))
 		.map((state) => count(state) + " " + (state === "pending" ? "waiting" : state))];
@@ -150,7 +150,7 @@ export function formatSubagentWidgetLines(
 ): string[] {
 	if (width <= 0) return [];
 	const graphIds = new Set(workflows.map((graph) => graph.id));
-	const visibleWorkflows = workflows.filter((graph) => graph.state !== "stopped");
+	const visibleWorkflows = workflows.filter((graph) => graph.state !== "stopped" && graph.state !== "completed");
 	const standalone = runs.filter((run) => (!run.workflow || !graphIds.has(run.workflow.workflowId)) && (isRunActiveStatus(run.status) || run.status === "failed"));
 	const groups = visibleWorkflows.map((graph) => workflowGroup(graph, runs, theme, width, now));
 	if (standalone.length) {

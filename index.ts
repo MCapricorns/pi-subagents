@@ -27,6 +27,7 @@ import { runSetup } from "./src/configuration/setup.ts";
 import { loadBuiltinAgents } from "./src/delegation/agents.ts";
 import { registerSubagentTool } from "./src/delegation/dispatch.ts";
 import { buildDelegationDirective, installDelegationSections } from "./src/delegation/prompt.ts";
+import { pendingWorkflowLeases, registerMainOwnershipGuard } from "./src/delegation/ownership.ts";
 import { currentSubagentDepth } from "./src/execution/spawn.ts";
 import { createDispatchCore } from "./src/lifecycle/dispatch-core.ts";
 import { registerCancellationHooks } from "./src/lifecycle/cancellation.ts";
@@ -78,6 +79,7 @@ export default function (pi: ExtensionAPI): void {
 	registerWorkflowTool(pi, runtime, dispatchCore);
 	registerLookupTools(pi, runtime, dispatchCore);
 	registerCancellationHooks(pi, runtime);
+	registerMainOwnershipGuard(pi, runtime);
 
 	pi.registerCommand("subagents-setup", {
 		description: "Configure pi-subagents: model and thinking per role",
@@ -118,7 +120,7 @@ export default function (pi: ExtensionAPI): void {
 	pi.on("before_agent_start", async (event) => {
 		await runtime.durableRestore;
 		const agents = loadBuiltinAgents();
-		const sources = [...runtime.threads.values()];
+		const sources = [...runtime.threads.values(), ...pendingWorkflowLeases(runtime)];
 		const sections = event.systemPromptOptions?.sections;
 		if (sections) {
 			installDelegationSections(sections, agents, sources);

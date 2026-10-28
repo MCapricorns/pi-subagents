@@ -532,6 +532,24 @@ describe("subagent_workflow tool", () => {
 		} finally { await h.runtime.shutdown(); await rm(root, { recursive: true, force: true }); }
 	});
 
+	it("migrates trusted saved roles on disk while rejecting retired inline names", async () => {
+		const root = await mkdtemp(join(tmpdir(), "pi-workflow-role-migrate-"));
+		const h = toolHarness(join(root, "config.json"));
+		try {
+			const file = join(root, "graph.json");
+			const content = JSON.stringify({ nodes: [{ id: "review", agent: "reviewer", task: "Inspect the implementation" }] });
+			await writeFile(file, content);
+			await assert.rejects(execute(h.tool, { file }, root), /trusted project/);
+			assert.equal(await readFile(file, "utf8"), content);
+			await assert.rejects(execute(h.tool, { nodes: [{ id: "review", agent: "reviewer", task: "Inspect implementation" }] }, root), /not an enabled agent/);
+			assert.equal(h.started.length, 0);
+			const response = await h.tool.execute("saved", { file }, new AbortController().signal, undefined, { ...ctx(root), isProjectTrusted: () => true }) as any;
+			assert.equal(response.details.workflow.nodes[0].agent, "sentinel");
+			assert.equal(JSON.parse(await readFile(file, "utf8")).nodes[0].agent, "sentinel");
+			await until(() => h.messages.length === 1);
+		} finally { await h.runtime.shutdown(); await rm(root, { recursive: true, force: true }); }
+	});
+
 	it("honors saved graph name and description overrides", async () => {
 		const root = await mkdtemp(join(tmpdir(), "pi-workflow-name-"));
 		const h = toolHarness(join(root, "config.json"));

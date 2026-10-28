@@ -12,6 +12,7 @@ import { Text } from "@earendil-works/pi-tui";
 import { Type } from "typebox";
 import { isWriteCapableAgent, loadBuiltinAgents } from "../delegation/agents.ts";
 import { defaultIsolationMode, IsolationSchema, PhaseIdSchema, ScopeSchema } from "../delegation/dispatch.ts";
+import { findRuntimeWriterConflict } from "../delegation/ownership.ts";
 import { loadConfig } from "../configuration/config.ts";
 import type { SubagentRuntime } from "../lifecycle/runtime.ts";
 import type { DispatchCore } from "../lifecycle/dispatch-core.ts";
@@ -26,7 +27,7 @@ import {
 	workflowStatus,
 	type WorkflowStatusView,
 } from "./engine.ts";
-import { resolveWorkflowDefinition } from "./files.ts";
+import { migrateWorkflowDefinition, resolveWorkflowDefinition } from "./files.ts";
 import { compileWorkflow, WORKFLOW_NODE_ID_MAX_LENGTH, type WorkflowPlanInput } from "./plan.ts";
 
 const WorkflowNodeSchema = Type.Object({
@@ -94,7 +95,7 @@ function launchReceipt(status: WorkflowStatusView): string {
 			return parts.join(" · ");
 		}),
 		"",
-		"The graph dispatches each dependent the moment its prerequisites settle, with no further dispatch from you. One summary arrives when the whole graph settles; continue disjoint work or end your turn, and do not poll. Ready independent nodes start together without a process-count limit.",
+		"Every node is owned by this graph, including nodes waiting on dependencies. Do not perform or redispatch their work in main or another agent. The graph dispatches dependents automatically and sends one summary; continue only disjoint work or end your turn, and do not poll.",
 	];
 	return lines.join("\n");
 }
@@ -134,7 +135,7 @@ export function registerWorkflowTool(pi: ExtensionAPI, runtime: SubagentRuntime,
 		name: "subagent_workflow",
 		label: "Subagent Workflow",
 		description:
-			"Run a dependency graph of sub-agent phases: declare nodes with dependsOn, and the runtime dispatches each dependent as soon as its prerequisites settle. Choose this proactively for two or more substantial phases with known dependencies and writer scopes, when scheduling saves coordination. Use subagent tasks for independent work with no dependency edges; keep small or tightly coupled work in main. If a result must decide the next task or its scope, dispatch that phase alone, decide in main, then reassess whether a graph fits. Never add research, review, or gate nodes by habit. A graph saves dispatch turns; it does not plan or judge success beyond process results. One summary arrives when the graph settles. Nodes are ordinary one-shot runs; main still owns integration, the final gate, and release.",
+			"Run a fixed dependency graph for substantial phases with known scopes. dependsOn starts a node after prerequisites finish and integrate. Pending nodes already own their work; main must not execute or redispatch it. Duplicate phases and external writer conflicts reject the graph before any child starts. Independent work without dependency edges uses subagent tasks. If a result must decide the next phase, dispatch it alone and decide in main. Omit isolation for automatic selection. One summary arrives after settlement; main checks outcomes, integrates, and releases.",
 		exposure: "model-only",
 		executionMode: "parallel",
 		annotations: {
@@ -178,7 +179,7 @@ export function registerWorkflowTool(pi: ExtensionAPI, runtime: SubagentRuntime,
 				if (resolved.error || !resolved.definition) {
 					throw new Error((resolved.error ?? "workflow definition could not be read") + ". No nodes were started.");
 				}
-				const definition = resolved.definition;
+				const definition = await migrateWorkflowDefinition(resolved.definition);
 				plan = {
 					name: params.name ?? definition.plan.name ?? definition.name,
 					...(params.description ?? definition.description
@@ -224,6 +225,13 @@ export function registerWorkflowTool(pi: ExtensionAPI, runtime: SubagentRuntime,
 				);
 			}
 
+			for (const node of workflow.nodes) {
+				const agent = agents.find((candidate) => candidate.name === node.agent)!;
+				if (!node.scope || !isWriteCapableAgent(agent, toolInfos)) continue;
+				const conflict = findRuntimeWriterConflict(runtime, node.scope);
+				if (conflict) throw new Error(`Workflow node "${node.id}" scope ${conflict.overlap.left} overlaps ${conflict.owner} scope ${conflict.overlap.right}. No nodes were started.`);
+			}
+
 			const handle = startWorkflow(
 				{
 					runtime,
@@ -231,7 +239,6 @@ export function registerWorkflowTool(pi: ExtensionAPI, runtime: SubagentRuntime,
 					resolveIsolation: (agentName) => {
 						const agent = agents.find((candidate) => candidate.name === agentName);
 						return defaultIsolationMode(
-							"parallel",
 							agentName,
 							undefined,
 							agent ? isWriteCapableAgent(agent, toolInfos) : undefined,

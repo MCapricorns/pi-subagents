@@ -20,7 +20,7 @@ Esc returns without applying a picker selection, and the grid keeps the focused
 cell. Model pickers support search, paste, and paging.
 
 All roles follow the main model by default; thinking defaults to `low` for scout
-and `high` for artisan, reviewer, and critic. The panel distinguishes defaults from overrides and
+and `high` for artisan, sentinel, and skeptic. The panel distinguishes defaults from overrides and
 shows the effective level when model capabilities clamp a preference. Changing
 a model preserves the thinking preference. Settings live in
 `~/.pi/agent/pi-subagents.json` as `agentModels` and `agentThinkingLevels`.
@@ -31,13 +31,26 @@ a model preserves the thinking preference. Settings live in
 | --- | --- | --- |
 | `scout` | Code, documentation, and web research with citations | Read-only tools; no commands or edits |
 | `artisan` | Implementation and fixes with tests and checks | Parent's tool surface, including codemode |
-| `reviewer` | Code review for correctness and regressions | Parent's tool surface; instructed not to edit |
-| `critic` | Adversarial review of changes or findings | Parent's tool surface; instructed not to edit |
+| `sentinel` | Inspect an implementation or diff against requirements and callers | Parent's tool surface; instructed not to edit |
+| `skeptic` | Test a named claim, assumption, or review finding with counterexamples | Parent's tool surface; instructed not to edit |
 
-Reviewer and critic may run checks, so their no-edit boundary is an instruction,
-not a tool-enforced restriction. Configure each role independently. Choose the
-reviewer or critic for the question at hand; use both only for distinct risks.
-Change reviews focus on introduced defects; a wider audit needs an explicit brief.
+The main model chooses from these role descriptions; names alone do not route a
+task. Use `sentinel` for "inspect this diff" and `skeptic` for "does this claim
+hold?" Default to one. Both are justified only by distinct questions, such as
+reviewing an implementation and then testing its specific findings. A skeptic
+without a named claim reports the gap and stops instead of starting another review.
+
+Sentinel and skeptic may run focused checks, so their no-edit boundary is an
+instruction, not a tool-enforced restriction. Change reviews focus on introduced
+defects; a wider audit needs an explicit brief. All roles reuse existing facts
+and valid checks, filling gaps rather than repeating main or upstream work.
+
+Only `scout`, `artisan`, `sentinel`, and `skeptic` are valid runtime role names.
+Existing model/thinking settings and interrupted run records migrate on load
+and are saved with the new names. Explicit valid settings under the new names
+win. A selected trusted saved workflow is migrated on disk before compilation;
+its briefs, node ids, and dependency edges are preserved. Discovery remains
+read-only. New tool calls and inline graphs using retired names are rejected.
 
 Children receive a self-contained brief and project instructions, but no parent
 conversation. They cannot delegate or release. Main owns planning, integration,
@@ -54,7 +67,7 @@ Explicit requests to work in main or avoid subagents take precedence.
 Use one owner per deliverable, including its regression tests. Brief the child
 with the outcome, done condition, relevant paths, established evidence, write
 boundaries, required checks, and a compact expected result. Scout retrieves
-sources; artisan implements, while reviewer and critic can execute checks. This policy applies the context-isolation,
+sources; artisan implements, while sentinel and skeptic can execute focused checks. This policy applies the context-isolation,
 focused-role, and coordination-cost guidance in the official
 [Codex subagents](https://developers.openai.com/codex/subagents) and
 [Claude Code subagents](https://code.claude.com/docs/en/sub-agents) docs to Pi's
@@ -102,6 +115,21 @@ including in one-shot `pi -p` sessions. Use stable `phaseId` values: completed
 phases stay owned for the parent session, and interrupted phases retain ownership
 across reloads. Repeating the same task in the same cwd is also rejected.
 
+Ownership includes main, individual runs, and workflow nodes still waiting on
+dependencies. Main continues only disjoint work and passes its completed research
+and checks into the child brief. Pending graph nodes reserve their declared write
+scopes; external conflicts reject a batch or graph before any child starts.
+Main `edit`/`write` calls, including nested calls through `codemode`, are blocked
+on those scopes. In-flight main writes also prevent conflicting dispatches.
+Stopped writers keep their claims until execution and integration finish.
+
+These checks use declared phase identity and exact paths/symbols. Main file writes
+conservatively conflict with any claimed symbol in that file. Omitted scopes,
+arbitrary shell/custom-tool effects, symlink aliases, and differently worded work
+without a shared phase id cannot be inferred reliably; this is coordination,
+not a sandbox or semantic duplicate detector. Use `subagent_status` to inspect
+phase/scope ownership; an exact run id also retrieves its retained result for reuse.
+
 ## Workflows
 
 Main proactively chooses `subagent_workflow` for two or more substantial phases
@@ -127,10 +155,9 @@ subagent_workflow({
     },
     {
       id: "review",
-      agent: "critic",
-      isolation: "shared",
+      agent: "sentinel",
       dependsOn: ["fix"],
-      task: "Try to disprove this fix: inspect callers and edge cases, then run focused checks. Do not edit files.\n{{fix}}",
+      task: "Inspect the implementation against the refresh contract and callers. Reuse valid checks and investigate concrete gaps. Do not edit files.\n{{fix}}",
     },
   ],
 });
@@ -141,8 +168,8 @@ subagent_workflow({
 facts. Long answers include a full-result file. A failed node blocks its
 dependents; independent branches continue. The graph delivers one summary.
 
-Reviews seek counterexamples and try to disprove findings. Add independent
-confirmation and synthesis when risk warrants them; combine stages for small tasks.
+Reviews inspect implementations; claim verification tests named findings or
+assumptions. Add independent verification only when its distinct work earns the cost.
 
 Saved definitions use JSON or Markdown with a `json` fenced block:
 
@@ -154,8 +181,9 @@ subagent_workflow({ file: ".pi/workflows/code-review.md" });
 Definitions load from `.pi/workflows/`, `~/.pi/agent/workflows/`, and the shipped
 [templates](./workflows), in that order of precedence. Project definitions and
 explicit file paths require project trust. Customize template questions, targets,
-and scopes before running them. The broad `code-review` template uses four nodes;
-its critic verifies findings and returns the final review. The `migration`
+and scopes before running them. The `code-review` template has two nodes:
+sentinel reviews the target, then skeptic verifies only the reported claims and
+returns the final review. An ordinary review uses one sentinel. The `migration`
 template passes the shared interface contract to every slice and declares the
 closing gate's write scope. Run the full integrated gate once in main or a closing
 node, and repeat it when later edits or unresolved failures warrant it.
@@ -179,22 +207,30 @@ workflow progress groups, and task rows with status and elapsed time at the righ
 Activity, model, thinking, token usage, and worktree state use secondary lines as
 space permits. Task identities take priority over detail; failed and blocked
 work takes priority over ordinary activity. Completed nodes collapse into graph
-progress, and overflow reports hidden tasks. Runs preparing their child process
-show `starting`. There is no process-count limit or shared-checkout startup
+progress while their workflow is running. Successfully completed workflows hide
+automatically, while failed or blocked work stays visible until the next dispatch.
+Completion messages and status lookups retain the results. Overflow reports
+hidden tasks. Runs preparing their child process show `starting`. There is no
+process-count limit or shared-checkout startup
 lock: independent runs start together, including separate dispatch calls while
 another call awaits results.
 
-Single writers use the shared checkout. Parallel writers and workflow writers
-default to detached worktrees, which require a committed `HEAD`. Each worktree
-starts from the caller's current tracked files and non-ignored untracked files,
-including uncommitted changes. Its initial snapshot is also the integration base,
-so dependent tasks and follow-ups see earlier results without reapplying them.
-The caller's index, branch, and `HEAD` stay unchanged. Set `isolation: "shared"`
-to run directly in the checkout without a repository-wide launch lock. Declare exact write paths or symbols in `scope` to detect conflicts.
-Duplicate phases and declared writer overlaps are still rejected. Worktrees
-isolate Git changes, not tool permissions. Only final worktree integration into
-the original checkout is serialized; it leaves your index untouched, and failures
-retain recovery artifacts.
+Usually omit `isolation`: implementation tasks use detached Git worktrees in
+single calls, parallel batches, and workflows. Reading and review use the current
+directory. Without a Git repository or committed `HEAD`, automatic isolation uses
+the caller's directory and reports why. Unexpected setup or integration failures
+remain failures; an explicit `isolation: "worktree"` requires isolation and never
+falls back. `isolation: "shared"` is an advanced override for tasks that need to
+write directly in the caller's checkout.
+
+Each worktree starts from the caller's current tracked files and non-ignored
+untracked files, including uncommitted changes. Its initial snapshot is also the
+integration base, so dependent tasks see earlier results without reapplying them.
+The caller's index, branch, and `HEAD` stay unchanged. Declare exact write paths
+or symbols in `scope` to detect conflicts. Worktrees isolate Git changes, not
+tool permissions. Independent tasks start together; only the final application
+of worktree changes to the original checkout is serialized. Integration leaves
+your index untouched, and failures retain recovery artifacts.
 
 Cancelling the parent run with Escape stops unfinished work without waking the
 parent. A cancellation receipt is supplied on the next user turn with the stopped
@@ -224,6 +260,8 @@ admission and isolation still apply. Pending runs cannot be steered, and fixed
 workflow graphs cannot be edited.
 
 Children use Pi's native `--mode rpc` CLI, retries, and session persistence.
+On Windows, background child console windows stay hidden; RPC communication and
+process-tree cancellation remain active.
 A settled provider failure can hand off once to the main model in the same
 session. State and full-result files live under
 `~/.pi/agent/ferris-pi-subagents/`, grouped by project. `PI_CODING_AGENT_DIR`

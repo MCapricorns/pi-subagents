@@ -87,7 +87,7 @@ export function registerLookupTools(pi: ExtensionAPI, runtime: SubagentRuntime, 
 	pi.registerTool({
 		name: "subagent_status",
 		label: "Subagent Status",
-		description: "Check live subagent progress without waiting or changing execution: state, elapsed time, an activity trail (what the run has been doing), and failure diagnostics. Omit id to list runs. Results arrive automatically in completion messages; use this to inspect progress, not as a polling loop.",
+		description: "Inspect run or workflow ownership, progress, and failures. An exact run id also returns its retained result so completed work can be reused. Omit id to list runs. Results arrive automatically; do not poll.",
 		exposure: "model-only",
 		executionMode: "parallel",
 		annotations: {
@@ -134,6 +134,7 @@ export function registerLookupTools(pi: ExtensionAPI, runtime: SubagentRuntime, 
 					resultFile: result?.resultFile,
 					sessionDir: thread.retired ? undefined : thread.sessionDir ?? result?.sessionDir,
 					isolation: thread.isolation,
+					isolationNote: result?.isolationNote,
 					integrationStatus: live?.integrationStatus ?? result?.integrationStatus ?? thread.worktree?.state,
 					integrationError: result?.integrationError,
 					integrationWorktreePath: result?.integrationWorktreePath ?? (state === "interrupted" ? thread.worktree?.worktreePath : undefined),
@@ -145,6 +146,9 @@ export function registerLookupTools(pi: ExtensionAPI, runtime: SubagentRuntime, 
 				: runs.map((run) => {
 					const wait = run.waitReason ? ` — ${runWaitLabel({ status: "queued", waitReason: run.waitReason })}` : "";
 					const lines = [`#${run.id} ${run.agent} · ${run.state} · ${formatDuration(run.elapsedMs)}${wait}`, `  task: ${run.taskSummary}`];
+					if (run.phaseId) lines.push(`  phase: ${run.phaseId}`);
+					if (run.scope) lines.push(`  scope: ${JSON.stringify(run.scope)}`);
+					if (run.isolationNote) lines.push(`  isolation: ${run.isolationNote}`);
 					// The trail is the progress answer: what the run has been doing,
 					// newest last. It replaces pointing the parent at child session
 					// files, which it cannot usefully read mid-run.
@@ -176,7 +180,14 @@ export function registerLookupTools(pi: ExtensionAPI, runtime: SubagentRuntime, 
 				...workflowRuns.map((run) => formatWorkflowStatus(run).join("\n")),
 				...retainedWorkflows.map((record) => formatRetainedWorkflow(record).join("\n")),
 			] : [];
-			const sections = [text, ...workflowSections].filter((section) => section.trim().length > 0);
+			const selected = params.id === undefined ? undefined : runtime.threads.get(params.id);
+			const retainedResult = selected ? runtime.settledRuns.get(selected.id) ?? selected.lastResult : undefined;
+			const evidence = retainedResult && retainedResult.exitCode !== -1
+				? retainedResult.resultFile
+					? `Read the retained result: ${retainedResult.resultFile}`
+					: formatCompletionBlock(retainedResult, DEFAULT_MAX_RESULT_LINES, { resultRoot: projectResultsRoot(runtime.configPath, selected!.cwd) })
+				: "";
+			const sections = [text, ...workflowSections, evidence].filter((section) => section.trim().length > 0);
 			const unknownWorkflow = workflowId !== undefined && workflowRuns.length === 0 && retainedWorkflows.length === 0;
 			return {
 				content: [{

@@ -41,6 +41,8 @@ export interface RunResult {
 	runId?: number;
 	/** Filesystem isolation selected for this logical thread. */
 	isolation?: IsolationMode;
+	/** Why automatic isolation used the caller's directory instead. */
+	isolationNote?: string;
 	/** Final integration state for a worktree-isolated settlement. */
 	integrationStatus?: "pending" | WorktreeFinalizationStatus;
 	integrationApplied?: boolean;

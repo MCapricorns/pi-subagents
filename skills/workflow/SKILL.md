@@ -50,13 +50,13 @@ confirmation, and gate nodes merely to follow a template.
 ```ts
 subagent_workflow({
   name: "auth-fix",
-  description: "Fix the refresh race and challenge the result.",
+  description: "Fix the refresh race and inspect the implementation.",
   nodes: [
     { id: "map", agent: "scout", task: "Trace the refresh race in src/auth. Cite path:line and test coverage gaps." },
     { id: "fix", agent: "artisan", task: "Fix the race and add its regression tests. Evidence:\n{{map}}", dependsOn: ["map"],
       scope: { paths: ["src/auth", "test/auth.test.ts"] } },
-    { id: "review", agent: "critic", isolation: "shared",
-      task: "Try to disprove the fix: inspect callers and edge cases, then run the documented checks. Report evidence and unresolved risks; do not edit files.\n{{fix}}",
+    { id: "review", agent: "sentinel",
+      task: "Inspect the implementation against the refresh contract and callers. Reuse completed checks; investigate concrete gaps and report confirmed defects. Do not edit files.\n{{fix}}",
       dependsOn: ["fix"] },
   ],
 });
@@ -81,21 +81,20 @@ The shapes that are worth writing, in the order they usually appear:
 - **Fan-out with a join.** Independent slices of one plan run at the same time; a
   join node depends on all of them. Declare disjoint `scope.paths` per slice —
   the compiler rejects overlapping scopes between nodes with no dependency edge.
-- **Adversarial review and confirmation.** Reviewers seek counterexamples;
-  confirmation tries to disprove their findings against callers, invariants,
-  and focused reproductions. Use different lenses for independent reviewers.
-  Distinguish reproduced, source-supported, disproved, and unverified findings.
-  Use reviewer or critic when commands are required; scout cannot execute a reproduction.
+- **Implementation review → claim verification.** A sentinel inspects the diff
+  against requirements and callers. A skeptic tests only its named findings or a
+  stated design assumption. Do not ask both for a general review. Reuse valid
+  checks; add the second phase only when independent verification earns its cost.
+  Both may run focused reproductions; scout cannot execute commands.
 - **A closing gate.** Run the project's required checks on the integrated result
   in main or one closing node. Keep focused regression checks with the writer;
   reuse a completed full gate unless later edits, failures, or unresolved
   concerns invalidate it. A separate gate node must justify its own session.
 
-Choose depth for the risk. A reviewer, independent confirmer, and synthesis
-node are reasonable for a large or sensitive change; a focused review can
-combine stages or leave synthesis to main. Every extra node should answer a
-different question. Keep a fix and its regression tests with one owner. Choose
-reviewer or critic for the question at hand; use both only for distinct risks.
+Choose depth for the risk. Use sentinel for an implementation review, skeptic
+for a named assumption or finding, and both only for distinct questions. Every
+extra node should deliver new evidence. Keep a fix and its regression tests with
+one owner.
 A review request authorizes findings; apply fixes only when changes are also
 authorized. Request focused confirmation when material uncertainty remains.
 
@@ -174,12 +173,18 @@ node expects to write:
 - Two nodes with no dependency edge may not claim overlapping paths — the graph
   is rejected before anything starts. A dependency edge makes the overlap
   intentional (a fix, then its own test file).
-- Externally, declared scopes are still checked against live runs at dispatch
-  time, so a node that conflicts with unrelated work fails alone.
-- Write-capable nodes default to a detached Git worktree in a graph, initialized
-  from the caller's current tracked and non-ignored untracked files. That snapshot
-  is also the integration base, so each node sees integrated prerequisites even
-  before they are committed, and only its own delta is applied on settlement.
+- External writer conflicts are rejected before any node starts. All pending
+  nodes reserve their declared write scope, including while dependencies run.
+  Main `edit`/`write` calls and other dispatches respect these reservations.
+  Ordered nodes in the same graph may reuse a scope after their prerequisites
+  settle. Arbitrary commands and undeclared writes are not sandboxed.
+- Usually omit `isolation`. Implementation nodes use a detached Git worktree,
+  initialized from the caller's current tracked and non-ignored untracked files.
+  Reading and review stay in the caller's directory. Without a Git repository or
+  committed HEAD, automatic isolation uses the current directory and reports why.
+  An explicit `worktree` override requires isolation and never falls back.
+  Each isolated snapshot is also the integration base, so nodes see integrated
+  prerequisites before commit and only their own delta is applied on settlement.
 - A stopped run retains phase and writer leases while its child or finalization
   can still change files, including after the stop call's bounded wait expires.
 
@@ -217,8 +222,11 @@ run's claim.
 Every node is a full model session with its own context, and the summary carries
 each node's answer. Budget accordingly:
 
-- Give each phase one owner. Add separate review, confirmation, and synthesis
-  when their distinct work justifies the cost; combine them for bounded tasks.
+- Give each phase one owner across main, subagent, and workflow, including
+  pending nodes. Main continues only disjoint work. Pass completed main findings
+  and checks into briefs; later nodes fill gaps instead of restarting research.
+- Use sentinel for implementation defects or skeptic for a named claim. Add both
+  only for distinct questions; reuse valid checks across every owner.
 - Keep node answers short: conclusions, paths, `command → result`.
 - Choose nodes from independent work; do not split one tightly coupled change
   across nodes just to increase concurrency.
@@ -245,7 +253,7 @@ One completion message per graph:
 ### workflow auth-fix completed (3/3 completed)
 - map (scout) completed · run #12 · 1m02s
 - fix (artisan) completed · run #13 · 4m11s
-- review (critic) completed · run #15 · 2m40s
+- review (sentinel) completed · run #15 · 2m40s
 
 Node answers:
 #### map

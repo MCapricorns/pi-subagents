@@ -20,6 +20,7 @@ import { uptime } from "node:os";
 import { dirname, isAbsolute, join, relative, resolve } from "node:path";
 import type { UsageStats } from "../execution/run-control.ts";
 import { normalizePhaseId, normalizePhaseScope, type PhaseScope } from "../delegation/phase-scope.ts";
+import { migrateStoredRecordRoles } from "../configuration/role-migration.ts";
 import type { SubagentThread } from "./runtime.ts";
 import { getResultOutput, isFailedResult, getProjectRoot, getSubagentsRoot, type SingleResult } from "../execution/spawn.ts";
 import { isManagedSessionDir, isManagedWorktreeLayout, samePath } from "../isolation/managed-paths.ts";
@@ -211,6 +212,7 @@ function normalizeRecord(value: unknown): ThreadRecord | undefined {
 
 interface ThreadManifestRead {
 	valid: boolean;
+	rolesMigrated?: boolean;
 	sourceCount: number;
 	records: ThreadRecord[];
 }
@@ -219,8 +221,11 @@ async function readManifest(path: string): Promise<ThreadManifestRead> {
 	try {
 		const parsed = JSON.parse(await readFile(path, "utf8")) as { records?: unknown };
 		if (!Array.isArray(parsed.records)) return { valid: false, sourceCount: 0, records: [] };
+		let rolesMigrated = false;
+		for (const record of parsed.records) rolesMigrated = migrateStoredRecordRoles(record) || rolesMigrated;
 		return {
 			valid: true,
+			rolesMigrated,
 			sourceCount: parsed.records.length,
 			records: parsed.records.flatMap((record) => {
 				const normalized = normalizeRecord(record);
@@ -304,7 +309,7 @@ export async function readThreadRecords(configPath: string): Promise<ThreadRecor
 			.map((path) => withFileMutationQueue(path, async () => {
 				const manifest = await readManifest(path);
 				const validated = await validatedManifestRecords(configPath, path, manifest.records);
-				if (!manifest.valid || validated.length !== manifest.sourceCount) await writeManifest(path, validated);
+				if (!manifest.valid || manifest.rolesMigrated || validated.length !== manifest.sourceCount) await writeManifest(path, validated);
 				return validated;
 			})),
 	);

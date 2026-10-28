@@ -37,8 +37,9 @@ describe("buildDelegationDirective", () => {
 	it("routes the four built-in roles without inventing extra phases", () => {
 		const directive = buildDelegationDirective(loadBuiltinAgents());
 		assert.match(directive, /Work directly for small, familiar, or tightly coupled tasks/u);
-		assert.match(directive, /parallel progress, keeping noisy research out of main, or an independent check outweighs startup, briefing, and integration cost/u);
-		assert.match(directive, /`scout` for cited research, `artisan` for implementation, `reviewer` for review, and `critic` to challenge changes or findings/u);
+		assert.match(directive, /parallel work, isolated research, or independent verification saves more than startup and coordination cost/u);
+		assert.match(directive, /`scout` for cited research, `artisan` for implementation, `sentinel` to inspect implementations, and `skeptic` to test named claims/u);
+		assert.match(directive, /Default to one: sentinel finds defects; skeptic tests a stated assumption or finding/u);
 		// The routing contract states the live tool policy without naming tools.
 		assert.match(directive, /Children inherit this session's live tool surface/u);
 		assert.match(directive, /including `codemode`/u);
@@ -57,7 +58,7 @@ describe("buildDelegationDirective", () => {
 		assert.match(directive, /Apply fixes only when authorized; otherwise report them/u);
 		assert.match(directive, /Request focused confirmation only for material uncertainty/u);
 		assert.match(directive, /Do not re-review the whole change/u);
-		assert.match(directive, /one owner, a stable `phaseId`, and exact writer `scope`/u);
+		assert.match(directive, /one owner across main, `subagent`, and workflow, including pending nodes/u);
 		assert.match(directive, /Parallelize independent phases in one call/u);
 		assert.match(directive, /never overlap writers or duplicate an owned phase/u);
 		assert.match(directive, /Dependent phases wait for prerequisites/u);
@@ -79,20 +80,22 @@ describe("buildDelegationDirective", () => {
 			assert.ok(!directive.includes(role.systemPrompt));
 		}
 		assert.match(directive, /Children have no parent conversation/u);
-		assert.match(directive, /self-contained brief: outcome, done condition, relevant paths, established evidence, write boundaries, required checks, and compact expected output/u);
+		assert.match(directive, /brief outcome, done condition, paths, existing findings\/checks, boundaries, and output/u);
+		assert.match(directive, /Pass completed main work forward; assign only gaps/u);
+		assert.match(directive, /Do not redo delegated research, edits, or checks in main/u);
 	});
 
 	it("preserves one-shot ownership and completion requirements", () => {
 		const directive = buildDelegationDirective(loadBuiltinAgents());
 		assert.match(directive, /Each run returns once/u);
-		assert.match(directive, /`subagent_message` to steer an active run or continue a completed run/u);
+		assert.match(directive, /`subagent_message` to steer or continue a run/u);
 		assert.match(directive, /Main handles failed or interrupted work from partial edits and artifacts/u);
 		assert.match(directive, /`wait: true` for an immediate dependency or one-shot session/u);
 		assert.match(directive, /completions arrive automatically and wake you; do not poll or sleep to wait/u);
 		assert.match(directive, /Conclude the overall task only after every run settles or is stopped/u);
 		assert.match(directive, /Report only checks actually run/u);
 		assert.match(directive, /repeat or broaden checks only for new changes, failures, or unresolved concerns/u);
-		assert.match(directive, /Read the full result file whenever a completion says its output is truncated/u);
+		assert.match(directive, /Read full result files when output is truncated/u);
 	});
 
 	it("shows routing only for enabled roles", () => {
@@ -129,7 +132,7 @@ describe("buildDelegationDirective", () => {
 		assert.equal(sections[DELEGATION_LEASE_SECTION], undefined);
 	});
 
-	it("renders only bounded active and settling leases", () => {
+	it("bounds active leases and retains recent results for reuse", () => {
 		const directive = buildDelegationDirective(loadBuiltinAgents(), [
 			lease({ id: 11, task: "Map dispatch ownership" }),
 			lease({ id: 12, state: "completed" }),
@@ -141,7 +144,8 @@ describe("buildDelegationDirective", () => {
 		assert.match(directive, /#11 broad reconnaissance \(scout, running\): Map dispatch ownership/u);
 		assert.match(directive, /#13 primary change \(artisan, settling\): Apply focused edit/u);
 		assert.match(directive, /2 more active leases omitted/u);
-		assert.doesNotMatch(directive, /#12|#14|#15|#16/u);
+		assert.doesNotMatch(directive, /#14|#15/u);
+		assert.match(directive, /Recent settled phases[\s\S]*#12 \(completed\)[\s\S]*#16 \(failed\)/u);
 	});
 
 	it("keeps launch receipts short and limits independence claims to parallel batches", () => {

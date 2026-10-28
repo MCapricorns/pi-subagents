@@ -7,16 +7,17 @@
  * every operational default is a constant. Parsing is defensive: invalid
  * fields fall back to defaults instead of throwing, so a hand-edited or
  * partially-written file can never break the extension at runtime. Unknown
- * keys from older versions are dropped and the normalized shape persisted back
- * on load.
+ * top-level keys from older versions are dropped; unknown role keys are retained
+ * and legacy role names migrated. The normalized shape is persisted on load.
  */
 
 import { mkdir, readFile, rename, rm, writeFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import { getAgentDir, withFileMutationQueue } from "@earendil-works/pi-coding-agent";
+import { migrateStoredRoleKeys } from "./role-migration.ts";
 
 /** Full catalog of agents shipped with the package; all of them always run. */
-export const BUILTIN_AGENT_NAMES = ["scout", "artisan", "reviewer", "critic"] as const;
+export const BUILTIN_AGENT_NAMES = ["scout", "artisan", "sentinel", "skeptic"] as const;
 
 /** Thinking levels accepted by pi's `--thinking` option. */
 const THINKING_LEVEL_VALUES = ["off", "minimal", "low", "medium", "high", "xhigh", "max"] as const;
@@ -30,8 +31,8 @@ export function roleThinkingLevel(agentName: string): ThinkingLevel {
 		case "scout":
 			return "low";
 		case "artisan":
-		case "reviewer":
-		case "critic":
+		case "sentinel":
+		case "skeptic":
 			return "high";
 		default:
 			return DEFAULT_THINKING_LEVEL;
@@ -51,11 +52,11 @@ export const AGENT_PROFILES: Record<(typeof BUILTIN_AGENT_NAMES)[number], AgentP
 	artisan: {
 		remark: "Implement one substantial change with its tests and verification.",
 	},
-	reviewer: {
-		remark: "Review code for actionable defects and verify findings without editing files.",
+	sentinel: {
+		remark: "Inspect an implementation or diff against requirements and callers for defects and regressions. No edits.",
 	},
-	critic: {
-		remark: "Challenge changes or findings with counterexamples and independent verification.",
+	skeptic: {
+		remark: "Test a named claim, design assumption, or review finding with counterexamples and focused checks. No edits.",
 	},
 };
 
@@ -102,7 +103,8 @@ function isModelReference(value: unknown): value is string {
 }
 
 /**
- * Merge a raw parsed JSON value over the defaults, dropping invalid fields.
+ * Merge a raw parsed JSON value over the defaults, dropping invalid fields and
+ * migrating legacy role names after validation so valid canonical values win.
  * Exported for tests.
  */
 export function normalizeConfig(raw: unknown): SubagentsConfig {
@@ -131,6 +133,8 @@ export function normalizeConfig(raw: unknown): SubagentsConfig {
 		}
 	}
 
+	config.agentModels = migrateStoredRoleKeys(config.agentModels);
+	config.agentThinkingLevels = migrateStoredRoleKeys(config.agentThinkingLevels);
 	return config;
 }
 

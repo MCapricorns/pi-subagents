@@ -83,6 +83,13 @@ describe("workflow widget", () => {
 		assert.equal(changes, 1);
 		store.beginTurn();
 		assert.equal(store.getWorkflows().length, 1);
+		const beforeCompletion = changes;
+		graph.state = "completed";
+		for (const node of graph.nodes) node.state = "completed";
+		store.updateWorkflow(graph);
+		assert.equal(changes, beforeCompletion + 1);
+		assert.equal(store.getWorkflows().length, 1, "completion remains available in monitor state");
+		assert.deepEqual(formatSubagentWidgetLines(store.getRuns(), store.getWorkflows(), plainTheme, 80), []);
 		graph.state = "failed";
 		store.updateWorkflow(graph);
 		assert.equal(store.getWorkflows()[0]!.state, "failed");
@@ -147,13 +154,35 @@ describe("widget layout priorities", () => {
 		assert.deepEqual(formatSubagentWidgetLines([run], [graph], plainTheme, 80), []);
 	});
 
-	it("summarizes completed graphs without flooding the board with finished nodes", () => {
+	it("hides completed graphs and their retained child rows", () => {
 		const graph = graphFixture(20);
 		graph.state = "completed";
 		for (const node of graph.nodes) node.state = "completed";
-		const lines = formatSubagentWidgetLines([], [graph], plainTheme, 80, 10_000);
-		assert.equal(lines.length, 2);
-		assert.match(lines[1]!, /20\/20 completed/u);
+		const child = { ...run(7), workflow: { workflowId: graph.id, name: graph.name, nodeId: "step0" } };
+		assert.deepEqual(formatSubagentWidgetLines([child], [graph], plainTheme, 80, 10_000), []);
+	});
+
+	it("removes completed summaries while keeping other active work and failures", () => {
+		const completed = graphFixture(1);
+		completed.state = "completed";
+		completed.nodes[0]!.state = "completed";
+		const active = graphFixture(1);
+		active.id = 4;
+		const failed = graphFixture(2);
+		failed.id = 5;
+		failed.state = "failed";
+		failed.nodes[0]!.state = "failed";
+		failed.nodes[0]!.error = "build failed";
+		failed.nodes[1]!.state = "blocked";
+		failed.nodes[1]!.error = "dependency step0 failed";
+		const text = formatSubagentWidgetLines([run(99)], [completed, active, failed], plainTheme, 120, 10_000).join("\n");
+		assert.doesNotMatch(text, /Workflow #3/u);
+		assert.match(text, /2 workflows/u);
+		assert.match(text, /Workflow #4/u);
+		assert.match(text, /Workflow #5/u);
+		assert.match(text, /step0.*failed: build failed/u);
+		assert.match(text, /step1.*blocked/u);
+		assert.match(text, /#99.*running/u);
 	});
 });
 

@@ -12,8 +12,8 @@ Replace <TARGET>, <CONTRACT> (the shared interface contract or its file path),
 both slice briefs, and every example scope before running. Each child needs the
 contract in its own brief because it cannot see main's conversation.
 Each slice owns its implementation and regression tests. Keep coupled changes
-with one owner. Add a separate adversarial reviewer for risk that the gate cannot
-cover; main still owns final integration and release.
+with one owner. Use sentinel for a separate implementation review or skeptic
+for a named assumption the gate cannot test; main owns final integration and release.
 
 ```json
 {
@@ -33,7 +33,6 @@ cover; main still owns final integration and release.
     {
       "id": "gate",
       "agent": "artisan",
-      "isolation": "shared",
       "task": "Challenge the integrated migration using the project's documented required checks. Interface contract: <CONTRACT>. Verify both slices meet their done conditions before proceeding; report missing prerequisites instead of guessing. Run the required commands; inspect cross-slice call sites for mismatches. Fix failures caused by this migration within its authorized scope. Report commands, results, and unverified risks.\n\nCore:\n{{apply-core}}\n\nAdapters:\n{{apply-adapters}}",
       "dependsOn": ["apply-core", "apply-adapters"],
       "scope": { "paths": ["src/core", "test/core", "src/adapters", "test/adapters"] }

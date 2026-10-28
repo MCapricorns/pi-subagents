@@ -186,6 +186,7 @@ export async function runCliAgentAttempt(options: RunCliAttemptOptions): Promise
 		const processGroup = process.platform !== "win32";
 		const proc = spawn(invocation.command, invocation.args, {
 			cwd: options.cwd ?? options.defaultCwd, shell: false, stdio: ["pipe", "pipe", "pipe"],
+			windowsHide: true,
 			env: { ...(options.env ?? process.env), [DEPTH_ENV_VAR]: String(currentSubagentDepth(options.env) + 1) },
 			detached: processGroup,
 		});

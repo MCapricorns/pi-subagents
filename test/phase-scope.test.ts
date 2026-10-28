@@ -340,7 +340,7 @@ describe("single scope admission", () => {
 				task: "Edit another parser wording",
 				phaseId: "single-parser",
 				scope: { paths: ["src/parser.ts"] },
-			}, root), /scope.*overlaps active run #76/i);
+			}, root), /scope.*overlaps run #76/i);
 			assert.equal(runtime.threads.size, 1);
 			assert.equal(monitor.getRuns().length, 0);
 		} finally {
@@ -377,7 +377,7 @@ describe("single scope admission", () => {
 				await assert.rejects(execute(tool, {
 					agent: "artisan", task: "Edit during stopped integration", phaseId: "stop-lease-conflict",
 					scope: { paths: ["src/parser.ts"] },
-				}, root), /scope.*overlaps active run #77/i);
+				}, root), /scope.*overlaps run #77/i);
 				assert.equal(runtime.threads.size, 1);
 				assert.equal(findDuplicateDispatch(runtime.threads.values(), thread.task, root, thread.phaseId)?.kind, "active");
 				release.resolve();

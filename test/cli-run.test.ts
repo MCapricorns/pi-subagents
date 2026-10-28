@@ -1,4 +1,6 @@
 import assert from "node:assert/strict";
+import childProcess, { type SpawnOptions } from "node:child_process";
+import { syncBuiltinESMExports } from "node:module";
 import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -128,6 +130,26 @@ describe("bounded stderr retention", () => {
 
 
 describe("native RPC child lifecycle", () => {
+	it("launches a hidden child while preserving RPC pipes and process-group policy", async (t) => {
+		const original = childProcess.spawn;
+		const launches: SpawnOptions[] = [];
+		t.mock.method(childProcess, "spawn", (command: string, args: string[], options: SpawnOptions) => {
+			if (command === process.execPath) launches.push(options);
+			return original(command, args, options);
+		});
+		syncBuiltinESMExports();
+		t.after(() => { t.mock.restoreAll(); syncBuiltinESMExports(); });
+		await withChild('assistant("stop", "RPC still works"); send({type:"agent_settled"});', (result) => {
+			assert.equal(result.exitCode, 0);
+			assert.equal(getResultOutput(result), "RPC still works");
+		});
+		assert.equal(launches.length, 1);
+		assert.equal(launches[0]!.windowsHide, true);
+		assert.equal(launches[0]!.shell, false);
+		assert.deepEqual(launches[0]!.stdio, ["pipe", "pipe", "pipe"]);
+		assert.equal(launches[0]!.detached, process.platform !== "win32");
+	});
+
 	it("uses the official RPC mode", () => {
 		const args = buildChildLaunchArgs({ agent: {}, thinkingLevel: "off" });
 		assert.deepEqual(args.slice(0, 2), ["--mode", "rpc"]);

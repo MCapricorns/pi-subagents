@@ -135,15 +135,6 @@ class Picker implements Component, Focusable {
 	invalidate(): void { this.search.invalidate(); }
 }
 
-function openPicker(ctx: PickerContext, items: SelectItem[], options: PickerOptions): Promise<string | undefined> {
-	if (ctx.mode !== "tui") {
-		ctx.ui.notify("/subagents-setup requires Pi's interactive TUI.", "error");
-		return Promise.resolve(undefined);
-	}
-	return ctx.ui.custom<string | undefined>((tui, theme, keybindings, done) =>
-		new Picker(items, options, tui, theme, keybindings, done));
-}
-
 /** Single-select with fuzzy search and paging. Esc returns without a change. */
 export function promptSelectOne(
 	ctx: PickerContext,
@@ -152,7 +143,12 @@ export function promptSelectOne(
 	items: SelectItem[],
 	initialValue?: string,
 ): Promise<string | undefined> {
-	return openPicker(ctx, items, { title, hint, initialValue });
+	if (ctx.mode !== "tui") {
+		ctx.ui.notify("/subagents-setup requires Pi's interactive TUI.", "error");
+		return Promise.resolve(undefined);
+	}
+	return ctx.ui.custom<string | undefined>((tui, theme, keybindings, done) =>
+		new Picker(items, { title, hint, initialValue }, tui, theme, keybindings, done));
 }
 
 /** One role per row, with Model, Thinking and Reset side by side: the whole

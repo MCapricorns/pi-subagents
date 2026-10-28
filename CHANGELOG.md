@@ -1,5 +1,33 @@
 # Changelog
 
+## 5.0.5
+
+### Changes
+
+- Share writer ownership across main edit/write calls, subagent runs, and pending
+  workflow nodes. Reject conflicting batches and graphs before any child starts;
+  keep ordered nodes compatible and hold stopped claims until finalization ends.
+- Expose phase/scope ownership and retained results in status. Keep bounded
+  ownership reminders and reuse completed research, implementation, and checks.
+- Rename reviewer to sentinel for implementation review and critic to skeptic
+  for named claims. Migrate settings, retained records, and selected trusted
+  workflow files on disk; runtime calls and inline graphs accept only current
+  role names. Reduce the review template to one implementation review followed
+  by verification of its specific findings.
+- Automatically isolate implementation tasks in worktrees for single calls as
+  well as batches and workflows. Keep reading and review local. Report a fallback
+  to the caller's directory only when Git or a committed HEAD is unavailable;
+  explicit worktree requests never fall back. Simplify isolation guidance and
+  leave final integration serialized without delaying independent launches.
+- Remove the unused dispatch-mode argument from isolation selection and its
+  callers, keeping explicit overrides and fallback behavior intact.
+- Hide Pi child console windows on Windows while preserving RPC pipes and
+  process-tree cancellation.
+- Hide successfully completed workflows from the widget immediately while
+  preserving failures, blocked nodes, completion messages, and status results.
+- Inline the setup picker's forwarding wrapper and simplify the two-model route
+  without changing selection, provider aliases, or fallback behavior.
+
 ## 5.0.4
 
 ### Changes

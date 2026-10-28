@@ -116,6 +116,16 @@ export interface WorktreeIsolation {
 	finalize(): Promise<WorktreeFinalization>;
 }
 
+export class WorktreeUnavailableError extends Error {
+	readonly reason: "not a Git repository" | "no committed HEAD";
+
+	constructor(reason: "not a Git repository" | "no committed HEAD") {
+		super(`Worktree isolation unavailable: ${reason}.`);
+		this.name = "WorktreeUnavailableError";
+		this.reason = reason;
+	}
+}
+
 class WorktreeSetupError extends Error {
 	constructor(message: string) {
 		super(message);
@@ -248,6 +258,9 @@ async function resolveRepositoryLocation(
 			`Git repository discovery for ${originalCwd}`,
 		);
 	} catch (error) {
+		if (error instanceof Error && /not a git repository/iu.test(error.message)) {
+			throw new WorktreeUnavailableError("not a Git repository");
+		}
 		throw new WorktreeSetupError(
 			`Worktree isolation requires cwd to be inside a Git worktree/repository: ${error instanceof Error ? error.message : String(error)}`,
 		);
@@ -280,13 +293,17 @@ async function resolveWorktreeTarget(
 	const { originalCwd, originalRoot } = await resolveRepositoryLocation(cwd, runner);
 	let headResult: CommandResult;
 	try {
-		headResult = await runGit(
-			runner,
-			originalRoot,
-			["rev-parse", "--verify", "HEAD"],
-			`Resolving HEAD for ${originalRoot}`,
-		);
+		headResult = await runner("git", ["rev-parse", "--verify", "--quiet", "HEAD"], {
+			cwd: originalRoot,
+			timeoutMs: GIT_COMMAND_TIMEOUT_MS,
+			maxOutputBytes: GIT_OUTPUT_MAX_BYTES,
+		});
+		if (headResult.code === 1 && !headResult.stdout.length && !headResult.stderr.length) {
+			throw new WorktreeUnavailableError("no committed HEAD");
+		}
+		if (headResult.code !== 0) throw commandFailure(`Resolving HEAD for ${originalRoot}`, headResult);
 	} catch (error) {
+		if (error instanceof WorktreeUnavailableError) throw error;
 		throw new WorktreeSetupError(
 			`Worktree isolation requires a repository with a committed HEAD: ${error instanceof Error ? error.message : String(error)}`,
 		);

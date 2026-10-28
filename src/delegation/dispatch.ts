@@ -21,9 +21,9 @@ import {
 	statusLabel,
 } from "../presentation/monitor.ts";
 import { findDuplicateDispatch, formatParallelScopeAdmissionNote, formatPhaseLeaseReceipt } from "./prompt.ts";
+import { findRuntimeWriterConflict } from "./ownership.ts";
 import {
 	findPhaseScopeOverlap,
-	findWriterLeaseScopeOverlap,
 	normalizePhaseId,
 	normalizePhaseScope,
 	PHASE_ID_MAX_LENGTH,
@@ -49,7 +49,7 @@ import type { IsolationMode } from "../isolation/worktree.ts";
 const NON_BLANK_TASK_OPTIONS = { minLength: 1, pattern: "\\S" } as const;
 
 const ISOLATION_DESCRIPTION =
-	"Git isolation (not a sandbox): shared uses the caller's checkout; worktree snapshots its current files into a detached temporary worktree for write-capable agents only.";
+	"Usually omit: writers use an automatic Git worktree when a committed HEAD is available; reading and review use the current directory. Override worktree to require isolation, or shared to write directly in the caller's checkout. Not a sandbox.";
 
 export const IsolationSchema = Type.Optional(
 	StringEnum(["shared", "worktree"] as const, { description: ISOLATION_DESCRIPTION }),
@@ -107,21 +107,19 @@ const SubagentParams = Type.Object({
 	wait: WaitSchema,
 });
 
-/** Roles that default to worktree isolation in parallel dispatches even when
- * the live catalog cannot be consulted (render-only call sites). Custom
- * worktree-capable agents join them via the live catalog on the execute path. */
+/** Default when rendering without the live tool catalog. */
 const WORKTREE_DEFAULT_AGENTS = new Set(["artisan"]);
 
-/** Explicit isolation wins. Parallel writers default to detached worktrees
- * to keep their Git changes separate; shared runs may also start together. */
+/** Explicit overrides win. Implementation uses worktrees even for a single
+ * task; reading and review stay in the current directory. */
 export function defaultIsolationMode(
-	mode: "single" | "parallel",
 	agentName: string,
 	requested?: IsolationMode,
 	writeCapable = WORKTREE_DEFAULT_AGENTS.has(agentName),
 ): IsolationMode {
 	if (requested) return requested;
-	return mode === "parallel" && writeCapable ? "worktree" : "shared";
+	const readOnlyRole = ["scout", "sentinel", "skeptic"].includes(agentName);
+	return writeCapable && !readOnlyRole ? "worktree" : "shared";
 }
 
 interface PreparedDispatchTask {
@@ -159,7 +157,7 @@ function prepareDispatchTasks(
 
 function parallelAdmissionConflict(
 	tasks: readonly PreparedDispatchTask[],
-	threads: Iterable<SubagentThread>,
+	runtime: SubagentRuntime,
 ): string | undefined {
 	for (let leftIndex = 0; leftIndex < tasks.length; leftIndex++) {
 		for (let rightIndex = leftIndex + 1; rightIndex < tasks.length; rightIndex++) {
@@ -178,7 +176,7 @@ function parallelAdmissionConflict(
 			}
 		}
 	}
-	const leases = [...threads];
+	const leases = [...runtime.threads.values()];
 	for (const task of tasks) {
 		const duplicate = findDuplicateDispatch(leases, task.task, task.cwd, task.phaseId);
 		if (duplicate?.kind === "active") {
@@ -202,9 +200,9 @@ function parallelAdmissionConflict(
 		}
 	}
 	for (const task of writers) {
-		const conflict = findWriterLeaseScopeOverlap(task.scope, leases);
+		const conflict = findRuntimeWriterConflict(runtime, task.scope);
 		if (conflict) {
-			return `tasks[${task.index}] scope ${conflict.overlap.left} overlaps run #${conflict.lease.id} scope ${conflict.overlap.right}`;
+			return `tasks[${task.index}] scope ${conflict.overlap.left} overlaps ${conflict.owner} scope ${conflict.overlap.right}`;
 		}
 	}
 	return undefined;
@@ -351,7 +349,7 @@ export function registerSubagentTool(
 	pi.registerTool({
 		name: "subagent",
 		label: "Subagent",
-		description: "Start one-shot leaf runs when substantial bounded work benefits from parallel progress, context isolation, or independent verification enough to offset startup and integration. Keep small or tightly coupled tasks in main. Use tasks for independent phases; use subagent_workflow for known dependent phases. Duplicate phases and declared writer overlaps are rejected before allocation; scope does not prove independence or grant permissions. Parallel tasks without scope report `independence not verified`. Results arrive automatically, or in-turn with wait:true. Main handles incomplete work.",
+		description: "Delegate bounded work when parallel progress, isolated context, or independent verification earns a child session. Use tasks for independent phases and subagent_workflow for known dependencies. Duplicate phases and declared writer overlaps with runs, pending nodes, or main writes are rejected before allocation. Scope is coordination metadata, not permissions. Omit isolation for automatic selection. Results arrive automatically or with wait:true; main reuses completed work and handles gaps.",
 		// Admission and lease reservation finish synchronously before child startup.
 		// Awaited runs must not block unrelated dispatch calls.
 		exposure: "model-only",
@@ -437,7 +435,7 @@ export function registerSubagentTool(
 				}
 				const pending = prepared.map((task) => findPendingWorkflowPhase(runtime, task.task, task.cwd, task.phaseId)).find(Boolean);
 				if (pending) throw new Error(`Workflow #${pending.workflowId} node "${pending.nodeId}" already owns a requested phase. No runs were started.`);
-				const conflict = parallelAdmissionConflict(prepared, runtime.threads.values());
+				const conflict = parallelAdmissionConflict(prepared, runtime);
 				if (conflict) {
 					throw new Error(`Parallel admission rejected: ${conflict}. No background tasks were started.`);
 				}
@@ -452,7 +450,6 @@ export function registerSubagentTool(
 						item.task,
 						item.cwd,
 						defaultIsolationMode(
-							"parallel",
 							item.agent,
 							item.isolation,
 							catalogAgent ? isWorktreeCapableAgent(catalogAgent, toolInfos) : undefined,
@@ -462,6 +459,7 @@ export function registerSubagentTool(
 							phaseId: item.phaseId,
 							scope: item.scope,
 							writeCapable: item.writeCapable,
+							automaticIsolation: item.isolation === undefined,
 						},
 					);
 				}));
@@ -525,7 +523,6 @@ export function registerSubagentTool(
 				single.task,
 				single.cwd,
 				defaultIsolationMode(
-					"single",
 					single.agent,
 					single.isolation,
 					singleCatalogAgent ? isWorktreeCapableAgent(singleCatalogAgent, toolInfos) : undefined,
@@ -535,6 +532,7 @@ export function registerSubagentTool(
 					phaseId: single.phaseId,
 					scope: single.scope,
 					writeCapable: single.writeCapable,
+					automaticIsolation: single.isolation === undefined,
 				},
 			);
 			if (result.exitCode !== -1) {
@@ -564,7 +562,7 @@ export function registerSubagentTool(
 				let text = `${theme.fg("toolTitle", theme.bold("subagent "))}${theme.fg("accent", `parallel (${args.tasks.length})`)}`;
 				for (const t of args.tasks.slice(0, 4)) {
 					const preview = formatTaskSummary(t.task, 48);
-					const isolation = defaultIsolationMode("parallel", t.agent, t.isolation) === "worktree" ? " [worktree]" : "";
+					const isolation = defaultIsolationMode(t.agent, t.isolation) === "worktree" ? " [worktree]" : "";
 					text += `\n  ${theme.fg("accent", t.agent)}${theme.fg("dim", isolation)} ${theme.fg("dim", preview)}`;
 				}
 				if (args.tasks.length > 4) text += `\n  ${theme.fg("dim", `… +${args.tasks.length - 4} more`)}`;

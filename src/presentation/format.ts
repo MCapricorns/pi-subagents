@@ -113,6 +113,7 @@ export function formatCompletionBlock(
 		if (result.integrationError) lines.push(`Integration error: ${result.integrationError}`);
 		lines.push("");
 	}
+	if (result.isolationNote) lines.push(`Isolation: ${result.isolationNote}`, "");
 	if (!truncated) lines.push(text);
 	// Failed-tool diagnostics ride along only when the run itself failed: they
 	// explain the failure, while on a successful run a transient failed call

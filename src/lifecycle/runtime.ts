@@ -10,6 +10,7 @@
 
 import type { ExtensionAPI, ToolInfo } from "@earendil-works/pi-coding-agent";
 import { findDuplicateDispatch } from "../delegation/prompt.ts";
+import { pendingWorkflowLeases } from "../delegation/ownership.ts";
 import type { PhaseScope } from "../delegation/phase-scope.ts";
 import { rmSync } from "node:fs";
 import { BackgroundTaskQueue } from "../execution/background.ts";
@@ -122,6 +123,8 @@ export interface SubagentRuntime {
 	registerRunResult: (runId: number, result: SingleResult) => void;
 	/** Logical threads outlive process attempts and completed generations. */
 	threads: Map<number, SubagentThread>;
+	/** Explicit main edit/write calls hold their paths until tool_execution_end. */
+	mainWrites: Map<string, { toolName: string; scope: PhaseScope }>;
 	/** Workflow graphs started in this parent session, live and settled. */
 	workflows: Map<number, WorkflowRun>;
 	/** Allocate a graph id that no retained or live workflow record owns. */
@@ -147,16 +150,9 @@ export function findPendingWorkflowPhase(
 	phaseId?: string,
 	excludeWorkflowId?: number,
 ): { workflowId: number; nodeId: string; agent: string } | undefined {
-	for (const graph of runtime.workflows.values()) {
-		if (graph.state !== "running" || graph.id === excludeWorkflowId) continue;
-		for (const node of graph.nodes) {
-			if (node.state !== "pending" && !(node.state === "running" && node.runId === undefined)) continue;
-			if (findDuplicateDispatch([{ id: graph.id, agentName: node.agent, task: node.task, cwd: node.cwd, phaseId: node.phaseId, state: "queued" }], task, cwd, phaseId)) {
-				return { workflowId: graph.id, nodeId: node.id, agent: node.agent };
-			}
-		}
-	}
-	return undefined;
+	const duplicate = findDuplicateDispatch(pendingWorkflowLeases(runtime, excludeWorkflowId), task, cwd, phaseId);
+	const owner = duplicate?.source;
+	return owner?.workflow ? { workflowId: owner.workflow.workflowId, nodeId: owner.workflow.nodeId, agent: owner.agentName } : undefined;
 }
 
 export function createRuntime(pi: ExtensionAPI, configPath: string): SubagentRuntime {
@@ -253,6 +249,7 @@ export function createRuntime(pi: ExtensionAPI, configPath: string): SubagentRun
 		settledRuns: new Map<number, SingleResult>(),
 		settledListeners: new Map<number, Set<(result: SingleResult) => void>>(),
 		threads: new Map<number, SubagentThread>(),
+		mainWrites: new Map(),
 		workflows: new Map<number, WorkflowRun>(),
 		reserveWorkflowId: () => nextWorkflowId++,
 		ensureWorkflowIdAbove: (id) => {
@@ -395,6 +392,7 @@ export function createRuntime(pi: ExtensionAPI, configPath: string): SubagentRun
 			// manifest; the next process re-registers them at restore.
 			runtime.sessionDirs.clear();
 			runtime.threads.clear();
+			runtime.mainWrites.clear();
 			runtime.workflows.clear();
 			runtime.shutdownHooks = [];
 			monitor.clear();

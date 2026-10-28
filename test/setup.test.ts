@@ -100,45 +100,63 @@ describe("role grid", () => {
 		assert.deepEqual(await promptRoleGrid(context, [{ role: "scout", model: "test/model", thinking: "high", description: "Research" }]), { row: 0, column: 2, role: "scout", field: "reset" });
 	});
 
-	it("shows every role with model and thinking side by side", async (t) => {
-		await scenario(t, baseConfig({ agentModels: { reviewer: "test/other" }, agentThinkingLevels: { critic: "medium" } }), [{
+	it("shows canonical roles with migrated model and thinking preferences side by side", async (t) => {
+		const path = await scenario(t, baseConfig({ agentModels: { reviewer: "test/other" }, agentThinkingLevels: { critic: "medium" } }), [{
 			title: /Subagents · Roles/u, act(c, screen) {
 				assert.match(screen, /Role\s+Model\s+Thinking/u);
-				for (const role of ["scout", "artisan", "reviewer", "critic"]) assert.match(screen, new RegExp(role));
-				assert.match(screen, /reviewer +test\/other +high/u);
-				assert.match(screen, /critic +Follow main +medium\*/u);
+				for (const role of ["scout", "artisan", "sentinel", "skeptic"]) assert.match(screen, new RegExp(role));
+				assert.doesNotMatch(screen, /reviewer|critic/u);
+				assert.match(screen, /sentinel +test\/other +high/u);
+				assert.match(screen, /skeptic +Follow main +medium\*/u);
 				press(c, KEY.escape);
 			},
 		}]);
+		assert.deepEqual(saved(path), baseConfig({ agentModels: { sentinel: "test/other" }, agentThinkingLevels: { skeptic: "medium" } }));
 	});
 
-	it("edits reviewer model and thinking from one row and keeps the focused cell", async (t) => {
+	it("explains implementation verification and named-claim challenges in their selected rows", async (t) => {
+		await scenario(t, baseConfig(), [{ title: /Roles/u, act(c) {
+			press(c, KEY.down, KEY.down);
+			const sentinel = c.render(120).join(" ");
+			assert.match(sentinel, /sentinel · Model/u);
+			assert.match(sentinel, /implementation or diff against requirements and callers.*defects and regressions/u);
+			assert.match(sentinel, /No edits/u);
+			press(c, KEY.down);
+			const skeptic = c.render(120).join(" ");
+			assert.match(skeptic, /skeptic · Model/u);
+			assert.match(skeptic, /named claim, design assumption, or review finding.*counterexamples and focused checks/u);
+			assert.match(skeptic, /No edits/u);
+			press(c, KEY.escape);
+		} }]);
+	});
+
+	it("edits sentinel model and thinking from one row and keeps the focused cell", async (t) => {
 		const path = await scenario(t, baseConfig({ agentModels: { artisan: "test/reasoning" } }), [
 			{ title: /Roles/u, act: (c) => press(c, KEY.down, KEY.down, KEY.enter) },
-			{ title: /reviewer · Model/u, act: (c) => press(c, "other", KEY.enter) },
-			{ title: /Saved reviewer model/u, act(c, screen) {
-				assert.match(screen, /› reviewer +test\/other +high/u);
+			{ title: /sentinel · Model/u, act: (c) => press(c, "other", KEY.enter) },
+			{ title: /Saved sentinel model/u, act(c, screen) {
+				assert.match(screen, /› sentinel +test\/other +high/u);
 				press(c, RIGHT, KEY.enter);
 			} },
-			{ title: /reviewer · Thinking/u, act: (c) => press(c, "medium", KEY.enter) },
-			{ title: /Saved reviewer thinking/u, act(c, screen) {
-				assert.match(screen, /reviewer +test\/other +medium\*/u);
+			{ title: /sentinel · Thinking/u, act: (c) => press(c, "medium", KEY.enter) },
+			{ title: /Saved sentinel thinking/u, act(c, screen) {
+				assert.match(screen, /sentinel +test\/other +medium\*/u);
 				press(c, KEY.escape);
 			} },
 		]);
-		assert.deepEqual(saved(path), baseConfig({ agentModels: { artisan: "test/reasoning", reviewer: "test/other" }, agentThinkingLevels: { reviewer: "medium" } }));
+		assert.deepEqual(saved(path), baseConfig({ agentModels: { artisan: "test/reasoning", sentinel: "test/other" }, agentThinkingLevels: { sentinel: "medium" } }));
 	});
 
 	it("reset lives in its own column and only clears the focused role", async (t) => {
-		const path = await scenario(t, baseConfig({ agentModels: { scout: "test/other", critic: "test/reasoning" }, agentThinkingLevels: { scout: "high", critic: "low" } }), [
+		const path = await scenario(t, baseConfig({ agentModels: { scout: "test/other", skeptic: "test/reasoning" }, agentThinkingLevels: { scout: "high", skeptic: "low" } }), [
 			{ title: /Roles/u, act: (c) => press(c, RIGHT, RIGHT, KEY.enter) },
 			{ title: /Saved scout defaults/u, act(c, screen) {
 				assert.match(screen, /› scout +Follow main +low/u);
-				assert.match(screen, /critic +test\/reasoning +low\*/u);
+				assert.match(screen, /skeptic +test\/reasoning +low\*/u);
 				press(c, KEY.escape);
 			} },
 		]);
-		assert.deepEqual(saved(path), baseConfig({ agentModels: { critic: "test/reasoning" }, agentThinkingLevels: { critic: "low" } }));
+		assert.deepEqual(saved(path), baseConfig({ agentModels: { skeptic: "test/reasoning" }, agentThinkingLevels: { skeptic: "low" } }));
 	});
 
 	it("Esc in a picker keeps the saved value and the focused cell", async (t) => {

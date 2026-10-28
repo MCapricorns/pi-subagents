@@ -159,6 +159,27 @@ describe("subagent_status", () => {
 		} finally { await shutdown(runtime); await rm(root, { recursive: true, force: true }); }
 	});
 
+	it("returns settled evidence on exact lookup without repeating it in the run list", async () => {
+		const { runtime, tools, sent } = harness();
+		const thread = makeThread(9, "completed");
+		thread.phaseId = "parser-fix";
+		thread.scope = { paths: [join(process.cwd(), "src", "parser.ts")] };
+		thread.lastResult = {
+			agent: "artisan", task: thread.task, exitCode: 0, stderr: "", usage: emptyUsage(),
+			messages: [{ role: "assistant", content: [{ type: "text", text: "Fixed parser. node --test test/parser.test.ts → 4 passed." }], stopReason: "stop" } as never],
+		};
+		runtime.threads.set(thread.id, thread);
+		try {
+			const status = tools.get("subagent_status")!;
+			assert.doesNotMatch(resultText(await execute(status)), /4 passed/);
+			const selected = resultText(await execute(status, { id: 9 }));
+			assert.match(selected, /phase: parser-fix/);
+			assert.match(selected, /scope: /);
+			assert.match(selected, /4 passed/);
+			assert.equal(sent.length, 0);
+		} finally { await shutdown(runtime); }
+	});
+
 	it("reads live progress without waiting for settlement, mutating the run, or delivering results", async () => {
 		const { runtime, tools, sent } = harness();
 		const thread = makeThread(7);
@@ -289,13 +310,13 @@ describe("subagent_message", () => {
 		const core = { setEnvironment() {}, async startBackground(...args: any[]) { captured = args; return { runId: 79 }; } } as unknown as DispatchCore;
 		const { runtime, tools } = harness(join(root, "config.json"), core);
 		const source = makeThread(64, "completed");
-		source.agentName = "reviewer";
+		source.agentName = "sentinel";
 		source.sessionId = "summary-source";
 		source.sessionDir = join(root, "source");
 		await mkdir(source.sessionDir);
 		await writeFile(join(source.sessionDir, "2026_summary-source.jsonl"), "context");
 		source.lastResult = {
-			agent: "reviewer", task: source.task, exitCode: 0, stderr: "", usage: emptyUsage(),
+			agent: "sentinel", task: source.task, exitCode: 0, stderr: "", usage: emptyUsage(),
 			messages: [
 				{ role: "assistant", content: [{ type: "text", text: "Found a race in src/cache.ts" }, { type: "toolCall", name: "read", arguments: { path: "src/cache.ts" } }], stopReason: "stop" } as never,
 			],

@@ -93,7 +93,7 @@ export function persistThreadCheckpoint(
 }
 
 const WORKTREE_ISOLATION_INSTRUCTIONS =
-	"You are running in a temporary detached Git worktree. Work only in the current cwd; do not create another worktree or manually copy/apply changes to the original checkout. The parent dispatcher will integrate your tracked, deleted, and untracked changes when this thread finally settles.";
+	"You are running in a temporary detached Git worktree. Work only in the current cwd; interpret paths from the brief relative to this checkout. Do not write to the original checkout, create another worktree, or copy/apply changes back manually. The runtime will merge your tracked, deleted, and untracked changes after you finish.";
 
 export function withWorktreeSystemPrompt(agent: AgentConfig): AgentConfig {
 	return {
@@ -121,6 +121,8 @@ export interface StartBackgroundOptions {
 	scope?: PhaseScope;
 	/** A false hint cannot downgrade a live write-capable role. */
 	writeCapable?: boolean;
+	/** Omitted public isolation may fall back only when no Git baseline exists. */
+	automaticIsolation?: boolean;
 	/** Chosen by the tool call before the queue can start a fast child. */
 	deliveryRoute?: "background" | "await";
 	/** A workflow node reports through its graph's single summary: no per-run
