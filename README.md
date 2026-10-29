@@ -5,7 +5,8 @@ dependency workflows, and Git worktree isolation.
 
 ## Install
 
-Requires **Pi >= 1.0.0** and **Node.js >= 22.19.0**.
+Requires **Pi >= 1.4.0** and **Node.js >= 22.19.0**. Development and native
+integration tests use the Pi 1.4.0 SDK.
 
 ```bash
 pi install npm:@ferris1225/pi-subagents
@@ -113,10 +114,21 @@ subagent({
 });
 ```
 
-Results arrive automatically. Set `wait: true` to return them in the tool call,
-including in one-shot `pi -p` sessions. Use stable `phaseId` values: completed
-phases stay owned for the parent session, and interrupted phases retain ownership
-across reloads. Repeating the same task in the same cwd is also rejected.
+Use `wait: true` when the next step needs the result. `subagent`,
+`subagent_workflow`, and completed-run `subagent_message` follow-ups default to
+waiting in one-shot `pi -p` / JSON sessions, so the parent stays alive until the
+work finishes. TUI and RPC sessions default to background delivery; `wait: false`
+explicitly selects it in any mode. Each result is delivered once, after
+integration, either in the waiting tool call or as a background completion.
+Awaited failures are tool errors with retained evidence.
+
+A launch receipt only confirms delegation. Main continues independent work or
+pauses until the completion wakes it, then finishes the requested outcome and
+final checks. It does not poll or treat a successful launch as task completion.
+Use stable `phaseId` values: completed phases stay owned for the parent session,
+and interrupted phases retain ownership across reloads. Equal normalized tasks
+in the same cwd are also rejected, even with a different `phaseId`. Reuse the
+result, or use `subagent_message` for an additional bounded step.
 
 Ownership includes main, individual runs, and workflow nodes still waiting on
 dependencies. Main continues only disjoint work and passes its completed research
@@ -151,6 +163,7 @@ so no separate workflow skill needs to be loaded.
 subagent_workflow({
   workflow: "code-review",
   inputs: { TARGET: "HEAD~1..HEAD; inspect the cache invalidation fix" },
+  wait: true,
 });
 
 subagent_workflow({
@@ -200,8 +213,10 @@ The final answer must end with `WORKFLOW_ACCEPTANCE: PASS` or
 fails the workflow even when the reviewer process exits normally. A PASS cannot
 clear failures in earlier work. Explicit cancellation or session interruption
 stops the graph without starting acceptance. The graph sends one final summary
-containing its acceptance result; main still owns remediation, the final gate,
-and release.
+containing its acceptance result, or returns it in the tool call with `wait: true`.
+Waiting includes integration and acceptance, streams progress, and stops owned
+work on parent cancellation without a background wake-up. Main still owns
+remediation, the final gate, and release.
 
 Phase identity includes the built-in plan and its inputs. The same deliverable
 remains owned within its workspace; different questions or targets can run in
@@ -261,9 +276,16 @@ stops unfinished work. New/resume/fork/reload ends old children and retains inte
 for manual recovery. Runs do not resume automatically; main finishes incomplete
 work from partial changes and artifacts.
 
-A steering message is queued at the next Pi steering boundary; acknowledgement
-does not mean the child has acted on it. To continue a successfully completed
-run, choose the context that fits the follow-up:
+A steering call waits for the child's existing RPC channel to acknowledge the
+matching request ID. The tool card shows **Received · queued** when Pi confirms
+queueing, **Received · handled** when an input hook consumes the message, or
+**Accepted · queue state unconfirmed** when no disposition is available.
+`subagent_status` retains the latest acknowledgement, request ID, age, and message
+summary. Rejection or a missing acknowledgement is an error, not a receipt.
+Queueing delivers at a Pi steering boundary; it does not prove that the model
+has executed the instruction.
+
+To continue a successfully completed run, choose the context that fits the follow-up:
 
 - `context: "auto"` (default) continues a private copy of the retained session
   when available. If cleanup has removed it, the follow-up starts with a bounded
@@ -281,8 +303,10 @@ including when a previous temporary worktree has already been removed. The
 continuation is instructed to re-read files before editing in the current cwd.
 
 Every follow-up preserves the role, workspace and scope and passes through normal
-admission and isolation. `subagent_status` reports whether a completed run has
-a session available or only summary context. Results and summaries remain
+admission and isolation. Set `wait: true` to receive its final result in the same
+call; this waiting option applies to newly started follow-ups, while steering a
+running child returns its acknowledgement. `subagent_status` reports whether a
+completed run has a session available or only summary context. Results and summaries remain
 available within the current parent runtime; completed runs are not restored
 after reload. Pending runs cannot be steered, and fixed workflow graphs cannot
 be edited.
@@ -304,6 +328,21 @@ A settled provider failure can hand off once to the main model in the same
 session. State and full-result files live under
 `~/.pi/agent/ferris-pi-subagents/`, grouped by project. `PI_CODING_AGENT_DIR`
 overrides the agent directory.
+
+## Pi codemode compatibility
+
+Call `subagent`, `subagent_workflow`, and the control tools directly. They use
+Pi's `model-only` exposure and are intentionally unavailable as nested
+`tools.subagent(...)` calls inside codemode. Children can still use codemode
+with their inherited callable tools. Indirect tools retain their exposure;
+scout promotes approved read-only tools for direct use. It waits up to ten
+seconds for startup registration and activates later arrivals between turns.
+Read-only classification uses Pi tool metadata.
+
+Child RPC dialogs that require confirmation, selection, or text input are
+cancelled with a matching response and an explanation, so an unattended child
+does not hang waiting for an invisible dialog. No confirmation is approved
+automatically.
 
 ## Storage and cleanup
 

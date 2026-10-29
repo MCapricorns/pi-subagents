@@ -14,9 +14,9 @@
  */
 
 import { createHash, randomUUID } from "node:crypto";
-import { withManifestMutation } from "../isolation/manifest-mutation.ts";
+import { replaceManifestFile, withManifestMutation } from "../isolation/manifest-mutation.ts";
 import { existsSync, type Dirent, readdirSync, statSync } from "node:fs";
-import { mkdir, readFile, realpath, rename, rm, writeFile } from "node:fs/promises";
+import { mkdir, readFile, realpath, rm, writeFile } from "node:fs/promises";
 import { uptime } from "node:os";
 import { dirname, isAbsolute, join, relative, resolve } from "node:path";
 import type { UsageStats } from "../execution/run-control.ts";
@@ -365,7 +365,7 @@ async function writeManifest(path: string, records: readonly ThreadRecord[]): Pr
 			records: [...records],
 		};
 		await writeFile(temporaryPath, `${JSON.stringify(manifest, null, 2)}\n`, "utf8");
-		await rename(temporaryPath, path);
+		await replaceManifestFile(temporaryPath, path);
 	} finally {
 		await rm(temporaryPath, { force: true }).catch(() => undefined);
 	}

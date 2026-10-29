@@ -3,9 +3,11 @@ import { mkdtemp, mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, it } from "node:test";
+import { getEventListeners } from "node:events";
 import type { SingleResult } from "../src/execution/spawn.ts";
 import type { SubagentRuntime } from "../src/lifecycle/runtime.ts";
-import { emptyUsage } from "../src/execution/run-control.ts";
+import { emptyUsage, RunControl } from "../src/execution/run-control.ts";
+import { monitor } from "../src/presentation/monitor.ts";
 import type { CompletionMessageItem } from "../src/lifecycle/completion.ts";
 import { compileWorkflow, defaultPhaseId, renderNodeTask, WORKFLOW_NODE_LIMIT, UPSTREAM_OUTPUT_MAX_CHARS } from "../src/workflow/plan.ts";
 import { compileBuiltinWorkflow } from "../src/workflow/templates.ts";
@@ -26,6 +28,12 @@ async function until(check: () => boolean, timeoutMs = 2_000): Promise<void> {
 	}
 }
 
+
+function deferred() {
+	let resolve!: () => void;
+	const promise = new Promise<void>((done) => { resolve = done; });
+	return { promise, resolve };
+}
 
 function result(agent: string, task: string, runId: number, output: string, failed = false): SingleResult {
 	return {
@@ -334,6 +342,47 @@ describe("workflow runner", () => {
 		}
 	});
 
+	for (const deliveryRoute of ["background", "await"] as const) {
+		it("reports unexpected graph failure once through the " + deliveryRoute + " route", async (t) => {
+			const root = await mkdtemp(join(tmpdir(), "pi-workflow-crash-"));
+			try {
+				const h = fakeRuntime(join(root, "config.json"), async (agent, task, id) => result(agent, task, id, "done"));
+				const notices: string[] = [];
+				t.mock.method(monitor, "updateWorkflow", () => { throw new Error("workflow checkpoint crashed"); }, { times: 1 });
+				const handle = startWorkflow({ runtime: h.runtime, startBackground: h.dispatch, deliveryRoute, resolveIsolation: () => "shared",
+					resultsRoot: join(root, "results"), notify: (message) => notices.push(message),
+				}, compileWorkflow({ name: "crash", nodes: [{ id: "work", agent: "scout", task: "Inspect" }] }, root, AGENTS));
+				const run = await handle.done;
+				assert.equal(run, handle.run);
+				assert.equal(run.state, "failed");
+				assert.match(run.stopReason!, /workflow checkpoint crashed/);
+				assert.ok(run.endedAt);
+				assert.equal(notices.length, 1);
+				assert.equal(h.completions.length, deliveryRoute === "background" ? 1 : 0);
+				if (deliveryRoute === "background") assert.match(h.completions[0]!.block, /workflow crash finished with failures[\s\S]*workflow checkpoint crashed/);
+				assert.deepEqual(await readWorkflowRecords(h.runtime.configPath, root), []);
+			} finally { await rm(root, { recursive: true, force: true }); }
+		});
+	}
+
+	it("resolves done without retrying a completion sender that throws after delivery", async () => {
+		const root = await mkdtemp(join(tmpdir(), "pi-workflow-delivery-crash-"));
+		try {
+			const h = fakeRuntime(join(root, "config.json"), async (agent, task, id) => result(agent, task, id, "done"));
+			h.runtime.sendCompletionGroup = (items) => {
+				h.completions.push(...items);
+				throw new Error("completion sender crashed");
+			};
+			const handle = startWorkflow({ runtime: h.runtime, startBackground: h.dispatch, resolveIsolation: () => "shared", resultsRoot: join(root, "results"),
+				notify: () => { throw new Error("notification unavailable"); },
+			}, compileWorkflow({ nodes: [{ id: "work", agent: "scout", task: "Inspect" }] }, root, AGENTS));
+			const run = await handle.done;
+			assert.equal(run.state, "failed");
+			assert.equal(run.stopReason, "completion sender crashed");
+			assert.equal(h.completions.length, 1, "a delivery exception must not recurse into a second summary");
+		} finally { await rm(root, { recursive: true, force: true }); }
+	});
+
 	it("retains the shape of an unfinished graph for the next session", async () => {
 		const root = await mkdtemp(join(tmpdir(), "pi-subagents-workflow-retain-"));
 		try {
@@ -391,14 +440,14 @@ function parkedThread(id: number, cwd: string, phaseId: string) {
 }
 
 describe("subagent_workflow tool", () => {
-	function toolHarness(configPath: string) {
+	function toolHarness(configPath: string, settle?: (agent: string, task: string, runId: number) => Promise<SingleResult>) {
 		type RegisteredTool = {
 			execute: (...args: unknown[]) => Promise<unknown>;
 			exposure?: string;
 			executionMode?: string;
 		};
 		const tools = new Map<string, RegisteredTool>();
-		const messages: Array<{ content: string }> = [];
+		const messages: Array<{ content: string; customType?: string; options?: unknown }> = [];
 		const started: string[] = [];
 		let nextRunId = 1;
 		const pi = {
@@ -406,7 +455,7 @@ describe("subagent_workflow tool", () => {
 			getAllTools: () => [],
 			on: () => undefined,
 			registerTool: (tool: { name: string }) => tools.set(tool.name, tool as unknown as RegisteredTool),
-			sendMessage: (message: { content: string }) => messages.push(message),
+			sendMessage: (message: { content: string }, options: unknown) => messages.push({ ...message, options }),
 		} as unknown as Parameters<typeof createRuntime>[0];
 		const runtime = createRuntime(pi, configPath);
 		const core = {
@@ -415,7 +464,10 @@ describe("subagent_workflow tool", () => {
 				started.push(task);
 				const runId = nextRunId++;
 				const output = task.startsWith("Act as the independent acceptance officer") ? "Checked evidence.\nWORKFLOW_ACCEPTANCE: PASS" : "answer from " + agent;
-				setTimeout(() => runtime.registerRunResult(runId, result(agent, task, runId, output)), 0);
+				setTimeout(() => {
+					if (settle) void settle(agent, task, runId).then((settled) => runtime.registerRunResult(runId, settled));
+					else runtime.registerRunResult(runId, result(agent, task, runId, output));
+				}, 0);
 				return { agent, task, exitCode: -1, messages: [], stderr: "", usage: emptyUsage(), runId };
 			},
 			finishRun: () => undefined,
@@ -423,11 +475,12 @@ describe("subagent_workflow tool", () => {
 			makeDetails: () => () => ({ mode: "single" as const, results: [] }),
 		};
 		registerWorkflowTool(pi, runtime, core as never);
-		return { runtime, tool: tools.get("subagent_workflow")!, messages, started };
+		return { runtime, core, tool: tools.get("subagent_workflow")!, messages, started };
 	}
 
 	const ctx = (cwd: string) => ({
 		cwd,
+		hasUI: true,
 		isProjectTrusted: () => false,
 		ui: { notify: () => undefined },
 	});
@@ -453,6 +506,160 @@ describe("subagent_workflow tool", () => {
 			assert.match(h.messages[0]!.content, /workflow research completed/);
 			assert.match(h.started[3]!, /answer from scout/, "synthesis receives upstream evidence");
 		} finally { await h.runtime.shutdown(); await rm(root, { recursive: true, force: true }); }
+	});
+
+	it("awaits integration and acceptance, streams progress, and returns the sole final report", async (t) => {
+		const root = await mkdtemp(join(tmpdir(), "pi-workflow-await-"));
+		const integrate = deferred();
+		const accept = deferred();
+		let reviewing = false;
+		let reviewTask = "";
+		let returned = false;
+		let subscriptions = 0;
+		const subscribe = monitor.subscribe.bind(monitor);
+		t.mock.method(monitor, "subscribe", (callback: () => void) => {
+			subscriptions++;
+			const unsubscribe = subscribe(callback);
+			return () => { subscriptions--; unsubscribe(); };
+		});
+		const h = toolHarness(join(root, "config.json"), async (agent, task, runId) => {
+			if (task.startsWith("Act as the independent acceptance officer")) {
+				reviewing = true;
+				reviewTask = task;
+				await accept.promise;
+				return result(agent, task, runId, "Independent evidence checked.\nWORKFLOW_ACCEPTANCE: PASS");
+			}
+			await integrate.promise;
+			return { ...result(agent, task, runId, "Authored work and integration complete"), integrationStatus: "integrated" };
+		});
+		const controller = new AbortController();
+		const updates: any[] = [];
+		const pending = h.tool.execute("await", { workflow: "code-review", inputs: { TARGET: "HEAD" }, wait: true }, controller.signal,
+			(update: unknown) => updates.push(update), ctx(root)).then((response) => { returned = true; return response as any; });
+		try {
+			await until(() => h.started.length === 1);
+			assert.equal(returned, false);
+			assert.equal(reviewing, false, "acceptance waits for integrated settlement");
+			integrate.resolve();
+			await until(() => reviewing);
+			assert.equal(returned, false, "the tool must also await independent acceptance");
+			const run = [...h.runtime.workflows.values()][0]!;
+			assert.match(await readFile(run.nodes.at(-1)!.evidenceFile!, "utf8"), /Integration: integrated/);
+			assert.match(reviewTask, /Authored work and integration complete/);
+			assert.ok(updates.some((update) => update.details.workflow.nodes.some((node: any) => node.kind === "acceptance" && node.state === "running")));
+			accept.resolve();
+			const response = await pending;
+			assert.equal(response.isError, false);
+			assert.equal(response.details.workflow.state, "completed");
+			assert.ok(response.details.workflow.nodes.every((node: any) => node.state === "completed"));
+			assert.match(response.content[0].text, /workflow code-review completed/);
+			assert.match(response.content[0].text, /Independent evidence checked/);
+			assert.equal(h.messages.length, 0, "an awaited graph must never also send a background summary");
+			assert.equal(subscriptions, 0);
+			assert.equal(getEventListeners(controller.signal, "abort").length, 0);
+			const updateCount = updates.length;
+			monitor.updateWorkflow([...h.runtime.workflows.values()][0]!);
+			assert.equal(updates.length, updateCount, "the progress subscription is removed after return");
+		} finally {
+			integrate.resolve(); accept.resolve(); controller.abort();
+			await pending;
+			await h.runtime.shutdown(); await rm(root, { recursive: true, force: true });
+		}
+	});
+
+	it("returns isError when independent acceptance rejects an awaited graph", async () => {
+		const root = await mkdtemp(join(tmpdir(), "pi-workflow-await-reject-"));
+		const h = toolHarness(join(root, "config.json"), async (agent, task, runId) => result(agent, task, runId,
+			task.startsWith("Act as the independent acceptance officer") ? "A required check is missing.\nWORKFLOW_ACCEPTANCE: FAIL" : "Authored work complete"));
+		try {
+			const response = await execute(h.tool, { workflow: "code-review", inputs: { TARGET: "HEAD" }, wait: true }, root);
+			assert.equal(response.isError, true);
+			assert.equal(response.details.workflow.state, "failed");
+			assert.equal(response.details.workflow.nodes.at(-1).state, "failed");
+			assert.match(response.content[0].text, /required acceptance rejected/);
+			assert.match(response.content[0].text, /A required check is missing/);
+			assert.equal(h.messages.length, 0);
+		} finally { await h.runtime.shutdown(); await rm(root, { recursive: true, force: true }); }
+	});
+
+	for (const wait of [undefined, false]) {
+		it(wait === false ? "honors explicit wait:false in headless mode and delivers one background summary" : "waits by default in headless mode", async () => {
+			const root = await mkdtemp(join(tmpdir(), "pi-workflow-headless-"));
+			const h = toolHarness(join(root, "config.json"));
+			try {
+				const response = await h.tool.execute("headless", { workflow: "code-review", inputs: { TARGET: "HEAD" }, ...(wait === undefined ? {} : { wait }) },
+					undefined, undefined, { ...ctx(root), hasUI: false }) as any;
+				assert.equal(response.details.workflow.state, wait === false ? "running" : "completed");
+				assert.match(response.content[0].text, wait === false ? /code-review started/ : /code-review completed/);
+				await Promise.all([...h.runtime.workflows.values()].map((run) => run.done));
+				assert.equal(h.messages.length, wait === false ? 1 : 0);
+				if (wait === false) assert.match(h.messages[0]!.content, /workflow code-review completed/);
+			} finally { await h.runtime.shutdown(); await rm(root, { recursive: true, force: true }); }
+		});
+	}
+
+	it("cancels owned work during an awaited call, waits for cleanup, and removes listeners without a completion wake-up", async () => {
+		const root = await mkdtemp(join(tmpdir(), "pi-workflow-await-cancel-"));
+		const h = toolHarness(join(root, "config.json"));
+		const controller = new AbortController();
+		const cleanupEntered = deferred();
+		const cleanupRelease = deferred();
+		let stopped = false;
+		let finalized = false;
+		let returned = false;
+		const updates: unknown[] = [];
+		h.core.startBackground = async (agent, task) => {
+			h.started.push(task);
+			const graph = [...h.runtime.workflows.values()][0]!;
+			const workflow = { workflowId: graph.id, name: graph.name, nodeId: graph.nodes[0]!.id };
+			const id = monitor.addRun(agent, task, undefined, undefined, { workflow });
+			const control = new RunControl(task, 1);
+			control.attach(control.beginAttempt(), { stop: async () => { stopped = true; } });
+			h.runtime.threads.set(id, {
+				id, generation: 1, agentName: agent, task, cwd: root, executionCwd: root, isolation: "shared", state: "running",
+				workflow, control, lifecycleVersion: 0, elapsedMs: 0, generationCompletion: Promise.resolve(),
+				finalizeIsolation: async (_generation, result) => {
+					cleanupEntered.resolve();
+					await cleanupRelease.promise;
+					finalized = true;
+					if (result) result.integrationStatus = "integrated";
+					return { status: "integrated", integrated: true, hadChanges: true };
+				},
+			});
+			return { agent, task, runId: id, exitCode: -1, messages: [], stderr: "", usage: emptyUsage() };
+		};
+		const pending = h.tool.execute("cancel", { workflow: "code-review", inputs: { TARGET: "HEAD" }, wait: true }, controller.signal,
+			(update: unknown) => updates.push(update), ctx(root)).then((response) => { returned = true; return response as any; });
+		try {
+			await until(() => h.runtime.settledListeners.size > 0);
+			controller.abort();
+			await cleanupEntered.promise;
+			assert.equal(stopped, true);
+			assert.equal(finalized, false);
+			assert.equal(returned, false, "cancellation must wait for isolation cleanup");
+			cleanupRelease.resolve();
+			const response = await pending;
+			assert.equal(finalized, true);
+			assert.equal(response.isError, true);
+			assert.equal(response.details.workflow.state, "stopped");
+			assert.match(response.content[0].text, /Parent run was cancelled/);
+			assert.equal(h.started.length, 1, "acceptance must never start after cancellation");
+			assert.equal(response.details.workflow.nodes.at(-1).runId, undefined);
+			assert.equal(monitor.findRun(response.details.workflow.nodes[0].runId), undefined);
+			assert.ok([...h.runtime.settledListeners.values()].every((listeners) => listeners.size === 0));
+			assert.equal(getEventListeners(controller.signal, "abort").length, 0);
+			h.runtime.completionBatcher.flush();
+			assert.equal(h.messages.length, 1, "only the existing cancellation receipt is recorded");
+			assert.equal(h.messages[0]!.customType, "subagent-cancelled");
+			assert.deepEqual(h.messages[0]!.options, { deliverAs: "nextTurn", triggerTurn: false });
+			assert.equal(h.runtime.suppressCompletions, false);
+			const updateCount = updates.length;
+			monitor.updateWorkflow([...h.runtime.workflows.values()][0]!);
+			assert.equal(updates.length, updateCount);
+		} finally {
+			cleanupRelease.resolve(); controller.abort(); await pending;
+			await h.runtime.shutdown(); await rm(root, { recursive: true, force: true });
+		}
 	});
 
 	it("rejects overlapping migration slices before any child starts", async () => {

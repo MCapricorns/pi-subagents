@@ -220,10 +220,19 @@ describe("duplicate dispatch", () => {
 		const result = await start("artisan", "Trace dispatch ownership", process.cwd());
 		assert.equal(result.exitCode, 1);
 		assert.match(result.errorMessage ?? "", /Run #41 \(scout\).*phase \(completed\)/u);
-		assert.match(result.errorMessage ?? "", /Main handles follow-up work/u);
+		assert.match(result.errorMessage ?? "", /subagent_status.*subagent_message/u);
 		assert.doesNotMatch(result.errorMessage ?? "", /resume|steer|park/iu);
 		assert.equal(runtime.threads.size, 1);
 		assert.equal(runtime.runControllers.size, 0);
+	});
+	it("gives interrupted owners a schema-valid retirement command without promising a phase-id bypass", async () => {
+		const { start } = dispatcher([source({ state: "parked", phaseId: "old" })]);
+		const result = await start("artisan", "Trace dispatch ownership", process.cwd(), "shared", { phaseId: "new" });
+		assert.equal(result.exitCode, 1);
+		const remedy = result.errorMessage ?? "";
+		assert.match(remedy, /subagent_stop\(\{ id: "41" \}\)/u);
+		assert.match(remedy, /Changing only phaseId cannot bypass equal-task ownership/u);
+		assert.doesNotMatch(remedy, /or give this work a different phaseId/u);
 	});
 });
 

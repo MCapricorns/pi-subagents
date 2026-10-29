@@ -271,14 +271,61 @@ describe("subagent_message", () => {
 		const { runtime, tools } = harness();
 		const thread = makeThread(61);
 		let received = "";
-		attachRunning(thread.control, { stop: async () => {}, steer: async (message) => { received = message; } });
+		attachRunning(thread.control, { stop: async () => {}, steer: async (message) => { received = message; return { disposition: "queued", acknowledgedAt: Date.now(), requestId: "steer-61" }; } });
 		runtime.threads.set(61, thread);
 		try {
 			const response = await execute(tools.get("subagent_message")!, { id: 61, message: "Check the caller too" });
 			assert.equal(received, "Check the caller too");
-			assert.match(resultText(response), /queued.*not necessarily been acted on/u);
+			assert.match(resultText(response), /Received by #61.*queued.*Model execution is not yet confirmed/u);
+			assert.equal(response.details.steering.requestId, "steer-61");
+			const status = await execute(tools.get("subagent_status")!, { id: 61 });
+			assert.match(resultText(status), /last steering: queued.*request steer-61.*Check the caller too/u);
+			const tool = tools.get("subagent_message")! as any;
+			const theme = { fg: (_color: string, text: string) => text, bold: (text: string) => text };
+			assert.match(tool.renderResult(response, { expanded: false }, theme).render(120).join("\n"), /Received by #61.*queued/u);
 			const unknown = await execute(tools.get("subagent_message")!, { id: 62, message: "Check" });
 			assert.equal(unknown.isError, true);
+		} finally { await shutdown(runtime); }
+	});
+
+	it("does not report receipt before the child acknowledges or call a handled input queued", async () => {
+		const { runtime, tools } = harness();
+		const received = deferred();
+		const acknowledge = deferred();
+		const thread = makeThread(62);
+		attachRunning(thread.control, { stop: async () => {}, steer: async () => {
+			received.resolve();
+			await acknowledge.promise;
+			return { disposition: "handled", acknowledgedAt: Date.now(), requestId: "steer-62" };
+		} });
+		runtime.threads.set(62, thread);
+		let returned = false;
+		try {
+			const pending = execute(tools.get("subagent_message")!, { id: 62, message: "Handle this input" }).then((result) => { returned = true; return result; });
+			await received.promise;
+			assert.equal(returned, false);
+			assert.equal(thread.lastSteering, undefined);
+			acknowledge.resolve();
+			const result = await pending;
+			assert.match(resultText(result), /Received by #62.*handled by an input hook/u);
+			assert.doesNotMatch(resultText(result), /queued/u);
+			assert.equal(runtime.threads.get(62)?.lastSteering?.disposition, "handled");
+		} finally { acknowledge.resolve(); await shutdown(runtime); }
+	});
+
+	it("keeps missing queue disposition explicit and reports rejected steering", async () => {
+		const { runtime, tools } = harness();
+		const thread = makeThread(62);
+		attachRunning(thread.control, { stop: async () => {}, steer: async () => {} });
+		runtime.threads.set(62, thread);
+		try {
+			const result = await execute(tools.get("subagent_message")!, { id: 62, message: "Check" });
+			assert.match(resultText(result), /queue state unconfirmed/u);
+			attachRunning(thread.control, { stop: async () => {}, steer: async () => { throw new Error("child rejected message"); } });
+			const rejected = await execute(tools.get("subagent_message")!, { id: 62, message: "Another check" });
+			assert.equal(rejected.isError, true);
+			assert.match(resultText(rejected), /child rejected message/u);
+			assert.equal(thread.lastSteering?.message, "Check");
 		} finally { await shutdown(runtime); }
 	});
 

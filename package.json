@@ -40,9 +40,9 @@
     "prepack": "npm run check"
   },
   "peerDependencies": {
-    "@earendil-works/pi-ai": ">=1.0.0",
-    "@earendil-works/pi-coding-agent": ">=1.0.0",
-    "@earendil-works/pi-tui": ">=1.0.0",
+    "@earendil-works/pi-ai": ">=1.4.0",
+    "@earendil-works/pi-coding-agent": ">=1.4.0",
+    "@earendil-works/pi-tui": ">=1.4.0",
     "typebox": "*"
   },
   "devDependencies": {

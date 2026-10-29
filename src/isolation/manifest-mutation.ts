@@ -2,7 +2,7 @@
 
 import { withFileMutationQueue } from "@earendil-works/pi-coding-agent";
 import { randomUUID } from "node:crypto";
-import { mkdir, readdir, rmdir, stat, unlink, writeFile } from "node:fs/promises";
+import { mkdir, readdir, rename, rmdir, stat, unlink, writeFile } from "node:fs/promises";
 import { uptime } from "node:os";
 import { dirname, join } from "node:path";
 import { setTimeout as delay } from "node:timers/promises";
@@ -11,6 +11,22 @@ import { isProcessAlive } from "./temp-hygiene.ts";
 const LOCK_TIMEOUT_MS = 15_000;
 const EMPTY_LOCK_MAX_AGE_MS = 60_000;
 const BOOT_TOLERANCE_MS = 60_000;
+
+/** Windows can briefly deny replacement while another process inspects the
+ * checkpoint. Retry the same atomic rename under the caller's mutation lock;
+ * never unlink the last valid manifest to make a replacement succeed. */
+export async function replaceManifestFile(temporaryPath: string, path: string): Promise<void> {
+	for (let attempt = 0; ; attempt++) {
+		try {
+			await rename(temporaryPath, path);
+			return;
+		} catch (error) {
+			const code = (error as NodeJS.ErrnoException).code;
+			if (process.platform !== "win32" || (code !== "EPERM" && code !== "EACCES") || attempt === 5) throw error;
+			await delay(25 * 2 ** attempt);
+		}
+	}
+}
 
 function bootId(): number {
 	return Math.round(Date.now() - uptime() * 1_000);

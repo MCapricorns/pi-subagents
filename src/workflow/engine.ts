@@ -6,7 +6,7 @@
  * through the same dispatcher a `subagent` call uses — same lifecycle ownership, same
  * admission, same isolation, same durable checkpoint — and is `quiet`, meaning
  * it reports into this graph instead of sending its own completion message.
- * The parent is woken exactly once, with the graph's summary.
+ * The parent receives the graph's summary once, through its chosen delivery route.
  *
  * Failure is contained by the graph, not the session: a failed node blocks only
  * its dependents, independent branches keep running, and the summary states
@@ -46,6 +46,8 @@ export interface WorkflowRunDeps {
 	startBackground: StartBackgroundInternal;
 	/** Isolation the graph wants for a node, resolved against the live catalog. */
 	resolveIsolation: (agentName: string) => "shared" | "worktree";
+	/** Awaited graphs return their summary in the tool result instead of waking the parent. */
+	deliveryRoute?: "background" | "await";
 	/** Project-scoped results directory for the full workflow report. */
 	resultsRoot: string;
 	notify: (message: string, kind: "info" | "warning" | "error") => void;
@@ -53,7 +55,7 @@ export interface WorkflowRunDeps {
 
 export interface WorkflowHandle {
 	run: WorkflowRun;
-	/** Resolves after the graph settles and its summary is delivered. */
+	/** Resolves after the graph settles and background delivery, when requested. */
 	done: Promise<WorkflowRun>;
 }
 
@@ -295,7 +297,6 @@ async function drive(ctx: RunContext): Promise<void> {
 		await ctx.waitForWake();
 	}
 	await Promise.all(inFlight);
-	await settle(ctx);
 }
 
 function stateLabel(state: WorkflowRunState): string {
@@ -470,14 +471,6 @@ async function settle(ctx: RunContext): Promise<void> {
 	run.endedAt ??= Date.now();
 	if (runtime.sessionActive) monitor.updateWorkflow(run);
 	if (!interrupted && run.durableId) await removeWorkflowRecord(runtime.configPath, run.durableId, run.cwd).catch(() => undefined);
-	if (!runtime.sessionActive) return;
-	const item: CompletionMessageItem = {
-		agent: `workflow:${run.name}`,
-		block: formatWorkflowSummary(run, ctx.resultsRoot),
-	};
-	// No usage on the item: the summary carries its own per-model tally, and a
-	// group total would merge different models' spend into one number.
-	runtime.sendCompletionGroup([item]);
 }
 
 /** A phase a live or retained thread already owns. */
@@ -587,17 +580,46 @@ export function startWorkflow(deps: WorkflowRunDeps, workflow: CompiledWorkflow)
 	// Declared writer overlap inside the graph was rejected at compile time; the
 	// dispatcher still runs its own admission per node, so a node that conflicts
 	// with unrelated live work fails alone instead of poisoning the graph.
-	const done = drive(ctx).then(
-		() => run,
-		(error: unknown) => {
-			run.state = "failed";
-			run.endedAt = Date.now();
-			run.stopReason = error instanceof Error ? error.message : String(error);
-			deps.notify(`✗ workflow ${run.name} crashed: ${run.stopReason}`, "error");
-			void removeWorkflowRecord(runtime.configPath, durableId, run.cwd).catch(() => undefined);
-			return run;
-		},
-	);
+	const recordFailure = (error: unknown): void => {
+		run.state = "failed";
+		run.endedAt = Date.now();
+		run.stopReason = error instanceof Error ? error.message : String(error);
+	};
+	const done = (async () => {
+		let crashed = false;
+		try {
+			await drive(ctx);
+			await settle(ctx);
+		} catch (error) {
+			crashed = true;
+			recordFailure(error);
+			await removeWorkflowRecord(runtime.configPath, durableId, run.cwd).catch(() => undefined);
+		}
+		// Both normal and unexpected failure paths use this sole delivery point.
+		// Never retry delivery when the sender itself throws: it may have sent.
+		try {
+			if (runtime.sessionActive && deps.deliveryRoute !== "await") {
+				const item: CompletionMessageItem = {
+					agent: `workflow:${run.name}`,
+					block: formatWorkflowSummary(run, ctx.resultsRoot),
+				};
+				// The summary carries its own per-model tally; a group total would
+				// merge different models' spend into one number.
+				runtime.sendCompletionGroup([item]);
+			}
+		} catch (error) {
+			crashed = true;
+			recordFailure(error);
+		}
+		if (crashed) {
+			try {
+				deps.notify(`✗ workflow ${run.name} crashed: ${run.stopReason}`, "error");
+			} catch {
+				/* Notification failure must not strand callers waiting on done. */
+			}
+		}
+		return run;
+	})();
 	run.done = done;
 	return { run, done };
 }

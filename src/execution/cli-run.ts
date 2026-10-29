@@ -12,7 +12,7 @@ import { SUBAGENT_TOOL_NAMES, type AgentConfig } from "../delegation/agents.ts";
 import type { ThinkingLevel } from "../configuration/config.ts";
 import { writeTempOwnerMarker } from "../isolation/temp-hygiene.ts";
 import { terminateProcessTree } from "./process-tree.ts";
-import { asPlainTextPrompt, emptyUsage, type RunControl, type AttemptControl, type RunResult, type SubagentLiveEvent } from "./run-control.ts";
+import { asPlainTextPrompt, emptyUsage, type RunControl, type AttemptControl, type RunResult, type SteeringReceipt, type SubagentLiveEvent } from "./run-control.ts";
 
 const DEPTH_ENV_VAR = "PI_SUBAGENT_DEPTH";
 /** Every tool of an MCP server shares this prefix, whatever its exposure. */
@@ -142,14 +142,15 @@ export interface ChildLaunchOptions {
 	resumeExistingSession?: boolean;
 	/** Appended system prompt file, when the role carries one. */
 	promptPath?: string;
+	/** Activate scout's approved indirect tools after they register. */
+	toolActivationPath?: string;
 }
 
 /** Command line for one child attempt.
  *
- * An explicit role list is a strict intersection of the parent's tools, but pi
- * keeps MCP tools unless a `--tools` entry names one, so a list that names none
- * has to exclude them by pattern. Scout depends on that: its read-only boundary
- * must not leak an MCP writer. */
+ * The allowlist includes active tools and allowed callable indirect tools. Pi
+ * keeps their exposure, so naming a codemode/deferred tool does not declare it.
+ * Exclude all MCP names when the parent supplied none to keep the boundary. */
 export function buildChildLaunchArgs(options: ChildLaunchOptions): string[] {
 	const { agent, thinkingLevel } = options;
 	const excludedTools: string[] = [...SUBAGENT_TOOL_NAMES];
@@ -173,6 +174,7 @@ export function buildChildLaunchArgs(options: ChildLaunchOptions): string[] {
 	args.push("--exclude-tools", excludedTools.join(","));
 	// Compiled Pi runtimes may ignore NODE_OPTIONS; install before tools run too.
 	if (process.platform === "win32") args.push("--extension", HIDDEN_CONSOLE_PATH);
+	if (options.toolActivationPath) args.push("--extension", options.toolActivationPath);
 	if (options.promptPath) args.push("--append-system-prompt", options.promptPath);
 	return args;
 }
@@ -209,7 +211,34 @@ export async function runCliAgentAttempt(options: RunCliAttemptOptions): Promise
 		if (signal?.aborted || control?.isStopRequested()) {
 			return { ...result, exitCode: 1, stopReason: "aborted", errorMessage: control?.getStopMessage() ?? "Subagent was aborted" };
 		}
-		if (agent.systemPrompt.trim()) promptFile = await writePromptToTempFile(options.scratchRoot, agent.name, agent.systemPrompt);
+		const activateScoutTools = agent.name === "scout" && !!agent.tools?.length;
+		if (agent.systemPrompt.trim() || activateScoutTools) promptFile = await writePromptToTempFile(options.scratchRoot, agent.name, agent.systemPrompt);
+		let toolActivationPath: string | undefined;
+		if (activateScoutTools && promptFile) {
+			toolActivationPath = join(promptFile.dir, "activate-scout-tools.mjs");
+			await writeFile(toolActivationPath, `
+export default function (pi) {
+ const approved = new Set(${JSON.stringify(agent.tools)});
+ const activate = () => {
+  const active = pi.getActiveTools();
+  const registered = pi.getAllTools();
+  const late = registered.filter(tool => approved.has(tool.name) &&
+   (tool.exposure === "codemode" || tool.exposure === "deferred") && !active.includes(tool.name));
+  if (late.length) pi.setActiveTools([...active, ...late.map(tool => tool.name)]);
+  return [...approved].every(name => registered.some(tool => tool.name === name));
+ };
+ pi.on("before_agent_start", async () => {
+  // Match Pi's bounded first-prompt wait for direct MCP tools. These tools
+  // retain indirect exposure, so Pi itself would not wait for them.
+  const deadline = Date.now() + 10_000;
+  while (!activate() && Date.now() < deadline) await new Promise(resolve => setTimeout(resolve, 25));
+ });
+ // Run before Pi snapshots the next turn's tools. Registration may finish
+ // while the previous model request or its tool calls are in flight.
+ pi.on("turn_end", () => { activate(); });
+}
+`, "utf8");
+		}
 		const sessionFile = options.sessionDir && options.sessionId
 			? findSessionFile(options.sessionDir, options.sessionId) : undefined;
 		if (sessionFile) await prepareSessionCwd(sessionFile, options.sessionId!, options.cwd ?? options.defaultCwd);
@@ -217,7 +246,7 @@ export async function runCliAgentAttempt(options: RunCliAttemptOptions): Promise
 			agent, thinkingLevel: options.thinkingLevel,
 			sessionDir: options.sessionDir, sessionId: options.sessionId,
 			resumeExistingSession: sessionFile !== undefined,
-			promptPath: promptFile?.filePath,
+			promptPath: promptFile?.filePath, toolActivationPath,
 		});
 		const invocation = getPiInvocation(args);
 		const processGroup = process.platform !== "win32";
@@ -237,7 +266,7 @@ export async function runCliAgentAttempt(options: RunCliAttemptOptions): Promise
 		let idleTimer: ReturnType<typeof setInterval> | undefined;
 		let startupTimer: ReturnType<typeof setTimeout> | undefined;
 		let nextRequestId = 0;
-		const pendingSteers = new Map<string, { resolve: () => void; reject: (error: Error) => void }>();
+		const pendingSteers = new Map<string, { resolve: (receipt: SteeringReceipt) => void; reject: (error: Error) => void }>();
 		let resolveClosed!: () => void;
 		const processClosed = new Promise<void>((resolve) => { resolveClosed = resolve; });
 		const emit = (event: SubagentLiveEvent): void => {
@@ -254,12 +283,12 @@ export async function runCliAgentAttempt(options: RunCliAttemptOptions): Promise
 			steer(message) {
 				if (closed || settled || stopping || !proc.stdin || proc.stdin.destroyed) return Promise.reject(new Error("Subagent has stopped accepting messages."));
 				const id = `steer-${++nextRequestId}`;
-				return new Promise<void>((resolve, reject) => {
+				return new Promise<SteeringReceipt>((resolve, reject) => {
 					const timer = setTimeout(() => {
 						if (pendingSteers.delete(id)) reject(new Error("No acknowledgement; message delivery is unconfirmed."));
 					}, 10_000);
 					timer.unref?.();
-					pendingSteers.set(id, { resolve: () => { clearTimeout(timer); resolve(); }, reject: (error) => { clearTimeout(timer); reject(error); } });
+					pendingSteers.set(id, { resolve: (receipt) => { clearTimeout(timer); resolve(receipt); }, reject: (error) => { clearTimeout(timer); reject(error); } });
 					proc.stdin.write(JSON.stringify({ id, type: "steer", message: asPlainTextPrompt(message) }) + "\n", (error) => {
 						if (error) {
 							const pending = pendingSteers.get(id);
@@ -296,6 +325,15 @@ export async function runCliAgentAttempt(options: RunCliAttemptOptions): Promise
 		const processLine = (line: string): void => {
 			let record: any;
 			try { record = JSON.parse(line); } catch { return; }
+			if (record?.type === "extension_ui_request") {
+				if (["select", "confirm", "input", "editor"].includes(record.method) && typeof record.id === "string") {
+					result.stderr = appendBoundedStderr(result.stderr, `Cancelled child extension ${record.method} dialog: subagents cannot answer interactive requests; approval was not granted.\n`);
+					if (!closed && !proc.stdin?.destroyed && !proc.stdin?.writableEnded) {
+						proc.stdin?.write(JSON.stringify({ type: "extension_ui_response", id: record.id, cancelled: true }) + "\n");
+					}
+				}
+				return;
+			}
 			if (record?.type === "response") {
 				if (record.id === "initial-prompt" && (!record.success || record.data?.disposition === "handled")) {
 					result.dispatchFailed = true;
@@ -305,7 +343,13 @@ export async function runCliAgentAttempt(options: RunCliAttemptOptions): Promise
 				const pending = pendingSteers.get(record.id);
 				if (pending) {
 					pendingSteers.delete(record.id);
-					if (record.success) pending.resolve();
+					if (record.success) {
+						const disposition = record.data?.disposition;
+						pending.resolve({
+							requestId: record.id, acknowledgedAt: Date.now(),
+							disposition: disposition === "queued" || disposition === "handled" ? disposition : "accepted",
+						});
+					}
 					else pending.reject(new Error(record.error || "Steering was rejected."));
 				}
 				return;

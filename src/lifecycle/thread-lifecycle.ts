@@ -129,10 +129,12 @@ export function createBackgroundDispatcher(options: BackgroundDispatcherOptions)
 			// owner and leaves the caller with no way forward.
 			const owner = duplicate.source;
 			const remedy = owner.state === "parked" || owner.retired
-				? `That run was interrupted (possibly in an earlier session) and keeps the phase claimed; retire it with subagent_stop({ id: ${owner.id} }) to reuse the phase, or give this work a different phaseId. Main handles follow-up work.`
-				: owner.state === "completed" || owner.state === "failed"
-					? "Inspect it with subagent_status; a different deliverable needs a different phaseId. Main handles follow-up work."
-					: "Do not redispatch it; inspect its result or let it finish. Main handles follow-up work.";
+				? `That interrupted run keeps the phase claimed. Inspect its retained result with subagent_status and finish from that evidence. Retire it with subagent_stop({ id: "${owner.id}" }) only if discarding its retained session is intended; then the phase can be reused. Changing only phaseId cannot bypass equal-task ownership.`
+				: owner.state === "completed"
+					? `Reuse its result via subagent_status({ id: ${owner.id} }); use subagent_message({ id: ${owner.id}, message: "<bounded next step>" }) for additional work. A new deliverable needs its own brief and phaseId.`
+					: owner.state === "failed"
+						? "Inspect the failure with subagent_status and finish the remaining work from its evidence. Do not repeat the same phase."
+						: "Do not redispatch it; let it finish or steer it with subagent_message. Its result returns automatically; then continue the task.";
 			return failedStartResult(agentName, task,
 				`Run #${owner.id} (${owner.agentName}) already owns this logical phase (${owner.state}). ${remedy}`);
 		}

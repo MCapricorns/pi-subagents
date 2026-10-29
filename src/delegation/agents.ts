@@ -40,8 +40,7 @@ export type ToolMetadata = Pick<ToolInfo, "name" | "annotations" | "reachesTools
 	exposure?: ToolInfo["exposure"];
 };
 
-/** Exposures reached through a script or `tool_search` instead of a declaration.
- * The session can call these, so a child can be given them directly. */
+/** Exposures callable through a script or `tool_search` without activation. */
 const INDIRECT_EXPOSURES: ReadonlySet<string> = new Set(["codemode", "deferred"]);
 /** Live tool metadata keyed by name. Read-only and write capability come from it
  * instead of a maintained list of extension or MCP tool names. */
@@ -66,11 +65,9 @@ function isReadOnlyToolName(name: string, index: ToolInfoIndex): boolean {
 	return info ? isReadOnlyTool(info) : BUILTIN_READ_ONLY_TOOL_SET.has(name);
 }
 
-/** Resolve a child against the parent's live tool selection. Broad roles
- * inherit the complete active set. A read-only role keeps every active tool
- * that is proven read-only, so retrieval extensions and MCP servers work
- * without being named anywhere. pi-subagents controls are always removed so
- * children stay leaves. */
+/** Resolve a child against the parent's active and callable indirect tools.
+ * Inactive direct tools stay excluded. Scout promotes only tools marked
+ * read-only; pi-subagents controls are removed so children stay leaves. */
 export function resolveAgentTools(
 	agent: AgentConfig,
 	activeToolNames: readonly string[],
@@ -78,23 +75,19 @@ export function resolveAgentTools(
 ): AgentConfig {
 	const active = [...new Set(activeToolNames)].filter((tool) => !SUBAGENT_TOOL_NAME_SET.has(tool));
 	const toolIndex = indexToolInfos(toolInfos);
-	if (agent.name !== "scout") return { ...agent, tools: active };
-	// Scout is a hard read-only boundary, so its surface is derived from the
-	// live catalog alone — the role can never widen past what the host proves
-	// read-only. Codemode and tool_search are excluded because they reach other
-	// tools.
+	const indirect = [...toolIndex.values()]
+		.filter((tool) => tool.exposure && INDIRECT_EXPOSURES.has(tool.exposure) && !SUBAGENT_TOOL_NAME_SET.has(tool.name))
+		.map((tool) => tool.name)
+		.filter((name) => !active.includes(name))
+		.sort();
+	if (agent.name !== "scout") return { ...agent, tools: [...active, ...indirect] };
+	// Scout uses the live catalog's read-only classification. Codemode and
+	// tool_search are excluded because they can reach tools outside that set.
 	const tools = active.filter((tool) => isReadOnlyToolName(tool, toolIndex));
-	// A read-only tool the session reaches through codemode or tool_search is
-	// part of the same capability, and the child can be handed it directly.
-	// Declaring it is the only way to give scout an MCP server it cannot
-	// reconfigure, without also giving it a tool that reaches a writer.
+	// The child explicitly activates these after registration, without giving
+	// scout an orchestrating tool that could also reach writers.
 	if (active.some((tool) => toolIndex.get(tool)?.reachesTools)) {
-		const indirect = [...toolIndex.values()]
-			.filter((tool) => typeof tool.exposure === "string" && INDIRECT_EXPOSURES.has(tool.exposure) && isReadOnlyTool(tool))
-			.map((tool) => tool.name)
-			.filter((name) => !tools.includes(name))
-			.sort();
-		tools.push(...indirect);
+		tools.push(...indirect.filter((name) => isReadOnlyToolName(name, toolIndex)));
 	}
 	return { ...agent, tools };
 }

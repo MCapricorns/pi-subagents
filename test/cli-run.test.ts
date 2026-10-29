@@ -7,14 +7,16 @@ import { join } from "node:path";
 import { describe, it } from "node:test";
 import { appendBoundedStderr, buildChildLaunchArgs, CHILD_STDERR_MAX_CHARS, runCliAgentAttempt } from "../src/execution/cli-run.ts";
 import { getResultOutput, isFailedResult, isModelLevelFailure } from "../src/execution/spawn.ts";
-import { RunControl } from "../src/execution/run-control.ts";
+import { RunControl, type SteeringReceipt } from "../src/execution/run-control.ts";
 
 async function withChild(
 	onPrompt: string,
-	verify: (result: Awaited<ReturnType<typeof runCliAgentAttempt>>) => void,
+	verify: (result: Awaited<ReturnType<typeof runCliAgentAttempt>>, receipt?: SteeringReceipt) => void,
 	stopOnStart = false,
 	onSteer?: string,
 	env?: NodeJS.ProcessEnv,
+	onUiResponse?: string,
+	timeoutMs = 10_000,
 ): Promise<void> {
 	const root = await mkdtemp(join(tmpdir(), "pi-subagents-cli-test-"));
 	const child = join(root, "child.mjs");
@@ -33,6 +35,7 @@ process.stdin.on("data", chunk => {
   const command = JSON.parse(buffer.slice(0, index));
   buffer = buffer.slice(index + 1);
   if (command.type === "steer") { ${onSteer ?? ""} continue; }
+  if (command.type === "extension_ui_response") { ${onUiResponse ?? ""} continue; }
   if (command.type !== "prompt") continue;
   send({ type: "response", id: command.id, command: "prompt", success: true, data: { disposition: "started" } });
   send({ type: "agent_start" });
@@ -43,20 +46,22 @@ process.stdin.on("data", chunk => {
 	try {
 		process.argv[1] = child;
 		const control = new RunControl("Test native Pi", 1);
-		let steering: Promise<void> | undefined;
+		let steering: Promise<SteeringReceipt> | undefined;
 		const result = await runCliAgentAttempt({
 			defaultCwd: root, agent: { name: "artisan", description: "test", systemPrompt: "" },
 			agentName: "artisan", task: "Test native Pi", thinkingLevel: "off", idleTimeoutMs: 0,
 			scratchRoot: join(root, "tmp"), prompt: "Test native Pi", control, env,
-			signal: AbortSignal.timeout(10_000), startupTimeoutMs: 5_000,
+			signal: AbortSignal.timeout(timeoutMs), startupTimeoutMs: 5_000,
 			onLive: (event) => {
 				if (stopOnStart && event.kind === "status" && event.status === "running") void control.stop("User cancelled");
-				if (onSteer && !steering && event.kind === "status" && event.status === "running") steering = control.steer("Please check the caller");
+				if (onSteer && !steering && event.kind === "status" && event.status === "running") {
+					steering = control.steer("Please check the caller");
+					void steering.catch(() => undefined);
+				}
 			},
 		});
 		if (stopOnStart) await control.stop("User cancelled");
-		if (steering) await steering;
-		verify(result);
+		verify(result, steering ? await steering : undefined);
 	} finally {
 		process.argv[1] = previousScript;
 		await rm(root, { recursive: true, force: true });
@@ -127,6 +132,30 @@ describe("child launch arguments", () => {
 		assert.equal(buildChildLaunchArgs({ ...base, agent: {} }).includes("--no-session"), true);
 	});
 });
+
+describe("stable steering receipts", () => {
+	it("preserves the receipt returned by the attached attempt", async () => {
+		const control = new RunControl("Fixture", 1);
+		const token = control.beginAttempt();
+		const receipt: SteeringReceipt = { requestId: "native-7", disposition: "handled", acknowledgedAt: 123 };
+		control.attach(token, { stop: async () => {}, steer: async () => receipt });
+		control.updateAttemptPhase(token, "running");
+		assert.equal(await control.steer("Additional instruction"), receipt);
+	});
+
+	it("normalizes a legacy control to accepted without claiming a queue or RPC acknowledgement", async () => {
+		const control = new RunControl("Fixture", 1);
+		const token = control.beginAttempt();
+		control.attach(token, { stop: async () => {}, steer: async () => {} });
+		control.updateAttemptPhase(token, "running");
+		const before = Date.now();
+		const receipt = await control.steer("Additional instruction");
+		assert.equal(receipt.disposition, "accepted");
+		assert.equal(receipt.requestId, undefined);
+		assert.ok(receipt.acknowledgedAt >= before && receipt.acknowledgedAt <= Date.now());
+	});
+});
+
 
 describe("bounded stderr retention", () => {
 	it("keeps short output whole and trims long output to its newest tail", () => {
@@ -208,11 +237,47 @@ console.log("fixture survived both spawn failures");
 		const args = buildChildLaunchArgs({ agent: {}, thinkingLevel: "off" });
 		assert.deepEqual(args.slice(0, 2), ["--mode", "rpc"]);
 	});
-	it("delivers and acknowledges steering before the final answer", async () => {
-		await withChild("", (result) => {
-			assert.equal(isFailedResult(result), false);
-			assert.match(getResultOutput(result), /Please check the caller/u);
-		}, false, `send({ type: "response", id: command.id, command: "steer", success: true, data: { disposition: "queued" } }); assistant("stop", command.message); send({ type: "agent_settled" });`);
+	for (const disposition of ["queued", "handled", undefined, "unknown"]) {
+		it(`returns the child steering receipt for ${disposition ?? "empty success"}`, async () => {
+			const before = Date.now();
+			await withChild("", (result, receipt) => {
+				assert.equal(isFailedResult(result), false);
+				assert.match(getResultOutput(result), /Please check the caller/u);
+				assert.equal(receipt?.requestId, "steer-1");
+				assert.equal(receipt.disposition, disposition === "queued" || disposition === "handled" ? disposition : "accepted");
+				assert.ok(receipt.acknowledgedAt >= before && receipt.acknowledgedAt <= Date.now());
+			}, false, `send({ type: "response", id: command.id, command: "steer", success: true, data: ${JSON.stringify(disposition ? { disposition } : {})} }); assistant("stop", command.message); send({ type: "agent_settled" });`);
+		});
+	}
+	for (const response of [
+		{ code: `send({ type: "response", id: command.id, command: "steer", success: false, error: "Fixture rejected steer" }); assistant("stop", "Finished"); send({ type: "agent_settled" });`, error: /Fixture rejected steer/u },
+		{ code: `send({ type: "response", id: "wrong-id", command: "steer", success: true, data: { disposition: "queued" } }); assistant("stop", "Finished"); send({ type: "agent_settled" });`, error: /settled before acknowledging/u },
+		{ code: `process.exit(1);`, error: /exited before acknowledging/u },
+	]) {
+		it(`rejects unacknowledged or failed steering: ${response.error}`, async () => {
+			await assert.rejects(withChild("", () => assert.fail("A receipt must not be invented"), false, response.code), response.error);
+		});
+	}
+	it("fails delivery after the acknowledgement timeout while the child is still running", { timeout: 15_000 }, async () => {
+		await assert.rejects(withChild("", () => assert.fail("A receipt must not be invented"), false,
+			`setTimeout(() => { assistant("stop", "Finished without acknowledging"); send({ type: "agent_settled" }); }, 10_200);`,
+			undefined, undefined, 14_000), /No acknowledgement; message delivery is unconfirmed/u);
+	});
+	for (const method of ["select", "confirm", "input", "editor"]) {
+		it(`cancels a matching ${method} dialog without approval`, async () => {
+			await withChild(`send({ type: "extension_ui_request", id: "dialog-1", method: "${method}" });`, (result) => {
+				assert.equal(isFailedResult(result), false, result.stderr);
+				assert.deepEqual(JSON.parse(getResultOutput(result)), { type: "extension_ui_response", id: "dialog-1", cancelled: true });
+				assert.match(result.stderr, new RegExp(`Cancelled child extension ${method} dialog.*approval was not granted`));
+			}, false, undefined, undefined, `assistant("stop", JSON.stringify(command)); send({ type: "agent_settled" });`);
+		});
+	}
+	it("ignores fire-and-forget UI notifications without responding", async () => {
+		await withChild(`send({ type: "extension_ui_request", id: "notification", method: "notify" }); setTimeout(() => { assistant("stop", "Finished"); send({ type: "agent_settled" }); }, 20);`, (result) => {
+			assert.equal(isFailedResult(result), false, result.stderr);
+			assert.equal(getResultOutput(result), "Finished");
+			assert.equal(result.stderr, "");
+		}, false, undefined, undefined, `process.exit(3);`);
 	});
 	it("cancels a live child and waits for its process to close", async () => {
 		await withChild('setInterval(() => {}, 1000);', (result) => {

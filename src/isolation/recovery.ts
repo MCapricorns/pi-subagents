@@ -1,8 +1,8 @@
 /** Durable handoff for worktree integration/cleanup failures across sessions. */
 
-import { withManifestMutation } from "./manifest-mutation.ts";
+import { replaceManifestFile, withManifestMutation } from "./manifest-mutation.ts";
 import { existsSync } from "node:fs";
-import { mkdir, readFile, rename, rm, writeFile } from "node:fs/promises";
+import { mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import { stripVTControlCharacters } from "node:util";
 import { getProjectRoot, getSubagentsRoot } from "../execution/spawn.ts";
@@ -126,7 +126,7 @@ async function writeManifest(path: string, records: readonly RecoveryRecord[]): 
 			records: [...records],
 		};
 		await writeFile(temporaryPath, `${JSON.stringify(manifest, null, 2)}\n`, "utf8");
-		await rename(temporaryPath, path);
+		await replaceManifestFile(temporaryPath, path);
 	} finally {
 		await rm(temporaryPath, { force: true }).catch(() => undefined);
 	}

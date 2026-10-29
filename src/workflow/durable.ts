@@ -15,9 +15,9 @@
  */
 
 import { createHash } from "node:crypto";
-import { withManifestMutation } from "../isolation/manifest-mutation.ts";
+import { replaceManifestFile, withManifestMutation } from "../isolation/manifest-mutation.ts";
 import { readdirSync } from "node:fs";
-import { mkdir, readFile, rename, rm, writeFile } from "node:fs/promises";
+import { mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import { dirname, isAbsolute, join, resolve } from "node:path";
 import { getProjectRoot, getSubagentsRoot } from "../execution/spawn.ts";
 import { PARKED_RECORD_MAX_AGE_MS } from "../lifecycle/durable.ts";
@@ -154,7 +154,7 @@ async function writeManifest(path: string, records: readonly WorkflowRecord[]): 
 	try {
 		const manifest: WorkflowsManifest = { version: WORKFLOWS_MANIFEST_VERSION, records: [...records] };
 		await writeFile(temporaryPath, `${JSON.stringify(manifest, null, 2)}\n`, "utf8");
-		await rename(temporaryPath, path);
+		await replaceManifestFile(temporaryPath, path);
 	} finally {
 		await rm(temporaryPath, { force: true }).catch(() => undefined);
 	}

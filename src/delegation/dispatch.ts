@@ -13,12 +13,11 @@ import { Text } from "@earendil-works/pi-tui";
 import { Type } from "typebox";
 import { isWriteCapableAgent, loadBuiltinAgents, type AgentConfig, type ToolMetadata } from "./agents.ts";
 import { DEFAULT_MAX_RESULT_LINES, loadConfig } from "../configuration/config.ts";
-import { formatCompletionBlock, formatUsage } from "../presentation/format.ts";
+import { formatUsage } from "../presentation/format.ts";
 import {
 	formatTaskSummary,
 	monitor,
 	statusIcon,
-	statusLabel,
 } from "../presentation/monitor.ts";
 import { findDuplicateDispatch, formatParallelScopeAdmissionNote, formatPhaseLeaseReceipt } from "./prompt.ts";
 import { findRuntimeWriterConflict } from "./ownership.ts";
@@ -33,6 +32,7 @@ import {
 } from "./phase-scope.ts";
 import { findPendingWorkflowPhase, type SubagentRuntime, type SubagentThread } from "../lifecycle/runtime.ts";
 import { cancelActiveWork } from "../lifecycle/cancellation.ts";
+import { awaitRunResults, WaitSchema } from "../lifecycle/await-results.ts";
 import { createDispatchCore, type DispatchCore } from "../lifecycle/dispatch-core.ts";
 import {
 	getResultOutput,
@@ -40,10 +40,7 @@ import {
 	type SingleResult,
 	type SubagentDetails,
 } from "../execution/spawn.ts";
-import {
-	isWorktreeCapableAgent,
-	projectResultsRoot,
-} from "../lifecycle/thread-shared.ts";
+import { isWorktreeCapableAgent } from "../lifecycle/thread-shared.ts";
 import type { IsolationMode } from "../isolation/worktree.ts";
 
 const NON_BLANK_TASK_OPTIONS = { minLength: 1, pattern: "\\S" } as const;
@@ -59,7 +56,7 @@ export const PhaseIdSchema = Type.Optional(Type.String({
 	minLength: 1,
 	maxLength: PHASE_ID_MAX_LENGTH,
 	pattern: PHASE_ID_PATTERN_SOURCE,
-	description: "Stable logical phase id. Reuse it when rewording the same phase; exact task+cwd is the fallback when omitted.",
+	description: "Stable logical phase id. Reuse it when rewording the same phase. Equal normalized task+cwd also rejects duplicates, even with a different phaseId.",
 }));
 export const ScopeSchema = Type.Optional(Type.Object({
 	paths: Type.Optional(Type.Array(Type.String({
@@ -71,13 +68,6 @@ export const ScopeSchema = Type.Optional(Type.Object({
 		name: Type.String({ ...NON_BLANK_TASK_OPTIONS, description: "Exact symbol name claimed for writing." }),
 	}))),
 }, { description: "Declarative write-conflict metadata for admission, not filesystem permissions or a sandbox. If present, at least one valid claim is required." }));
-
-const WaitSchema = Type.Optional(
-	Type.Boolean({
-		description:
-			"Block until every run started by this call settles, then return each result exactly once in this tool response. Cancelling the parent stops its runs and suppresses background wake-ups. Intended for one-shot (pi -p) sessions or an immediate dependent step.",
-	}),
-);
 
 const TASK_BRIEF_DESCRIPTION =
 	"Complete brief: objective and done condition, relevant paths/symbols, known facts with citations when available, boundaries, and needed output. The child has no parent conversation.";
@@ -226,107 +216,6 @@ function formatResultRow(r: SingleResult, theme: Theme): string {
  * folds tool-result usage into one session total — that merged every
  * model's spend into the main window's consumption line. */
 
-/** In-turn wait for a fresh dispatch. Registration resolves it without a model-chosen
- * timer; parent abort ends the wait and cancels its owned work. */
-async function awaitRunResults(
-	runtime: SubagentRuntime,
-	runIds: number[],
-	signal: AbortSignal | undefined,
-	maxResultLines: number,
-	fallbackCwd: string,
-	onProgress?: (text: string) => void,
-): Promise<string> {
-	const waitForRun = (runId: number): Promise<{ result?: SingleResult; note?: string }> => {
-		const already = runtime.settledRuns.get(runId);
-		if (already) return Promise.resolve({ result: already });
-		if (monitor.findRun(runId)?.status === "parked") {
-			return Promise.resolve({ note: `run #${runId} was interrupted; inspect retained work with subagent_status and finish it in main` });
-		}
-		return new Promise((resolve) => {
-			let done = false;
-			let unsub: (() => void) | undefined;
-			const cleanup = (): void => {
-				if (unsub) unsub();
-				signal?.removeEventListener("abort", onAbort);
-				const listeners = runtime.settledListeners.get(runId);
-				if (listeners) {
-					listeners.delete(onSettled);
-					if (listeners.size === 0) runtime.settledListeners.delete(runId);
-				}
-			};
-			const finish = (outcome: { result?: SingleResult; note?: string }): void => {
-				if (done) return;
-				done = true;
-				cleanup();
-				resolve(outcome);
-			};
-			const onSettled = (result: SingleResult): void => finish({ result });
-			const onMonitor = (): void => {
-				const current = runtime.settledRuns.get(runId);
-				if (current) {
-					finish({ result: current });
-					return;
-				}
-				const live = monitor.findRun(runId);
-				if (live?.status === "parked") {
-					finish({ note: `run #${runId} was interrupted; inspect retained work with subagent_status and finish it in main` });
-					return;
-				}
-				if (!live) {
-					// Removal is followed synchronously by registerRunResult in the
-					// finishing task; re-check on the next tick so the result wins.
-					setTimeout(() => {
-						const late = runtime.settledRuns.get(runId);
-						if (late) finish({ result: late });
-						else finish({ note: `run #${runId} was removed before its result was recorded (cancelled or session ended)` });
-					}, 0);
-				}
-			};
-			const onAbort = (): void => finish({ note: `Parent wait cancelled for run #${runId}; automatic cancellation stops unfinished child work. No additional subagent_stop is needed.` });
-			let listeners = runtime.settledListeners.get(runId);
-			if (!listeners) {
-				listeners = new Set();
-				runtime.settledListeners.set(runId, listeners);
-			}
-			listeners.add(onSettled);
-			unsub = monitor.subscribe(onMonitor);
-			if (signal?.aborted) onAbort();
-			else signal?.addEventListener("abort", onAbort, { once: true });
-		});
-	};
-	// One shared subscription drives the progress line: each waiter already
-	// subscribes for its own settlement, and the tool card wants a single
-	// rolled-up line rather than one per run.
-	let lastProgress: string | undefined;
-	const emitProgress = onProgress
-		? (): void => {
-			const parts = runIds.map((id) => {
-				const settled = runtime.settledRuns.get(id);
-				if (settled) return `#${id} ${isFailedResult(settled) ? "failed" : "done"}`;
-				const live = monitor.findRun(id);
-				return live ? `#${id} ${statusLabel(live.status)}` : `#${id} …`;
-			});
-			const text = `Waiting in-turn on ${runIds.length} run${runIds.length === 1 ? "" : "s"} · ${parts.join(", ")}`;
-			// The monitor notifies on every usage and activity change; this line
-			// names only statuses, so most notifications leave it identical.
-			if (text === lastProgress) return;
-			lastProgress = text;
-			onProgress(text);
-		}
-		: undefined;
-	const progressUnsub = emitProgress ? monitor.subscribe(emitProgress) : undefined;
-	emitProgress?.();
-	try {
-		const outcomes = await Promise.all(runIds.map(waitForRun));
-		return outcomes.map((outcome) =>
-			outcome.result
-				? formatCompletionBlock(outcome.result, maxResultLines, { resultRoot: projectResultsRoot(runtime.configPath, outcome.result.projectCwd ?? fallbackCwd) })
-				: (outcome.note ?? "(no outcome)"),
-		).join("\n\n");
-	} finally {
-		progressUnsub?.();
-	}
-}
 
 export function registerSubagentTool(
 	pi: ExtensionAPI,
@@ -349,7 +238,7 @@ export function registerSubagentTool(
 	pi.registerTool({
 		name: "subagent",
 		label: "Subagent",
-		description: "Delegate worthwhile bounded work for focused implementation, isolated research, parallel progress, or independent verification. Use tasks for independent phases and a built-in subagent_workflow when its fixed phases fit. Duplicate phases and declared writer overlaps with runs, pending nodes, or main writes are rejected before allocation. Scope is coordination metadata, not permissions. Omit isolation for automatic selection. Results arrive automatically or with wait:true; main reuses completed work and handles gaps.",
+		description: "Delegate worthwhile bounded work for focused implementation, isolated research, parallel progress, or independent verification. Use tasks for independent phases and a built-in subagent_workflow when its fixed phases fit. Duplicate phases and declared writer overlaps with runs, pending nodes, or main writes are rejected before allocation. Scope is coordination metadata, not permissions. Omit isolation for automatic selection. Use wait:true for an immediate dependency; one-shot print/JSON sessions wait by default. Background results wake main to finish the task. Reuse completed work and handle gaps.",
 		// Admission and lease reservation finish synchronously before child startup.
 		// Awaited runs must not block unrelated dispatch calls.
 		exposure: "model-only",
@@ -363,6 +252,7 @@ export function registerSubagentTool(
 		parameters: SubagentParams,
 
 		async execute(_toolCallId, params, signal, onUpdate, ctx) {
+			const wait = params.wait ?? (ctx.hasUI === false);
 			// `wait: true` holds this call for minutes and would otherwise show a
 			// blank card; the background path returns at once and has nothing to
 			// stream. Frames carry the final details shape because renderResult
@@ -379,6 +269,7 @@ export function registerSubagentTool(
 			// One admission snapshot: role boundaries and writer capability must
 			// describe the same catalog the batch is validated against.
 			const toolInfos = runtime.getToolInfos();
+			if (signal?.aborted) throw new Error("Subagent dispatch cancelled before any run started.");
 			core.setEnvironment({ ctx, config, agents });
 
 			const hasTasks = (params.tasks?.length ?? 0) > 0;
@@ -455,7 +346,7 @@ export function registerSubagentTool(
 							catalogAgent ? isWorktreeCapableAgent(catalogAgent, toolInfos) : undefined,
 						),
 						{
-							deliveryRoute: params.wait ? "await" : "background",
+							deliveryRoute: wait ? "await" : "background",
 							phaseId: item.phaseId,
 							scope: item.scope,
 							writeCapable: item.writeCapable,
@@ -481,7 +372,7 @@ export function registerSubagentTool(
 					// that still carry details.
 					throw new Error(`No subagents started.\n${failureLines.join("\n")}`);
 				}
-				if (params.wait) {
+				if (wait) {
 					const blocks = await awaitRunResults(runtime, startedIds, signal, DEFAULT_MAX_RESULT_LINES, ctx.cwd, makeProgress(makeDetails("parallel")(results)));
 					if (signal?.aborted) await cancelActiveWork(runtime, "Parent run was cancelled.");
 					else runtime.completeAwaitDelivery(startedIds);
@@ -489,9 +380,11 @@ export function registerSubagentTool(
 						? `${blocks}\n\nLaunch failures:\n${failureLines.join("\n")}`
 						: blocks;
 					const text = `${resultText}\n\n${admissionNote}`;
+					const settled = results.map((result) => result.runId === undefined ? result : runtime.settledRuns.get(result.runId) ?? result);
 					return {
 						content: [{ type: "text", text }],
-						details: makeDetails("parallel")(results),
+						details: makeDetails("parallel")(settled),
+						...(signal?.aborted || settled.some((result) => result.exitCode === -1 || isFailedResult(result)) ? { isError: true } : {}),
 					};
 				}
 				const text = [
@@ -528,7 +421,7 @@ export function registerSubagentTool(
 					singleCatalogAgent ? isWorktreeCapableAgent(singleCatalogAgent, toolInfos) : undefined,
 				),
 				{
-					deliveryRoute: params.wait ? "await" : "background",
+					deliveryRoute: wait ? "await" : "background",
 					phaseId: single.phaseId,
 					scope: single.scope,
 					writeCapable: single.writeCapable,
@@ -538,13 +431,15 @@ export function registerSubagentTool(
 			if (result.exitCode !== -1) {
 				throw new Error(getResultOutput(result));
 			}
-			if (params.wait && result.runId !== undefined) {
+			if (wait && result.runId !== undefined) {
 				const blocks = await awaitRunResults(runtime, [result.runId], signal, DEFAULT_MAX_RESULT_LINES, ctx.cwd, makeProgress(makeDetails("single")([result])));
 				if (signal?.aborted) await cancelActiveWork(runtime, "Parent run was cancelled.");
 				else runtime.completeAwaitDelivery([result.runId]);
+				const settled = runtime.settledRuns.get(result.runId);
 				return {
 					content: [{ type: "text", text: blocks }],
-					details: makeDetails("single")([result]),
+					details: makeDetails("single")([settled ?? result]),
+					...(signal?.aborted || !settled || isFailedResult(settled) ? { isError: true } : {}),
 				};
 			}
 			return {

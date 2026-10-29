@@ -9,9 +9,11 @@ import { Text } from "@earendil-works/pi-tui";
 import { Type } from "typebox";
 import { DEFAULT_MAX_RESULT_LINES, loadConfig } from "../configuration/config.ts";
 import { loadBuiltinAgents } from "../delegation/agents.ts";
-import { findSessionFile, getProjectRoot, getResultOutput, sessionExists } from "../execution/spawn.ts";
+import { findSessionFile, getProjectRoot, getResultOutput, isFailedResult, sessionExists } from "../execution/spawn.ts";
 import { writeTempOwnerMarker } from "../isolation/temp-hygiene.ts";
 import type { DispatchCore } from "./dispatch-core.ts";
+import { awaitRunResults, WaitSchema } from "./await-results.ts";
+import { cancelActiveWork } from "./cancellation.ts";
 import { stopThreads } from "./stop.ts";
 import { formatCompletionBlock, matchRunIds } from "../presentation/format.ts";
 import { emptyUsage } from "../execution/run-control.ts";
@@ -124,6 +126,7 @@ export function registerLookupTools(pi: ExtensionAPI, runtime: SubagentRuntime, 
 					waitReason: state === "queued" ? live?.waitReason : undefined,
 					activity: live?.activity,
 					recentActivity: live?.recentActivity ?? [],
+					lastSteering: thread.lastSteering,
 					elapsedMs: monitor.getElapsedMs(thread.id) ?? thread.elapsedMs,
 					model: live?.model ?? result?.model,
 					thinking: live?.thinking ?? result?.thinking ?? thread.thinkingLevel,
@@ -152,6 +155,7 @@ export function registerLookupTools(pi: ExtensionAPI, runtime: SubagentRuntime, 
 					if (run.phaseId) lines.push(`  phase: ${run.phaseId}`);
 					if (run.scope) lines.push(`  scope: ${JSON.stringify(run.scope)}`);
 					if (run.isolationNote) lines.push(`  isolation: ${run.isolationNote}`);
+					if (run.lastSteering) lines.push(`  last steering: ${run.lastSteering.disposition} · acknowledged ${formatDuration(Math.max(0, Date.now() - run.lastSteering.acknowledgedAt))} ago${run.lastSteering.requestId ? ` · request ${run.lastSteering.requestId}` : ""} · ${run.lastSteering.message}`);
 					if (run.followUpContext) lines.push(`  follow-up: ${run.followUpContext}${run.followUpContext === "summary" ? " (retained session unavailable)" : " available"}`);
 					// The trail is the progress answer: what the run has been doing,
 					// newest last. It replaces pointing the parent at child session
@@ -220,15 +224,16 @@ export function registerLookupTools(pi: ExtensionAPI, runtime: SubagentRuntime, 
 	pi.registerTool({
 		name: "subagent_message",
 		label: "Subagent Message",
-		description: "Send a steering message to a running subagent, or continue a successfully completed run. Omit context or use \"auto\" to reuse its retained session when available and otherwise start from a bounded summary, reporting the fallback. Use \"session\" only when full history is required; missing history is an error. Use \"summary\" for a new next step with only the earlier objective, result, and touched files. Session copies preserve history and the provider cache key; summary runs have neither. Steering is acknowledged as queued, not necessarily acted on.",
+		description: "Send a steering message to a running subagent, or continue a successfully completed run. Omit context or use \"auto\" to reuse its retained session when available and otherwise start from a bounded summary, reporting the fallback. Use \"session\" only when full history is required; missing history is an error. Use \"summary\" for a new next step with only the earlier objective, result, and touched files. Session copies preserve history and the provider cache key; summary runs have neither. Use wait:true to receive a completed-run follow-up in this call; one-shot print/JSON sessions wait by default. Steering waits for the child RPC acknowledgement and reports queued, handled by an input hook, or accepted with queue state unknown. Receipt is not proof of model execution; status retains the latest acknowledgement.",
 		exposure: "model-only",
-		executionMode: "sequential",
+		executionMode: "parallel",
 		parameters: Type.Object({
 			id: Type.Integer({ minimum: 1, description: "Exact run id in this parent session." }),
 			message: Type.String({ minLength: 1, pattern: "\\S", description: "Additional instruction or follow-up question." }),
 			context: Type.Optional(Type.String({ enum: ["auto", "session", "summary"], description: "auto (default) uses the retained session when available, otherwise a bounded summary and reports the fallback. session requires the full retained history and fails if unavailable. summary always starts fresh with the earlier objective, result, and touched files; no history or cache reuse." })),
+			wait: WaitSchema,
 		}),
-		async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
+		async execute(_toolCallId, params, _signal, onUpdate, ctx) {
 			await runtime.durableRestore;
 			const thread = runtime.threads.get(params.id);
 			const fail = (message: string) => ({ content: [{ type: "text" as const, text: message }], details: {}, isError: true });
@@ -236,9 +241,19 @@ export function registerLookupTools(pi: ExtensionAPI, runtime: SubagentRuntime, 
 			if (!thread || thread.retired) return fail(`No available run matches #${params.id} in this session.`);
 			if (thread.state === "running" && !thread.lifecycleOperation) {
 				try {
-					await thread.control.steer(params.message);
-					return { content: [{ type: "text" as const, text: `Steering queued for #${thread.id}; it has not necessarily been acted on yet.` }], details: { id: thread.id } };
-				} catch (error) { return fail(`Could not send to #${thread.id}: ${error instanceof Error ? error.message : String(error)}`); }
+					const receipt = await thread.control.steer(params.message);
+					thread.lastSteering = { ...receipt, message: formatTaskSummary(params.message, 160, false) };
+					const status = receipt.disposition === "queued"
+						? `Received by #${thread.id} · queued for the next steering boundary. Model execution is not yet confirmed.`
+						: receipt.disposition === "handled"
+							? `Received by #${thread.id} · handled by an input hook. Delivery to the model is not confirmed.`
+							: `Accepted by #${thread.id} · queue state unconfirmed. Model execution is not yet confirmed.`;
+					monitor.setActivity(thread.id, `steering ${receipt.disposition}`);
+					return {
+						content: [{ type: "text" as const, text: `${status}${receipt.requestId ? `\nChild RPC acknowledgement: ${receipt.requestId}` : ""}` }],
+						details: { id: thread.id, steering: thread.lastSteering },
+					};
+				} catch (error) { return fail(`Steering to #${thread.id} was not confirmed: ${error instanceof Error ? error.message : String(error)}`); }
 			}
 			if (thread.state !== "completed" || thread.lifecycleOperation) {
 				const state = thread.state === "parked" ? "interrupted" : thread.state;
@@ -279,21 +294,43 @@ export function registerLookupTools(pi: ExtensionAPI, runtime: SubagentRuntime, 
 				const task = copyDir
 					? `Follow-up to run #${thread.id} (${randomUUID()}):\n${params.message}`
 					: buildSummaryFollowUp(thread, params.message);
+				const wait = params.wait ?? (ctx.hasUI === false);
 				const result = await dispatchCore.startBackground(thread.agentName, task, thread.cwd, thread.isolation, {
 					phaseId: `followup:${thread.id}:${randomUUID()}`, scope: thread.scope,
+					deliveryRoute: wait ? "await" : "background",
 					...(copyDir ? { resumeSession: { sessionId: thread.sessionId!, sessionDir: copyDir } } : {}),
 				});
 				if (result.runId === undefined) throw new Error(result.errorMessage || "Follow-up dispatch failed.");
 				copyDir = undefined;
 				const contextNote = selectedContext === "session" ? "its retained session" : "a summary only";
+				const receipt = `Follow-up #${result.runId} from #${thread.id} with ${contextNote}${fallbackReason ? ` (${fallbackReason})` : ""}`;
+				const details = { id: result.runId, sourceId: thread.id, context: selectedContext, ...(fallbackReason ? { fallbackReason } : {}) };
+				if (wait) {
+					const blocks = await awaitRunResults(runtime, [result.runId], _signal, DEFAULT_MAX_RESULT_LINES, thread.cwd, (text) => {
+						onUpdate?.({ content: [{ type: "text", text }], details });
+					});
+					if (_signal?.aborted) await cancelActiveWork(runtime, "Parent run was cancelled.");
+					else runtime.completeAwaitDelivery([result.runId]);
+					const settled = runtime.settledRuns.get(result.runId);
+					return {
+						content: [{ type: "text" as const, text: `${receipt}\n\n${blocks}` }], details,
+						...(_signal?.aborted || !settled || isFailedResult(settled) ? { isError: true } : {}),
+					};
+				}
 				return {
-					content: [{ type: "text" as const, text: `Started follow-up #${result.runId} from #${thread.id} with ${contextNote}${fallbackReason ? ` (${fallbackReason})` : ""}; results arrive automatically.` }],
-					details: { id: result.runId, sourceId: thread.id, context: selectedContext, ...(fallbackReason ? { fallbackReason } : {}) },
+					content: [{ type: "text" as const, text: `${receipt} started; results arrive automatically. Continue independent work, then use the result to finish the task.` }], details,
 				};
 			} catch (error) {
 				if (copyDir) await rm(copyDir, { recursive: true, force: true }).catch(() => undefined);
 				return fail(`Could not continue #${thread.id}: ${error instanceof Error ? error.message : String(error)}`);
 			}
+		},
+		renderCall(args, theme) {
+			return new Text(`${theme.fg("toolTitle", theme.bold("subagent_message "))}${theme.fg("accent", `#${args.id ?? "?"}`)} ${theme.fg("dim", formatTaskSummary(args.message ?? "", 80, false))}`, 0, 0);
+		},
+		renderResult(result, options, theme) {
+			if (options.expanded) return new Text(result.content.map((part) => part.type === "text" ? part.text : "").join("\n"), 0, 0);
+			return renderFirstLine(result, "subagent_message ", theme);
 		},
 	});
 

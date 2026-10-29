@@ -83,9 +83,9 @@ describe("buildDelegationDirective", () => {
 			assert.ok(!directive.includes(role.systemPrompt));
 		}
 		assert.match(directive, /Children have no parent conversation/u);
-		assert.match(directive, /brief outcome, done condition, paths, existing evidence, boundaries, and output/u);
+		assert.match(directive, /brief outcome, done condition, paths, evidence, boundaries, and output/u);
 		assert.match(directive, /Pass completed work forward; assign only gaps/u);
-		assert.match(directive, /Do not redo delegated research, edits, or checks in main/u);
+		assert.match(directive, /Reuse valid work and checks; fix confirmed defects and gaps/u);
 	});
 
 	it("preserves one-shot ownership and completion requirements", () => {
@@ -95,11 +95,11 @@ describe("buildDelegationDirective", () => {
 		assert.match(directive, /`auto` \(default\) reuses history or a summary/u);
 		assert.match(directive, /`session` requires full history/u);
 		assert.match(directive, /Main handles failed or interrupted work from partial edits and artifacts/u);
-		assert.match(directive, /`wait: true` for an immediate dependency or one-shot session/u);
-		assert.match(directive, /completions arrive automatically and wake you; do not poll or sleep to wait/u);
-		assert.match(directive, /Conclude the overall task only after every run settles or is stopped/u);
+		assert.match(directive, /`wait: true` for an immediate dependency, including workflows and follow-ups; print\/JSON sessions wait by default/u);
+		assert.match(directive, /completions wake you to continue\. Do not poll or sleep to wait/u);
+		assert.match(directive, /A launch receipt is not completion\. Finish the requested outcome and final checks before concluding/u);
 		assert.match(directive, /Report only checks actually run/u);
-		assert.match(directive, /repeat or broaden checks only for new changes, failures, or unresolved concerns/u);
+		assert.match(directive, /repeat checks only for changes, failures, or unresolved concerns/u);
 		assert.match(directive, /Read full result files when output is truncated/u);
 	});
 

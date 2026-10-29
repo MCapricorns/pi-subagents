@@ -24,7 +24,7 @@ import {
 import { type ThinkingLevel } from "../configuration/config.ts";
 import { removeThreadRecord, threadRecordFromThread, upsertThreadRecord, type ThreadRecord } from "./durable.ts";
 import { isRunActiveStatus, monitor, type RunWorkflowTag } from "../presentation/monitor.ts";
-import type { RunControl } from "../execution/run-control.ts";
+import type { RunControl, SteeringReceipt } from "../execution/run-control.ts";
 import { isFailedResult, type SingleResult } from "../execution/spawn.ts";
 import type { IsolationMode, WorktreeFinalization, WorktreeIsolation } from "../isolation/worktree.ts";
 import type { WorkflowRun } from "../workflow/state.ts";
@@ -58,6 +58,8 @@ export interface SubagentThread {
 	restorationRecord?: ThreadRecord;
 	state: ThreadState;
 	control: RunControl;
+	/** Last child acknowledgement; queued delivery does not prove model execution. */
+	lastSteering?: SteeringReceipt & { message: string };
 	queueController?: AbortController;
 	/** Resolves after the child, isolation finalization, and queue work fully quiesce. */
 	generationCompletion: Promise<void>;

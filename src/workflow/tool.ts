@@ -3,8 +3,8 @@
  * Scheduling, isolation, and independent acceptance are owned by the runtime.
  *
  * The graph is validated before anything starts (see plan.ts), so an invalid
- * plan costs zero child processes. A valid plan returns a launch receipt
- * immediately; one completion message summarises the whole graph.
+ * plan costs zero child processes. Headless calls await the complete graph by
+ * default; UI calls return a launch receipt and receive one completion message.
  */
 
 import { StringEnum } from "@earendil-works/pi-ai";
@@ -17,11 +17,14 @@ import { findRuntimeWriterConflict } from "../delegation/ownership.ts";
 import { loadConfig } from "../configuration/config.ts";
 import type { SubagentRuntime } from "../lifecycle/runtime.ts";
 import type { DispatchCore } from "../lifecycle/dispatch-core.ts";
+import { cancelActiveWork } from "../lifecycle/cancellation.ts";
 import { projectResultsRoot } from "../lifecycle/thread-shared.ts";
 import { formatTaskSummary, monitor } from "../presentation/monitor.ts";
 import { pruneWorkflowRecords } from "./durable.ts";
 import {
 	findOwnedPhases,
+	formatWorkflowSummary,
+	formatWorkflowStatus,
 	persistInterruptedWorkflows,
 	readRetainedWorkflows,
 	startWorkflow,
@@ -34,6 +37,9 @@ const WorkflowParams = Type.Object({
 	workflow: StringEnum(["code-review", "research", "migration"] as const, {
 		description: "Built-in plan: code-review inspects a target; research answers a question; migration applies two planned slices. Every plan ends with independent acceptance.",
 	}),
+	wait: Type.Optional(Type.Boolean({
+		description: "Wait for all nodes, integration, and independent acceptance, then return the final summary. Defaults to true in one-shot print/JSON sessions and false in TUI/RPC. Explicit false returns a launch receipt and delivers one background summary.",
+	})),
 	inputs: Type.Record(Type.String(), Type.String({ minLength: 1, pattern: "\\S" }), {
 		description: "Named inputs. code-review: TARGET. research: QUESTION. migration: TARGET, CONTRACT, CORE_CHANGE, ADAPTER_CHANGE, CORE_SCOPE, CORE_TEST_SCOPE, ADAPTER_SCOPE, ADAPTER_TEST_SCOPE. Scope values are exact paths relative to cwd. Include existing evidence and done conditions in task inputs.",
 	}),
@@ -60,7 +66,7 @@ function launchReceipt(status: WorkflowStatusView): string {
 			return parts.join(" · ");
 		}),
 		"",
-		"Every node is owned by this graph, including nodes waiting on dependencies. Do not perform or redispatch their work in main or another agent. Required independent acceptance runs after all authored work settles and integrates, including failed branches; the graph succeeds only when all work and acceptance pass. The graph sends one summary; continue only disjoint work or end your turn, and do not poll.",
+		"Every node is owned by this graph, including nodes waiting on dependencies. Do not perform or redispatch their work in main or another agent. Required independent acceptance runs after all authored work settles and integrates, including failed branches; the graph succeeds only when all work and acceptance pass. The graph sends one summary; continue disjoint work or pause this turn until it arrives, then finish the requested outcome. A launch receipt is not task completion. Do not poll.",
 	];
 	return lines.join("\n");
 }
@@ -100,7 +106,7 @@ export function registerWorkflowTool(pi: ExtensionAPI, runtime: SubagentRuntime,
 		name: "subagent_workflow",
 		label: "Subagent Workflow",
 		description:
-			"Run a built-in workflow with named inputs: code-review, research, or migration. Custom graphs and workflow files are unsupported. The runtime schedules dependencies, integrates work, and requires an independent sentinel acceptance PASS. Pending nodes own their work; main must not duplicate it. Duplicate deliverables and writer conflicts reject the plan before dispatch. One final summary arrives automatically. Use subagent for a single phase or independent tasks.",
+			"Run a built-in workflow with named inputs: code-review, research, or migration. Custom graphs and workflow files are unsupported. The runtime schedules dependencies, integrates work, and requires an independent sentinel acceptance PASS. Pending nodes own their work; main must not duplicate it. Duplicate deliverables and writer conflicts reject the plan before dispatch. One-shot print/JSON calls wait by default; TUI/RPC calls run in the background. Set wait to override. Awaited calls return the summary once, after integration and acceptance. Use subagent for a single phase or independent tasks.",
 		exposure: "model-only",
 		executionMode: "parallel",
 		annotations: {
@@ -111,7 +117,7 @@ export function registerWorkflowTool(pi: ExtensionAPI, runtime: SubagentRuntime,
 		},
 		parameters: WorkflowParams,
 
-		async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
+		async execute(_toolCallId, params, signal, onUpdate, ctx) {
 			await runtime.durableRestore;
 			monitor.beginTurn();
 			const config = await loadConfig(runtime.configPath);
@@ -124,12 +130,12 @@ export function registerWorkflowTool(pi: ExtensionAPI, runtime: SubagentRuntime,
 			// Ignore empty legacy placeholders, which previously triggered ambiguous
 			// source errors. A supplied custom definition is always rejected.
 			const unsupported = Object.entries(params as Record<string, unknown>).filter(([key, value]) =>
-				key !== "workflow" && key !== "inputs" && value !== undefined && value !== null && value !== ""
+				key !== "workflow" && key !== "inputs" && key !== "wait" && value !== undefined && value !== null && value !== ""
 				&& !(Array.isArray(value) && value.length === 0),
 			).map(([key]) => key);
-			if (unsupported.length) throw new Error(`Custom workflow fields are unsupported: ${unsupported.join(", ")}. Use only workflow and inputs. No nodes were started.`);
+			if (unsupported.length) throw new Error(`Custom workflow fields are unsupported: ${unsupported.join(", ")}. Use only workflow, inputs, and wait. No nodes were started.`);
 			const workflow = compileBuiltinWorkflow(params.workflow, params.inputs, ctx.cwd, agents.map((agent) => agent.name));
-			if (_signal?.aborted) throw new Error("Workflow cancelled before any node started.");
+			if (signal?.aborted) throw new Error("Workflow cancelled before any node started.");
 
 			// Re-using a phase another owner holds fails the first node and blocks the
 			// rest; reject the whole graph instead, with the owners named.
@@ -143,7 +149,7 @@ export function registerWorkflowTool(pi: ExtensionAPI, runtime: SubagentRuntime,
 					"Workflow \"" + workflow.name + "\" was not started: " + owned.length + " of " + workflow.nodes.length +
 					" node" + (owned.length === 1 ? " reuses" : "s reuse") + " a phase this session already owns.\n" +
 					lines.join("\n") +
-					"\nInspect the owning run or workflow with subagent_status and reuse its evidence. Main handles follow-up work. Retire an interrupted run with subagent_stop({ id: <run id> }) only when discarding its retained session is intended. Different deliverables need different task inputs. No nodes were started.",
+					"\nInspect the owning run or workflow with subagent_status and reuse its evidence. Main handles follow-up work. Retire an interrupted run with subagent_stop({ id: \"<run id>\" }) only when discarding its retained session is intended. Different deliverables need different task inputs. No nodes were started.",
 				);
 			}
 
@@ -154,6 +160,8 @@ export function registerWorkflowTool(pi: ExtensionAPI, runtime: SubagentRuntime,
 				if (conflict) throw new Error(`Workflow node "${node.id}" scope ${conflict.overlap.left} overlaps ${conflict.owner} scope ${conflict.overlap.right}. No nodes were started.`);
 			}
 
+			const wait = params.wait ?? (ctx.hasUI === false);
+			const resultsRoot = projectResultsRoot(runtime.configPath, ctx.cwd);
 			const handle = startWorkflow(
 				{
 					runtime,
@@ -166,11 +174,40 @@ export function registerWorkflowTool(pi: ExtensionAPI, runtime: SubagentRuntime,
 							agent ? isWriteCapableAgent(agent, toolInfos) : undefined,
 						);
 					},
-					resultsRoot: projectResultsRoot(runtime.configPath, ctx.cwd),
+					deliveryRoute: wait ? "await" : "background",
+					resultsRoot,
 					notify: (message, kind) => ctx.ui.notify(message, kind),
 				},
 				workflow,
 			);
+			if (wait) {
+				let cancellation: Promise<void> | undefined;
+				const onAbort = (): void => {
+					cancellation ??= cancelActiveWork(runtime, "Parent run was cancelled.");
+				};
+				const emitProgress = (): void => {
+					onUpdate?.({
+						content: [{ type: "text", text: formatWorkflowStatus(handle.run).join("\n") }],
+						details: { workflow: workflowStatus(handle.run) } satisfies WorkflowToolDetails,
+					});
+				};
+				const unsubscribe = onUpdate ? monitor.subscribe(emitProgress) : undefined;
+				try {
+					signal?.addEventListener("abort", onAbort, { once: true });
+					if (signal?.aborted) onAbort();
+					emitProgress();
+					const run = await handle.done;
+					await cancellation;
+					return {
+						content: [{ type: "text", text: formatWorkflowSummary(run, resultsRoot) }],
+						details: { workflow: workflowStatus(run) } satisfies WorkflowToolDetails,
+						isError: run.state !== "completed",
+					};
+				} finally {
+					signal?.removeEventListener("abort", onAbort);
+					unsubscribe?.();
+				}
+			}
 			const status = workflowStatus(handle.run);
 			return {
 				content: [{ type: "text", text: launchReceipt(status) }],

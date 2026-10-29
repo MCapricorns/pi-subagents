@@ -203,6 +203,30 @@ describe("resolveAgentTools", () => {
 		assert.deepEqual(resolveAgentTools(scout, ["read"], infos).tools, ["read"]);
 	});
 
+	it("inherits active and callable indirect tools without widening inactive direct tools", () => {
+		const infos = [
+			CODEMODE,
+			tool("tool_search", undefined, () => "all"),
+			tool("mcp__direct__search", { readOnlyHint: true }, undefined, "direct"),
+			tool("mcp__indirect__search", { readOnlyHint: true }, undefined, "codemode"),
+			tool("extension_deferred", undefined, undefined, "deferred"),
+			tool("inactive_direct", undefined, undefined, "direct"),
+			tool("mcp__inactive__direct", undefined, undefined, "direct"),
+			tool("hidden_tool", undefined, undefined, "hidden"),
+			tool("subagent", undefined, undefined, "codemode"),
+			tool("subagent_message", undefined, undefined, "deferred"),
+		];
+		for (const name of ["artisan", "sentinel", "skeptic"]) {
+			const agent = loadBuiltinAgents().find((entry) => entry.name === name)!;
+			for (const reachingTool of ["codemode", "tool_search"]) {
+				assert.deepEqual(resolveAgentTools(agent, ["read", reachingTool, "mcp__direct__search"], infos).tools,
+					["read", reachingTool, "mcp__direct__search", "extension_deferred", "mcp__indirect__search"]);
+			}
+			// Pi keeps registered indirect tools callable independently of activation.
+			assert.deepEqual(resolveAgentTools(agent, ["read"], infos).tools, ["read", "extension_deferred", "mcp__indirect__search"]);
+		}
+	});
+
 	it("treats tools without a read-only proof as potentially write-capable", () => {
 		const infos = [READ_ONLY, tool("db_write", { readOnlyHint: false }), tool("codemode", undefined, () => "all")];
 		assert.equal(isWriteCapableAgent({ name: "sentinel", tools: ["read", "grep"] }), false);

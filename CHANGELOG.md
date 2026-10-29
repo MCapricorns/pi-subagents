@@ -4,6 +4,27 @@
 
 ### Fixes
 
+- Require Pi SDK 1.4.0 and preserve callable codemode/deferred tools in child
+  sessions, including approved read-only tools that register after startup.
+  Keep delegation controls model-only and invoke them outside codemode.
+- Add workflow and completed-run follow-up waiting; default all dispatches to
+  waiting in one-shot print/JSON sessions. Return final evidence exactly once
+  after integration and acceptance, mark awaited failures as tool errors, and
+  cancel unfinished work without background wake-ups.
+- Display child RPC steering acknowledgements in the tool card and status,
+  including request ID and queued/handled/unknown queue disposition. Distinguish
+  receipt from model execution instead of showing only a generic success mark.
+- Cancel unattended RPC input dialogs with an explicit response, preventing
+  invisible confirmation or input requests from hanging child execution.
+- Clarify that launch receipts are not task completion and that main resumes
+  from child evidence to finish fixes and final checks. Correct interrupted-run
+  retirement examples, equal-task ownership guidance, and completed-run
+  follow-up recommendations. Reuse the completion waiter across dispatch paths.
+- Deliver unexpected workflow failures through the same final-summary route.
+- Retry brief Windows permission/sharing errors during atomic manifest
+  replacement under the existing writer lock, preserving the last checkpoint
+  and propagating persistent errors without an unlink/copy fallback.
+
 - Contain synchronous Windows process-termination errors and child spawn
   failures with missing stdio, preventing resource errors such as `ENOMEM`,
   `EMFILE`, and `ENFILE` from escaping into the parent Pi process.
