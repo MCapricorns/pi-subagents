@@ -447,7 +447,7 @@ describe("subagent_workflow tool", () => {
 			assert.match(response.content[0].text, /workflow #1 research started/);
 			assert.match(response.content[0].text, /synthesis \(scout\) · waits for primary, practice, codebase/);
 			assert.match(response.content[0].text, /workflow-acceptance \(sentinel\) · required independent acceptance/);
-			await until(() => h.messages.length > 0);
+			await Promise.all([...h.runtime.workflows.values()].map((run) => run.done));
 			assert.equal(h.messages.length, 1);
 			assert.equal(h.started.length, 5, "four research phases and mandatory acceptance");
 			assert.match(h.messages[0]!.content, /workflow research completed/);
@@ -485,7 +485,8 @@ describe("subagent_workflow tool", () => {
 		const h = toolHarness(join(root, "config.json"));
 		try {
 			await execute(h.tool, { workflow: "code-review", inputs: { TARGET: "HEAD" }, nodes: [], file: "", name: "", description: "" }, root);
-			await until(() => h.messages.length === 1);
+			await Promise.all([...h.runtime.workflows.values()].map((run) => run.done));
+			assert.equal(h.messages.length, 1);
 			assert.equal(h.started.length, 2);
 			assert.match(h.messages[0]!.content, /workflow code-review completed/);
 		} finally { await h.runtime.shutdown(); await rm(root, { recursive: true, force: true }); }
@@ -503,7 +504,8 @@ describe("subagent_workflow tool", () => {
 			const response = await h.tool.execute("call", { workflow: "code-review", inputs: { TARGET: "HEAD" } }, undefined, undefined, { ...ctx(root), isProjectTrusted: () => true }) as any;
 			assert.equal(response.details.workflow.nodes[0].agent, "sentinel");
 			assert.equal(await readFile(file, "utf8"), content);
-			await until(() => h.messages.length === 1);
+			await Promise.all([...h.runtime.workflows.values()].map((run) => run.done));
+			assert.equal(h.messages.length, 1);
 			assert.ok(h.started.every((task) => !task.includes("Replace the built-in")));
 		} finally { await h.runtime.shutdown(); await rm(root, { recursive: true, force: true }); }
 	});
@@ -513,7 +515,8 @@ describe("subagent_workflow tool", () => {
 		const h = toolHarness(join(root, "config.json"));
 		try {
 			await Promise.all(["Cache invalidation", "Request cancellation"].map((QUESTION) => execute(h.tool, { workflow: "research", inputs: { QUESTION } }, root)));
-			await until(() => h.messages.length === 2);
+			await Promise.all([...h.runtime.workflows.values()].map((run) => run.done));
+			assert.equal(h.messages.length, 2);
 			assert.equal(h.started.length, 10);
 			assert.ok(h.messages.every((message) => message.content.includes("research completed")));
 		} finally { await h.runtime.shutdown(); await rm(root, { recursive: true, force: true }); }

@@ -213,7 +213,7 @@ the same session. Inspect retained results instead of repeating completed work.
 | --- | --- |
 | `subagent_status({ id: 12 })` | Inspect a run's progress, result, and recovery paths |
 | `subagent_status({ workflow: 3 })` | Inspect graph nodes and dependencies |
-| `subagent_message({ id: 12, message: "Check the caller too" })` | Steer a running child, or start a follow-up from its completed session |
+| `subagent_message({ id: 12, message: "Check the caller too" })` | Steer a running child, or continue a completed run using its session when available and a summary otherwise |
 | `subagent_message({ id: 12, message: "Add the test", context: "summary" })` | Start a new next step with only a bounded summary of the earlier run |
 | `subagent_stop({ id: "12" })` | Stop a run and retire its retained session |
 | `subagent_stop({ workflow: 3 })` | Stop a graph and finalize its active nodes |
@@ -265,18 +265,27 @@ A steering message is queued at the next Pi steering boundary; acknowledgement
 does not mean the child has acted on it. To continue a successfully completed
 run, choose the context that fits the follow-up:
 
-- `context: "session"` (default) for rework — revising, fixing or extending the
-  same deliverable. It continues a private copy of the retained session, so the
-  earlier reasoning stays available and the provider prompt-cache key
-  (`sessionId`) is unchanged.
-- `context: "summary"` for a new next step — the new run never sees the old
-  transcript and is briefed with the objective, the final result and the files
-  the run touched. Cheaper, no cache reuse, and it cannot rely on detail the
-  summary omits.
+- `context: "auto"` (default) continues a private copy of the retained session
+  when available. If cleanup has removed it, the follow-up starts with a bounded
+  summary and explicitly reports that full history is unavailable. No retry is
+  needed for an expired session.
+- `context: "session"` requires full history for rework that depends on earlier
+  details. If the session is unavailable, the call fails without starting a run.
+- `context: "summary"` always starts fresh for a new next step, with the earlier
+  objective, final result and touched files. It cannot rely on omitted details
+  or reuse the earlier provider cache.
 
-Both start a new run with the role, workspace and scope preserved. Queueing,
-admission and isolation still apply. Pending runs cannot be steered, and fixed
-workflow graphs cannot be edited.
+Session continuations retain the earlier history and provider prompt-cache key
+(`sessionId`). Their private copy is bound to the new run's working directory,
+including when a previous temporary worktree has already been removed. The
+continuation is instructed to re-read files before editing in the current cwd.
+
+Every follow-up preserves the role, workspace and scope and passes through normal
+admission and isolation. `subagent_status` reports whether a completed run has
+a session available or only summary context. Results and summaries remain
+available within the current parent runtime; completed runs are not restored
+after reload. Pending runs cannot be steered, and fixed workflow graphs cannot
+be edited.
 
 Children use Pi's native `--mode rpc` CLI with piped input/output, retries, and
 session persistence. On Windows, console hiding covers the Pi child and Node
@@ -287,8 +296,10 @@ explicit child extension installs the same policy for runtimes without Node
 preloading. Windows launches stay attached so detachment cannot open a console.
 On macOS and Linux, the policy leaves shell options unchanged; the Pi child uses
 a separate process group for cancellation and does not launch a terminal app.
-RPC communication and process-tree cancellation remain active. Commands that
-explicitly open a terminal or GUI control their own windows.
+RPC communication and process-tree cancellation remain active. Child startup
+errors are reported as failed runs. If Windows cannot launch `taskkill`,
+termination falls back to killing the child directly. Commands that explicitly
+open a terminal or GUI control their own windows.
 A settled provider failure can hand off once to the main model in the same
 session. State and full-result files live under
 `~/.pi/agent/ferris-pi-subagents/`, grouped by project. `PI_CODING_AGENT_DIR`
@@ -299,17 +310,27 @@ overrides the agent directory.
 Each project root holds `sessions/`, `worktrees/`, `tmp/` and `results/`. Startup
 hygiene already drops temp leftovers, artifacts whose Pi process is gone, result
 files past their retention window, and project roots idle for three days. Parked
-recovery work and anything a manifest still references always survive.
+recovery work and manifest references are protected during these sweeps.
+Interrupted checkpoints expire after 30 days when no recorded owner or child
+from the current boot is alive; expired checkpoints are pruned before restore.
+Missing session files do not erase validated recovery paths. Unreadable or
+malformed manifests leave artifacts intact and skip automatic reclamation;
+explicit cleanup reports the error. Startup warns about failed recovery inspection
+and continues initializing the progress widget.
 
 Reclamation is automatic: a settlement may trigger one paced sweep (at most every
 five minutes) that drops dead-owner artifacts, expired result files, and settled
 session copies older than 30 minutes, then trims the oldest settled sessions
-until a project fits its 1.5 GB budget. Live runs, parked recovery work, recent
-sessions, and anything a manifest references are never touched, so rework within
-the last half hour can still continue its session.
+until a project fits its 1.5 GB budget. Under budget pressure, settled sessions
+older than five minutes can be removed. Live runs, parked recovery work, and
+manifest references remain protected. Automatic follow-ups use the retained
+summary when a completed run's transcript has expired. Session shutdown waits
+for cleanup already in progress and prevents new settlement sweeps.
 
-`/subagents-cleanup` runs the same pass immediately and reports per-project usage
-and freed bytes; `/subagents-cleanup dry-run` measures without deleting anything.
+`/subagents-cleanup` immediately reclaims unclaimed dead-owner artifacts and idle
+project roots, reporting usage and freed bytes. `/subagents-cleanup dry-run`
+measures without deleting anything. Session age and budget reclamation runs
+automatically on settlement.
 
 ## Development
 

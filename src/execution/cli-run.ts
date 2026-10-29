@@ -2,8 +2,8 @@
 
 import { spawn } from "node:child_process";
 import { existsSync, readdirSync } from "node:fs";
-import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
-import { basename, join } from "node:path";
+import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { basename, join, resolve } from "node:path";
 import { StringDecoder } from "node:string_decoder";
 import { fileURLToPath } from "node:url";
 import type { Message, Usage } from "@earendil-works/pi-ai";
@@ -44,13 +44,34 @@ export function currentSubagentDepth(env: NodeJS.ProcessEnv = process.env): numb
 	return Number.isFinite(parsed) && parsed > 0 ? parsed : 0;
 }
 
-/** Match pi's `<timestamp>Z_<id>.jsonl` session-file convention. */
-export function sessionExists(sessionDir: string, sessionId: string): boolean {
+/** Match Pi's `<timestamp>Z_<id>.jsonl` session-file convention. */
+export function findSessionFile(sessionDir: string, sessionId: string): string | undefined {
 	try {
-		return readdirSync(sessionDir).some((file) => file.endsWith(`_${sessionId}.jsonl`));
+		const file = readdirSync(sessionDir, { withFileTypes: true })
+			.find((entry) => entry.isFile() && entry.name.endsWith(`_${sessionId}.jsonl`));
+		return file ? join(sessionDir, file.name) : undefined;
 	} catch {
-		return false;
+		return undefined;
 	}
+}
+
+export function sessionExists(sessionDir: string, sessionId: string): boolean {
+	return findSessionFile(sessionDir, sessionId) !== undefined;
+}
+
+/** Pi restores cwd from the session header, even when its process starts in a
+ * new worktree. Update only this run's private copy, keeping its id and every
+ * transcript entry intact; the source run's history remains unchanged. */
+async function prepareSessionCwd(file: string, sessionId: string, cwd: string): Promise<void> {
+	const transcript = await readFile(file, "utf8");
+	const newline = transcript.indexOf("\n");
+	const header = JSON.parse(newline < 0 ? transcript : transcript.slice(0, newline));
+	if (header?.type !== "session" || header.id !== sessionId) {
+		throw new Error(`Invalid retained session header: ${file}`);
+	}
+	const currentCwd = resolve(cwd);
+	if (header.cwd === currentCwd) return;
+	await writeFile(file, JSON.stringify({ ...header, cwd: currentCwd }) + (newline < 0 ? "\n" : transcript.slice(newline)), "utf8");
 }
 
 /** Resolve how to invoke the same pi build as the current process. */
@@ -189,10 +210,13 @@ export async function runCliAgentAttempt(options: RunCliAttemptOptions): Promise
 			return { ...result, exitCode: 1, stopReason: "aborted", errorMessage: control?.getStopMessage() ?? "Subagent was aborted" };
 		}
 		if (agent.systemPrompt.trim()) promptFile = await writePromptToTempFile(options.scratchRoot, agent.name, agent.systemPrompt);
+		const sessionFile = options.sessionDir && options.sessionId
+			? findSessionFile(options.sessionDir, options.sessionId) : undefined;
+		if (sessionFile) await prepareSessionCwd(sessionFile, options.sessionId!, options.cwd ?? options.defaultCwd);
 		const args = buildChildLaunchArgs({
 			agent, thinkingLevel: options.thinkingLevel,
 			sessionDir: options.sessionDir, sessionId: options.sessionId,
-			resumeExistingSession: Boolean(options.sessionDir && options.sessionId && sessionExists(options.sessionDir, options.sessionId)),
+			resumeExistingSession: sessionFile !== undefined,
 			promptPath: promptFile?.filePath,
 		});
 		const invocation = getPiInvocation(args);
@@ -228,7 +252,7 @@ export async function runCliAgentAttempt(options: RunCliAttemptOptions): Promise
 		};
 		const attempt: AttemptControl = {
 			steer(message) {
-				if (closed || settled || stopping || proc.stdin.destroyed) return Promise.reject(new Error("Subagent has stopped accepting messages."));
+				if (closed || settled || stopping || !proc.stdin || proc.stdin.destroyed) return Promise.reject(new Error("Subagent has stopped accepting messages."));
 				const id = `steer-${++nextRequestId}`;
 				return new Promise<void>((resolve, reject) => {
 					const timer = setTimeout(() => {
@@ -339,23 +363,7 @@ export async function runCliAgentAttempt(options: RunCliAttemptOptions): Promise
 		const stdoutDecoder = new StringDecoder("utf8");
 		const stderrDecoder = new StringDecoder("utf8");
 		let stdoutBuffer = "";
-		proc.stdout.on("data", (chunk: Buffer) => {
-			lastActivityAt = Date.now();
-			stdoutBuffer += stdoutDecoder.write(chunk);
-			let start = 0;
-			for (let lf = stdoutBuffer.indexOf("\n"); lf !== -1; lf = stdoutBuffer.indexOf("\n", start)) {
-				processLine(stdoutBuffer.slice(start, lf));
-				start = lf + 1;
-			}
-			if (start) stdoutBuffer = stdoutBuffer.slice(start);
-		});
-		proc.stderr.on("data", (chunk: Buffer) => { result.stderr = appendBoundedStderr(result.stderr, stderrDecoder.write(chunk)); });
-		proc.stdin.on("error", (error) => {
-			if (stopping || closed || settled) return;
-			result.dispatchFailed = true;
-			result.errorMessage ??= "Subagent stdin failed: " + error.message;
-			terminate();
-		});
+		const onAbort = (): void => { void attempt.stop("Subagent was aborted"); };
 		proc.once("error", (error) => {
 			result.dispatchFailed = true;
 			result.errorMessage ??= "Failed to start the sub-agent process: " + error.message;
@@ -389,7 +397,25 @@ export async function runCliAgentAttempt(options: RunCliAttemptOptions): Promise
 			result.exitCode = result.dispatchFailed || result.stopReason === "error" || result.stopReason === "aborted" || result.stopReason === "length" ? 1 : 0;
 			resolveClosed();
 		});
-		const onAbort = (): void => { void attempt.stop("Subagent was aborted"); };
+		// EMFILE/ENFILE may return a child without stdio. Register lifecycle
+		// handlers first so its queued error and close still settle this attempt.
+		proc.stdout?.on("data", (chunk: Buffer) => {
+			lastActivityAt = Date.now();
+			stdoutBuffer += stdoutDecoder.write(chunk);
+			let start = 0;
+			for (let lf = stdoutBuffer.indexOf("\n"); lf !== -1; lf = stdoutBuffer.indexOf("\n", start)) {
+				processLine(stdoutBuffer.slice(start, lf));
+				start = lf + 1;
+			}
+			if (start) stdoutBuffer = stdoutBuffer.slice(start);
+		});
+		proc.stderr?.on("data", (chunk: Buffer) => { result.stderr = appendBoundedStderr(result.stderr, stderrDecoder.write(chunk)); });
+		proc.stdin?.on("error", (error) => {
+			if (stopping || closed || settled) return;
+			result.dispatchFailed = true;
+			result.errorMessage ??= "Subagent stdin failed: " + error.message;
+			terminate();
+		});
 		startupTimer = setTimeout(() => {
 			result.dispatchFailed = true;
 			result.errorMessage = "Subagent startup timeout before agent activity.";
@@ -406,7 +432,7 @@ export async function runCliAgentAttempt(options: RunCliAttemptOptions): Promise
 		signal?.addEventListener("abort", onAbort, { once: true });
 		try {
 			if (signal?.aborted || control?.isStopRequested()) await attempt.stop(control?.getStopMessage());
-			else proc.stdin.write(JSON.stringify({ id: "initial-prompt", type: "prompt", message: asPlainTextPrompt(options.prompt) }) + "\n");
+			else proc.stdin?.write(JSON.stringify({ id: "initial-prompt", type: "prompt", message: asPlainTextPrompt(options.prompt) }) + "\n");
 			await processClosed;
 			return result;
 		} finally {

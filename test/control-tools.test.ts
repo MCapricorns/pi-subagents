@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import { existsSync } from "node:fs";
-import { mkdir, mkdtemp, readFile, readdir, rm, writeFile } from "node:fs/promises";
+import fsPromises, { mkdir, mkdtemp, readFile, readdir, rm, writeFile } from "node:fs/promises";
+import { syncBuiltinESMExports } from "node:module";
 import { getProjectRoot } from "../src/execution/spawn.ts";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -63,8 +64,8 @@ function makeThread(id: number, state: ThreadState = "running"): SubagentThread 
 	};
 }
 
-async function execute(tool: RegisteredTool, params: Record<string, unknown> = {}): Promise<any> {
-	return tool.execute("call-1", params, new AbortController().signal, () => undefined, {
+async function execute(tool: RegisteredTool, params: Record<string, unknown> = {}, signal = new AbortController().signal): Promise<any> {
+	return tool.execute("call-1", params, signal, () => undefined, {
 		cwd: process.cwd(), ui: { notify: () => undefined },
 	});
 }
@@ -302,6 +303,122 @@ describe("subagent_message", () => {
 			assert.notEqual(captured[4].resumeSession.sessionDir, source.sessionDir);
 			assert.equal(await readFile(join(captured[4].resumeSession.sessionDir, "2026_test-session.jsonl"), "utf8"), "original context");
 		} finally { await shutdown(runtime); await rm(root, { recursive: true, force: true }); }
+	});
+
+	for (const context of [undefined, "auto", "session"] as const) {
+		it(`defaults to summary when history is unavailable; context=${context ?? "omitted"}`, async () => {
+			const root = await mkdtemp(join(tmpdir(), "pi-subagents-missing-session-"));
+			let captured: any;
+			const core = { setEnvironment() {}, async startBackground(...args: any[]) { captured = args; return { runId: 80 }; } } as unknown as DispatchCore;
+			const { runtime, tools } = harness(join(root, "config.json"), core);
+			const source = makeThread(65, "completed");
+			source.sessionId = "expired-session";
+			source.sessionDir = join(root, "expired");
+			source.scope = { paths: [join(source.cwd, "src/cache.ts")] };
+			source.lastResult = {
+				agent: source.agentName, task: source.task, exitCode: 0, stderr: "", usage: emptyUsage(),
+				messages: [{ role: "assistant", content: [{ type: "text", text: "Implemented the cache fix; next verify callers." }], stopReason: "stop" } as never],
+			};
+			runtime.threads.set(source.id, source);
+			try {
+				const status = await execute(tools.get("subagent_status")!, { id: source.id });
+				assert.equal(status.details.runs[0].followUpContext, "summary");
+				assert.match(resultText(status), /follow-up: summary/u);
+				const response = await execute(tools.get("subagent_message")!, { id: source.id, message: "Verify the callers", context });
+				if (context === "session") {
+					assert.equal(response.isError, true);
+					assert.equal(captured, undefined, "strict session continuation must never silently discard history");
+					assert.match(resultText(response), /context: "auto"|context: "summary"/u);
+				} else {
+					assert.equal(response.isError, undefined);
+					assert.equal(response.details.context, "summary");
+					assert.match(response.details.fallbackReason, /session.*unavailable/iu);
+					assert.match(resultText(response), /summary.*session.*unavailable/iu);
+					assert.equal(captured[4].resumeSession, undefined);
+					assert.deepEqual(captured[4].scope, source.scope);
+					assert.match(captured[1], /Implemented the cache fix/u);
+					assert.match(captured[1], /Verify the callers/u);
+					assert.match(captured[1], /did not witness the earlier session/u);
+				}
+				assert.equal(existsSync(join(getProjectRoot(join(root, "config.json"), source.cwd), "sessions")), false);
+			} finally { await shutdown(runtime); await rm(root, { recursive: true, force: true }); }
+		});
+	}
+
+	it("falls back once when the retained file disappears during copying", async (t) => {
+		const root = await mkdtemp(join(tmpdir(), "pi-subagents-copy-race-"));
+		let starts = 0;
+		const core = { setEnvironment() {}, async startBackground(...args: any[]) {
+			starts++;
+			assert.equal(args[4].resumeSession, undefined);
+			return { runId: 81 };
+		} } as unknown as DispatchCore;
+		const { runtime, tools } = harness(join(root, "config.json"), core);
+		const source = makeThread(66, "completed");
+		source.sessionDir = join(root, "source");
+		source.sessionId = "copy-race";
+		await mkdir(source.sessionDir);
+		const sessionFile = join(source.sessionDir, "2026_copy-race.jsonl");
+		await writeFile(sessionFile, "retained history");
+		runtime.threads.set(source.id, source);
+		const originalCopy = fsPromises.copyFile;
+		t.mock.method(fsPromises, "copyFile", async (...args: Parameters<typeof fsPromises.copyFile>) => {
+			await rm(sessionFile);
+			return originalCopy(...args);
+		});
+		syncBuiltinESMExports();
+		try {
+			const response = await execute(tools.get("subagent_message")!, { id: source.id, message: "Continue" });
+			assert.equal(response.isError, undefined);
+			assert.equal(response.details.context, "summary");
+			assert.equal(starts, 1);
+			assert.deepEqual(await readdir(join(getProjectRoot(join(root, "config.json"), source.cwd), "sessions")), []);
+		} finally {
+			t.mock.restoreAll(); syncBuiltinESMExports();
+			await shutdown(runtime); await rm(root, { recursive: true, force: true });
+		}
+	});
+
+	it("does not dispatch a summary if the source is retired while preparing the follow-up", async () => {
+		const root = await mkdtemp(join(tmpdir(), "pi-subagents-retired-followup-"));
+		const source = makeThread(67, "completed");
+		let starts = 0;
+		const core = { setEnvironment() { source.retired = true; }, async startBackground() { starts++; return { runId: 82 }; } } as unknown as DispatchCore;
+		const { runtime, tools } = harness(join(root, "config.json"), core);
+		runtime.threads.set(source.id, source);
+		try {
+			const response = await execute(tools.get("subagent_message")!, { id: source.id, message: "Continue", context: "summary" });
+			assert.equal(response.isError, true);
+			assert.equal(starts, 0);
+		} finally { await shutdown(runtime); await rm(root, { recursive: true, force: true }); }
+	});
+
+	it("does not start a follow-up after the parent call is cancelled", async () => {
+		const root = await mkdtemp(join(tmpdir(), "pi-subagents-cancelled-followup-"));
+		const abort = new AbortController();
+		let starts = 0;
+		const core = { setEnvironment() { abort.abort(); }, async startBackground() { starts++; return { runId: 83 }; } } as unknown as DispatchCore;
+		const { runtime, tools } = harness(join(root, "config.json"), core);
+		runtime.threads.set(68, makeThread(68, "completed"));
+		try {
+			const response = await execute(tools.get("subagent_message")!, { id: 68, message: "Continue" }, abort.signal);
+			assert.equal(response.isError, true);
+			assert.match(resultText(response), /cancelled/iu);
+			assert.equal(starts, 0);
+		} finally { await shutdown(runtime); await rm(root, { recursive: true, force: true }); }
+	});
+
+	it("gives recovery guidance for interrupted and failed runs without waiting or restarting", async () => {
+		const { runtime, tools } = harness();
+		try {
+			for (const state of ["parked", "failed"] as const) {
+				runtime.threads.set(69, makeThread(69, state));
+				const response = await execute(tools.get("subagent_message")!, { id: 69, message: "Continue" });
+				assert.equal(response.isError, true);
+				assert.match(resultText(response), /subagent_status.*unfinished work in main/u);
+				assert.doesNotMatch(resultText(response), /wait/u);
+			}
+		} finally { await shutdown(runtime); }
 	});
 
 	it("briefs a summary follow-up with the result and touched files instead of copying the session", async () => {

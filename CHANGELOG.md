@@ -1,5 +1,31 @@
 # Changelog
 
+## 6.0.1
+
+### Fixes
+
+- Contain synchronous Windows process-termination errors and child spawn
+  failures with missing stdio, preventing resource errors such as `ENOMEM`,
+  `EMFILE`, and `ENFILE` from escaping into the parent Pi process.
+- Default completed-run follow-ups to `context: "auto"`: reuse retained history
+  when available, otherwise dispatch with a bounded summary and report the
+  fallback. Keep explicit `session` strict, expose available follow-up context
+  in status, and give interrupted runs actionable recovery guidance.
+- Bind private session copies to the next run's cwd so follow-ups survive
+  removal of an earlier worktree. Preserve the session ID and prior entries,
+  and remind continued agents to re-read changed files.
+- Preserve recovery artifacts when manifests or path validation cannot be read.
+  Protect live owners during empty-session, age, budget and project cleanup.
+  Prune expired checkpoints before restore, keep checkpoints with live owners
+  or children, and retain validated paths when a session file is unavailable.
+  Recovery inspection errors warn without skipping progress-widget setup.
+- Recheck cancellation and source state before follow-up dispatch, and handle
+  a retained transcript disappearing during copying without duplicate launches.
+- Drain settlement-triggered cleanup during shutdown and stop launching new
+  sweeps once shutdown begins, avoiding filesystem activity after teardown.
+- Correct the documented five-minute minimum retention under budget pressure
+  and distinguish automatic reclamation from explicit storage cleanup.
+
 ## 6.0.0
 
 ### Breaking changes

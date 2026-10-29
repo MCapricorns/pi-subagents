@@ -72,7 +72,7 @@ export function writeTempOwnerMarker(dir: string, now = Date.now()): void {
 	}
 }
 
-function readTempOwnerMarker(dir: string): TempOwner | undefined {
+export function readTempOwnerMarker(dir: string): TempOwner | undefined {
 	try {
 		const parsed = JSON.parse(readFileSync(join(dir, TEMP_OWNER_FILE_NAME), "utf8")) as Partial<TempOwner>;
 		if (typeof parsed.pid !== "number" || !Number.isInteger(parsed.pid) || parsed.pid <= 0) return undefined;

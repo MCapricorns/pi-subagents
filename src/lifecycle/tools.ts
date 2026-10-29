@@ -1,15 +1,15 @@
-/** Read-only run inspection and destructive cancellation of one-shot runs. */
+/** Run inspection, steering, completed-run follow-ups, and destructive cancellation. */
 
 import { randomUUID } from "node:crypto";
-import { copyFile, mkdir, mkdtemp, readdir, rm } from "node:fs/promises";
-import { join } from "node:path";
+import { copyFile, mkdir, mkdtemp, rm } from "node:fs/promises";
+import { basename, join } from "node:path";
 import type { Message } from "@earendil-works/pi-ai";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { Text } from "@earendil-works/pi-tui";
 import { Type } from "typebox";
 import { DEFAULT_MAX_RESULT_LINES, loadConfig } from "../configuration/config.ts";
 import { loadBuiltinAgents } from "../delegation/agents.ts";
-import { getProjectRoot, getResultOutput, sessionExists } from "../execution/spawn.ts";
+import { findSessionFile, getProjectRoot, getResultOutput, sessionExists } from "../execution/spawn.ts";
 import { writeTempOwnerMarker } from "../isolation/temp-hygiene.ts";
 import type { DispatchCore } from "./dispatch-core.ts";
 import { stopThreads } from "./stop.ts";
@@ -133,6 +133,9 @@ export function registerLookupTools(pi: ExtensionAPI, runtime: SubagentRuntime, 
 					errorMessage: result ? getResultError(result) : state === "failed" ? "No failure reason was recorded." : undefined,
 					resultFile: result?.resultFile,
 					sessionDir: thread.retired ? undefined : thread.sessionDir ?? result?.sessionDir,
+					followUpContext: state === "completed"
+						? thread.sessionDir && thread.sessionId && sessionExists(thread.sessionDir, thread.sessionId) ? "session" : "summary"
+						: undefined,
 					isolation: thread.isolation,
 					isolationNote: result?.isolationNote,
 					integrationStatus: live?.integrationStatus ?? result?.integrationStatus ?? thread.worktree?.state,
@@ -149,6 +152,7 @@ export function registerLookupTools(pi: ExtensionAPI, runtime: SubagentRuntime, 
 					if (run.phaseId) lines.push(`  phase: ${run.phaseId}`);
 					if (run.scope) lines.push(`  scope: ${JSON.stringify(run.scope)}`);
 					if (run.isolationNote) lines.push(`  isolation: ${run.isolationNote}`);
+					if (run.followUpContext) lines.push(`  follow-up: ${run.followUpContext}${run.followUpContext === "summary" ? " (retained session unavailable)" : " available"}`);
 					// The trail is the progress answer: what the run has been doing,
 					// newest last. It replaces pointing the parent at child session
 					// files, which it cannot usefully read mid-run.
@@ -216,18 +220,19 @@ export function registerLookupTools(pi: ExtensionAPI, runtime: SubagentRuntime, 
 	pi.registerTool({
 		name: "subagent_message",
 		label: "Subagent Message",
-		description: "Send a steering message to a running subagent, or continue a completed run. Use context \"session\" (default) to redo or revise the same work: it continues a private copy of the retained session, so earlier reasoning and the provider prompt-cache key survive. Use context \"summary\" for a new next step: it starts fresh with a bounded summary (objective, result, touched files) instead of loading the old transcript. Running messages are queued by Pi and acknowledged, not guaranteed to have been acted on yet.",
+		description: "Send a steering message to a running subagent, or continue a successfully completed run. Omit context or use \"auto\" to reuse its retained session when available and otherwise start from a bounded summary, reporting the fallback. Use \"session\" only when full history is required; missing history is an error. Use \"summary\" for a new next step with only the earlier objective, result, and touched files. Session copies preserve history and the provider cache key; summary runs have neither. Steering is acknowledged as queued, not necessarily acted on.",
 		exposure: "model-only",
 		executionMode: "sequential",
 		parameters: Type.Object({
 			id: Type.Integer({ minimum: 1, description: "Exact run id in this parent session." }),
 			message: Type.String({ minLength: 1, pattern: "\\S", description: "Additional instruction or follow-up question." }),
-			context: Type.Optional(Type.String({ enum: ["session", "summary"], description: "session (default) continues the retained session, preserving its history and provider prompt-cache key. summary starts a fresh run briefed with a bounded summary of the earlier work: cheaper context, no cache reuse, and no access to details the summary omits." })),
+			context: Type.Optional(Type.String({ enum: ["auto", "session", "summary"], description: "auto (default) uses the retained session when available, otherwise a bounded summary and reports the fallback. session requires the full retained history and fails if unavailable. summary always starts fresh with the earlier objective, result, and touched files; no history or cache reuse." })),
 		}),
 		async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
 			await runtime.durableRestore;
 			const thread = runtime.threads.get(params.id);
 			const fail = (message: string) => ({ content: [{ type: "text" as const, text: message }], details: {}, isError: true });
+			if (_signal?.aborted) return fail("Subagent message cancelled before delivery.");
 			if (!thread || thread.retired) return fail(`No available run matches #${params.id} in this session.`);
 			if (thread.state === "running" && !thread.lifecycleOperation) {
 				try {
@@ -236,40 +241,55 @@ export function registerLookupTools(pi: ExtensionAPI, runtime: SubagentRuntime, 
 				} catch (error) { return fail(`Could not send to #${thread.id}: ${error instanceof Error ? error.message : String(error)}`); }
 			}
 			if (thread.state !== "completed" || thread.lifecycleOperation) {
-				return fail(`Run #${thread.id} is ${thread.state}; wait for a running or successfully completed run.`);
+				const state = thread.state === "parked" ? "interrupted" : thread.state;
+				const terminal = !thread.lifecycleOperation && ["parked", "failed", "stopped"].includes(thread.state);
+				return fail(`Run #${thread.id} is ${state}; ${terminal
+					? "inspect retained results with subagent_status and handle unfinished work in main. This run cannot be continued with subagent_message."
+					: "messages require a running or successfully completed run. Results arrive automatically."}`);
 			}
 			if (!dispatchCore) return fail("Follow-up dispatch is unavailable in this process.");
-			const useSummary = params.context === "summary";
-			if (!useSummary && (!thread.sessionDir || !thread.sessionId || !sessionExists(thread.sessionDir, thread.sessionId))) {
-				return fail(`Run #${thread.id} has no available session to continue; retry with context: "summary".`);
+			const context = params.context ?? "auto";
+			const sourceFile = context !== "summary" && thread.sessionDir && thread.sessionId
+				? findSessionFile(thread.sessionDir, thread.sessionId) : undefined;
+			if (context === "session" && !sourceFile) {
+				return fail(`Run #${thread.id} has no available session to continue; use context: "auto" or "summary" for a bounded summary without the earlier history.`);
 			}
+			let fallbackReason = context === "auto" && !sourceFile ? "Retained session is unavailable." : undefined;
 			let copyDir: string | undefined;
 			try {
 				dispatchCore.setEnvironment({ ctx, config: await loadConfig(runtime.configPath), agents: loadBuiltinAgents() });
-				if (useSummary) {
-					const task = buildSummaryFollowUp(thread, params.message);
-					const result = await dispatchCore.startBackground(thread.agentName, task, thread.cwd, thread.isolation, {
-						phaseId: `followup:${thread.id}:${randomUUID()}`, scope: thread.scope,
-					});
-					if (result.runId === undefined) throw new Error(result.errorMessage || "Follow-up dispatch failed.");
-					return { content: [{ type: "text" as const, text: `Started follow-up #${result.runId} from #${thread.id} with a summary only; results arrive automatically.` }], details: { id: result.runId, sourceId: thread.id } };
+				if (sourceFile) {
+					const root = join(getProjectRoot(runtime.configPath, thread.cwd), "sessions");
+					await mkdir(root, { recursive: true });
+					copyDir = await mkdtemp(join(root, "pi-subagent-session-"));
+					writeTempOwnerMarker(copyDir);
+					try {
+						await copyFile(sourceFile, join(copyDir, basename(sourceFile)));
+					} catch (error) {
+						const code = (error as NodeJS.ErrnoException).code;
+						if (context !== "auto" || (code !== "ENOENT" && code !== "ENOTDIR")) throw error;
+						await rm(copyDir, { recursive: true, force: true });
+						copyDir = undefined;
+						fallbackReason = "Retained session became unavailable before it could be copied.";
+					}
 				}
-				const root = join(getProjectRoot(runtime.configPath, thread.cwd), "sessions");
-				await mkdir(root, { recursive: true });
-				copyDir = await mkdtemp(join(root, "pi-subagent-session-"));
-				writeTempOwnerMarker(copyDir);
-				const file = (await readdir(thread.sessionDir!)).find((name) => name.endsWith(`_${thread.sessionId}.jsonl`));
-				if (!file) throw new Error("The retained session file is missing; retry with context: \"summary\".");
-				await copyFile(join(thread.sessionDir!, file), join(copyDir, file));
-				if (thread.retired || thread.lifecycleOperation || thread.state !== "completed") throw new Error("The source run changed while its session was copied.");
-				const task = `Follow-up to run #${thread.id} (${randomUUID()}):\n${params.message}`;
+				if (_signal?.aborted) throw new Error("Follow-up cancelled before dispatch.");
+				if (thread.retired || thread.lifecycleOperation || thread.state !== "completed") throw new Error("The source run changed while the follow-up was prepared.");
+				const selectedContext = copyDir ? "session" : "summary";
+				const task = copyDir
+					? `Follow-up to run #${thread.id} (${randomUUID()}):\n${params.message}`
+					: buildSummaryFollowUp(thread, params.message);
 				const result = await dispatchCore.startBackground(thread.agentName, task, thread.cwd, thread.isolation, {
 					phaseId: `followup:${thread.id}:${randomUUID()}`, scope: thread.scope,
-					resumeSession: { sessionId: thread.sessionId!, sessionDir: copyDir },
+					...(copyDir ? { resumeSession: { sessionId: thread.sessionId!, sessionDir: copyDir } } : {}),
 				});
 				if (result.runId === undefined) throw new Error(result.errorMessage || "Follow-up dispatch failed.");
 				copyDir = undefined;
-				return { content: [{ type: "text" as const, text: `Started follow-up #${result.runId} from #${thread.id} with its retained session; results arrive automatically.` }], details: { id: result.runId, sourceId: thread.id } };
+				const contextNote = selectedContext === "session" ? "its retained session" : "a summary only";
+				return {
+					content: [{ type: "text" as const, text: `Started follow-up #${result.runId} from #${thread.id} with ${contextNote}${fallbackReason ? ` (${fallbackReason})` : ""}; results arrive automatically.` }],
+					details: { id: result.runId, sourceId: thread.id, context: selectedContext, ...(fallbackReason ? { fallbackReason } : {}) },
+				};
 			} catch (error) {
 				if (copyDir) await rm(copyDir, { recursive: true, force: true }).catch(() => undefined);
 				return fail(`Could not continue #${thread.id}: ${error instanceof Error ? error.message : String(error)}`);

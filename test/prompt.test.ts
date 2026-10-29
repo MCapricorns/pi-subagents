@@ -92,6 +92,8 @@ describe("buildDelegationDirective", () => {
 		const directive = buildDelegationDirective(loadBuiltinAgents());
 		assert.match(directive, /Each run returns once/u);
 		assert.match(directive, /`subagent_message` to steer or continue a run/u);
+		assert.match(directive, /`auto` \(default\) reuses history or a summary/u);
+		assert.match(directive, /`session` requires full history/u);
 		assert.match(directive, /Main handles failed or interrupted work from partial edits and artifacts/u);
 		assert.match(directive, /`wait: true` for an immediate dependency or one-shot session/u);
 		assert.match(directive, /completions arrive automatically and wake you; do not poll or sleep to wait/u);

@@ -51,25 +51,25 @@ function normalizeRecord(value: unknown): RecoveryRecord | undefined {
 }
 
 interface RecoveryManifestRead {
-	valid: boolean;
 	sourceCount: number;
 	records: RecoveryRecord[];
 }
 
 async function readManifest(path: string): Promise<RecoveryManifestRead> {
 	try {
-		const parsed = JSON.parse(await readFile(path, "utf8")) as { records?: unknown };
-		if (!Array.isArray(parsed.records)) return { valid: false, sourceCount: 0, records: [] };
+		const parsed = JSON.parse(await readFile(path, "utf8")) as { records?: unknown } | null;
+		if (!Array.isArray(parsed?.records)) throw new Error(`Invalid recovery manifest: ${path}`);
 		return {
-			valid: true,
 			sourceCount: parsed.records.length,
 			records: parsed.records.flatMap((record) => {
 				const normalized = normalizeRecord(record);
 				return normalized ? [normalized] : [];
 			}),
 		};
-	} catch {
-		return { valid: false, sourceCount: 0, records: [] };
+	} catch (error) {
+		if ((error as NodeJS.ErrnoException).code === "ENOENT") return { sourceCount: 0, records: [] };
+		// Keep the original document and its artifacts when references are unknown.
+		throw error;
 	}
 }
 
@@ -91,7 +91,7 @@ export async function readRecoveryRecords(configPath: string): Promise<RecoveryR
 	return withManifestMutation(path, async () => {
 		const manifest = await readManifest(path);
 		const records = await validatedRecords(configPath, manifest.records);
-		if (!manifest.valid || records.length !== manifest.sourceCount) await writeManifest(path, records);
+		if (records.length !== manifest.sourceCount) await writeManifest(path, records);
 		return records;
 	});
 }
@@ -104,10 +104,6 @@ export async function relocateRecoveryManifest(configPath: string): Promise<void
 	if (legacyPath === currentPath || !existsSync(legacyPath)) return;
 	await withManifestMutation(legacyPath, async () => {
 		const legacy = await readManifest(legacyPath);
-		if (!legacy.valid) {
-			await rm(legacyPath, { force: true });
-			return;
-		}
 		await persistRecoveryRecords(configPath, legacy.records);
 		await rm(legacyPath, { force: true });
 	});
@@ -220,7 +216,7 @@ export async function announceRecoveryRecords(
 			(record.worktreePath ? existsSync(record.worktreePath) : false) ||
 			(record.patchPath ? existsSync(record.patchPath) : false),
 		);
-		if (!current.valid || remaining.length !== current.sourceCount) await writeManifest(path, remaining);
+		if (remaining.length !== current.sourceCount) await writeManifest(path, remaining);
 		return remaining;
 	});
 	for (const record of live) {

@@ -186,7 +186,7 @@ describe("durable identity across Pi windows", () => {
 			await writeFile(path, JSON.stringify({ version: 1, records }));
 			const runtime = createRuntime(fakePi(), configPath);
 			assert.deepEqual(await restoreDurableThreads(runtime, cwd), [7, 8]);
-			assert.equal(runtime.threads.get(7)?.sessionDir, undefined);
+			assert.equal(runtime.threads.get(7)?.sessionDir, records[0]!.sessionDir);
 			assert.equal(runtime.threads.get(7)?.durableId, threadRecordIdentity(records[0]!));
 			const second = runtime.threads.get(8)!;
 			assert.equal(second.durableId, threadRecordIdentity(records[1]!));

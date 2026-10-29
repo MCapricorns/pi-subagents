@@ -26,6 +26,7 @@ import type { SubagentThread } from "./runtime.ts";
 import { getResultOutput, isFailedResult, getProjectRoot, getSubagentsRoot, type SingleResult } from "../execution/spawn.ts";
 import { isManagedSessionDir, isManagedWorktreeLayout, samePath } from "../isolation/managed-paths.ts";
 import { readRecoveryRecords, referencedRecoveryPaths } from "../isolation/recovery.ts";
+import { isProcessAlive, readTempOwnerMarker } from "../isolation/temp-hygiene.ts";
 import {
 	isPathInside,
 	normalizeWorktreeSnapshot,
@@ -215,7 +216,6 @@ function normalizeRecord(value: unknown): ThreadRecord | undefined {
 }
 
 interface ThreadManifestRead {
-	valid: boolean;
 	rolesMigrated?: boolean;
 	sourceCount: number;
 	records: ThreadRecord[];
@@ -223,12 +223,11 @@ interface ThreadManifestRead {
 
 async function readManifest(path: string): Promise<ThreadManifestRead> {
 	try {
-		const parsed = JSON.parse(await readFile(path, "utf8")) as { records?: unknown };
-		if (!Array.isArray(parsed.records)) return { valid: false, sourceCount: 0, records: [] };
+		const parsed = JSON.parse(await readFile(path, "utf8")) as { records?: unknown } | null;
+		if (!Array.isArray(parsed?.records)) throw new Error(`Invalid thread manifest: ${path}`);
 		let rolesMigrated = false;
 		for (const record of parsed.records) rolesMigrated = migrateStoredRecordRoles(record) || rolesMigrated;
 		return {
-			valid: true,
 			rolesMigrated,
 			sourceCount: parsed.records.length,
 			records: parsed.records.flatMap((record) => {
@@ -236,8 +235,10 @@ async function readManifest(path: string): Promise<ThreadManifestRead> {
 				return normalized ? [normalized] : [];
 			}),
 		};
-	} catch {
-		return { valid: false, sourceCount: 0, records: [] };
+	} catch (error) {
+		if ((error as NodeJS.ErrnoException).code === "ENOENT") return { sourceCount: 0, records: [] };
+		// A failed read or corrupt document is not evidence that no records exist.
+		throw error;
 	}
 }
 
@@ -277,8 +278,9 @@ async function validateThreadRecord(
 		try {
 			const [realWorktree, realCwd] = await Promise.all([realpath(worktree.worktreePath), realpath(worktree.cwd)]);
 			if (!samePath(realCwd, join(realWorktree, relative(worktree.originalRoot, worktree.originalCwd)))) return false;
-		} catch {
-			return false;
+		} catch (error) {
+			if (["ENOENT", "ENOTDIR"].includes((error as NodeJS.ErrnoException).code ?? "")) return false;
+			throw error;
 		}
 	}
 	// Managed recovery references survive a missing checkout or failed Git
@@ -329,8 +331,9 @@ function projectManifestPaths(durableRoot: string): string[] {
 		return readdirSync(durableRoot, { withFileTypes: true })
 			.filter((entry) => entry.isDirectory() && !entry.isSymbolicLink() && !entry.name.endsWith(".lock"))
 			.map((entry) => join(durableRoot, entry.name, THREADS_MANIFEST_FILE_NAME));
-	} catch {
-		return [];
+	} catch (error) {
+		if ((error as NodeJS.ErrnoException).code === "ENOENT") return [];
+		throw error;
 	}
 }
 
@@ -342,7 +345,7 @@ export async function readThreadRecords(configPath: string): Promise<ThreadRecor
 			.map((path) => withManifestMutation(path, async () => {
 				const manifest = await readManifest(path);
 				const validated = await validatedManifestRecords(configPath, path, manifest.records);
-				if (!manifest.valid || manifest.rolesMigrated || validated.length !== manifest.sourceCount) await writeManifest(path, validated);
+				if (manifest.rolesMigrated || validated.length !== manifest.sourceCount) await writeManifest(path, validated);
 				return validated;
 			})),
 	);
@@ -500,13 +503,16 @@ export async function pruneThreadRecords(
 		await withManifestMutation(path, async () => {
 			const manifest = await readManifest(path);
 			const records = manifest.records;
-			if (manifest.valid && records.length === 0) return;
+			if (manifest.sourceCount === 0) return;
 			const validity = await Promise.all(records.map((record) => validateThreadRecord(configPath, path, record)));
-			let changed = !manifest.valid || manifest.sourceCount !== records.length || validity.some((valid) => !valid);
+			let changed = Boolean(manifest.rolesMigrated) || manifest.sourceCount !== records.length || validity.some((valid) => !valid);
 			const kept: ThreadRecord[] = [];
 			for (const [index, record] of records.entries()) {
 				if (!validity[index]) continue;
-				if (now - record.updatedAt <= PARKED_RECORD_MAX_AGE_MS) {
+				const live = isCurrentBoot(record) && (
+					(record.ownerPid !== undefined && isProcessAlive(record.ownerPid)) || record.childPids.some(isProcessAlive)
+				);
+				if (live || now - record.updatedAt <= PARKED_RECORD_MAX_AGE_MS) {
 					kept.push(record);
 					continue;
 				}
@@ -556,6 +562,8 @@ function isIdleSince(root: string, cutoffMs: number, now: number): boolean {
 	const stack: string[] = [root];
 	while (stack.length > 0) {
 		const dir = stack.pop()!;
+		const owner = readTempOwnerMarker(dir);
+		if (owner && isProcessAlive(owner.pid)) return false;
 		let entries: Dirent[];
 		try {
 			entries = readdirSync(dir, { withFileTypes: true });

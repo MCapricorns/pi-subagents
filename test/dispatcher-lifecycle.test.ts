@@ -1,17 +1,62 @@
 import assert from "node:assert/strict";
-import { mkdtemp, readdir, rm, writeFile } from "node:fs/promises";
+import fsPromises, { mkdir, mkdtemp, readdir, rm, writeFile } from "node:fs/promises";
+import { syncBuiltinESMExports } from "node:module";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import { describe, it } from "node:test";
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { loadBuiltinAgents } from "../src/delegation/agents.ts";
 import { DEFAULT_CONFIG } from "../src/configuration/config.ts";
 import { createDispatchCore } from "../src/lifecycle/dispatch-core.ts";
 import { createRuntime } from "../src/lifecycle/runtime.ts";
+import { getThreadsManifestPath } from "../src/lifecycle/durable.ts";
+import { resetAutomaticCleanupClock } from "../src/isolation/cleanup.ts";
 import { monitor } from "../src/presentation/monitor.ts";
 
 describe("dispatcher completion delivery", () => {
-	it("starts eight disjoint shared writers in one repository before any finishes", { timeout: 15_000 }, async () => {
+	it("waits for settlement cleanup before shutdown completes", { timeout: 15_000 }, async (t) => {
+		const root = await mkdtemp(join(tmpdir(), "pi-subagents-cleanup-shutdown-"));
+		const pi = { on: () => undefined, getActiveTools: () => [], getAllTools: () => [], sendMessage: () => undefined } as unknown as ExtensionAPI;
+		const runtime = createRuntime(pi, join(root, "config.json"));
+		const manifest = getThreadsManifestPath(runtime.configPath, root);
+		await mkdir(dirname(manifest), { recursive: true });
+		await writeFile(manifest, JSON.stringify({ version: 1, records: [] }));
+		let entered!: () => void;
+		const reading = new Promise<void>((resolve) => { entered = resolve; });
+		let release!: () => void;
+		const blocked = new Promise<void>((resolve) => { release = resolve; });
+		const originalRead = fsPromises.readFile;
+		let reads = 0;
+		t.mock.method(fsPromises, "readFile", async (...args: any[]) => {
+			if (String(args[0]) === manifest) { reads++; entered(); await blocked; }
+			return (originalRead as any)(...args);
+		});
+		syncBuiltinESMExports();
+		let shutdown: Promise<void> | undefined;
+		try {
+			const core = createDispatchCore(runtime);
+			resetAutomaticCleanupClock();
+			core.finishRun(monitor.addRun("scout", "Completed research"), "done", { silent: true });
+			await reading;
+			let stopped = false;
+			shutdown = runtime.shutdown().then(() => { stopped = true; });
+			await new Promise<void>((resolve) => setImmediate(resolve));
+			assert.equal(stopped, false, "shutdown must wait for an in-flight cleanup pass");
+			resetAutomaticCleanupClock();
+			core.finishRun(monitor.addRun("scout", "Settled during shutdown"), "done", { silent: true });
+			release();
+			await shutdown;
+			assert.equal(reads, 1, "settlement cannot start another cleanup after shutdown begins");
+		} finally {
+			release();
+			await (shutdown ?? runtime.shutdown());
+			t.mock.restoreAll(); syncBuiltinESMExports();
+			monitor.clear();
+			await rm(root, { recursive: true, force: true });
+		}
+	});
+
+	it("starts eight disjoint shared writers in one repository before any finishes", { timeout: 45_000 }, async (t) => {
 		const root = await mkdtemp(join(tmpdir(), "pi-subagents-concurrent-shared-"));
 		const previousScript = process.argv[1];
 		const pi = { on: () => undefined, getActiveTools: () => ["write"], getAllTools: () => [], sendMessage: () => undefined } as unknown as ExtensionAPI;
@@ -47,9 +92,10 @@ process.stdin.on("data", (chunk) => {
 			core.setEnvironment({ ctx: { cwd: root, modelRegistry: { getAvailable: () => [] }, ui: { notify: () => undefined } } as unknown as ExtensionContext, config: DEFAULT_CONFIG, agents: loadBuiltinAgents() });
 			const starts = await Promise.all(Array.from({ length: 8 }, (_, id) => core.startBackground("artisan", "Write independent file " + id, root, "shared", { phaseId: "write-" + id, scope: { paths: ["output-" + id] }, quiet: true })));
 			assert.ok(starts.every((result) => result.runId !== undefined && result.exitCode === -1));
-			const deadline = Date.now() + 8_000;
+			// Wait for the child barrier within the overall test timeout. Cold process
+			// startup under the full suite is not a scheduler concurrency limit.
 			while ((await readdir(root)).filter((name) => name.startsWith("started-")).length < 8) {
-				assert.ok(Date.now() < deadline, "every writer must start while all earlier writers are still running");
+				t.signal.throwIfAborted();
 				await new Promise((resolve) => setTimeout(resolve, 10));
 			}
 			assert.equal(runtime.settledRuns.size, 0);

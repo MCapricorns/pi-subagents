@@ -26,8 +26,9 @@ async function isPlainPath(path: string, kind: "directory" | "file"): Promise<bo
 	try {
 		const entry = await lstat(path);
 		return !entry.isSymbolicLink() && (kind === "directory" ? entry.isDirectory() : entry.isFile());
-	} catch {
-		return false;
+	} catch (error) {
+		if (["ENOENT", "ENOTDIR"].includes((error as NodeJS.ErrnoException).code ?? "")) return false;
+		throw error;
 	}
 }
 
@@ -35,8 +36,9 @@ async function isDirectRealChild(root: string, candidate: string): Promise<boole
 	try {
 		const [realRoot, realCandidate] = await Promise.all([realpath(root), realpath(candidate)]);
 		return samePath(dirname(realCandidate), realRoot);
-	} catch {
-		return false;
+	} catch (error) {
+		if (["ENOENT", "ENOTDIR"].includes((error as NodeJS.ErrnoException).code ?? "")) return false;
+		throw error;
 	}
 }
 

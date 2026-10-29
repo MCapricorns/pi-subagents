@@ -24,6 +24,7 @@ import {
 } from "./run-control.ts";
 import {
 	currentSubagentDepth,
+	findSessionFile,
 	runCliAgentAttempt,
 	sessionExists,
 } from "./cli-run.ts";
@@ -31,6 +32,7 @@ import { writeTempOwnerMarker } from "../isolation/temp-hygiene.ts";
 
 export {
 	currentSubagentDepth,
+	findSessionFile,
 	RunControl,
 	sessionExists,
 };
@@ -254,7 +256,7 @@ export function getResultOutput(result: SingleResult): string {
 /** Model handoff preserves useful history, but main or siblings may have edited
  * the workspace since the selected model last read it. */
 const RESUME_CONTINUATION_RULES =
-	"Your earlier work — searches, reads, edits, and reasoning — is preserved in this session's history above; review it before acting. Do not redo searches, reads, or edits that already succeeded. The workspace may have changed while this thread was inactive: before editing a file, re-read it unless you read it during this continuation. Finish with the result-only handoff your role requires.";
+	"Your earlier work — searches, reads, edits, and reasoning — is preserved in this session's history above; review it before acting. Do not redo searches, reads, or edits that already succeeded. The workspace may have changed while this thread was inactive: before editing a file, re-read it unless you read it during this continuation. The current cwd is authoritative; do not reuse paths to an earlier temporary worktree. Finish with the result-only handoff your role requires.";
 
 /** The objective is a multi-line brief, so it gets its own block instead of
  * being spliced mid-sentence (where a trailing period also doubled up). */
@@ -379,7 +381,12 @@ export async function runSingleAgentWithMainFallback(
 
 	const sessionId = options.sessionId ?? randomUUID();
 	const sessionDir = options.sessionDir ?? (await createSessionDir(options.sessionRoot));
-	const baseOptions: RunSingleOptions = { ...options, sessionDir, sessionId };
+	const baseOptions: RunSingleOptions = {
+		...options, sessionDir, sessionId,
+		...(options.sessionDir && options.stdinText === undefined
+			? { stdinText: buildResumePrompt(options.task, "a follow-up was requested") }
+			: {}),
+	};
 	if (!options.sessionDir) {
 		// Surface the fresh session immediately so the dispatching thread can
 		// persist a durable checkpoint before the child settles.

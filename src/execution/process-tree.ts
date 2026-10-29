@@ -15,14 +15,18 @@ export function terminateProcessTree(proc: ChildProcess, force: boolean, process
 				/* process may already be gone */
 			}
 		};
-		const killer = spawn("taskkill", ["/pid", String(proc.pid), "/t", "/f"], {
-			stdio: "ignore",
-			windowsHide: true,
-		});
-		killer.once("error", fallback);
-		killer.once("close", (code) => {
-			if (code !== 0) fallback();
-		});
+		try {
+			const killer = spawn("taskkill", ["/pid", String(proc.pid), "/t", "/f"], {
+				stdio: "ignore",
+				windowsHide: true,
+			});
+			killer.once("error", fallback);
+			killer.once("close", (code) => {
+				if (code !== 0) fallback();
+			});
+		} catch {
+			fallback();
+		}
 		return;
 	}
 

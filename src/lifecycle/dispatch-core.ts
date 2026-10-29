@@ -28,6 +28,10 @@ export interface DispatchCore {
 
 export function createDispatchCore(runtime: SubagentRuntime): DispatchCore {
 	const environmentRef: { current: DispatchEnvironment | undefined } = { current: undefined };
+	// Sweeps outlive the queue task which starts them. Drain every started pass
+	// before shutdown releases this runtime and its filesystem ownership.
+	let cleanupPending: Promise<void> = Promise.resolve();
+	runtime.shutdownHooks.push(() => cleanupPending);
 
 	// Terminal rows stay in the monitor until the next beginTurn so the footer
 	// can count them beside siblings that are still live. The widget ignores
@@ -46,7 +50,9 @@ export function createDispatchCore(runtime: SubagentRuntime): DispatchCore {
 		if (endedAt !== undefined) publishedEndedAt.set(runId, endedAt);
 		// Settlement is the natural moment to reclaim disk: a burst of runs costs
 		// one paced sweep, and every live or parked thread stays protected.
-		void runAutomaticCleanup(runtime).catch(() => undefined);
+		if (runtime.sessionActive) {
+			cleanupPending = Promise.allSettled([cleanupPending, runAutomaticCleanup(runtime)]).then(() => undefined);
+		}
 		if (opts?.silent || !runtime.sessionActive) return;
 		const icon = status === "done" ? "✓" : "✗";
 		const result = runtime.threads.get(runId)?.lastResult;

@@ -14,7 +14,7 @@ import { join } from "node:path";
 import { getSubagentsRoot, sweepProjectResultArtifacts } from "../execution/spawn.ts";
 import { pruneStaleProjectRoots, readReferencedDurablePaths, readThreadRecords } from "../lifecycle/durable.ts";
 import type { SubagentRuntime } from "../lifecycle/runtime.ts";
-import { isProcessAlive, sweepProjectDurableDirs, sweepProjectTempDirs } from "./temp-hygiene.ts";
+import { isProcessAlive, readTempOwnerMarker, sweepProjectDurableDirs, sweepProjectTempDirs } from "./temp-hygiene.ts";
 
 /** Bytes a directory tree occupies, without following symlinks. */
 export function directoryBytes(path: string): number {
@@ -103,9 +103,10 @@ function removeEmptySessionCopies(path: string, claimed: readonly string[]): voi
 		if (!entry.name.startsWith("pi-subagent-session-")) continue;
 		const dir = join(path, "sessions", entry.name);
 		if (claimed.some((claim) => claim.startsWith(dir))) continue;
-		// A follow-up copies a session and the child resumes it; once that copy
-		// holds nothing, it is pure overhead. Owner liveness already guards the
-		// live case, so an empty unclaimed directory is safe to drop.
+		// The earlier orphan sweep kept live owners; this pass must honor the
+		// same guard while a fresh child has not written its first prompt yet.
+		const owner = readTempOwnerMarker(dir);
+		if (owner && isProcessAlive(owner.pid)) continue;
 		let files = 0;
 		try {
 			files = readdirSync(dir).filter((name) => name !== "owner.json").length;
@@ -132,8 +133,8 @@ export interface CleanupResult {
 export async function runStorageCleanup(configPath: string, options: { now?: number; root?: string } = {}): Promise<CleanupResult> {
 	const root = options.root ?? getSubagentsRoot(configPath);
 	const before = measureDurableUsage(root);
-	const records = await readThreadRecords(configPath).catch(() => []);
-	const claimed = await readReferencedDurablePaths(configPath).catch(() => new Set<string>());
+	const records = await readThreadRecords(configPath);
+	const claimed = await readReferencedDurablePaths(configPath);
 	const keep = (path: string) => [...claimed].some((claim) => path.startsWith(claim) || claim.startsWith(path));
 
 	sweepProjectTempDirs(root);
@@ -203,6 +204,13 @@ export interface AutomaticCleanupOptions {
 	force?: boolean;
 }
 
+/** Another Pi process may still be preparing its checkpoint. Its owner marker
+ * protects the session even when this runtime has no thread or manifest for it. */
+function hasForeignLiveOwner(path: string): boolean {
+	const owner = readTempOwnerMarker(path);
+	return owner !== undefined && owner.pid !== process.pid && isProcessAlive(owner.pid);
+}
+
 interface SettledSession {
 	path: string;
 	mtimeMs: number;
@@ -221,6 +229,7 @@ function settledSessions(projectRoot: string): SettledSession[] {
 		.filter((entry) => entry.isDirectory() && !entry.isSymbolicLink() && entry.name.startsWith("pi-subagent-session-"))
 		.flatMap((entry) => {
 			const path = join(dir, entry.name);
+			if (hasForeignLiveOwner(path)) return [];
 			try {
 				// Pi appends the transcript in place, leaving the parent mtime
 				// unchanged. Settlement also refreshes the directory timestamp.
@@ -306,7 +315,13 @@ export async function runAutomaticCleanup(
 	if (!options.force && now - lastAutomaticCleanupAt < AUTO_CLEANUP_INTERVAL_MS) return { freedBytes: 0, skipped: true };
 	lastAutomaticCleanupAt = now;
 	const root = getSubagentsRoot(runtime.configPath);
-	const claimed = await readReferencedDurablePaths(runtime.configPath).catch(() => new Set<string>());
+	let claimed: Set<string>;
+	try {
+		claimed = await readReferencedDurablePaths(runtime.configPath);
+	} catch {
+		// Unknown references cannot authorize deleting any recovery artifacts.
+		return { freedBytes: 0, skipped: true };
+	}
 	const protectedPaths = protectedSessionPaths(runtime, claimed);
 	const keep = (path: string) => protectedPaths.some((kept) => path.startsWith(kept) || kept.startsWith(path));
 	const before = measureDurableUsage(root).totalBytes;

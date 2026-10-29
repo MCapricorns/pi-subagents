@@ -21,7 +21,6 @@ import {
 	getProjectRoot,
 	getSubagentsRoot,
 	RunControl,
-	sessionExists,
 	sweepProjectResultArtifacts,
 	type SingleResult,
 } from "../execution/spawn.ts";
@@ -107,18 +106,14 @@ export async function restoreDurableThreads(runtime: SubagentRuntime, cwd: strin
 		if (runtime.threads.has(record.runId) || monitor.findRun(record.runId)) {
 			record = { ...record, durableId: identity, runId: monitor.reserveRunId() };
 		}
-		// Freeze a legacy identity before dropping missing session metadata.
+		// Keep validated recovery paths even when their files are temporarily
+		// missing or unreadable. Availability is checked when a session is used.
 		record = { ...record, durableId: identity };
-		const sessionValid =
-			record.sessionId !== undefined &&
-			record.sessionDir !== undefined &&
-			sessionExists(record.sessionDir, record.sessionId);
-		const restoredRecord = sessionValid ? record : { ...record, sessionId: undefined, sessionDir: undefined };
 		const worktree = record.worktree && await isThreadSourceAvailable(record)
 			? await restoreWorktreeIsolation(record.worktree).catch(() => undefined)
 			: undefined;
 		const restorationFailed = record.isolation === "worktree" && record.worktree !== undefined && !worktree;
-		const thread = createRestoredThread(runtime, restoredRecord, worktree, restorationFailed ? "failed" : "parked");
+		const thread = createRestoredThread(runtime, record, worktree, restorationFailed ? "failed" : "parked");
 		runtime.threads.set(record.runId, thread);
 		if (thread.sessionDir) runtime.sessionDirs.add(thread.sessionDir);
 		if (restorationFailed) {
@@ -184,16 +179,17 @@ export async function restoreDurableThreads(runtime: SubagentRuntime, cwd: strin
 	return restoredIds;
 }
 
-/** Session-start durable bootstrap: restore threads, age out expired records, and
- * sweep leaked temp/state directories. Every stage is best-effort so a broken
- * manifest never blocks the session.
- *
- * Restore is published on the runtime as `durableRestore` before this returns,
- * so callers that must see restored threads await that pass alone and never the
- * hygiene sweeps behind it. Hygiene still runs after restore: pruning decides
- * what to delete from the records restore has already claimed. */
+/** Age out expired records before restoring threads, then sweep leaked state.
+ * Each stage is best-effort so a broken manifest never blocks the session.
+ * `durableRestore` includes pruning: callers cannot see a restored owner whose
+ * checkpoint the same startup is about to delete. Later sweeps run separately. */
 export function bootstrapDurableState(runtime: SubagentRuntime, cwd: string): Promise<void> {
 	const restore = (async () => {
+		try {
+			await pruneThreadRecords(runtime.configPath);
+		} catch {
+			/* unreadable recovery references remain protected */
+		}
 		try {
 			runtime.restoredRunIds = await restoreDurableThreads(runtime, cwd);
 		} catch {
@@ -203,11 +199,6 @@ export function bootstrapDurableState(runtime: SubagentRuntime, cwd: string): Pr
 	runtime.durableRestore = restore;
 	return (async () => {
 		await restore;
-		try {
-			await pruneThreadRecords(runtime.configPath);
-		} catch {
-			/* retention is best-effort */
-		}
 		const projectRoots = getSubagentsRoot(runtime.configPath);
 		try {
 			sweepProjectTempDirs(projectRoots);

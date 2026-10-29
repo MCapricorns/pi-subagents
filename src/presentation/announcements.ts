@@ -35,8 +35,14 @@ async function removeUnavailableAgentModels(
 export function registerAnnouncements(pi: ExtensionAPI, runtime: SubagentRuntime): void {
 	pi.on("session_start", async (_event, ctx) => {
 		await ensureDefaultConfig(ctx, runtime.configPath);
-		await relocateRecoveryManifest(runtime.configPath);
-		await announceRecoveryRecords(runtime.configPath, ctx);
+		try {
+			await relocateRecoveryManifest(runtime.configPath);
+			await announceRecoveryRecords(runtime.configPath, ctx);
+		} catch (error) {
+			// Recovery readers must fail closed for cleanup, but a failed notice
+			// must not prevent the rest of the session UI from being installed.
+			ctx.ui.notify(`pi-subagents: recovery inspection failed; continuing startup: ${error instanceof Error ? error.message : String(error)}`, "warning");
+		}
 		await removeUnavailableAgentModels(ctx, runtime);
 		// Bootstrap also runs on session_start; wait so this notice sees restored
 		// threads instead of racing an empty list.

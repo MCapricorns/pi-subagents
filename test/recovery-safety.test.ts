@@ -137,8 +137,8 @@ describe("interrupted work without a retained session", () => {
 				assert.equal(existsSync(pendingFile), true, "a missing session must not delete unintegrated edits");
 				assert.deepEqual(restored, [71]);
 				const thread = runtime.threads.get(71)!;
-				assert.equal(thread.sessionId, undefined);
-				assert.equal(thread.sessionDir, undefined);
+				assert.equal(thread.sessionId, record.sessionId);
+				assert.equal(thread.sessionDir, record.sessionDir, "validated recovery paths survive temporary file unavailability");
 				assert.equal((await thread.finalizeIsolation(thread.generation))?.status, "integrated");
 				assert.equal(await readFile(join(cwd, "pending.txt"), "utf8"), "unmerged child edit\n");
 				assert.equal((await execFileAsync("git", ["diff", "--cached"], { cwd: repository })).stdout, indexBefore);

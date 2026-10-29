@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import childProcess, { type SpawnOptions } from "node:child_process";
+import childProcess, { spawnSync, type SpawnOptions } from "node:child_process";
 import { syncBuiltinESMExports } from "node:module";
 import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
@@ -138,6 +138,36 @@ describe("bounded stderr retention", () => {
 
 
 describe("native RPC child lifecycle", () => {
+	it("settles native descriptor exhaustion without an unhandled child error", () => {
+		const moduleUrl = new URL("../src/execution/cli-run.ts", import.meta.url).href;
+		const fixture = spawnSync(process.execPath, ["--unhandled-rejections=strict", "--input-type=module", "--eval", `
+import assert from "node:assert/strict";
+import { runCliAgentAttempt } from ${JSON.stringify(moduleUrl)};
+const nativeProcess = process.binding("process_wrap").Process.prototype;
+const originalSpawn = nativeProcess.spawn;
+for (const code of ["EMFILE", "ENFILE"]) {
+ // Exercise Node's real missing-stdio and next-tick error path without
+ // consuming file descriptors or launching a child.
+ nativeProcess.spawn = () => process.binding("uv")["UV_" + code];
+ try {
+  const result = await runCliAgentAttempt({
+   defaultCwd: process.cwd(), agent: { name: "scout", description: "fixture", systemPrompt: "" },
+   agentName: "scout", task: "Test failed spawn", thinkingLevel: "off", idleTimeoutMs: 0,
+   scratchRoot: process.cwd(), prompt: "Test failed spawn", startupTimeoutMs: 1_000,
+  });
+  assert.equal(result.exitCode, 1);
+  assert.equal(result.dispatchFailed, true);
+  assert.equal(result.stopReason, "error");
+  assert.match(result.errorMessage, new RegExp("Failed to start.*" + code));
+ } finally { nativeProcess.spawn = originalSpawn; }
+}
+console.log("fixture survived both spawn failures");
+`], { encoding: "utf8", windowsHide: true, timeout: 45_000 });
+		assert.ifError(fixture.error);
+		assert.equal(fixture.status, 0, fixture.stderr || fixture.stdout);
+		assert.match(fixture.stdout, /fixture survived both spawn failures/u);
+	});
+
 	it("launches a hidden child while preserving RPC pipes and process-group policy", async (t) => {
 		const original = childProcess.spawn;
 		const launches: SpawnOptions[] = [];
