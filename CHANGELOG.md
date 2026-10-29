@@ -4,6 +4,9 @@
 
 ### Fixes
 
+- Resolve the child working directory before launching or updating its private
+  session header, preserving fallback and follow-ups through macOS path aliases
+  and Windows junctions without a cross-project fork prompt.
 - Require Pi SDK 1.4.0 and preserve callable codemode/deferred tools in child
   sessions, including approved read-only tools that register after startup.
   Keep delegation controls model-only and invoke them outside codemode.

@@ -2,7 +2,7 @@
 
 import { spawn } from "node:child_process";
 import { existsSync, readdirSync } from "node:fs";
-import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, realpath, rm, writeFile } from "node:fs/promises";
 import { basename, join, resolve } from "node:path";
 import { StringDecoder } from "node:string_decoder";
 import { fileURLToPath } from "node:url";
@@ -239,9 +239,12 @@ export default function (pi) {
 }
 `, "utf8");
 		}
+		// Pi matches session headers against process.cwd(). Both must use the same
+		// physical directory, including macOS /var aliases and Windows junctions.
+		const executionCwd = await realpath(options.cwd ?? options.defaultCwd);
 		const sessionFile = options.sessionDir && options.sessionId
 			? findSessionFile(options.sessionDir, options.sessionId) : undefined;
-		if (sessionFile) await prepareSessionCwd(sessionFile, options.sessionId!, options.cwd ?? options.defaultCwd);
+		if (sessionFile) await prepareSessionCwd(sessionFile, options.sessionId!, executionCwd);
 		const args = buildChildLaunchArgs({
 			agent, thinkingLevel: options.thinkingLevel,
 			sessionDir: options.sessionDir, sessionId: options.sessionId,
@@ -251,7 +254,7 @@ export default function (pi) {
 		const invocation = getPiInvocation(args);
 		const processGroup = process.platform !== "win32";
 		const proc = spawn(invocation.command, invocation.args, {
-			cwd: options.cwd ?? options.defaultCwd, shell: false, stdio: ["pipe", "pipe", "pipe"],
+			cwd: executionCwd, shell: false, stdio: ["pipe", "pipe", "pipe"],
 			windowsHide: true,
 			env: childEnvironment(options.env),
 			detached: processGroup,

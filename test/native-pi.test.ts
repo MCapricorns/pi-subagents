@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { copyFile, mkdtemp, mkdir, readFile, readdir, rm, writeFile } from "node:fs/promises";
+import { copyFile, mkdtemp, mkdir, readFile, readdir, realpath, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -11,9 +11,11 @@ import { loadBuiltinAgents, resolveAgentTools } from "../src/delegation/agents.t
 // Exercise the actual installed Pi CLI with a local provider that never makes
 // network requests. The temporary agent directory contains no user credentials.
 describe("native Pi CLI integration", () => {
-	for (const mode of ["normal", "fallback", "steering", "handled", "dialogs", "followup"] as const) {
-		const fallback = mode === "fallback";
-		it(mode === "fallback" ? "resumes the same Pi session on main-model fallback" : mode === "steering" ? "delivers steering through the real Pi RPC process" : mode === "handled" ? "reports native input-hook handling without claiming the steer was queued" : mode === "dialogs" ? "cancels real extension dialogs and leaves approval denied" : mode === "followup" ? "continues a private session in a new workspace after the old workspace is removed" : "runs through Pi's own CLI, loader, provider, and RPC events", { timeout: 30_000 }, async () => {
+	for (const mode of ["normal", "fallback", "fallback-alias", "steering", "handled", "dialogs", "followup", "followup-alias"] as const) {
+		const fallback = mode === "fallback" || mode === "fallback-alias";
+		const followup = mode === "followup" || mode === "followup-alias";
+		const aliased = mode.endsWith("-alias");
+		it((fallback ? "resumes the same Pi session on main-model fallback" : mode === "steering" ? "delivers steering through the real Pi RPC process" : mode === "handled" ? "reports native input-hook handling without claiming the steer was queued" : mode === "dialogs" ? "cancels real extension dialogs and leaves approval denied" : followup ? "continues a private session in a new workspace after the old workspace is removed" : "runs through Pi's own CLI, loader, provider, and RPC events") + (aliased ? " through a directory alias" : ""), { timeout: 30_000 }, async () => {
 			const root = await mkdtemp(join(tmpdir(), "pi-subagents-native-pi-"));
 			const agentDir = join(root, "agent");
 			const previousScript = process.argv[1];
@@ -66,7 +68,14 @@ export default async (pi) => {
 `, "utf8");
 				process.argv[1] = fileURLToPath(new URL("./cli.js", import.meta.resolve("@earendil-works/pi-coding-agent")));
 				const control = new RunControl("Test native session preservation", 1);
-				const cwd = mode === "followup" ? join(root, "first-worktree") : root;
+				let workspaceRoot = root;
+				if (aliased) {
+					const target = join(root, "workspace");
+					await mkdir(target);
+					workspaceRoot = join(root, "workspace-alias");
+					await symlink(target, workspaceRoot, process.platform === "win32" ? "junction" : "dir");
+				}
+				const cwd = followup ? join(workspaceRoot, "first-worktree") : workspaceRoot;
 				await mkdir(cwd, { recursive: true });
 				let steering: Promise<SteeringReceipt> | undefined;
 				const result = await runSingleAgentWithMainFallback({
@@ -94,17 +103,20 @@ export default async (pi) => {
 				assert.match(getResultOutput(result), /native completed/);
 				assert.equal(result.model, "fixture/main");
 				assert.ok(result.sessionDir && result.sessionId);
-				assert.equal((await readdir(result.sessionDir)).filter((file) => file.endsWith("_" + result.sessionId + ".jsonl")).length, 1);
+				const sessionFiles = (await readdir(result.sessionDir)).filter((file) => file.endsWith("_" + result.sessionId + ".jsonl"));
+				assert.equal(sessionFiles.length, 1);
+				const session = await readFile(join(result.sessionDir, sessionFiles[0]!), "utf8");
+				assert.equal(JSON.parse(session.split("\n")[0]!).cwd, await realpath(cwd));
 				if (fallback) {
 					assert.equal(result.modelFallbackFrom, "fixture/selected");
 					assert.match(getResultOutput(result), /2 user messages/);
 				}
-				if (mode === "followup") {
+				if (followup) {
 					const file = (await readdir(result.sessionDir)).find((name) => name.endsWith(`_${result.sessionId}.jsonl`))!;
 					const originalFile = join(result.sessionDir, file);
 					const original = await readFile(originalFile, "utf8");
 					const privateDir = join(root, "copied-session");
-					const nextCwd = join(root, "next-worktree");
+					const nextCwd = join(workspaceRoot, "next-worktree");
 					await mkdir(privateDir);
 					await mkdir(nextCwd);
 					await copyFile(originalFile, join(privateDir, file));
@@ -121,7 +133,7 @@ export default async (pi) => {
 					assert.match(getResultOutput(continued), /2 user messages; resume guard=true/u);
 					assert.equal(continued.sessionId, result.sessionId, "a private continuation keeps its provider cache key");
 					const copied = await readFile(join(privateDir, file), "utf8");
-					assert.equal(JSON.parse(copied.split("\n")[0]).cwd, nextCwd);
+					assert.equal(JSON.parse(copied.split("\n")[0]).cwd, await realpath(nextCwd));
 					assert.ok(copied.includes(original.slice(original.indexOf("\n") + 1)), "prior history survives the cwd update");
 					assert.equal(await readFile(originalFile, "utf8"), original, "the source transcript is never modified");
 				}

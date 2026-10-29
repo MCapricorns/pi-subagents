@@ -299,8 +299,10 @@ To continue a successfully completed run, choose the context that fits the follo
 
 Session continuations retain the earlier history and provider prompt-cache key
 (`sessionId`). Their private copy is bound to the new run's working directory,
-including when a previous temporary worktree has already been removed. The
-continuation is instructed to re-read files before editing in the current cwd.
+including when a previous temporary worktree has already been removed. Child
+startup and the copied session header use the same physical directory, so macOS
+path aliases and Windows junctions do not trigger a cross-project fork prompt.
+The continuation is instructed to re-read files before editing in the current cwd.
 
 Every follow-up preserves the role, workspace and scope and passes through normal
 admission and isolation. Set `wait: true` to receive its final result in the same
