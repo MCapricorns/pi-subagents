@@ -24,7 +24,7 @@ import {
 	resolveThinkingLevel,
 	supportedThinkingLevels,
 } from "./models.ts";
-import { promptRoleGrid, promptSelectOne, type RoleGridFocus, type RoleGridRow } from "./ui.ts";
+import { promptMenu, promptSelectOne, type SetupItem } from "./ui.ts";
 
 const ROLE_DEFAULT = "__role_default__";
 const THINKING_LEVEL_HINTS: Record<ThinkingLevel, string> = {
@@ -50,29 +50,38 @@ function roleModel(ctx: ExtensionContext, config: SubagentsConfig, name: string)
 	return findModelByRef(availableModelsInScope(ctx), config.agentModels[name]) ?? ctx.model;
 }
 
-/** One row per role: every model and thinking choice stays visible together. */
-function roleRows(ctx: ExtensionContext, config: SubagentsConfig): RoleGridRow[] {
-	const mainRef = currentModelRef(ctx) ?? "Pi default";
-	const models = availableModelsInScope(ctx);
+const ROLE_PURPOSE: Record<string, string> = {
+	scout: "Research with citations",
+	artisan: "Implement and verify",
+	sentinel: "Review implementation",
+	skeptic: "Challenge a named claim",
+};
+
+function roleSettings(ctx: ExtensionContext, config: SubagentsConfig, name: string): SetupItem[] {
+	const selected = config.agentModels[name];
+	const model = findModelByRef(availableModelsInScope(ctx), selected);
+	const modelLabel = selected
+		? model ? model.name + " · " + model.provider : selected + " (unavailable)"
+		: "Follow main (dynamic)";
+	const preferred = config.agentThinkingLevels[name] ?? roleThinkingLevel(name);
+	const effective = resolveThinkingLevel(model ?? ctx.model, preferred);
+	const source = config.agentThinkingLevels[name] ? "override" : "role default";
+	const thinking = effective + (effective !== preferred ? " (" + preferred + " requested)" : "") + " · " + source;
+	return [
+		{ value: "model", label: "Model: " + modelLabel, description: selected
+			? "Pinned reference: " + selected + (model ? ". Falls back to main if it fails." : ". Unavailable; using main.")
+			: "Follows the main window's model, including future changes. Now: " + (currentModelRef(ctx) ?? "Pi default") + ". Choose a specific model to pin it." },
+		{ value: "thinking", label: "Thinking: " + thinking,
+			description: "Reasoning effort: " + thinking + ". Role default: " + roleThinkingLevel(name) + ". Model capabilities limit the effective level; your saved preference is kept when changing models." },
+		{ value: "reset", label: "Reset defaults", description: "Restore only " + name + " to Follow main and role-default thinking (" + roleThinkingLevel(name) + "). Saves immediately." },
+	];
+}
+
+function roleItems(ctx: ExtensionContext, config: SubagentsConfig): SetupItem[] {
 	return BUILTIN_AGENT_NAMES.map((name) => {
-		const profile = agentProfile(name)!;
-		const selected = config.agentModels[name];
-		const model = findModelByRef(models, selected);
-		const available = !selected || Boolean(model);
-		const preferred = config.agentThinkingLevels[name] ?? roleThinkingLevel(name);
-		const effective = resolveThinkingLevel(model ?? ctx.model, preferred);
-		const clamped = effective !== preferred ? " (" + preferred + " requested)" : "";
-		const overridden = Boolean(config.agentThinkingLevels[name]);
-		return {
-			role: name,
-			thinkingOverridden: overridden,
-			model: selected ? selected + (available ? "" : " (unavailable)") : "Follow main",
-			thinking: effective + clamped,
-			description: profile.remark + " Model: " + (selected
-				? (available ? "falls back to main if it fails." : "unavailable; using main.")
-				: "follows main (" + mainRef + ") dynamically.")
-				+ " Thinking: role default " + roleThinkingLevel(name) + ", clamped to the model-supported levels. Reset restores " + name + " to Follow main and that default. * marks an override.",
-		};
+		const settings = roleSettings(ctx, config, name);
+		return { value: name, label: name + " · " + ROLE_PURPOSE[name],
+			description: settings[0]!.label + "\n" + settings[1]!.label + "\n" + agentProfile(name)!.remark };
 	});
 }
 async function editSetting(
@@ -90,7 +99,7 @@ async function editSetting(
 		delete next.agentThinkingLevels[name];
 	} else if (field === "model") {
 		const choice = await promptSelectOne(ctx, name + " · Model",
-			"Search provider, model, or capability · Esc back without changes",
+			"Follow main = dynamic · Others = pinned",
 			buildModelPickerItems({ models: availableModelsInScope(ctx), configuredRef: config.agentModels[name], mainRef: currentModelRef(ctx) }),
 			config.agentModels[name] ?? CURRENT_MAIN_MODEL);
 		if (choice === undefined) return undefined;
@@ -109,9 +118,13 @@ async function editSetting(
 			...supported.map((level) => ({ value: level, label: level, description: THINKING_LEVEL_HINTS[level] })),
 		];
 		const current = config.agentThinkingLevels[name];
+		if (current && !supported.includes(current)) {
+			options.push({ value: current, label: current + " (runs as " + resolveThinkingLevel(model, current) + ")",
+				description: "Saved preference; this model clamps it. Keep it for other models, or choose a supported level." });
+		}
 		const choice = await promptSelectOne(ctx, name + " · Thinking",
-			"Choose reasoning effort · Role default follows model capabilities · Esc back",
-			options, current && supported.includes(current) ? current : ROLE_DEFAULT);
+			"Reasoning effort · saved preferences survive model changes",
+			options, current ?? ROLE_DEFAULT);
 		if (choice === undefined) return undefined;
 		if (choice === ROLE_DEFAULT) delete next.agentThinkingLevels[name];
 		else next.agentThinkingLevels[name] = choice as ThinkingLevel;
@@ -130,17 +143,23 @@ export async function runSetup(ctx: ExtensionContext, configPath: string = getCo
 	}
 	try {
 		let config = await loadConfig(configPath);
-		let focus: RoleGridFocus = {};
+		let roleFocus: string | undefined;
+		const settingFocus: Record<string, string> = {};
 		let status = "Changes save immediately";
 		while (true) {
-			const choice = await promptRoleGrid(ctx, roleRows(ctx, config), focus, status);
-			if (choice === undefined) return;
-			focus = { row: choice.row, column: choice.column };
-			const next = await editSetting(ctx, config, choice.role, choice.field);
-			if (!next) continue;
-			await saveConfig(next, configPath);
-			config = next;
-			status = "Saved " + choice.role + (choice.field === "reset" ? " defaults" : " " + choice.field);
+			const name = await promptMenu(ctx, "Subagents · Roles", status === "Changes save immediately" ? "Choose a role · " + status : status, roleItems(ctx, config), roleFocus);
+			if (name === undefined) return;
+			roleFocus = name;
+			while (true) {
+				const field = await promptMenu(ctx, name + " · Settings", status === "Changes save immediately" ? "Choose a setting · " + status : status, roleSettings(ctx, config, name), settingFocus[name]);
+				if (field === undefined) break;
+				settingFocus[name] = field;
+				const next = await editSetting(ctx, config, name, field);
+				if (!next) continue;
+				await saveConfig(next, configPath);
+				config = next;
+				status = "Saved " + name + (field === "reset" ? " defaults" : " " + field);
+			}
 		}
 	} catch (error) {
 		ctx.ui.notify("pi-subagents setup failed: " + errorMessage(error), "error");

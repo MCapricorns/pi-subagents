@@ -2,7 +2,9 @@ import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 import type { Api, Model } from "@earendil-works/pi-ai";
 import {
+	availableModelsInScope,
 	buildModelPickerItems,
+	CURRENT_MAIN_MODEL,
 	filterUnavailableModelOverrides,
 	findModelByRef,
 	resolveAgentModelRoute,
@@ -42,6 +44,50 @@ describe("agent model route boundaries", () => {
 	}
 });
 
+describe("setup model catalog", () => {
+	it("uses friendly names and providers, disambiguates duplicate names, and retains exact references", () => {
+		const entries = [
+			{ ...model("team-proxy", "deployment-a"), name: "Friendly Model", input: ["text", "image"] as ("text" | "image")[] },
+			{ ...model("team-proxy", "deployment-b"), name: "Friendly Model" },
+			{ ...model("other-provider", "deployment-a"), name: "Friendly Model" },
+		];
+		const items = buildModelPickerItems({ models: [...entries, entries[0]!], configuredRef: "team-proxy/deployment-b", mainRef: "team-proxy/deployment-a" });
+		assert.equal(items.length, 4, "exact duplicates are removed");
+		assert.equal(items[0]?.value, CURRENT_MAIN_MODEL);
+		assert.equal(items[0]?.saved, false);
+		assert.match(items[0]?.description ?? "", /including future changes.*team-proxy\/deployment-a/u);
+		assert.equal(items[1]?.value, "team-proxy/deployment-b", "saved model sorts first after dynamic choice");
+		assert.equal(items[1]?.saved, true);
+		assert.equal(new Set(items.map((item) => item.label)).size, items.length);
+		for (const entry of entries) {
+			const item = items.find((item) => item.value === entry.provider + "/" + entry.id)!;
+			assert.ok(item.label.includes(entry.name));
+			assert.ok(item.label.includes(entry.provider));
+			assert.ok(item.description?.includes(item.value));
+			assert.match(item.description ?? "", /Pins this model/u);
+		}
+		assert.match(items.find((item) => item.value === "team-proxy/deployment-a")?.description ?? "", /vision.*thinking:/u);
+		const dynamic = buildModelPickerItems({ models: entries, mainRef: "team-proxy/deployment-a" });
+		assert.equal(dynamic[0]?.saved, true);
+		assert.ok(dynamic.slice(1).every((item) => item.saved === false));
+	});
+
+	it("uses live availability and metadata within the session scope, preserving configured providers", () => {
+		const live = model("configured-proxy", "one");
+		const outside = model("test", "outside");
+		const stale = model("configured-proxy", "removed");
+		const modelRegistry = { getAvailable: () => [live, outside] };
+		const context = { model: live, modelRegistry, scopedModels: [
+			{ model: { ...live, name: "Stale snapshot" }, thinkingLevel: "low" },
+			{ model: stale, thinkingLevel: "high" },
+		] } as unknown as Parameters<typeof availableModelsInScope>[0];
+		assert.deepEqual(availableModelsInScope(context), [live]);
+		assert.equal(buildModelPickerItems({ models: availableModelsInScope(context) })[1]?.value, "configured-proxy/one");
+		assert.deepEqual(availableModelsInScope({ ...context, scopedModels: [] }), [live, outside]);
+		assert.deepEqual(availableModelsInScope({ model: live, modelRegistry } as unknown as Parameters<typeof availableModelsInScope>[0]), [live, outside]);
+	});
+});
+
 describe("Pi 1.0.3 provider id rename", () => {
 	const azure = model("azure", "gpt-5.4");
 	const legacy = model("azure-openai-responses", "gpt-5.4");
@@ -69,7 +115,9 @@ describe("Pi 1.0.3 provider id rename", () => {
 			models: [azure],
 			configuredRef: "azure-openai-responses/gpt-5.4",
 		});
-		assert.equal(items[1]?.label, "azure/gpt-5.4");
+		assert.equal(items[1]?.label, "gpt-5.4 · azure");
+		assert.equal(items[1]?.value, "azure/gpt-5.4");
+		assert.equal(items[1]?.saved, true);
 		assert.match(items[1]?.description ?? "", /configured/);
 	});
 

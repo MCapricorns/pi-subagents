@@ -1,5 +1,18 @@
 # Changelog
 
+## 6.0.2
+
+### Fixes
+
+- Simplify `/subagents-setup` into role, setting, and value lists with consistent
+  up/down navigation and one-level-back cancellation. Preserve focus and save
+  each confirmed change immediately.
+- Prioritize visible model choices over repeated details, show readable model
+  names with providers, and distinguish saved settings from keyboard focus.
+  Explain following the main model versus choosing a fixed model explicitly.
+- Preserve Unicode search, paste, paging, capability-aware thinking preferences,
+  and space for the workflow required-acceptance row on short terminals.
+
 ## 6.0.1
 
 ### Fixes

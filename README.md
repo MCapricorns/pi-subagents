@@ -12,15 +12,21 @@ integration tests use the Pi 1.4.0 SDK.
 pi install npm:@ferris1225/pi-subagents
 ```
 
-Run `/subagents-setup` for a role selector and focused settings editor. Wide
-terminals place them side by side; narrow terminals stack them. ↑/↓ changes the
-role, ←/→ selects **Model**, **Thinking**, or **Reset**, and Enter edits it.
-The selected role shows its full model reference, effective reasoning level,
-requested level when clamped, and default/override source. Each selection saves
-immediately; Esc returns without applying a picker selection and keeps focus.
-Model pickers support search, paste, and paging. On short terminals, PgUp/PgDn
-scrolls the settings while the selected role and field stay pinned. Setup
-reserves space for the workflow's required-acceptance row.
+Run `/subagents-setup`, choose a role, then choose **Model**, **Thinking**, or
+**Reset defaults**. Every screen uses ↑/↓ and Enter; Esc goes back one level
+without applying an unconfirmed choice. Selections save immediately and return
+to the same setting; returning to the role list keeps that role selected.
+
+Model and thinking choices support search, Unicode paste, and PgUp/PgDn paging.
+Models show their friendly name and provider; search also matches exact model
+references and capabilities. **[saved]** marks the stored selection independently
+of the navigation cursor. **Follow main (dynamic)** tracks the main window's
+model, including future changes; choosing a specific model pins that reference,
+even when it currently matches main. Tab toggles complete details (including
+exact references); ↑/↓ and PgUp/PgDn scroll them. Tab or Esc returns from details
+to the list, keeping the search and cursor.
+The list takes priority over details on short terminals. Setup reserves space
+for the workflow identity and required-acceptance row.
 
 All roles follow the main model by default; thinking defaults to `low` for scout
 and `high` for artisan, sentinel, and skeptic. The panel distinguishes defaults from overrides and

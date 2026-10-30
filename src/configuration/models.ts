@@ -24,6 +24,7 @@ export interface ModelPickerItem {
 	value: string;
 	label: string;
 	description?: string;
+	saved?: boolean;
 }
 
 export type ModelListEntry = Pick<
@@ -199,19 +200,23 @@ export function buildModelPickerItems(options: {
 
 	const dynamic: ModelPickerItem = {
 		value: CURRENT_MAIN_MODEL,
-		label: "Current main model (dynamic)",
-		description: "Clear agent override; use the current main model dynamically",
+		label: "Follow main (dynamic)",
+		description: "Uses the main window's model, including future changes. Now: " + (mainRef ?? "Pi default") + ". No model is pinned.",
+		saved: !configuredRef,
 	};
 	const items: ModelPickerItem[] = [dynamic];
 	for (const ref of refs) {
 		const model = byRef.get(ref)!;
 		const tags = [ref === liveConfiguredRef ? "configured" : "", ref === mainRef ? "current main" : ""]
 			.filter(Boolean);
-		const name = model.name.trim() && model.name !== model.id ? model.name.trim() : undefined;
+		const name = model.name.trim() || model.id;
+		const duplicateName = [...byRef.values()].some((other) =>
+			other.id !== model.id && other.provider === model.provider && (other.name.trim() || other.id) === name);
 		items.push({
 			value: ref,
-			label: ref,
-			description: [name, modelCapabilities(model), ...tags].filter(Boolean).join(" · "),
+			label: name + " · " + model.provider + (duplicateName ? " (" + model.id + ")" : ""),
+			description: ["Reference: " + ref, "Pins this model; falls back to main if unavailable or it fails.", modelCapabilities(model), ...tags].join(" · "),
+			saved: ref === liveConfiguredRef,
 		});
 	}
 	return items;
