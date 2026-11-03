@@ -1,5 +1,17 @@
 # Changelog
 
+## 6.0.3
+
+### Changes
+
+- Update the Pi SDK dependencies and minimum supported Pi version to 1.5.0.
+- Preserve typed isolation and workflow enums with Pi's new JSON Schema
+  validation while retaining the existing tool parameter format.
+- Keep setup search focus stable and show configured navigation shortcuts.
+  Preserve acceptance verdicts and worktree application state on narrow panels.
+- Make follow-ups prioritize the current objective and reuse relevant history.
+  Clarify research evidence standards and reduce overlapping workflow prompts.
+
 ## 6.0.2
 
 ### Fixes

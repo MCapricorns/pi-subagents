@@ -29,9 +29,9 @@ function worktreeBadge(run: RunView): string | undefined {
 }
 
 /** Identity owns at least half the row. Drop telemetry before losing it. */
-function splitLine(left: string, right: string, theme: Theme, width: number): string {
+function splitLine(left: string, right: string, theme: Theme, width: number, preserveLeft = false): string {
 	const budget = width - visibleWidth(right) - 2;
-	if (!right || budget < Math.min(28, Math.ceil(width / 2))) return truncateToWidth(left, width, "…");
+	if (!right || budget < Math.min(28, Math.ceil(width / 2)) || (preserveLeft && visibleWidth(left) > budget)) return truncateToWidth(left, width, "…");
 	const clipped = truncateToWidth(left, budget, "…");
 	return clipped + " ".repeat(width - visibleWidth(clipped) - visibleWidth(right)) + theme.fg("dim", right);
 }
@@ -68,7 +68,7 @@ function detailLine(activity: string | undefined, run: RunView | undefined, them
 function runRow(run: RunView, theme: Theme, width: number, now: number): TaskRow {
 	const state = run.status === "queued" ? waitWord(run) : run.integrationStatus === "finalizing" ? "applying" : run.status;
 	const label = run.label ?? formatTaskSummary(run.task, Math.max(1, width - 18));
-	const narrowState = width < 60 && run.status === "queued" ? " · " + state : "";
+	const narrowState = width < 60 && (run.status === "queued" || run.integrationStatus === "finalizing") ? " · " + state : "";
 	const identity = statusIcon(run.status, theme) + " " + theme.fg("dim", "#" + run.id) + " " + run.agent + narrowState + " · " + label;
 	const elapsed = formatElapsed(run, now);
 	const primary = splitLine(identity, width >= 60 ? [state, elapsed].filter(Boolean).join(SEPARATOR) : elapsed, theme, width);
@@ -161,7 +161,7 @@ function workflowGroup(graph: WorkflowRun, runs: ReadonlyMap<number, RunView>, t
 				? unsettled ? "after " + unsettled + " work " + (unsettled === 1 ? "node settles" : "nodes settle") : "ready · all work settled"
 				: [node.agent + (node.runId === undefined ? "" : " #" + node.runId), live?.activity].filter(Boolean).join(SEPARATOR));
 			row = {
-				primary: splitLine("  " + statusIcon(iconState, theme) + " " + theme.bold("Acceptance required") + " · " + verdict, elapsed, theme, width),
+				primary: splitLine("  " + statusIcon(iconState, theme) + " " + theme.bold(width < 36 ? "Acceptance" : "Acceptance required") + " · " + verdict, elapsed, theme, width, true),
 				detail: theme.fg("dim", "    " + formatTaskSummary(reason, Math.max(1, width - 4), false)),
 				requiredDetail: node.state === "pending" || Boolean(node.error),
 				priority: node.state === "failed" ? 0 : node.state === "running" ? 2 : node.state === "pending" ? 3 : 4,

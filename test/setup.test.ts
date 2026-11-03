@@ -103,9 +103,9 @@ function hostFrame(editor: Component, width: number, height: number, verdict: "p
 
 
 /** All callbacks are synchronous so failures reject custom(), rather than hang. */
-function pickerContext(height: number, act: (c: Component) => void, terminal = { rows: height }, activeTheme = theme): ExtensionContext {
+function pickerContext(height: number, act: (c: Component) => void, terminal = { rows: height }, activeTheme = theme, activeKeys = keybindings): ExtensionContext {
 	return { mode: "tui", ui: { notify() {}, custom: async (factory: PickerFactory) => new Promise((resolve, reject) => {
-		try { act(factory({ requestRender() {}, terminal } as TUI, activeTheme, keybindings, resolve)); }
+		try { act(factory({ requestRender() {}, terminal } as TUI, activeTheme, activeKeys, resolve)); }
 		catch (error) { reject(error); }
 	}) } } as unknown as ExtensionContext;
 }
@@ -128,6 +128,39 @@ function assertFrame(c: Component, width: number, height: number) {
 }
 
 describe("setup in the fullscreen input dock", () => {
+	it("keeps the focused choice through filtering, no matches, and clearing search", async () => {
+		const result = await promptSelectOne(pickerContext(28, (c) => {
+			c.render(80);
+			press(c, KEY.down, "\x1b[200~Model\x1b[201~");
+			assert.match(c.render(80).join("\n"), /› Model 11/u);
+			press(c, "zzzz");
+			assert.match(c.render(80).join("\n"), /0 results/u);
+			for (let i = 0; i < 4; i++) press(c, "\x7f");
+			assert.match(c.render(80).join("\n"), /› Model 11/u);
+			for (let i = 0; i < 5; i++) press(c, "\x7f");
+			assert.match(c.render(80).join("\n"), /› Model 11/u);
+			press(c, KEY.enter);
+		}), "Model", "Choose", choices, "10");
+		assert.equal(result, "11");
+	});
+
+	it("shows and honors configured selection keys", async () => {
+		const customKeys = new KeybindingsManager(TUI_KEYBINDINGS, {
+			"tui.select.up": "ctrl+p", "tui.select.down": "ctrl+n",
+			"tui.select.confirm": "ctrl+y", "tui.select.cancel": "ctrl+q",
+			"tui.select.pageUp": "alt+p", "tui.select.pageDown": "alt+n",
+		});
+		const result = await promptSelectOne(pickerContext(28, (c) => {
+			const screen = c.render(120).join("\n");
+			assert.match(screen, /Ctrl\+p\/Ctrl\+n move · Ctrl\+y select · Ctrl\+q back/u);
+			assert.match(screen, /Alt\+p\/Alt\+n/u);
+			press(c, "\x0e");
+			assert.match(c.render(120).join("\n"), /› Model 11/u);
+			press(c, "\x19");
+		}, { rows: 28 }, theme, customKeys), "Model", "Choose", choices, "10");
+		assert.equal(result, "11");
+	});
+
 	it("prioritizes at least five model choices with controls visible at 24 and 28 rows", async () => {
 		for (const height of [24, 28]) for (const width of [40, 80, 120]) {
 			await promptSelectOne(pickerContext(height, (c) => {

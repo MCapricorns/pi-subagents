@@ -6,13 +6,13 @@
  * completion ownership live in thread-lifecycle.ts.
  */
 
-import { StringEnum } from "@earendil-works/pi-ai";
 import { resolve } from "node:path";
 import type { ExtensionAPI, Theme } from "@earendil-works/pi-coding-agent";
 import { Text } from "@earendil-works/pi-tui";
 import { Type } from "typebox";
 import { isWriteCapableAgent, loadBuiltinAgents, type AgentConfig, type ToolMetadata } from "./agents.ts";
 import { DEFAULT_MAX_RESULT_LINES, loadConfig } from "../configuration/config.ts";
+import { stringEnum } from "../configuration/schema.ts";
 import { formatUsage } from "../presentation/format.ts";
 import {
 	formatTaskSummary,
@@ -49,7 +49,7 @@ const ISOLATION_DESCRIPTION =
 	"Usually omit: writers use an automatic Git worktree when a committed HEAD is available; reading and review use the current directory. Override worktree to require isolation, or shared to write directly in the caller's checkout. Not a sandbox.";
 
 export const IsolationSchema = Type.Optional(
-	StringEnum(["shared", "worktree"] as const, { description: ISOLATION_DESCRIPTION }),
+	stringEnum(["shared", "worktree"] as const, { description: ISOLATION_DESCRIPTION }),
 );
 
 export const PhaseIdSchema = Type.Optional(Type.String({

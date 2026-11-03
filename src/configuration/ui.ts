@@ -2,7 +2,7 @@
 
 import {
 	Input, fuzzyFilter, matchesKey, truncateToWidth, visibleWidth, wrapTextWithAnsi,
-	type Component, type Focusable, type KeybindingsManager, type SelectItem, type TUI,
+	type Component, type Focusable, type Keybinding, type KeybindingsManager, type SelectItem, type TUI,
 } from "@earendil-works/pi-tui";
 import type { ExtensionCommandContext, Theme } from "@earendil-works/pi-coding-agent";
 
@@ -34,6 +34,7 @@ class Picker implements Component, Focusable {
 	private pageRows = 1;
 	private details = false;
 	private detailTop = 0;
+	private filterFocus?: string;
 	private filtered: SetupItem[];
 	private readonly search = new Input({ prompt: "Search: ", placeholder: "name, provider or reference" });
 
@@ -70,6 +71,13 @@ class Picker implements Component, Focusable {
 		return item.saved ?? (this.options.searchable && item.value === this.options.initialValue);
 	}
 
+	private keyLabel(action: Keybinding): string {
+		const key = this.keybindings.getKeys(action)[0];
+		if (!key) return "unbound";
+		const labels: Record<string, string> = { up: "↑", down: "↓", enter: "Enter", escape: "Esc", pageUp: "PgUp", pageDown: "PgDn", ctrl: "Ctrl", alt: "Alt", shift: "Shift" };
+		return key.split("+").map((part) => labels[part] ?? part).join("+");
+	}
+
 	private detailLines(width: number): string[] {
 		const item = this.filtered[this.cursor];
 		if (!item) return ["No matches. Clear or change the search."];
@@ -90,12 +98,19 @@ class Picker implements Component, Focusable {
 		}
 		if (!this.details && this.options.hint && height >= 10) lines.push(muted(this.options.hint));
 		if (!this.details && this.options.searchable) lines.push(...this.search.render(width));
+		const move = this.keyLabel("tui.select.up") + "/" + this.keyLabel("tui.select.down");
+		const confirm = this.keyLabel("tui.select.confirm");
+		const cancel = this.keyLabel("tui.select.cancel");
+		const pageKeys = this.keyLabel("tui.select.pageUp") + "/" + this.keyLabel("tui.select.pageDown");
+		const page = pageKeys === "PgUp/PgDn" ? "PgUp/Dn" : pageKeys;
+		const navigation = move + " move · " + confirm + " select · " + cancel + " back";
+		const selectionHint = visibleWidth(navigation) <= width ? navigation : confirm + " select · " + cancel + " back · " + move;
 		const footer = compact
-			? [muted(this.details ? "↑↓ scroll · Tab list · Esc" : "↑↓ Enter Esc · Tab details")]
+			? [muted(this.details ? move + " scroll · Tab list · " + cancel : move + " · " + confirm + " · " + cancel + " · Tab details")]
 			: this.details
-				? [muted("↑/↓ scroll · Tab list · Esc back"), muted("PgUp/Dn page · Enter select")]
-				: [muted("↑/↓ move · Enter select · Esc back"), muted(
-					(this.filtered.length ? (this.cursor + 1) + "/" + this.filtered.length + " · " : "") + "PgUp/Dn · Tab details")];
+				? [muted(move + " scroll · Tab list · " + cancel + " back"), muted(page + " page · " + confirm + " select")]
+				: [muted(selectionHint), muted(
+					(this.filtered.length ? (this.cursor + 1) + "/" + this.filtered.length : "0 results") + " · " + page + " · Tab details")];
 		const budget = Math.max(1, height - lines.length - footer.length);
 		if (this.details) {
 			this.pageRows = budget;
@@ -164,9 +179,13 @@ class Picker implements Component, Focusable {
 			const before = this.search.getValue();
 			this.search.handleInput(data);
 			if (before !== this.search.getValue()) {
+				this.filterFocus = this.filtered[this.cursor]?.value ?? this.filterFocus;
 				const query = this.search.getValue().trim();
 				this.filtered = query ? fuzzyFilter(this.items, query, (item) => [item.value, item.label, item.description].join(" ")) : this.items;
-				this.cursor = 0;
+				// Preserve a direct name/reference match; a weak fuzzy match must
+				// not keep the saved item ahead of a more relevant search result.
+				this.cursor = Math.max(0, this.filtered.findIndex((item) => item.value === this.filterFocus &&
+					(!query || [item.value, item.label].some((text) => text.toLowerCase().includes(query.toLowerCase())))));
 			}
 		}
 		this.tui.requestRender();

@@ -240,15 +240,17 @@ describe("internal model handoff prompts", () => {
 	it("keeps retained work while guarding against a changed workspace", () => {
 		const prompt = buildResumePrompt("Fix the cache race", "the selected model failed");
 		assert.match(prompt, /resuming an earlier sub-agent session after the selected model failed/u);
-		assert.match(prompt, /Do not redo searches, reads, or edits that already succeeded/u);
+		assert.match(prompt, /Reuse relevant completed work and checks/u);
+		assert.match(prompt, /current objective below takes precedence over earlier task requests/u);
+		assert.match(prompt, /preserve earlier constraints unless it changes them/u);
 		assert.match(prompt, /workspace may have changed.*re-read it unless you read it during this continuation/u);
-		assert.match(prompt, /\n\nCurrent objective:\nFix the cache race\n\nPick up exactly where you left off/u);
+		assert.match(prompt, /\n\nCurrent objective:\nFix the cache race\n\nComplete the remaining work for this objective/u);
 		assert.match(prompt, /result-only handoff/u);
 	});
 
 	it("keeps a multi-line objective intact without doubling its final period", () => {
 		const prompt = buildResumePrompt("Fix the cache race.\n- keep the API stable.\n", "a handoff");
-		assert.match(prompt, /Current objective:\nFix the cache race\.\n- keep the API stable\.\n\nPick up/u);
+		assert.match(prompt, /Current objective:\nFix the cache race\.\n- keep the API stable\.\n\nComplete the remaining work/u);
 		assert.doesNotMatch(prompt, /\.\./u);
 	});
 

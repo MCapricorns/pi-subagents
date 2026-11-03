@@ -21,7 +21,7 @@ export function builtinWorkflowPlans(): WorkflowPlanInput[] {
 			nodes: [{
 				id: "review",
 				agent: "sentinel",
-				task: "Review <TARGET> against the stated requirements and relevant callers. Establish the diff once, then inspect correctness, regressions, compatibility, and concrete failure paths within that target. Reuse existing research and valid checks; run a focused reproduction only to resolve a suspected defect. Stay read-only and do not change Git state. Return confirmed actionable findings with path:line, trigger, consequence, evidence, and smallest fix; include checks and material gaps. State clearly if no confirmed findings were found. The final acceptance officer will verify the report and its evidence; do not add another general review.",
+				task: "Review <TARGET> against the stated requirements and relevant callers. Establish the diff once; check correctness, regressions, compatibility, and concrete failure paths within it. Follow your role's evidence and reporting rules. The deliverable is the review report, including a clear no-findings conclusion when appropriate. Acceptance verifies that report; leave fixes to main.",
 			}],
 		},
 		{
@@ -31,12 +31,12 @@ export function builtinWorkflowPlans(): WorkflowPlanInput[] {
 				{
 					id: "primary",
 					agent: "scout",
-					task: "Research <QUESTION> from first-party sources only: official documentation, specifications, release notes, and the project's own repository. Record versions and dates. Cite every fact you state. Mark anything you could only find second-hand.",
+					task: "Research <QUESTION> from first-party sources: official documentation, specifications, and release notes. Focus on the documented contract and applicable versions; another pass inspects this checkout. Cite decisive claims with dates or versions. If primary evidence is unavailable, report that gap without substituting second-hand claims.",
 				},
 				{
 					id: "practice",
 					agent: "scout",
-					task: "Research <QUESTION> from practice: issue threads, migration notes, benchmarks, and post-mortems that describe what actually happened when people used it. Separate reported experience from vendor claims and cite each source.",
+					task: "Research <QUESTION> through reported experience: issue reproductions, migration outcomes, benchmarks, and post-mortems. Focus on observed conditions and limitations; another pass covers the official contract. Distinguish reproducible evidence from anecdotes, record applicable versions, and cite each source. If no relevant experience is available, state that gap.",
 				},
 				{
 					id: "codebase",
@@ -47,7 +47,7 @@ export function builtinWorkflowPlans(): WorkflowPlanInput[] {
 					id: "synthesis",
 					agent: "scout",
 					dependsOn: ["primary", "practice", "codebase"],
-					task: "Answer <QUESTION> from these three research passes. Reconcile disagreements explicitly; check dates, versions, and conditions when official claims conflict with observed practice. Prefer evidence applicable to this question.\n\nFirst-party:\n{{primary}}\n\nPractice:\n{{practice}}\n\nThis repository:\n{{codebase}}\n\nReturn the answer, decisive citations, open questions, and what would change the answer. The final acceptance officer checks the answer and its evidence.",
+					task: "Answer <QUESTION> using the evidence below. Reconcile disagreements by checking dates, versions, and conditions. Retrieve additional sources only for a specific gap or conflict; do not repeat the three research passes.\n\nFirst-party:\n{{primary}}\n\nPractice:\n{{practice}}\n\nThis repository:\n{{codebase}}\n\nReturn the answer, decisive citations, open questions, and what would change the answer. The final acceptance officer checks the answer and its evidence.",
 				},
 			],
 		},

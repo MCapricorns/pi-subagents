@@ -150,6 +150,8 @@ describe("widget layout priorities", () => {
 		const narrow = formatActiveRunLines([busy], plainTheme, 48, 10_000);
 		assert.match(narrow[1]!, /read src\/configuration\/config.ts/u);
 		assert.doesNotMatch(narrow[1]!, /test\//u, "omit metadata rather than showing half a model id");
+		const applying = { ...run(9), integrationStatus: "finalizing" as const };
+		assert.match(formatActiveRunLines([applying], plainTheme, 42, 10_000)[0]!, /applying/u);
 	});
 
 	it("fits ANSI-styled CJK identities and causes at every width without dropping the line bound", () => {
@@ -252,6 +254,11 @@ describe("acceptance presentation", () => {
 		assert.doesNotMatch(lines[0]!, /1 failed/u);
 		assert.equal(lines.filter((line) => line.includes("Acceptance required")).length, 1);
 		assert.match(lines.join("\n"), /Acceptance required · FAIL.*\n.*No explicit PASS/u);
+		for (const width of [24, 28, 32]) {
+			const narrow = formatSubagentWidgetLines([live], [graph], plainTheme, width, 10_000);
+			assert.match(narrow.join("\n"), /Acceptance · FAIL/u);
+			assert.ok(narrow.every((line) => visibleWidth(line) <= width));
+		}
 	});
 
 	it("retains PASS beside failed work and hides the panel only when the whole graph completes", () => {

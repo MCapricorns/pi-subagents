@@ -90,7 +90,7 @@ describe("buildDelegationDirective", () => {
 
 	it("preserves one-shot ownership and completion requirements", () => {
 		const directive = buildDelegationDirective(loadBuiltinAgents());
-		assert.match(directive, /Each run returns once/u);
+		assert.match(directive, /Each dispatch or follow-up returns once/u);
 		assert.match(directive, /`subagent_message` to steer or continue a run/u);
 		assert.match(directive, /`auto` \(default\) reuses history or a summary/u);
 		assert.match(directive, /`session` requires full history/u);

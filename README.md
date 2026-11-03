@@ -5,8 +5,8 @@ dependency workflows, and Git worktree isolation.
 
 ## Install
 
-Requires **Pi >= 1.4.0** and **Node.js >= 22.19.0**. Development and native
-integration tests use the Pi 1.4.0 SDK.
+Requires **Pi >= 1.5.0** and **Node.js >= 22.19.0**. Development and native
+integration tests use the Pi 1.5.0 SDK.
 
 ```bash
 pi install npm:@ferris1225/pi-subagents
@@ -25,6 +25,8 @@ model, including future changes; choosing a specific model pins that reference,
 even when it currently matches main. Tab toggles complete details (including
 exact references); ↑/↓ and PgUp/PgDn scroll them. Tab or Esc returns from details
 to the list, keeping the search and cursor.
+Filtering keeps focus on a matching name or reference, including after an empty
+result; other queries select the best match. Hints follow your Pi keybindings.
 The list takes priority over details on short terminals. Setup reserves space
 for the workflow identity and required-acceptance row.
 
@@ -63,6 +65,9 @@ from older releases remain available for recovery.
 Children receive a self-contained brief and project instructions, but no parent
 conversation. They cannot delegate or release. Main owns planning, integration,
 and the final result. Keep a fix and its regression tests with one owner.
+Follow-ups use the latest objective while retaining earlier constraints unless
+explicitly changed. Research separates documented contracts, reported experience,
+and local code; synthesis retrieves more sources only to resolve a gap or conflict.
 
 ## Delegate
 

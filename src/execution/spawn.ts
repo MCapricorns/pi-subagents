@@ -256,12 +256,12 @@ export function getResultOutput(result: SingleResult): string {
 /** Model handoff preserves useful history, but main or siblings may have edited
  * the workspace since the selected model last read it. */
 const RESUME_CONTINUATION_RULES =
-	"Your earlier work — searches, reads, edits, and reasoning — is preserved in this session's history above; review it before acting. Do not redo searches, reads, or edits that already succeeded. The workspace may have changed while this thread was inactive: before editing a file, re-read it unless you read it during this continuation. The current cwd is authoritative; do not reuse paths to an earlier temporary worktree. Finish with the result-only handoff your role requires.";
+	"Use the earlier session history as evidence. The current objective below takes precedence over earlier task requests; preserve earlier constraints unless it changes them. Reuse relevant completed work and checks. The workspace may have changed while this thread was inactive: before editing a file, re-read it unless you read it during this continuation. The current cwd is authoritative; do not reuse paths to an earlier temporary worktree. Finish with the result-only handoff your role requires.";
 
 /** The objective is a multi-line brief, so it gets its own block instead of
  * being spliced mid-sentence (where a trailing period also doubled up). */
 export function buildResumePrompt(task: string, reason: string): string {
-	return `You are resuming an earlier sub-agent session after ${reason}. ${RESUME_CONTINUATION_RULES}\n\nCurrent objective:\n${task.trim()}\n\nPick up exactly where you left off and finish it. Continue now.`;
+	return `You are resuming an earlier sub-agent session after ${reason}. ${RESUME_CONTINUATION_RULES}\n\nCurrent objective:\n${task.trim()}\n\nComplete the remaining work for this objective.`;
 }
 
 /** Create a fresh private session directory under the given root. The owner

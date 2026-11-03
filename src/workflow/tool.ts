@@ -7,7 +7,6 @@
  * default; UI calls return a launch receipt and receive one completion message.
  */
 
-import { StringEnum } from "@earendil-works/pi-ai";
 import type { ExtensionAPI, ExtensionContext, Theme } from "@earendil-works/pi-coding-agent";
 import { Text } from "@earendil-works/pi-tui";
 import { Type } from "typebox";
@@ -15,6 +14,7 @@ import { isWriteCapableAgent, loadBuiltinAgents } from "../delegation/agents.ts"
 import { defaultIsolationMode } from "../delegation/dispatch.ts";
 import { findRuntimeWriterConflict } from "../delegation/ownership.ts";
 import { loadConfig } from "../configuration/config.ts";
+import { stringEnum } from "../configuration/schema.ts";
 import type { SubagentRuntime } from "../lifecycle/runtime.ts";
 import type { DispatchCore } from "../lifecycle/dispatch-core.ts";
 import { cancelActiveWork } from "../lifecycle/cancellation.ts";
@@ -34,7 +34,7 @@ import {
 import { compileBuiltinWorkflow } from "./templates.ts";
 
 const WorkflowParams = Type.Object({
-	workflow: StringEnum(["code-review", "research", "migration"] as const, {
+	workflow: stringEnum(["code-review", "research", "migration"] as const, {
 		description: "Built-in plan: code-review inspects a target; research answers a question; migration applies two planned slices. Every plan ends with independent acceptance.",
 	}),
 	wait: Type.Optional(Type.Boolean({
