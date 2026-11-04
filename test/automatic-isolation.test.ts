@@ -33,15 +33,17 @@ async function harness(t: TestContext, repository: "committed" | "unborn" | "non
 	const script = join(root, "child.mjs");
 	await writeFile(script, `
 import { createInterface } from "node:readline";
-import { writeFileSync } from "node:fs";
+import { readFileSync, writeFileSync } from "node:fs";
 const send = (value) => process.stdout.write(JSON.stringify(value) + "\\n");
+const promptFlag = process.argv.indexOf("--append-system-prompt");
 createInterface({ input: process.stdin }).on("line", (line) => {
   const command = JSON.parse(line);
   if (command.type !== "prompt") return;
   send({ type: "response", id: command.id, command: "prompt", success: true, data: { disposition: "started" } });
   send({ type: "agent_start" });
   if (command.message.includes("Write output")) writeFileSync("output.txt", "isolated result");
-  send({ type: "message_end", message: { role: "assistant", content: [{ type: "text", text: process.cwd() }], stopReason: "stop" } });
+  const text = command.message.includes("Report prompt") ? readFileSync(process.argv[promptFlag + 1], "utf8") : process.cwd();
+  send({ type: "message_end", message: { role: "assistant", content: [{ type: "text", text }], stopReason: "stop" } });
   send({ type: "agent_settled" });
 });`);
 	const previousScript = process.argv[1];
@@ -72,10 +74,10 @@ describe("automatic isolation and current roles", () => {
 	it("selects isolation by role and explicit override", () => {
 		assert.equal(defaultIsolationMode("artisan"), "worktree");
 		for (const name of ["scout", "sentinel"]) {
-			assert.equal(defaultIsolationMode(name, undefined, name !== "scout"), "shared");
+			assert.equal(defaultIsolationMode(name), "shared");
 		}
 		assert.equal(defaultIsolationMode("artisan", "shared"), "shared");
-		assert.equal(defaultIsolationMode("sentinel", "worktree", true), "worktree");
+		assert.equal(defaultIsolationMode("sentinel", "worktree"), "worktree");
 	});
 
 	it("uses and integrates a worktree for a single implementation without an override", async (t) => {
@@ -95,6 +97,15 @@ describe("automatic isolation and current roles", () => {
 		assert.equal(await readFile(join(h.project, "output.txt"), "utf8"), "isolated result");
 		assert.equal(git(h.project, "rev-parse", "HEAD"), head);
 		assert.equal(git(h.project, "diff", "--cached", "--name-only"), "");
+	});
+
+	it("tells an isolated child where its worktree mirrors the original checkout", async (t) => {
+		const h = await harness(t, "committed");
+		const { thread, result } = await h.run({ agent: "artisan", task: "Report prompt" });
+		const prompt = getResultOutput(result);
+		assert.equal(result.exitCode, 0);
+		assert.ok(prompt.includes(`temporary detached Git worktree at ${thread.executionCwd}, a snapshot of the original checkout ${await realpath(h.project)}.`), prompt);
+		assert.match(prompt, /map every brief path under the original checkout to the same relative path here/u);
 	});
 
 	for (const repository of ["none", "unborn"] as const) {

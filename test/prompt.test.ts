@@ -38,12 +38,11 @@ describe("buildDelegationDirective", () => {
 		const directive = buildDelegationDirective(loadBuiltinAgents());
 		assert.match(directive, /Delegate worthwhile phases/u);
 		assert.match(directive, /focused ownership, isolated context, parallel progress, or independent verification/u);
-		assert.match(directive, /`scout` for cited research, `artisan` for implementation, and `sentinel` to review implementations or challenge claims/u);
 		// The routing contract states the live tool policy without naming tools.
 		assert.match(directive, /Children inherit this session's live tool surface/u);
-		assert.match(directive, /including `codemode`/u);
+		assert.match(directive, /including `codemode` when present/u);
 		assert.match(directive, /Do not plan a phase that needs a tool its role cannot reach/u);
-		// The preference line must not restate the catalog descriptions.
+		// The catalog alone routes roles; no rule restates a role description.
 		for (const role of loadBuiltinAgents()) {
 			assert.equal(directive.split(role.description).length - 1, 1);
 		}
@@ -52,10 +51,8 @@ describe("buildDelegationDirective", () => {
 		assert.match(directive, /Use `subagent` for one bounded phase and parallel `tasks` for independent phases/u);
 		assert.match(directive, /Honor requests to work in main or avoid subagents/u);
 		assert.match(directive, /no extra stop or automatic restart/u);
-		assert.match(directive, /smallest fix/u);
-		assert.match(directive, /Apply fixes when authorized; otherwise report them/u);
-		assert.match(directive, /Ask only for material uncertainty/u);
-		assert.match(directive, /Do not re-review the whole change/u);
+		assert.match(directive, /Apply confirmed review findings when authorized; otherwise report them/u);
+		assert.match(directive, /Request a focused re-check only for material uncertainty; do not re-review the whole change/u);
 		assert.match(directive, /Never overlap writers or duplicate an owned phase/u);
 		assert.match(directive, /If a result determines the next task or its scope, dispatch that phase alone and decide in main/u);
 		assert.match(directive, /implementation and its regression tests share one owner/u);
@@ -97,7 +94,6 @@ describe("buildDelegationDirective", () => {
 	it("shows routing only for enabled roles", () => {
 		const directive = buildDelegationDirective([agent("artisan")]);
 		assert.match(directive, /- artisan: artisan description/u);
-		assert.match(directive, /use `artisan` for implementation/u);
 		assert.doesNotMatch(directive, /\bscout\b/u);
 	});
 
@@ -110,14 +106,14 @@ describe("buildDelegationDirective", () => {
 	it("keeps the stable contract cached when only leases change", () => {
 		const sections: Record<string, string> = {};
 		installDelegationSections(sections, loadBuiltinAgents(), []);
-		assert.match(sections[DELEGATION_SECTION] ?? "", /use `scout`/u);
+		assert.match(sections[DELEGATION_SECTION] ?? "", /- scout: /u);
 		assert.equal(sections[DELEGATION_LEASE_SECTION], undefined);
 
 		installDelegationSections(sections, loadBuiltinAgents(), [lease({ id: 3 })]);
 		const stable = sections[DELEGATION_SECTION];
-		assert.match(stable ?? "", /use `scout`/u);
+		assert.match(stable ?? "", /- scout: /u);
 		assert.doesNotMatch(stable ?? "", /Active phase leases/u);
-		assert.match(sections[DELEGATION_LEASE_SECTION] ?? "", /#3 broad reconnaissance/u);
+		assert.match(sections[DELEGATION_LEASE_SECTION] ?? "", /#3 scout \(running\)/u);
 
 		installDelegationSections(sections, loadBuiltinAgents(), [lease({ id: 3, task: "Map a different entry point" })]);
 		assert.equal(sections[DELEGATION_SECTION], stable);
@@ -137,20 +133,28 @@ describe("buildDelegationDirective", () => {
 			lease({ id: 15 }),
 			lease({ id: 16, state: "failed" }),
 		]);
-		assert.match(directive, /#11 broad reconnaissance \(scout, running\): Map dispatch ownership/u);
-		assert.match(directive, /#13 primary change \(artisan, settling\): Apply focused edit/u);
+		assert.match(directive, /#11 scout \(running\): Map dispatch ownership/u);
+		assert.match(directive, /#13 artisan \(settling\): Apply focused edit/u);
 		assert.match(directive, /2 more active leases omitted/u);
 		assert.doesNotMatch(directive, /#14|#15/u);
-		assert.match(directive, /Recent settled phases[\s\S]*#12 \(completed\)[\s\S]*#16 \(failed\)/u);
+		assert.match(directive, /Recent settled phases[\s\S]*#12 scout \(completed\)[\s\S]*#16 scout \(failed\)/u);
 	});
 
 	it("keeps launch receipts short and clear", () => {
 		const sources = [lease({ id: 21, agentName: "artisan", task: "Implement duplicate rejection" })];
 		const single = formatPhaseLeaseReceipt(sources);
 		assert.match(single, /^Active phase lease:/u);
-		assert.match(single, /#21 primary change/u);
+		assert.match(single, /#21 artisan \(running\): Implement duplicate rejection/u);
 		assert.match(single, /Do not duplicate it/u);
 		assert.doesNotMatch(single, /never blocks|dispatch more|keep working/u);
+	});
+
+	it("lists every run a parallel launch started", () => {
+		const batch = formatPhaseLeaseReceipt([21, 22, 23, 24].map((id) => lease({ id, task: `Inspect module ${id}` })));
+		assert.match(batch, /^Active phase leases:/u);
+		for (const id of [21, 22, 23, 24]) assert.match(batch, new RegExp(`#${id} scout \\(running\\): Inspect module ${id}`, "u"));
+		assert.doesNotMatch(batch, /omitted/u);
+		assert.match(batch, /Do not duplicate them/u);
 	});
 
 	it("stays within the prompt budget", () => {

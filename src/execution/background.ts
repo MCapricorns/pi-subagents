@@ -1,6 +1,6 @@
 /** Background tasks start immediately and remain owned until cleanup finishes. */
 
-export type BackgroundTask = (signal: AbortSignal, controller: AbortController) => Promise<void>;
+export type BackgroundTask = (signal: AbortSignal) => Promise<void>;
 
 export class BackgroundTaskQueue {
 	private readonly active = new Set<AbortController>();
@@ -19,7 +19,7 @@ export class BackgroundTaskQueue {
 		this.completions.set(controller, new Promise<void>((resolve) => { complete = resolve; }));
 		this.active.add(controller);
 		// The async boundary catches synchronous throws as well as rejected tasks.
-		void (async () => task(controller.signal, controller))()
+		void (async () => task(controller.signal))()
 			.catch(async (error: unknown) => {
 				if (controller.signal.aborted) return;
 				try { await onError?.(error); } catch { /* error reporting must not strand ownership */ }

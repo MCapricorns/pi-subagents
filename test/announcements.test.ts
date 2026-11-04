@@ -42,4 +42,30 @@ describe("session-start recovery announcements", () => {
 			} finally { await runtime.shutdown(); await rm(root, { recursive: true, force: true }); }
 		});
 	}
+
+	it("keeps model overrides outside the session scope and drops only unavailable ones", async () => {
+		const root = await mkdtemp(join(tmpdir(), "pi-subagents-announcements-"));
+		const configPath = join(root, "agent", "config.json");
+		const handlers = new Map<string, (event: unknown, ctx: ExtensionContext) => Promise<void>>();
+		const pi = {
+			getActiveTools: () => [], getAllTools: () => [],
+			on: (name: string, handler: (event: unknown, ctx: ExtensionContext) => Promise<void>) => handlers.set(name, handler),
+		} as unknown as ExtensionAPI;
+		const runtime = createRuntime(pi, configPath);
+		const notices: string[] = [];
+		const scoped = { provider: "test", id: "scoped" };
+		const outside = { provider: "test", id: "outside" };
+		try {
+			await saveConfig({ agentModels: { scout: "test/outside", artisan: "test/missing" }, agentThinkingLevels: {} }, configPath);
+			registerAnnouncements(pi, runtime);
+			await handlers.get("session_start")!({}, {
+				cwd: root, mode: "print", hasUI: false,
+				modelRegistry: { getAvailable: () => [scoped, outside] },
+				scopedModels: [{ model: scoped }],
+				ui: { notify: (message: string) => notices.push(message) },
+			} as unknown as ExtensionContext);
+			assert.deepEqual((await loadConfig(configPath)).agentModels, { scout: "test/outside" });
+			assert.ok(notices.some((message) => /artisan: test\/missing.*follow the main model/u.test(message)));
+		} finally { await runtime.shutdown(); await rm(root, { recursive: true, force: true }); }
+	});
 });

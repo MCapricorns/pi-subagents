@@ -9,7 +9,7 @@ import { registerSubagentTool } from "../src/delegation/dispatch.ts";
 import { createDispatchCore } from "../src/lifecycle/dispatch-core.ts";
 import { createRuntime } from "../src/lifecycle/runtime.ts";
 
-it("validates dispatch enums through the Pi SDK", async (t) => {
+it("validates dispatch roles and isolation through the Pi SDK", async (t) => {
 	const root = await mkdtemp(join(tmpdir(), "pi-tool-schema-"));
 	const tools = new Map<string, Tool>();
 	const pi = {
@@ -36,4 +36,9 @@ it("validates dispatch enums through the Pi SDK", async (t) => {
 	}
 	assert.throws(() => validate("subagent", { ...task, isolation: "invalid" }), /isolation:/u);
 	assert.throws(() => validate("subagent", { tasks: [{ ...task, isolation: "invalid" }] }), /tasks\.0\.isolation:/u);
+	for (const agent of ["scout", "artisan", "sentinel"]) {
+		assert.deepEqual(validate("subagent", { ...task, agent }), { ...task, agent });
+	}
+	assert.throws(() => validate("subagent", { ...task, agent: "reviewer" }), /agent:/u);
+	assert.throws(() => validate("subagent", { tasks: [{ ...task, agent: "critic" }] }), /tasks\.0\.agent:/u);
 });

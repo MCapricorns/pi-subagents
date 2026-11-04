@@ -36,7 +36,9 @@ describe("loadBuiltinAgents", () => {
 			assert.match(agent.systemPrompt, /no interactive clarification/u);
 			assert.match(agent.systemPrompt, /Follow the brief within loaded project instructions/u);
 			assert.match(agent.systemPrompt, /do not dispatch agents, bump versions, commit, push, publish, tag, or release/u);
-			assert.match(agent.systemPrompt, /directly, or through its script tool/u);
+			// Scout receives only direct read-only tools, never a script tool.
+			if (agent.name === "scout") assert.doesNotMatch(agent.systemPrompt, /script tool/u);
+			else assert.match(agent.systemPrompt, /directly, or through its script tool/u);
 			assert.doesNotMatch(formatCatalogEntry(agent), /[\r\n]/u);
 		}
 	});
@@ -93,7 +95,7 @@ describe("loadBuiltinAgents", () => {
 		assert.match(sentinel.systemPrompt, /Reuse main or upstream.*research, and passing checks when they still cover/u);
 		assert.match(sentinel.systemPrompt, /repeat or broaden checks only for changed code or a concrete uncertainty/u);
 		assert.match(sentinel.systemPrompt, /exact location, trigger, consequence, evidence, and smallest fix/u);
-		assert.match(sentinel.systemPrompt, /Separate unverified concerns from findings/u);
+		assert.match(sentinel.systemPrompt, /unverified concerns separately from findings/u);
 		assert.match(sentinel.systemPrompt, /speculative hardening/u);
 		assert.match(sentinel.systemPrompt, /checks as `command → result`/u);
 	});

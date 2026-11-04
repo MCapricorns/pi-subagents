@@ -9,10 +9,10 @@
 
 import { randomUUID } from "node:crypto";
 import { join, resolve } from "node:path";
-import { resolveAgentTools, type AgentConfig } from "../delegation/agents.ts";
+import { isWriteCapableAgent, resolveAgentTools, type AgentConfig } from "../delegation/agents.ts";
 import type { CompletionMessageItem } from "./completion.ts";
 import { DEFAULT_IDLE_TIMEOUT_SEC, DEFAULT_MAX_RESULT_LINES, loadConfig } from "../configuration/config.ts";
-import { dispatchFailedResult, failedStartResult, formatCompletionBlock, modelLevelTakeoverNote, queuedResult } from "../presentation/format.ts";
+import { dispatchFailedResult, failedStartResult, formatCompletionBlock, queuedResult } from "../presentation/format.ts";
 import { formatTaskSummary, monitor } from "../presentation/monitor.ts";
 import { findDuplicateDispatch } from "../delegation/prompt.ts";
 import { persistRecoveryRecords, recoveryRecordFromFinalization } from "../isolation/recovery.ts";
@@ -27,7 +27,6 @@ import {
 	type SubagentLiveEvent,
 } from "../execution/spawn.ts";
 import {
-	isWorktreeCapableAgent,
 	persistThreadCheckpoint,
 	projectResultsRoot,
 	resolveDispatchModelRoute,
@@ -99,8 +98,7 @@ export function createBackgroundDispatcher(options: BackgroundDispatcherOptions)
 			resolveAgentTools(candidate, runtime.getActiveTools(), runtime.getToolInfos());
 		const agent = resolveLiveAgentTools(discoveredAgent);
 		const originalCwd = resolve(cwd ?? runCtx.cwd);
-		const quiet = startOptions.quiet === true;
-		if (isolation === "worktree" && !isWorktreeCapableAgent(agent, toolInfos)) {
+		if (isolation === "worktree" && !isWriteCapableAgent(agent, toolInfos)) {
 			return {
 				...failedStartResult(agentName, task, `Agent "${agentName}" is read-only; worktree isolation is available only to write-capable agents such as artisan.`),
 				isolation,
@@ -110,15 +108,18 @@ export function createBackgroundDispatcher(options: BackgroundDispatcherOptions)
 		if (duplicate) {
 			// A phase stays owned across reloads: an interrupted run keeps its claim
 			// until it is retired, so "let it finish" is wrong advice for a parked
-			// owner and leaves the caller with no way forward.
+			// owner and leaves the caller with no way forward. A retired owner is
+			// still releasing its child or worktree after subagent_stop.
 			const owner = duplicate.source;
-			const remedy = owner.state === "parked" || owner.retired
-				? `That interrupted run keeps the phase claimed. Inspect its retained result with subagent_status and finish from that evidence. Retire it with subagent_stop({ id: "${owner.id}" }) only if discarding its retained session is intended; then the phase can be reused.`
-				: owner.state === "completed"
-					? `Reuse its result via subagent_status({ id: ${owner.id} }); use subagent_message({ id: ${owner.id}, message: "<bounded next step>" }) for additional work. A new deliverable needs its own brief.`
-					: owner.state === "failed"
-						? "Inspect the failure with subagent_status and finish the remaining work from its evidence. Do not repeat the same phase."
-						: "Do not redispatch it; let it finish or steer it with subagent_message. Its result returns automatically; then continue the task.";
+			const remedy = owner.retired
+				? "It is still stopping; dispatch the phase again after the stop finishes."
+				: owner.state === "parked"
+					? `That interrupted run keeps the phase claimed. Inspect its retained result with subagent_status and finish from that evidence. Retire it with subagent_stop({ id: "${owner.id}" }) only if discarding its retained session is intended; then the phase can be reused.`
+					: owner.state === "completed"
+						? `Reuse its result via subagent_status({ id: ${owner.id} }); use subagent_message({ id: ${owner.id}, message: "<bounded next step>" }) for additional work. A new deliverable needs its own brief.`
+						: owner.state === "failed"
+							? "Inspect the failure with subagent_status and finish the remaining work from its evidence. Do not repeat the same phase."
+							: "Do not redispatch it; let it finish or steer it with subagent_message. Its result returns automatically; then continue the task.";
 			return failedStartResult(agentName, task,
 				`Run #${owner.id} (${owner.agentName}) already owns this logical phase (${owner.state}). ${remedy}`);
 		}
@@ -129,15 +130,10 @@ export function createBackgroundDispatcher(options: BackgroundDispatcherOptions)
 		let worktree: WorktreeIsolation | undefined;
 		let executionCwd = originalCwd;
 		let worktreeGroup: string | undefined;
-		const resolvedRoute = resolveDispatchModelRoute(agent, runConfig, runCtx);
-		let route = isolation === "worktree"
-			? { ...resolvedRoute, agent: withWorktreeSystemPrompt(resolvedRoute.agent) }
-			: resolvedRoute;
+		const route = resolveDispatchModelRoute(agent, runConfig, runCtx);
 		const thinkingLevel = route.thinkingLevel;
-		const runId = monitor.addRun(agent.name, task, route.agent.model, thinkingLevel, {
-			isolation,
-		});
-		if (!quiet) runtime.claimRunDelivery(runId, startOptions.deliveryRoute ?? "background");
+		const runId = monitor.addRun(agent.name, task, route.agent.model, thinkingLevel, isolation);
+		runtime.claimRunDelivery(runId, startOptions.deliveryRoute ?? "background");
 		const generation = 1;
 		const pending: SingleResult = {
 			...queuedResult(route.agent, task, thinkingLevel),
@@ -188,7 +184,7 @@ export function createBackgroundDispatcher(options: BackgroundDispatcherOptions)
 			runtime,
 			runCtx,
 		});
-		if (isolation === "shared" || worktree) installCurrentLifecycle();
+		if (isolation === "shared") installCurrentLifecycle();
 
 		const onLive = makeLiveHandler(runId, generation);
 		const runGeneration = async (backgroundSignal: AbortSignal): Promise<void> => {
@@ -205,7 +201,6 @@ export function createBackgroundDispatcher(options: BackgroundDispatcherOptions)
 					pending.isolation = "shared";
 					delete pending.integrationStatus;
 					pending.isolationNote = `Using the caller's directory: ${error.reason}; automatic worktree isolation is unavailable.`;
-					route = resolvedRoute;
 					monitor.setIsolation(runId, "shared");
 					runCtx.ui.notify(`#${runId}: ${pending.isolationNote}`, "info");
 					installCurrentLifecycle();
@@ -224,28 +219,24 @@ export function createBackgroundDispatcher(options: BackgroundDispatcherOptions)
 					installCurrentLifecycle();
 				}
 			}
-			// Independent runs start immediately; only worktree integration serializes.
-			monitor.setWaitReason(runId, "starting");
 			// Re-read model preferences after asynchronous worktree preparation.
 			let activeRoute = route;
 			const activeIdleTimeoutMs = DEFAULT_IDLE_TIMEOUT_SEC * 1000;
 			try {
 				const startConfig = await loadConfig(runtime.configPath);
-				const resolvedStart = resolveDispatchModelRoute(agent, startConfig, runCtx);
-				activeRoute = isolation === "worktree"
-					? { ...resolvedStart, agent: withWorktreeSystemPrompt(resolvedStart.agent) }
-					: resolvedStart;
+				activeRoute = resolveDispatchModelRoute(agent, startConfig, runCtx);
 				monitor.setModel(runId, activeRoute.agent.model);
 				monitor.setThinking(runId, activeRoute.thinkingLevel);
 			} catch {
 				/* keep the dispatch-time route when fresh config is unavailable */
 			}
+			const launchAgent = worktree ? withWorktreeSystemPrompt(activeRoute.agent, worktree) : activeRoute.agent;
 			let result: SingleResult;
 			try {
 				result = await runSingleAgentWithMainFallback(
 					{
 						defaultCwd: executionCwd,
-						agent: activeRoute.agent,
+						agent: launchAgent,
 						resolveAgentForAttempt: resolveLiveAgentTools,
 						agentName,
 						task,
@@ -286,7 +277,7 @@ export function createBackgroundDispatcher(options: BackgroundDispatcherOptions)
 			thread.sessionDir = result.sessionDir;
 			thread.lastResult = result;
 			runtime.retainSession(result);
-			monitor.setModel(runId, result.model, result.modelFallbackFrom);
+			monitor.setModel(runId, result.model);
 			monitor.setThinking(runId, result.thinking);
 			// Checkpoint the session location durably: a crash or reload before
 			// settlement still restores this thread with its retained context.
@@ -305,7 +296,6 @@ export function createBackgroundDispatcher(options: BackgroundDispatcherOptions)
 			// aborted partial.
 			if (backgroundSignal.aborted || !runtime.sessionActive) return;
 
-			if (thread.retireOnSettle) runtime.retireThreadSession(thread);
 			// Claim terminal settlement synchronously before the first slow await.
 			// Shutdown therefore either wins while the child is still active, or is rejected
 			// once settlement owns the generation. Destructive stop may supersede
@@ -339,30 +329,23 @@ export function createBackgroundDispatcher(options: BackgroundDispatcherOptions)
 				const ownedController = thread.queueController;
 				if (runtime.runControllers.get(runId) === ownedController) runtime.runControllers.delete(runId);
 				thread.queueController = undefined;
-				finishRun(
-					runId,
-					failed ? "failed" : "done",
-					quiet || modelLevel || dispatchFailed ? { silent: true } : undefined,
-				);
+				finishRun(runId, failed ? "failed" : "done", modelLevel || dispatchFailed ? { silent: true } : undefined);
 				runtime.registerRunResult(runId, result);
-				if (!quiet) {
-					const block = formatCompletionBlock(result, DEFAULT_MAX_RESULT_LINES, {
+				const completion: CompletionMessageItem = {
+					agent: result.agent,
+					block: formatCompletionBlock(result, DEFAULT_MAX_RESULT_LINES, {
 						resultRoot: projectResultsRoot(runtime.configPath, result.projectCwd ?? originalCwd),
-					});
-					const completion: CompletionMessageItem = {
-						agent: result.agent,
-						block: modelLevel ? `${block}\n\n${modelLevelTakeoverNote(result)}` : block,
-						usage: result.usage,
-						model: result.model,
-					};
-					if (modelLevel) {
-						const detail = notifyDetail(result.errorMessage, "model unavailable or broken");
-						runCtx.ui.notify(`✗ ${result.agent} dispatch failed: ${detail} — task handed to the main window`, "error");
-					} else if (dispatchFailed) {
-						runCtx.ui.notify(`✗ ${result.agent} dispatch failed: ${notifyDetail(result.errorMessage, "dispatch crashed")}`, "error");
-					}
-					runtime.publishRunCompletion(runId, completion, failed);
+					}),
+					usage: result.usage,
+					model: result.model,
+				};
+				if (modelLevel) {
+					const detail = notifyDetail(result.errorMessage, "model unavailable or broken");
+					runCtx.ui.notify(`✗ ${result.agent} dispatch failed: ${detail} — task handed to the main window`, "error");
+				} else if (dispatchFailed) {
+					runCtx.ui.notify(`✗ ${result.agent} dispatch failed: ${notifyDetail(result.errorMessage, "dispatch crashed")}`, "error");
 				}
+				runtime.publishRunCompletion(runId, completion, failed);
 			} finally {
 				if (ownsSettlement()) thread.lifecycleOperation = undefined;
 			}
@@ -433,13 +416,13 @@ export function createBackgroundDispatcher(options: BackgroundDispatcherOptions)
 					runtime.runControllers.delete(runId);
 					thread.queueController = undefined;
 					if (!runtime.sessionActive || !ownsSettlement()) return;
-					if (quiet) return;
 					try {
 						runCtx.ui.notify(`✗ ${crashed.agent} dispatch failed: ${notifyDetail(crashed.errorMessage, "dispatch crashed")}`, "error");
 						runtime.publishRunCompletion(runId, {
 							agent: crashed.agent,
 							block: formatCompletionBlock(crashed, DEFAULT_MAX_RESULT_LINES, { resultRoot: projectResultsRoot(runtime.configPath, crashed.projectCwd ?? originalCwd) }),
 							usage: crashed.usage,
+							model: crashed.model,
 						}, true);
 					} catch {
 						/* a second delivery failure must not throw through the queue */

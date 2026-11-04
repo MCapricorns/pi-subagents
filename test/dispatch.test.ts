@@ -2,9 +2,8 @@ import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import type { SubagentsConfig } from "../src/configuration/config.ts";
-import { loadBuiltinAgents, type AgentConfig } from "../src/delegation/agents.ts";
+import { isWriteCapableAgent, loadBuiltinAgents, type AgentConfig } from "../src/delegation/agents.ts";
 import { defaultIsolationMode } from "../src/delegation/dispatch.ts";
-import { isWorktreeCapableAgent } from "../src/lifecycle/thread-shared.ts";
 import { createRuntime, type SubagentThread } from "../src/lifecycle/runtime.ts";
 import { findDuplicateDispatch, type PhaseLeaseSource } from "../src/delegation/prompt.ts";
 import { buildResumePrompt } from "../src/execution/spawn.ts";
@@ -57,11 +56,8 @@ describe("isolation policy", () => {
 	it("keeps the lightweight reader on the shared checkout", () => {
 		const scout = loadBuiltinAgents().find((agent) => agent.name === "scout");
 		assert.ok(scout);
-		assert.equal(isWorktreeCapableAgent(scout), false);
-		assert.equal(
-			defaultIsolationMode(scout.name, undefined, isWorktreeCapableAgent(scout)),
-			"shared",
-		);
+		assert.equal(isWriteCapableAgent(scout), false);
+		assert.equal(defaultIsolationMode(scout.name), "shared");
 	});
 });
 
@@ -172,6 +168,14 @@ describe("duplicate dispatch", () => {
 		assert.doesNotMatch(result.errorMessage ?? "", /resume|steer|park/iu);
 		assert.equal(runtime.threads.size, 1);
 		assert.equal(runtime.runControllers.size, 0);
+	});
+
+	it("tells callers to wait for a stopping owner instead of stopping it again", async () => {
+		const { start } = dispatcher([source({ state: "stopped", retired: true, lifecycleOperation: "stop" })]);
+		const result = await start("artisan", "Trace dispatch ownership", process.cwd(), "shared");
+		assert.equal(result.exitCode, 1);
+		assert.match(result.errorMessage ?? "", /still stopping; dispatch the phase again after the stop finishes/u);
+		assert.doesNotMatch(result.errorMessage ?? "", /subagent_stop/u);
 	});
 
 	it("gives interrupted owners a schema-valid retirement command", async () => {

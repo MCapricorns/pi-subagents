@@ -41,7 +41,6 @@ export interface SubagentThread {
 	/** Actual child cwd (the equivalent path inside an isolated worktree). */
 	executionCwd: string;
 	thinkingLevel?: ThinkingLevel;
-	requestedThinkingLevel?: ThinkingLevel;
 	isolation: IsolationMode;
 	worktree?: WorktreeIsolation;
 	/** Original durable evidence retained when its worktree handle is unavailable. */
@@ -61,8 +60,7 @@ export interface SubagentThread {
 	elapsedMs: number;
 	/** Terminal or interrupted partial result; independent of the transient monitor row. */
 	lastResult?: SingleResult;
-	/** A destructive stop retires context even if the active child settles later. */
-	retireOnSettle?: boolean;
+	/** Retired by a destructive stop: its session is deleted and it cannot be continued. */
 	retired?: boolean;
 	/** All owners finalize under the same original-repository lane. */
 	finalizeIsolation: (generation: number, result?: SingleResult) => Promise<WorktreeFinalization | undefined>;
@@ -182,7 +180,7 @@ export function createRuntime(pi: ExtensionAPI, configPath: string): SubagentRun
 					id: run.id,
 					agent: run.agent,
 					label: run.label,
-					...(run.status === "queued" && run.waitReason ? { wait: run.waitReason } : {}),
+					...(run.status === "queued" ? { starting: true } : {}),
 				}));
 			const message = {
 				customType: "subagent-result",
@@ -271,10 +269,9 @@ export function createRuntime(pi: ExtensionAPI, configPath: string): SubagentRun
 					continue;
 				}
 				if (thread.lifecycleOperation === "settle") continue;
+				// Unlike subagent_stop, shutdown interrupts to the last checkpoint and
+				// preserves session/worktree artifacts for manual recovery.
 				thread.lifecycleOperation = "stop";
-				// Deliberately NOT retireOnSettle: shutdown interrupts to the last
-				// checkpoint and preserves session/worktree artifacts for manual recovery.
-				thread.retireOnSettle = false;
 				if (liveStates.has(thread.state)) thread.state = "stopped";
 			}
 			runtime.completionBatcher.dispose();

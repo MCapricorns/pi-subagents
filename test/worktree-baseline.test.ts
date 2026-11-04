@@ -19,6 +19,11 @@ async function git(cwd: string, ...args: string[]): Promise<string> {
 	return (await execFileAsync("git", args, { cwd })).stdout.trim();
 }
 
+/** Uncommitted worktree state against its baseline, including untracked files. */
+async function pendingChanges(worktree: WorktreeIsolation): Promise<string> {
+	return git(worktree.worktreePath, "status", "--porcelain", "--untracked-files=all");
+}
+
 async function callerState(cwd: string) {
 	return {
 		index: await readFile(resolve(cwd, await git(cwd, "rev-parse", "--git-path", "index"))),
@@ -87,12 +92,12 @@ describe("worktree caller baselines (real Git)", () => {
 			assert.equal(worktree.integrationBaseHead, worktree.head);
 			assert.notEqual(worktree.head, before.head);
 			assert.equal(await git(repository, "rev-parse", worktree.head + "^"), before.head);
-			assert.equal(await worktree.hasPendingChanges(), false);
+			assert.equal(await pendingChanges(worktree), "");
 
 			const snapshot = worktreeSnapshot(worktree)!;
 			const restored = await restoreWorktreeIsolation(snapshot);
 			assert.ok(restored);
-			assert.equal(await restored.hasPendingChanges(), false);
+			assert.equal(await pendingChanges(restored), "");
 			assert.deepEqual(await restored.finalize(), { status: "no_changes", integrated: false, hadChanges: false });
 			assert.equal(restored.getContinuationCheckpoint()?.commit, worktree.head);
 			assert.equal(existsSync(worktree.tempDir), false);
@@ -116,10 +121,10 @@ describe("worktree caller baselines (real Git)", () => {
 
 			const second = await isolate();
 			assert.equal(await readFile(join(second.cwd, "module.ts"), "utf8"), moduleA);
-			assert.equal(await second.hasPendingChanges(), false);
+			assert.equal(await pendingChanges(second), "");
 			const moduleB = moduleA + "export const second = first + 1;\n";
 			await writeFile(join(second.cwd, "module.ts"), moduleB);
-			assert.equal(await second.hasPendingChanges(), true);
+			assert.match(await pendingChanges(second), /module\.ts/u);
 			assert.equal((await second.finalize()).status, "integrated");
 			assert.equal(await readFile(join(repository, "module.ts"), "utf8"), moduleB);
 			assert.deepEqual(await callerState(repository), before);

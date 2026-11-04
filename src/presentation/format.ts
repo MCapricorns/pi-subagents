@@ -4,15 +4,15 @@
  * and run-id matching.
  */
 
+import { readFileSync } from "node:fs";
 import type { AgentConfig } from "../delegation/agents.ts";
 import { formatUsageCompact, runLabel, shrinkRunLabel } from "./monitor.ts";
 import { emptyUsage } from "../execution/run-control.ts";
 import {
-	RESULT_LINE_MAX,
 	getResultError,
 	getResultOutput,
 	isFailedResult,
-	truncateResultOutput,
+	isModelLevelFailure,
 	writeResultArtifact,
 	type SingleResult,
 	type UsageStats,
@@ -73,6 +73,34 @@ export interface CompletionFormatOptions {
  * tight enough to stay a hint rather than a second copy of the task. */
 const COMPLETION_LABEL_MAX = 24;
 
+/** Characters of one full line in the inline budget of a completion block. */
+export const RESULT_LINE_CHARS = 200;
+
+/** The result's existing artifact when it already holds exactly this output.
+ * Results derived from a delivered one (a crash or stop wrapper) carry its path
+ * but different text, so they get their own file. */
+function reusableArtifact(result: SingleResult, output: string): string | undefined {
+	if (!result.resultFile) return undefined;
+	try {
+		return readFileSync(result.resultFile, "utf8") === output ? result.resultFile : undefined;
+	} catch {
+		return undefined;
+	}
+}
+
+/** How an answer exceeds the inline budget of `maxLines` lines and the
+ * characters of that many full lines; undefined when it fits. Long prose lines
+ * fit, so only an oversized answer moves to its result file. */
+function inlineOverflow(output: string, maxLines: number): string | undefined {
+	const lineCount = output.split("\n").length;
+	const maxChars = maxLines * RESULT_LINE_CHARS;
+	const overflow = [
+		lineCount > maxLines ? `${lineCount} lines` : undefined,
+		output.length > maxChars ? `${output.length} characters` : undefined,
+	].filter(Boolean);
+	return overflow.length > 0 ? overflow.join(" · ") : undefined;
+}
+
 export function formatCompletionBlock(
 	result: SingleResult,
 	maxResultLines: number,
@@ -83,7 +111,7 @@ export function formatCompletionBlock(
 	const status = failed ? "failed" : "completed";
 	const usage = formatUsage(result.usage);
 	const output = getResultOutput(result);
-	const { text, truncated, shownLines, totalLines, widthClipped } = truncateResultOutput(output, maxResultLines);
+	const overflow = inlineOverflow(output, maxResultLines);
 	const fallbackNote = result.modelFallbackFrom
 		? ` (selected model ${result.modelFallbackFrom} failed → main ${result.model ?? "dynamic default"})`
 		: "";
@@ -114,7 +142,7 @@ export function formatCompletionBlock(
 		lines.push("");
 	}
 	if (result.isolationNote) lines.push(`Isolation: ${result.isolationNote}`, "");
-	if (!truncated) lines.push(text);
+	if (!overflow) lines.push(output);
 	// Failed-tool diagnostics ride along only when the run itself failed: they
 	// explain the failure, while on a successful run a transient failed call
 	// (no-match grep, rejected edit) is noise the agent already worked around.
@@ -125,28 +153,25 @@ export function formatCompletionBlock(
 			...failedTools.map((tool) => `- ${tool.toolName}: ${tool.error.trim() || "(no output)"}`),
 		);
 	}
-	if (truncated) {
+	if (overflow) {
 		// No inline copy at all: a truncated dump reads as complete while
 		// hiding the rest, and the parent re-reads the full text from the file
 		// anyway, paying for the same content twice. The notice only routes it.
-		const artifact = options.resultRoot
-			? writeResultArtifact(output, result.agent, options.resultRoot)
-			: "(result root unavailable)";
+		// Every delivery of the same result names one artifact.
+		const artifact = reusableArtifact(result, output)
+			?? (options.resultRoot ? writeResultArtifact(output, result.agent, options.resultRoot) : "(result root unavailable)");
 		if (options.resultRoot) result.resultFile = artifact;
-		const loss = [
-			shownLines < totalLines ? `${totalLines} lines` : undefined,
-			widthClipped ? `lines wider than ${RESULT_LINE_MAX} characters` : undefined,
-		].filter(Boolean).join(" · ");
 		lines.push(
 			"",
-			`⚠ The child's answer (${loss}) is not inlined here, so it is delivered exactly once. Read the complete result file \`${artifact}\`; it holds the full, untruncated output.`,
+			`⚠ The child's answer (${overflow}) is not inlined here, so it is delivered exactly once. Read the complete result file \`${artifact}\`; it holds the full, untruncated output.`,
 		);
 	}
+	if (failed && isModelLevelFailure(result)) lines.push("", modelLevelTakeoverNote(result));
 	return lines.join("\n");
 }
 
 /** A terminal model failure hands the unfinished task to main, not another run. */
-export function modelLevelTakeoverNote(result: SingleResult): string {
+function modelLevelTakeoverNote(result: SingleResult): string {
 	const retry = result.modelFallbackFrom ? ", and the current main model also failed" : "";
 	const cause = getResultError(result) ?? "its model was unavailable or failed";
 	return `The sub-agent could not complete this task: ${cause}${retry}. Earlier edits and any retained result/session artifacts remain available. Main must inspect that work and finish with its own tools; do not re-dispatch this phase.`;

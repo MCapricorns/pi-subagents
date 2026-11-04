@@ -84,8 +84,6 @@ export interface ThreadRecord {
 	executionCwd: string;
 	/** Resolved (clamped) level of the last generation. */
 	thinkingLevel?: string;
-	/** Originally requested level, retained with the recovery metadata. */
-	requestedThinkingLevel?: string;
 	isolation: IsolationMode;
 	state: "parked" | "completed" | "failed";
 	elapsedMs: number;
@@ -182,9 +180,6 @@ function normalizeRecord(value: unknown): ThreadRecord | undefined {
 		cwd: raw.cwd,
 		executionCwd: typeof raw.executionCwd === "string" && raw.executionCwd ? raw.executionCwd : raw.cwd,
 		...(typeof raw.thinkingLevel === "string" && raw.thinkingLevel ? { thinkingLevel: raw.thinkingLevel } : {}),
-		...(typeof raw.requestedThinkingLevel === "string" && raw.requestedThinkingLevel
-			? { requestedThinkingLevel: raw.requestedThinkingLevel }
-			: {}),
 		isolation: raw.isolation,
 		state: raw.state,
 		elapsedMs: typeof raw.elapsedMs === "number" && Number.isFinite(raw.elapsedMs) ? Math.max(0, raw.elapsedMs) : 0,
@@ -403,19 +398,19 @@ function summarizeResult(result: SingleResult): ThreadResultSummary | undefined 
 
 /** Project a live thread into its durable record. Only handles whose
  * filesystem is still meaningful are persisted; finalized-and-removed
- * worktrees keep their checkpoint commit as recovery evidence. */
+ * worktrees keep their checkpoint commit as recovery evidence. An upsert keeps
+ * the stored record's creation time. */
 export function threadRecordFromThread(
 	thread: SubagentThread,
 	state: "parked" | "completed" | "failed",
-	previous?: ThreadRecord,
-	now = Date.now(),
 ): ThreadRecord {
+	const now = Date.now();
 	const worktree = thread.worktree ? worktreeSnapshot(thread.worktree) : undefined;
-	thread.durableId ??= previous ? threadRecordIdentity(previous) : randomUUID();
+	thread.durableId ??= randomUUID();
 	return {
 		durableId: thread.durableId,
 		runId: thread.id,
-		createdAt: previous?.createdAt ?? now,
+		createdAt: now,
 		updatedAt: now,
 		generation: thread.generation,
 		agentName: thread.agentName,
@@ -423,7 +418,6 @@ export function threadRecordFromThread(
 		cwd: thread.cwd,
 		executionCwd: thread.executionCwd,
 		...(thread.thinkingLevel ? { thinkingLevel: thread.thinkingLevel } : {}),
-		...(thread.requestedThinkingLevel ? { requestedThinkingLevel: thread.requestedThinkingLevel } : {}),
 		isolation: thread.isolation,
 		state,
 		elapsedMs: thread.elapsedMs,

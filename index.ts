@@ -82,8 +82,13 @@ export default function (pi: ExtensionAPI): void {
 	pi.registerCommand("subagents-cleanup", {
 		description: "Report and reclaim pi-subagents storage; /subagents-cleanup dry-run only reports",
 		handler: async (args, ctx) => {
+			const mode = args.trim();
+			if (mode !== "" && mode !== "dry-run") {
+				ctx.ui.notify(`pi-subagents cleanup: unknown argument "${mode}"; nothing was deleted. Use /subagents-cleanup or /subagents-cleanup dry-run.`, "warning");
+				return;
+			}
 			const root = getSubagentsRoot(configPath);
-			if (args.trim() === "dry-run") {
+			if (mode === "dry-run") {
 				const usage = measureDurableUsage(root);
 				const detail = usage.projects.slice(0, 5).map((project) =>
 					`${project.path.split(/[\\/]/u).at(-1)} ${formatBytes(project.bytes)} (${project.sessions} sessions, ${project.worktrees} worktrees)`);

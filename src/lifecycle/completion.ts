@@ -7,17 +7,11 @@
  * failure directly so it is never delayed.
  */
 
-import { formatUsageTokens, sumUsage, type RunWaitReason } from "../presentation/monitor.ts";
+import { formatUsageTokens, sumUsage } from "../presentation/monitor.ts";
 import type { UsageStats } from "../execution/run-control.ts";
-export interface CompletionBatchTimings {
-	debounceMs: number;
-	maxWaitMs: number;
-}
 
-const DEFAULT_COMPLETION_BATCH_TIMINGS: CompletionBatchTimings = {
-	debounceMs: 150,
-	maxWaitMs: 1_000,
-};
+const COMPLETION_DEBOUNCE_MS = 150;
+const COMPLETION_MAX_WAIT_MS = 1_000;
 
 type TimerHandle = ReturnType<typeof setTimeout>;
 
@@ -34,7 +28,6 @@ function unrefHandle(handle: TimerHandle): void {
 
 export interface CompletionBatcherOptions<T> {
 	emit: (items: T[]) => void;
-	timings?: Partial<CompletionBatchTimings>;
 }
 
 export interface CompletionBatcher<T> {
@@ -47,7 +40,6 @@ export interface CompletionBatcher<T> {
 }
 
 export function createCompletionBatcher<T>(options: CompletionBatcherOptions<T>): CompletionBatcher<T> {
-	const timings = { ...DEFAULT_COMPLETION_BATCH_TIMINGS, ...options.timings };
 	let pending: T[] = [];
 	let debounceTimer: TimerHandle | null = null;
 	let maxWaitTimer: TimerHandle | null = null;
@@ -76,11 +68,11 @@ export function createCompletionBatcher<T>(options: CompletionBatcherOptions<T>)
 			pending.push(item);
 
 			if (debounceTimer !== null) clearTimeout(debounceTimer);
-			debounceTimer = setTimeout(emitGroup, timings.debounceMs);
+			debounceTimer = setTimeout(emitGroup, COMPLETION_DEBOUNCE_MS);
 			unrefHandle(debounceTimer);
 
 			if (maxWaitTimer === null) {
-				maxWaitTimer = setTimeout(emitGroup, timings.maxWaitMs);
+				maxWaitTimer = setTimeout(emitGroup, COMPLETION_MAX_WAIT_MS);
 				unrefHandle(maxWaitTimer);
 			}
 		},
@@ -97,7 +89,7 @@ export function createCompletionBatcher<T>(options: CompletionBatcherOptions<T>)
 export interface CompletionMessageItem {
 	agent: string;
 	block: string;
-	/** Final usage of the underlying run (or chain); aggregated into the group totals. */
+	/** Final usage of the underlying run; aggregated into the group totals. */
 	usage?: UsageStats;
 	/** Model ref that produced this run's usage; group totals stay per model
 	 * instead of summing different models' spend into one number. */
@@ -143,12 +135,8 @@ export interface ActiveRunFoot {
 	agent: string;
 	/** Optional content label (task-derived) shown next to the agent name. */
 	label?: string;
-	/** Startup state before a child emits activity. */
-	wait?: RunWaitReason;
-}
-
-function activeRunWaitTag(wait: RunWaitReason | undefined): string {
-	return wait ? " (starting)" : "";
+	/** The child process is still starting. */
+	starting?: boolean;
 }
 
 /**
@@ -163,7 +151,7 @@ export function formatActiveRunsFooter(runs: readonly ActiveRunFoot[], maxListed
 	if (runs.length === 0) return "";
 	const listed = runs.slice(0, maxListed);
 	const items = listed
-		.map((run) => `#${run.id} ${run.agent}${run.label ? `·${run.label}` : ""}${activeRunWaitTag(run.wait)}`)
+		.map((run) => `#${run.id} ${run.agent}${run.label ? `·${run.label}` : ""}${run.starting ? " (starting)" : ""}`)
 		.join(", ");
 	const more = runs.length > listed.length ? `, +${runs.length - listed.length} more` : "";
 	return `\n\n⚠ ${runs.length} other run${runs.length === 1 ? "" : "s"} still active: ${items}${more}. Do not conclude the overall task yet — their results wake you automatically.`;

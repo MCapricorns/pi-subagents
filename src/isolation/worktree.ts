@@ -108,10 +108,6 @@ export interface WorktreeIsolation {
 	getContinuationCheckpoint(): WorktreeCheckpoint | undefined;
 	/** Remove an unused worktree whose dispatch was cancelled. */
 	discard(): Promise<void>;
-	/** Whether anything is pending against the integration base — the same
-	 * question finalization answers as `hadChanges`, asked before settlement so
-	 * policy can tell a run that produced a diff from one that produced none. */
-	hasPendingChanges(): Promise<boolean>;
 	/** Idempotent across stale generations and repeated stop/shutdown paths. */
 	finalize(): Promise<WorktreeFinalization>;
 }
@@ -385,16 +381,6 @@ class GitWorktreeIsolation implements WorktreeIsolation {
 			this.currentState = "no_changes";
 		});
 		return this.discardPromise;
-	}
-
-	async hasPendingChanges(): Promise<boolean> {
-		// A settled worktree already recorded the answer; asking Git again after
-		// removal would fail. Diffing the integration base (not HEAD) excludes
-		// previously integrated work from the recovered run's pending changes.
-		if (this.currentState === "no_changes") return false;
-		if (this.currentState !== "active" || !existsSync(this.worktreePath)) return true;
-		const diff = await this.collectChanges(this.integrationBaseHead);
-		return diff.stdout.length > 0;
 	}
 
 	finalize(): Promise<WorktreeFinalization> {

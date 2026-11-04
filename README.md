@@ -28,6 +28,9 @@ and `high` for artisan and sentinel. The panel distinguishes defaults from overr
 shows the effective level when model capabilities clamp a preference. Changing
 a model preserves the thinking preference. Settings live in
 `~/.pi/agent/pi-subagents.json` as `agentModels` and `agentThinkingLevels`.
+Session start removes a model override that no authenticated provider offers
+anymore; an override outside the session's model scope is kept and only skipped
+while routing that session.
 
 ## Agents
 
@@ -112,10 +115,13 @@ so the parent stays alive until the work finishes. TUI and RPC sessions default
 to background delivery; `wait: false` explicitly selects it in any mode. Each
 result is delivered once, after integration, either in the waiting tool call or
 as a background completion. Awaited failures are tool errors with retained evidence.
+An answer longer than 40 lines or 8,000 characters is not inlined; its delivery
+names the full-result file instead.
 
-A launch receipt only confirms delegation. Main continues independent work or
-pauses until the completion wakes it, then finishes the requested outcome and
-final checks. It does not poll or treat a successful launch as task completion.
+A launch receipt only confirms delegation and lists every started run id. Main
+continues independent work or pauses until the completion wakes it, then
+finishes the requested outcome and final checks. It does not poll or treat a
+successful launch as task completion.
 Equal normalized tasks in the same cwd are rejected as duplicates while active
 or settled in the current session. Reuse the result, or use `subagent_message`
 for an additional bounded step.
@@ -151,9 +157,11 @@ write directly in the caller's checkout.
 Each worktree starts from the caller's current tracked files and non-ignored
 untracked files, including uncommitted changes. Its initial snapshot is also the
 integration base, so dependent tasks see earlier results without reapplying them.
-The caller's index, branch, and `HEAD` stay unchanged. Worktrees isolate Git
-changes, not tool permissions. Independent tasks start together; only the final
-application of worktree changes to the original checkout is serialized.
+The caller's index, branch, and `HEAD` stay unchanged. The child is told the
+original checkout and its worktree path, so it maps paths from the brief into the
+worktree. Worktrees isolate Git changes, not tool permissions. Independent tasks
+start together; only the final application of worktree changes to the original
+checkout is serialized.
 Integration leaves your index untouched, and failures retain recovery artifacts.
 
 Cancelling the parent run with Escape stops unfinished work without waking the
@@ -257,8 +265,8 @@ for cleanup already in progress and prevents new settlement sweeps.
 
 `/subagents-cleanup` immediately reclaims unclaimed dead-owner artifacts and idle
 project roots, reporting usage and freed bytes. `/subagents-cleanup dry-run`
-measures without deleting anything. Session age and budget reclamation runs
-automatically on settlement.
+measures without deleting anything; any other argument is rejected without
+deleting. Session age and budget reclamation runs automatically on settlement.
 
 ## Development
 

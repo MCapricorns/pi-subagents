@@ -152,6 +152,7 @@ export async function restoreDurableThreads(runtime: SubagentRuntime, cwd: strin
 				agent: record.agentName,
 				block: `### Subagent restoration failed: #${record.runId} ${record.agentName}\n\n${reason}`,
 				usage: failed.usage,
+				model: failed.model,
 			}, true);
 			continue;
 		}

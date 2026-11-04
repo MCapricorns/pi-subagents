@@ -1,5 +1,36 @@
 # Changelog
 
+## 6.0.5
+
+### Fixes
+
+- List every run a parallel launch started in its receipt instead of the first
+  two run ids.
+- Inline completion answers up to 40 lines and 8,000 characters regardless of
+  line width; a single prose line over 200 characters no longer moves the whole
+  answer to its result file. Repeated deliveries of one result name one artifact.
+- Give isolated children the original checkout and worktree paths so they map
+  paths from the brief into the worktree instead of editing the original.
+- Include the model-failure takeover guidance in awaited results, and keep
+  per-model usage totals for stopped, crashed, and restored runs.
+- Keep model overrides outside the session's model scope; session start removes
+  only overrides that no authenticated provider offers.
+- Reject unknown `/subagents-cleanup` arguments without deleting anything.
+- Show `starting` for every starting run, including a restart on the main model,
+  and advise waiting for a stopping run instead of stopping it again.
+- Give session follow-ups a deterministic objective, so repeated identical
+  follow-ups follow the same duplicate rules as summary follow-ups.
+
+### Changes
+
+- Restrict the `subagent` role parameter to `scout`, `artisan`, and `sentinel`.
+- Tighten the delegation directive and role prompts: drop the routing line that
+  restated role descriptions, name codemode only when present, clarify how main
+  applies review findings, label leases by role, remove script-tool guidance
+  from scout, and separate sentinel findings from unverified concerns.
+- Shorten the `subagent_message` description and remove code left from the
+  workflow runner and earlier setup screens.
+
 ## 6.0.4
 
 ### Changes

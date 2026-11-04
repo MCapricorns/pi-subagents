@@ -250,12 +250,11 @@ describe("subagent_status", () => {
 		stopping.lifecycleOperation = "stop";
 		runtime.threads.set(24, stopping);
 		monitor.restoreRun({ id: 21, agent: "artisan", task: queued.task, status: "queued" });
-		monitor.setWaitReason(21, "starting");
 		try {
 			assert.ok(tools.has("subagent_status"), "the status interface must be registered");
 			const response = await execute(tools.get("subagent_status")!);
 			assert.deepEqual(response.details.runs.map((run: any) => run.state), ["queued", "settling", "interrupted", "interrupting"]);
-			assert.equal(response.details.runs[0].waitReason, "starting");
+			assert.match(resultText(response), /^#21 artisan · queued · \S+ — starting$/mu);
 		} finally { await shutdown(runtime); }
 	});
 });
@@ -340,6 +339,7 @@ describe("subagent_message", () => {
 			assert.equal(response.isError, undefined);
 			assert.equal(response.details.id, 77);
 			assert.equal(captured[0], "scout");
+			assert.equal(captured[1], "Follow-up to run #63:\nFind the missing evidence", "a deterministic objective keeps duplicate admission");
 			assert.equal(captured[2], source.cwd);
 			assert.notEqual(captured[4].resumeSession.sessionDir, source.sessionDir);
 			assert.equal(await readFile(join(captured[4].resumeSession.sessionDir, "2026_test-session.jsonl"), "utf8"), "original context");
@@ -517,6 +517,27 @@ describe("subagent_stop", () => {
 			assert.doesNotMatch(resultText(response), /Integration is still settling/);
 			await execute(tools.get("subagent_stop")!, { id: "31" });
 			assert.equal(sent.length, 1, "retiring the same run twice must not redeliver its result");
+		} finally { await shutdown(runtime); await rm(root, { recursive: true, force: true }); }
+	});
+
+	it("keeps per-model usage totals when stopped runs are delivered together", async () => {
+		const root = await mkdtemp(join(tmpdir(), "pi-subagents-stop-models-"));
+		const { runtime, tools, sent } = harness(join(root, "config.json"));
+		for (const [id, model] of [[51, "test/alpha"], [52, "test/beta"]] as const) {
+			const thread = makeThread(id);
+			thread.lastResult = {
+				agent: "artisan", task: thread.task, exitCode: 1, messages: [], stderr: "", model,
+				usage: { ...emptyUsage(), input: 1_000, cost: 0.01 },
+			};
+			attachRunning(thread.control, { stop: async () => {} });
+			runtime.threads.set(id, thread);
+		}
+		try {
+			await execute(tools.get("subagent_stop")!, { all: true });
+			assert.equal(sent.length, 1);
+			const content = (sent[0] as { content: string }).content;
+			assert.match(content, /Totals: 2 runs · test\/alpha: .* · test\/beta: /u);
+			assert.doesNotMatch(content, /unknown model/u);
 		} finally { await shutdown(runtime); await rm(root, { recursive: true, force: true }); }
 	});
 

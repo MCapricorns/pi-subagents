@@ -11,10 +11,6 @@ const SUBAGENTS_WIDGET_ID = "pi-subagents";
 const MAX_WIDGET_LINES = 10;
 const SEPARATOR = " · ";
 
-function waitWord(run: Pick<RunView, "waitReason">): string {
-	return run.waitReason === "starting" ? "starting" : "queued";
-}
-
 function worktreeBadge(run: RunView): string | undefined {
 	if (run.isolation !== "worktree") return undefined;
 	const state = run.integrationStatus;
@@ -55,7 +51,7 @@ function detailLine(activity: string | undefined, run: RunView | undefined, them
 }
 
 function runRow(run: RunView, theme: Theme, width: number, now: number): TaskRow {
-	const state = run.status === "queued" ? waitWord(run) : run.integrationStatus === "finalizing" ? "applying" : run.status;
+	const state = run.status === "queued" ? "starting" : run.integrationStatus === "finalizing" ? "applying" : run.status;
 	const label = run.label ?? formatTaskSummary(run.task, Math.max(1, width - 18));
 	const narrowState = width < 60 && (run.status === "queued" || run.integrationStatus === "finalizing") ? " · " + state : "";
 	const identity = statusIcon(run.status, theme) + " " + theme.fg("dim", "#" + run.id) + " " + run.agent + narrowState + " · " + label;
@@ -72,10 +68,9 @@ function runRow(run: RunView, theme: Theme, width: number, now: number): TaskRow
 function rowCost(row: TaskRow): number { return 1 + Number(Boolean(row.requiredDetail && row.detail)); }
 
 /** Select identities before optional details. Overflow describes only hidden work. */
-function renderBoard(rows: TaskRow[], theme: Theme, width: number, overview?: string): string[] {
-	if (width <= 0 || !rows.length) return [];
+function renderBoard(rows: TaskRow[], theme: Theme, width: number, overview: string): string[] {
 	const totalCost = rows.reduce((cost, row) => cost + rowCost(row), 0);
-	const lines = overview ? [overview] : [];
+	const lines = [overview];
 	const capacity = MAX_WIDGET_LINES - lines.length - Number(totalCost + lines.length > MAX_WIDGET_LINES);
 	const selected = new Set<TaskRow>();
 	let used = 0;
@@ -102,11 +97,6 @@ function renderBoard(rows: TaskRow[], theme: Theme, width: number, overview?: st
 	return lines.map((line) => truncateToWidth(line, width, "…"));
 }
 
-export function formatActiveRunLines(runs: readonly RunView[], theme: Theme, width: number, now = Date.now()): string[] {
-	const rows = runs.filter((run) => isRunActiveStatus(run.status)).map((run) => runRow(run, theme, width, now));
-	return rows.length ? renderBoard(rows, theme, width) : [];
-}
-
 export function formatSubagentWidgetLines(
 	runs: readonly RunView[], theme: Theme, width: number, now = Date.now(),
 ): string[] {
@@ -117,7 +107,7 @@ export function formatSubagentWidgetLines(
 	const states = new Map<string, number>();
 	for (const row of rows) states.set(row.state, (states.get(row.state) ?? 0) + 1);
 	const counts = ["failed", "interrupting", "running", "queued"]
-		.filter((state) => states.has(state)).map((state) => states.get(state) + " " + state);
+		.filter((state) => states.has(state)).map((state) => states.get(state) + " " + (state === "queued" ? "starting" : state));
 	const overview = theme.bold("Subagents") + theme.fg("dim", "  " + counts.join(SEPARATOR));
 	return renderBoard(rows, theme, width, overview);
 }

@@ -4,7 +4,7 @@ import { utimesSync } from "node:fs";
 import { realpath } from "node:fs/promises";
 import { join, resolve } from "node:path";
 import type { ExtensionContext } from "@earendil-works/pi-coding-agent";
-import { isWriteCapableAgent, type AgentConfig, type ToolMetadata } from "../delegation/agents.ts";
+import type { AgentConfig } from "../delegation/agents.ts";
 import { roleThinkingLevel, type SubagentsConfig, type ThinkingLevel } from "../configuration/config.ts";
 import { removeThreadRecord, threadRecordFromThread, threadRecordIdentity, upsertThreadRecord } from "./durable.ts";
 import {
@@ -17,7 +17,7 @@ import {
 } from "../configuration/models.ts";
 import type { SubagentRuntime, SubagentThread } from "./runtime.ts";
 import { getProjectRoot, type SingleResult } from "../execution/spawn.ts";
-import { resolveRepositoryRoot, type IsolationMode } from "../isolation/worktree.ts";
+import { resolveRepositoryRoot, type IsolationMode, type WorktreeIsolation } from "../isolation/worktree.ts";
 
 /** Control operations must never wait forever on a settling generation: the
  * queue task can legitimately spend minutes in worktree finalization (bounded
@@ -102,19 +102,14 @@ export function persistThreadCheckpoint(
 	void write.catch(() => undefined);
 }
 
-const WORKTREE_ISOLATION_INSTRUCTIONS =
-	"You are running in a temporary detached Git worktree. Work only in the current cwd; interpret paths from the brief relative to this checkout. Do not write to the original checkout, create another worktree, or copy/apply changes back manually. The runtime will merge your tracked, deleted, and untracked changes after you finish.";
-
-export function withWorktreeSystemPrompt(agent: AgentConfig): AgentConfig {
-	return {
-		...agent,
-		systemPrompt: `${agent.systemPrompt.trimEnd()}\n\n${WORKTREE_ISOLATION_INSTRUCTIONS}`.trim(),
-	};
-}
-
-/** Only write-capable agents can run in an isolated worktree. */
-export function isWorktreeCapableAgent(agent: AgentConfig, toolInfos?: readonly ToolMetadata[]): boolean {
-	return isWriteCapableAgent(agent, toolInfos);
+/** Briefs name paths in the caller's checkout. Naming both roots lets an
+ * isolated child map them into its worktree instead of editing the original. */
+export function withWorktreeSystemPrompt(
+	agent: AgentConfig,
+	worktree: Pick<WorktreeIsolation, "originalRoot" | "worktreePath">,
+): AgentConfig {
+	const instructions = `You are running in a temporary detached Git worktree at ${worktree.worktreePath}, a snapshot of the original checkout ${worktree.originalRoot}. Work only inside this worktree: map every brief path under the original checkout to the same relative path here. Do not write to the original checkout, create another worktree, or copy/apply changes back manually. The runtime merges your tracked, deleted, and untracked changes after you finish.`;
+	return { ...agent, systemPrompt: `${agent.systemPrompt.trimEnd()}\n\n${instructions}` };
 }
 
 export interface DispatchEnvironment {
@@ -131,8 +126,6 @@ export interface StartBackgroundOptions {
 	automaticIsolation?: boolean;
 	/** Chosen by the tool call before the queue can start a fast child. */
 	deliveryRoute?: "background" | "await";
-	/** Suppress per-run completion messages and toasts when needed. */
-	quiet?: boolean;
 }
 
 export type StartBackgroundInternal = (

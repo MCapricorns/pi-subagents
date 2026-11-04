@@ -35,7 +35,6 @@ export async function stopThreads(runtime: SubagentRuntime, targets: readonly nu
 		const stopVersion = ++thread.lifecycleVersion;
 		thread.lifecycleOperation = "stop";
 		thread.retired = true;
-		thread.retireOnSettle = true;
 		thread.state = "stopped";
 		const completion = thread.generationCompletion;
 		let releaseQuiescence!: () => void;
@@ -60,7 +59,7 @@ export async function stopThreads(runtime: SubagentRuntime, targets: readonly nu
 	// Interrupt every claimed generation before awaiting any one of them.
 	// An isolated stop may need the repository lane for final integration;
 	// cancelling all holders first prevents stop-all from waiting behind a
-	// later shared workflow that this same operation has not interrupted yet.
+	// later run that this same operation has not interrupted yet.
 	const interruptionPromises = claimed.map(({ thread, stopMessage, controller }) => {
 		const stopping = thread.control.stop(stopMessage).catch(() => undefined);
 		runtime.backgroundQueue.cancel(controller);

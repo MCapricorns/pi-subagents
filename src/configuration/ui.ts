@@ -67,7 +67,6 @@ interface PickerOptions {
 	title: string;
 	hint: string;
 	initialValue?: string;
-	searchable: boolean;
 }
 
 /** Input owns Unicode editing, paste, horizontal scrolling and the IME cursor.
@@ -108,11 +107,11 @@ class Picker implements Component, Focusable {
 	get focused(): boolean { return this._focused; }
 	set focused(value: boolean) {
 		this._focused = value;
-		this.search.focused = value && this.options.searchable && !this.details;
+		this.search.focused = value && !this.details;
 	}
 
 	private isSaved(item: SetupItem): boolean {
-		return item.saved ?? (this.options.searchable && item.value === this.options.initialValue);
+		return item.saved ?? item.value === this.options.initialValue;
 	}
 
 	private keyLabel(action: Keybinding): string {
@@ -150,7 +149,7 @@ class Picker implements Component, Focusable {
 			const item = this.filtered[this.cursor];
 			return [
 				theme.bold(this.options.title + (this.details ? " · Details" : "")),
-				...(this.options.searchable && !this.details ? this.search.render(innerWidth) : []),
+				...(this.details ? [] : this.search.render(innerWidth)),
 				item ? theme.fg("accent", "› ") + theme.underline(item.label + (this.isSaved(item) ? " [saved]" : "")) : "No matches. Clear or change the search.",
 			].map((line) => truncateToWidth(line, width, "…"));
 		}
@@ -181,7 +180,7 @@ class Picker implements Component, Focusable {
 			return framePanel(theme, width, titleText, subtitle, body, footer);
 		}
 
-		const searchLines = this.options.searchable ? [...this.search.render(innerWidth), ""] : [];
+		const searchLines = [...this.search.render(innerWidth), ""];
 		const item = this.filtered[this.cursor];
 		const previewLines = item?.description
 			? ["", ...wrapTextWithAnsi(item.description, innerWidth).slice(0, 3).map((line, idx, arr) => {
@@ -257,7 +256,7 @@ class Picker implements Component, Focusable {
 			this.cursor = Math.max(0, this.cursor - this.pageRows);
 		} else if (kb.matches(data, "tui.select.pageDown")) {
 			this.cursor = Math.max(0, Math.min(count - 1, this.cursor + this.pageRows));
-		} else if (this.options.searchable) {
+		} else {
 			const before = this.search.getValue();
 			this.search.handleInput(data);
 			if (before !== this.search.getValue()) {
@@ -276,29 +275,18 @@ class Picker implements Component, Focusable {
 	invalidate(): void { this.search.invalidate(); }
 }
 
-function promptModal(ctx: PickerContext, items: SetupItem[], options: PickerOptions): Promise<string | undefined> {
+/** Single-select modal panel with fuzzy search, [saved] badge, Tab details, and paging. Esc returns without a change. */
+export function promptSelectOne(
+	ctx: PickerContext, title: string, hint: string, items: SetupItem[], initialValue?: string,
+): Promise<string | undefined> {
 	if (ctx.mode !== "tui") {
 		ctx.ui.notify("/subagents-setup requires Pi's interactive TUI.", "error");
 		return Promise.resolve(undefined);
 	}
 	return ctx.ui.custom<string | undefined>(
-		(tui, theme, keybindings, done) => new Picker(items, options, tui, theme, keybindings, done),
+		(tui, theme, keybindings, done) => new Picker(items, { title, hint, initialValue }, tui, theme, keybindings, done),
 		{ overlay: true, overlayOptions: SETUP_OVERLAY_OPTIONS },
 	);
-}
-
-/** Single-select modal panel with fuzzy search, [saved] badge, Tab details, and paging. Esc returns without a change. */
-export function promptSelectOne(
-	ctx: PickerContext, title: string, hint: string, items: SetupItem[], initialValue?: string,
-): Promise<string | undefined> {
-	return promptModal(ctx, items, { title, hint, initialValue, searchable: true });
-}
-
-/** Vertical modal menu. initialValue restores navigation, not saved state. */
-export function promptMenu(
-	ctx: PickerContext, title: string, hint: string, items: SetupItem[], initialValue?: string,
-): Promise<string | undefined> {
-	return promptModal(ctx, items, { title, hint, initialValue, searchable: false });
 }
 
 export interface RoleGridRow {

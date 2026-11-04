@@ -19,10 +19,8 @@ import type { IsolationMode, WorktreeFinalizationStatus } from "../isolation/wor
 // Types
 // ---------------------------------------------------------------------------
 
-export type RunStatus = "queued" | "running" | "interrupting" | "parked" | "done" | "failed";
-
 /** A queued run is preparing its child process; execution has no capacity wait. */
-export type RunWaitReason = "starting";
+export type RunStatus = "queued" | "running" | "interrupting" | "parked" | "done" | "failed";
 
 export function isRunActiveStatus(status: RunStatus): boolean {
 	return status === "queued" || status === "running" || status === "interrupting";
@@ -42,16 +40,12 @@ export interface RunView {
 	 * are doing, not just by their run id. */
 	label?: string;
 	model?: string;
-	/** Selected model ref when the run handed off to current main. */
-	modelFallbackFrom?: string;
 	/** Effective thinking strength this run was launched with (setup override or role default). */
 	thinking?: string;
 	isolation?: IsolationMode;
 	integrationStatus?: RunIntegrationStatus;
 	worktreeId?: string;
 	status: RunStatus;
-	/** What a queued run is actually waiting for; see RunWaitReason. */
-	waitReason?: RunWaitReason;
 	usage: UsageStats;
 	/** Concise current activity ("thinking", "read src/index.ts"); last writer wins. */
 	activity?: string;
@@ -66,13 +60,6 @@ export interface RunView {
 	elapsedMs: number;
 	/** Epoch ms when the latest active segment stopped. */
 	endedAt?: number;
-}
-
-export interface RunChainMeta {
-	isolation?: IsolationMode;
-	worktreeId?: string;
-	/** Initial startup state before the child emits activity. */
-	waitReason?: RunWaitReason;
 }
 
 // ---------------------------------------------------------------------------
@@ -288,7 +275,7 @@ function usageCostPart(usage: UsageStats | undefined): string | undefined {
 	return usage?.cost ? `$${usage.cost.toFixed(4)}` : undefined;
 }
 
-/** Aggregate usage across several runs (chain steps or a completion group). */
+/** Aggregate usage across the runs of a completion group. */
 export function sumUsage(parts: readonly UsageStats[]): UsageStats {
 	const total: UsageStats = { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, cost: 0, contextTokens: 0, turns: 0 };
 	for (const part of parts) {
@@ -308,7 +295,7 @@ export function formatDuration(ms: number): string {
 	if (totalSeconds < 60) return `${totalSeconds}s`;
 	const minutes = Math.floor(totalSeconds / 60);
 	const seconds = totalSeconds % 60;
-	// Seconds stay visible at every magnitude: a long-running chain is judged
+	// Seconds stay visible at every magnitude: a long-running run is judged
 	// by whether it is still moving, and "5s ago" is exactly that signal.
 	if (minutes < 60) return `${minutes}m${String(seconds).padStart(2, "0")}s`;
 	const hours = Math.floor(minutes / 60);
@@ -481,7 +468,7 @@ export class MonitorStore {
 		this.notify();
 	}
 
-	addRun(agent: string, task: string, model?: string, thinking?: string, meta?: RunChainMeta): number {
+	addRun(agent: string, task: string, model?: string, thinking?: string, isolation?: IsolationMode): number {
 		const id = this.reserveRunId();
 		this.runs.push({
 			id,
@@ -491,10 +478,9 @@ export class MonitorStore {
 			model,
 			thinking,
 			status: "queued",
-			waitReason: meta?.waitReason ?? "starting",
 			usage: emptyUsage(),
 			elapsedMs: 0,
-			...(meta?.isolation ? { isolation: meta.isolation, integrationStatus: meta.isolation === "worktree" ? "pending" : undefined, ...(meta.worktreeId ? { worktreeId: meta.worktreeId } : {}) } : {}),
+			...(isolation ? { isolation, integrationStatus: isolation === "worktree" ? "pending" : undefined } : {}),
 		});
 		this.notify();
 		return id;
@@ -508,7 +494,6 @@ export class MonitorStore {
 		const isExecuting = status === "running" || status === "interrupting";
 		const now = Date.now();
 		run.status = status;
-		if (status !== "queued") run.waitReason = undefined;
 		if (isExecuting && !wasExecuting) {
 			run.startedAt ??= now;
 			run.activeSince = now;
@@ -522,15 +507,6 @@ export class MonitorStore {
 		}
 		this.notify();
 	}
-	/** Record what a still-queued run is actually waiting for, at the exact
-	 * transition owned by the caller (lane wait begins, child process starts). */
-	setWaitReason(id: number, waitReason: RunWaitReason): void {
-		const run = this.find(id);
-		if (!run || run.status !== "queued" || run.waitReason === waitReason) return;
-		run.waitReason = waitReason;
-		this.notify();
-	}
-
 	setUsage(id: number, usage: UsageStats, model?: string): void {
 		const run = this.find(id);
 		if (!run) return;
@@ -539,12 +515,11 @@ export class MonitorStore {
 		this.notify();
 	}
 
-	/** Record the final actual model and selected-to-main transition. */
-	setModel(id: number, model?: string, fallbackFrom?: string): void {
+	/** Record the model of the current attempt. */
+	setModel(id: number, model?: string): void {
 		const run = this.find(id);
-		if (!run) return;
-		if (model) run.model = model;
-		run.modelFallbackFrom = fallbackFrom;
+		if (!run || !model) return;
+		run.model = model;
 		this.notify();
 	}
 
@@ -707,21 +682,16 @@ export function statusIcon(status: RunStatus, theme: Theme): string {
 export function statusLabel(status: RunStatus): string {
 	switch (status) {
 		case "queued":
-			return "queued";
+			return "starting";
 		case "running":
 			return "running";
 		case "interrupting":
 			return "interrupting";
 		case "parked":
-			return "parked";
+			return "interrupted";
 		case "done":
 			return "done";
 		case "failed":
 			return "stopped";
 	}
-}
-
-/** Startup label for runs that have not emitted activity yet. */
-export function runWaitLabel(run: Pick<RunView, "status" | "waitReason">): string | undefined {
-	return run.status === "queued" ? "starting" : undefined;
 }

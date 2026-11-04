@@ -61,29 +61,6 @@ function getFinalOutput(messages: Message[]): string {
 	return "";
 }
 
-export const RESULT_LINE_MAX = 200;
-
-export interface TruncatedOutput {
-	text: string;
-	truncated: boolean;
-	shownLines: number;
-	totalLines: number;
-	widthClipped: boolean;
-}
-
-export function truncateResultOutput(output: string, maxLines: number): TruncatedOutput {
-	const lines = output.split("\n");
-	const totalLines = lines.length;
-	const widthClipped = lines.some((line) => line.length > RESULT_LINE_MAX);
-	if (totalLines <= maxLines && !widthClipped) {
-		return { text: output, truncated: false, shownLines: totalLines, totalLines, widthClipped: false };
-	}
-	const kept = lines.slice(0, maxLines).map((line) =>
-		line.length > RESULT_LINE_MAX ? `${line.slice(0, RESULT_LINE_MAX)}…` : line,
-	);
-	return { text: kept.join("\n"), truncated: true, shownLines: kept.length, totalLines, widthClipped };
-}
-
 const RESULT_ARTIFACT_MAX_AGE_MS = 7 * 24 * 60 * 60 * 1_000;
 const RESULT_ARTIFACT_MAX_FILES_PER_PROJECT = 50;
 // Explicit current prefix plus the strict timestamp/token convention used by 1.1.0.
@@ -377,7 +354,7 @@ export async function runSingleAgentWithMainFallback(
 	mainFallbackRef?: string,
 ): Promise<SingleResult> {
 	const agent = options.agent;
-	const launchedRef = agent?.model;
+	const launchedRef = agent.model;
 
 	const sessionId = options.sessionId ?? randomUUID();
 	const sessionDir = options.sessionDir ?? (await createSessionDir(options.sessionRoot));
@@ -509,12 +486,7 @@ export async function runSingleAgentWithMainFallback(
 				: {}),
 		};
 		try {
-			options.onLive?.({
-				kind: "model",
-				model: candidate.ref,
-				thinking: candidateThinking,
-				...(candidateIndex > 0 && launchedRef ? { fallbackFrom: launchedRef } : {}),
-			});
+			options.onLive?.({ kind: "model", model: candidate.ref, thinking: candidateThinking });
 		} catch {
 			/* never throw from event handling */
 		}

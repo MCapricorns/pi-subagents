@@ -90,7 +90,7 @@ process.stdin.on("data", (chunk) => {
 			process.argv[1] = child;
 			const core = createDispatchCore(runtime);
 			core.setEnvironment({ ctx: { cwd: root, modelRegistry: { getAvailable: () => [] }, ui: { notify: () => undefined } } as unknown as ExtensionContext, config: DEFAULT_CONFIG, agents: loadBuiltinAgents() });
-			const starts = await Promise.all(Array.from({ length: 8 }, (_, id) => core.startBackground("artisan", "Write independent file " + id, root, "shared", { quiet: true })));
+			const starts = await Promise.all(Array.from({ length: 8 }, (_, id) => core.startBackground("artisan", "Write independent file " + id, root, "shared")));
 			assert.ok(starts.every((result) => result.runId !== undefined && result.exitCode === -1));
 			// Wait for the child barrier within the overall test timeout. Cold process
 			// startup under the full suite is not a scheduler concurrency limit.
@@ -112,7 +112,7 @@ process.stdin.on("data", (chunk) => {
 		}
 	});
 
-	for (const scenario of ["success", "failure", "await", "quiet"] as const) {
+	for (const scenario of ["success", "failure", "await"] as const) {
 		it("delivers " + scenario + " through its actual dispatcher route", async () => {
 			const root = await mkdtemp(join(tmpdir(), "pi-subagents-dispatch-delivery-"));
 			const previousScript = process.argv[1];
@@ -152,13 +152,12 @@ process.stdin.on("data", (chunk) => {
 				});
 				const started = await core.startBackground("scout", "Check completion delivery", root, "shared", {
 					deliveryRoute: scenario === "await" ? "await" : "background",
-					quiet: scenario === "quiet",
 				});
 				assert.ok(started.runId);
 				await runtime.threads.get(started.runId)!.generationCompletion;
 				assert.ok(runtime.settledRuns.has(started.runId), "the dispatcher registered the result");
 				runtime.completionBatcher.flush();
-				assert.equal(messages.length, scenario === "quiet" || scenario === "await" ? 0 : 1);
+				assert.equal(messages.length, scenario === "await" ? 0 : 1);
 				if (scenario === "await") {
 					runtime.completeAwaitDelivery([started.runId]);
 					runtime.completionBatcher.flush();

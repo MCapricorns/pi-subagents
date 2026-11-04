@@ -24,7 +24,7 @@ import {
 	resolveThinkingLevel,
 	supportedThinkingLevels,
 } from "./models.ts";
-import { promptMenu, promptRoleGrid, promptSelectOne, type RoleGridFocus, type RoleGridRow, type SetupItem } from "./ui.ts";
+import { promptRoleGrid, promptSelectOne, type RoleGridFocus, type RoleGridRow, type SetupItem } from "./ui.ts";
 
 const ROLE_DEFAULT = "__role_default__";
 const THINKING_LEVEL_HINTS: Record<ThinkingLevel, string> = {
@@ -54,34 +54,6 @@ async function configExists(configPath: string): Promise<boolean> {
 
 function roleModel(ctx: ExtensionContext, config: SubagentsConfig, name: string) {
 	return findModelByRef(availableModelsInScope(ctx), config.agentModels[name]) ?? ctx.model;
-}
-
-export function roleSettings(ctx: ExtensionContext, config: SubagentsConfig, name: string): SetupItem[] {
-	const selected = config.agentModels[name];
-	const model = findModelByRef(availableModelsInScope(ctx), selected);
-	const modelLabel = selected
-		? model ? model.name + " · " + model.provider : selected + " (unavailable)"
-		: "Follow main (dynamic)";
-	const preferred = config.agentThinkingLevels[name] ?? roleThinkingLevel(name);
-	const effective = resolveThinkingLevel(model ?? ctx.model, preferred);
-	const source = config.agentThinkingLevels[name] ? "override" : "role default";
-	const thinking = effective + (effective !== preferred ? " (" + preferred + " requested)" : "") + " · " + source;
-	return [
-		{ value: "model", label: "Model: " + modelLabel, description: selected
-			? "Pinned reference: " + selected + (model ? ". Falls back to main if it fails." : ". Unavailable; using main.")
-			: "Follows the main window's model, including future changes. Now: " + (currentModelRef(ctx) ?? "Pi default") + ". Choose a specific model to pin it." },
-		{ value: "thinking", label: "Thinking: " + thinking,
-			description: "Reasoning effort: " + thinking + ". Role default: " + roleThinkingLevel(name) + ". Model capabilities limit the effective level; your saved preference is kept when changing models." },
-		{ value: "reset", label: "Reset defaults", description: "Restore only " + name + " to Follow main and role-default thinking (" + roleThinkingLevel(name) + "). Saves immediately." },
-	];
-}
-
-export function roleItems(ctx: ExtensionContext, config: SubagentsConfig): SetupItem[] {
-	return BUILTIN_AGENT_NAMES.map((name) => {
-		const settings = roleSettings(ctx, config, name);
-		return { value: name, label: name + " · " + (ROLE_PURPOSE[name] ?? name),
-			description: settings[0]!.label + "\n" + settings[1]!.label + "\n" + agentProfile(name)!.remark };
-	});
 }
 
 /** One row per role: every model and thinking choice stays visible together in the standalone modal panel. */
@@ -202,8 +174,6 @@ export async function runSetup(ctx: ExtensionContext, configPath: string = getCo
 		ctx.ui.notify("pi-subagents setup failed: " + errorMessage(error), "error");
 	}
 }
-
-export { promptMenu };
 
 /** Write shipped defaults once so every role works immediately. */
 export async function ensureDefaultConfig(

@@ -91,11 +91,11 @@ export function resolveAgentTools(
 	return { ...agent, tools };
 }
 
-/** Filesystem-write capability used by worktree admission and writer-scope
- * safety. Scout is a hard read-only boundary. An unresolved tools list means
- * the child inherits arbitrary active tools and is therefore mutable; for a
- * resolved list only proven read-only tools count as safe — shells,
- * tool-reaching tools, and tools without a read-only annotation stay mutable. */
+/** Filesystem-write capability used by worktree admission. Scout is a hard
+ * read-only boundary. An unresolved tools list means the child inherits
+ * arbitrary active tools and is therefore mutable; for a resolved list only
+ * proven read-only tools count as safe — shells, tool-reaching tools, and tools
+ * without a read-only annotation stay mutable. */
 export function isWriteCapableAgent(
 	agent: Pick<AgentConfig, "name" | "tools">,
 	toolInfos?: readonly ToolMetadata[],

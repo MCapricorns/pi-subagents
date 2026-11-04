@@ -54,7 +54,7 @@ export interface RunResult {
 
 export type SubagentLiveEvent =
 	| { kind: "status"; status: "queued" | "running" | "interrupting" | "done" | "failed" }
-	| { kind: "model"; model?: string; thinking?: ThinkingLevel; fallbackFrom?: string }
+	| { kind: "model"; model?: string; thinking?: ThinkingLevel }
 	| { kind: "usage"; usage: UsageStats; model?: string }
 	| { kind: "session"; sessionId: string; sessionDir: string }
 	| { kind: "tool_start"; toolCallId?: string; toolName: string; args: unknown }

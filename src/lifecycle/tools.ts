@@ -1,10 +1,9 @@
 /** Run inspection, steering, completed-run follow-ups, and destructive cancellation. */
 
-import { randomUUID } from "node:crypto";
 import { copyFile, mkdir, mkdtemp, rm } from "node:fs/promises";
 import { basename, join } from "node:path";
 import type { Message } from "@earendil-works/pi-ai";
-import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
+import type { ExtensionAPI, Theme } from "@earendil-works/pi-coding-agent";
 import { Text } from "@earendil-works/pi-tui";
 import { Type } from "typebox";
 import { DEFAULT_MAX_RESULT_LINES, loadConfig } from "../configuration/config.ts";
@@ -17,12 +16,12 @@ import { cancelActiveWork } from "./cancellation.ts";
 import { stopThreads } from "./stop.ts";
 import { formatCompletionBlock, matchRunIds } from "../presentation/format.ts";
 import { emptyUsage } from "../execution/run-control.ts";
-import { formatDuration, formatTaskSummary, monitor, runWaitLabel } from "../presentation/monitor.ts";
+import { formatDuration, formatTaskSummary, monitor } from "../presentation/monitor.ts";
 import type { SubagentRuntime, SubagentThread } from "./runtime.ts";
 import { projectResultsRoot } from "./thread-shared.ts";
 import { getResultError } from "../execution/spawn.ts";
 
-function renderFirstLine(result: { content?: unknown }, label: string, theme: any): Text {
+function renderFirstLine(result: { content?: unknown }, label: string, theme: Theme): Text {
 	const parts = (result.content ?? []) as Array<{ type: string; text?: string }>;
 	const text = parts
 		.map((part) => (typeof part.text === "string" ? part.text : ""))
@@ -113,7 +112,6 @@ export function registerLookupTools(pi: ExtensionAPI, runtime: SubagentRuntime, 
 					executionCwd: thread.executionCwd,
 					taskSummary: formatTaskSummary(thread.task, 80, false),
 					state,
-					waitReason: state === "queued" ? live?.waitReason : undefined,
 					activity: live?.activity,
 					recentActivity: live?.recentActivity ?? [],
 					lastSteering: thread.lastSteering,
@@ -140,7 +138,7 @@ export function registerLookupTools(pi: ExtensionAPI, runtime: SubagentRuntime, 
 			const text = runs.length === 0
 				? params.id === undefined ? "No subagent runs in this parent session." : `No subagent run matches #${params.id}.`
 				: runs.map((run) => {
-					const wait = run.waitReason ? ` — ${runWaitLabel({ status: "queued", waitReason: run.waitReason })}` : "";
+					const wait = run.state === "queued" ? " — starting" : "";
 					const lines = [`#${run.id} ${run.agent} · ${run.state} · ${formatDuration(run.elapsedMs)}${wait}`, `  task: ${run.taskSummary}`];
 					if (run.isolationNote) lines.push(`  isolation: ${run.isolationNote}`);
 					if (run.lastSteering) lines.push(`  last steering: ${run.lastSteering.disposition} · acknowledged ${formatDuration(Math.max(0, Date.now() - run.lastSteering.acknowledgedAt))} ago${run.lastSteering.requestId ? ` · request ${run.lastSteering.requestId}` : ""} · ${run.lastSteering.message}`);
@@ -191,13 +189,13 @@ export function registerLookupTools(pi: ExtensionAPI, runtime: SubagentRuntime, 
 	pi.registerTool({
 		name: "subagent_message",
 		label: "Subagent Message",
-		description: "Send a steering message to a running subagent, or continue a successfully completed run. Omit context or use \"auto\" to reuse its retained session when available and otherwise start from a bounded summary, reporting the fallback. Use \"session\" only when full history is required; missing history is an error. Use \"summary\" for a new next step with only the earlier objective, result, and touched files. Session copies preserve history and the provider cache key; summary runs have neither. Use wait:true to receive a completed-run follow-up in this call; one-shot print/JSON sessions wait by default. Steering waits for the child RPC acknowledgement and reports queued, handled by an input hook, or accepted with queue state unknown. Receipt is not proof of model execution; status retains the latest acknowledgement.",
+		description: "Steer a running subagent, or continue a successfully completed run with a new bounded step in the same role and workspace. Steering waits for the child's RPC acknowledgement and reports queued, handled by an input hook, or accepted with queue state unknown; receipt is not proof of model execution, and status retains the latest acknowledgement. A continuation chooses its history with the context parameter. Use wait:true to receive its result in this call; one-shot print/JSON sessions wait by default.",
 		exposure: "model-only",
 		executionMode: "parallel",
 		parameters: Type.Object({
 			id: Type.Integer({ minimum: 1, description: "Exact run id in this parent session." }),
 			message: Type.String({ minLength: 1, pattern: "\\S", description: "Additional instruction or follow-up question." }),
-			context: Type.Optional(Type.String({ enum: ["auto", "session", "summary"], description: "auto (default) uses the retained session when available, otherwise a bounded summary and reports the fallback. session requires the full retained history and fails if unavailable. summary always starts fresh with the earlier objective, result, and touched files; no history or cache reuse." })),
+			context: Type.Optional(Type.String({ enum: ["auto", "session", "summary"], description: "Completed-run history. auto (default): continue a copy of the retained session when available, otherwise start from a bounded summary and report the fallback. session: require the full history, reusing the provider cache key; fails when unavailable. summary: start fresh with only the earlier objective, result, and touched files." })),
 			wait: WaitSchema,
 		}),
 		async execute(_toolCallId, params, _signal, onUpdate, ctx) {
@@ -259,7 +257,7 @@ export function registerLookupTools(pi: ExtensionAPI, runtime: SubagentRuntime, 
 				if (thread.retired || thread.lifecycleOperation || thread.state !== "completed") throw new Error("The source run changed while the follow-up was prepared.");
 				const selectedContext = copyDir ? "session" : "summary";
 				const task = copyDir
-					? `Follow-up to run #${thread.id} (${randomUUID()}):\n${params.message}`
+					? `Follow-up to run #${thread.id}:\n${params.message}`
 					: buildSummaryFollowUp(thread, params.message);
 				const wait = params.wait ?? (ctx.hasUI === false);
 				const result = await dispatchCore.startBackground(thread.agentName, task, thread.cwd, thread.isolation, {
@@ -351,15 +349,12 @@ export function registerLookupTools(pi: ExtensionAPI, runtime: SubagentRuntime, 
 			}
 
 			const { stopped, retainedIntegration, pendingIntegration, completionResults } = await stopThreads(runtime, targets);
-			if (completionResults.length > 0) {
-				runtime.sendCompletionGroup(completionResults.map((result) => ({
-					agent: result.agent,
-					block: formatCompletionBlock(result, DEFAULT_MAX_RESULT_LINES, { resultRoot: projectResultsRoot(runtime.configPath, result.projectCwd ?? ctx.cwd) }),
-					triggerTurn: true,
-					usage: result.usage,
-				})));
-				runtime.completionBatcher.flush();
-			}
+			runtime.sendCompletionGroup(completionResults.map((result) => ({
+				agent: result.agent,
+				block: formatCompletionBlock(result, DEFAULT_MAX_RESULT_LINES, { resultRoot: projectResultsRoot(runtime.configPath, result.projectCwd ?? ctx.cwd) }),
+				usage: result.usage,
+				model: result.model,
+			})));
 			return {
 				content: [{
 					type: "text",

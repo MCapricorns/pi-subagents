@@ -1,11 +1,11 @@
 /**
- * Shared background-dispatch machinery used by both delegation tools.
+ * Shared background-dispatch machinery for fresh runs and completed-run
+ * follow-ups.
  *
- * The `subagent` tool and the workflow runner start children through the same
- * dispatcher, live-activity projection, terminal-notification path, and tool-card
- * details builder. Keeping them here means a workflow node is an ordinary
- * managed run: same lifecycle ownership, isolation, admission, durable checkpointing,
- * and completion accounting.
+ * `subagent` and `subagent_message` start children through the same
+ * dispatcher, live-activity projection, terminal-notification path, and
+ * tool-card details builder, so every run shares lifecycle ownership,
+ * isolation, admission, durable checkpointing, and completion accounting.
  */
 
 import { createBackgroundDispatcher } from "./thread-lifecycle.ts";
@@ -90,7 +90,7 @@ export function createDispatchCore(runtime: SubagentRuntime): DispatchCore {
 					}
 					break;
 				case "model":
-					monitor.setModel(runId, e.model, e.fallbackFrom);
+					monitor.setModel(runId, e.model);
 					monitor.setThinking(runId, e.thinking);
 					break;
 				case "usage":

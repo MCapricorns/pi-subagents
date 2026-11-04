@@ -1,30 +1,32 @@
 /** Session-start recovery, stale-model cleanup, and progress-surface installation. */
 
-import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
+import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { loadConfig, saveConfig } from "../configuration/config.ts";
-import { availableModelsInScope, filterUnavailableModelOverrides } from "../configuration/models.ts";
+import { filterUnavailableModelOverrides } from "../configuration/models.ts";
 import { ensureDefaultConfig } from "../configuration/setup.ts";
 import { announceRecoveryRecords, relocateRecoveryManifest } from "../isolation/recovery.ts";
 import type { SubagentRuntime } from "../lifecycle/runtime.ts";
 import { installActiveRunsWidget } from "./widget.ts";
 
-/** Drop unavailable model overrides back to dynamic main-model routing. */
+/** Drop overrides that no authenticated model serves back to dynamic
+ * main-model routing. A session model scope only narrows this session's
+ * routing, so it never deletes a persisted override. */
 async function removeUnavailableAgentModels(
-	ctx: { ui: { notify: (message: string, kind: "info" | "warning" | "error") => void } } & Parameters<typeof availableModelsInScope>[0],
+	ctx: Pick<ExtensionContext, "ui" | "modelRegistry">,
 	runtime: SubagentRuntime,
 ): Promise<void> {
 	try {
 		const config = await loadConfig(runtime.configPath);
 		const overrides = Object.entries(config.agentModels);
 		if (overrides.length === 0) return;
-		const { kept, dropped } = filterUnavailableModelOverrides(config.agentModels, availableModelsInScope(ctx));
+		const { kept, dropped } = filterUnavailableModelOverrides(config.agentModels, ctx.modelRegistry.getAvailable());
 		const rewritten = JSON.stringify(kept) !== JSON.stringify(config.agentModels);
 		if (!rewritten && dropped.length === 0) return;
 		await saveConfig({ ...config, agentModels: kept }, runtime.configPath);
 		if (dropped.length === 0) return;
 		const list = dropped.map(({ agent, ref }) => `${agent}: ${ref}`).join(", ");
 		ctx.ui.notify(
-			`pi-subagents: removed stale agent model overrides that are no longer available (${list}). Those agents now use their role's default model route; run /subagents-setup to re-pick.`,
+			`pi-subagents: removed model overrides that are no longer available (${list}). Those roles now follow the main model; run /subagents-setup to choose another.`,
 			"warning",
 		);
 	} catch {

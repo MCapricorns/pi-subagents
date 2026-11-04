@@ -11,7 +11,7 @@ import type { ExtensionAPI, Theme } from "@earendil-works/pi-coding-agent";
 import { Text } from "@earendil-works/pi-tui";
 import { Type } from "typebox";
 import { loadBuiltinAgents } from "./agents.ts";
-import { DEFAULT_MAX_RESULT_LINES, loadConfig } from "../configuration/config.ts";
+import { BUILTIN_AGENT_NAMES, DEFAULT_MAX_RESULT_LINES, loadConfig } from "../configuration/config.ts";
 import { stringEnum } from "../configuration/schema.ts";
 import { formatUsage } from "../presentation/format.ts";
 import {
@@ -30,7 +30,6 @@ import {
 	type SingleResult,
 	type SubagentDetails,
 } from "../execution/spawn.ts";
-import { isWorktreeCapableAgent } from "../lifecycle/thread-shared.ts";
 import type { IsolationMode } from "../isolation/worktree.ts";
 
 const NON_BLANK_TASK_OPTIONS = { minLength: 1, pattern: "\\S" } as const;
@@ -45,8 +44,10 @@ export const IsolationSchema = Type.Optional(
 const TASK_BRIEF_DESCRIPTION =
 	"Complete brief: objective and done condition, relevant paths/symbols, known facts with citations when available, boundaries, and needed output. The child has no parent conversation.";
 
+const agentSchema = (description: string) => stringEnum(BUILTIN_AGENT_NAMES, { description });
+
 const TaskItem = Type.Object({
-	agent: Type.String({ description: "Name of the agent to invoke" }),
+	agent: agentSchema("Role that runs this task"),
 	task: Type.String({
 		...NON_BLANK_TASK_OPTIONS,
 		description: TASK_BRIEF_DESCRIPTION,
@@ -56,7 +57,7 @@ const TaskItem = Type.Object({
 });
 
 const SubagentParams = Type.Object({
-	agent: Type.Optional(Type.String({ description: "Name of the agent to invoke (single mode)" })),
+	agent: Type.Optional(agentSchema("Role that runs the task (single mode)")),
 	task: Type.Optional(
 		Type.String({ ...NON_BLANK_TASK_OPTIONS, description: `${TASK_BRIEF_DESCRIPTION} (single mode)` }),
 	),
@@ -66,19 +67,10 @@ const SubagentParams = Type.Object({
 	wait: WaitSchema,
 });
 
-/** Default when rendering without the live tool catalog. */
-const WORKTREE_DEFAULT_AGENTS = new Set(["artisan"]);
-
-/** Explicit overrides win. Implementation uses worktrees even for a single
- * task; reading and review stay in the current directory. */
-export function defaultIsolationMode(
-	agentName: string,
-	requested?: IsolationMode,
-	writeCapable = WORKTREE_DEFAULT_AGENTS.has(agentName),
-): IsolationMode {
-	if (requested) return requested;
-	const readOnlyRole = ["scout", "sentinel"].includes(agentName);
-	return writeCapable && !readOnlyRole ? "worktree" : "shared";
+/** Explicit overrides win. Implementation uses a worktree even for a single
+ * task; research and review stay in the current directory. */
+export function defaultIsolationMode(agentName: string, requested?: IsolationMode): IsolationMode {
+	return requested ?? (agentName === "artisan" ? "worktree" : "shared");
 }
 
 interface PreparedDispatchTask {
@@ -170,7 +162,7 @@ export function registerSubagentTool(
 	pi.registerTool({
 		name: "subagent",
 		label: "Subagent",
-		description: "Delegate worthwhile bounded work for focused implementation, isolated research, parallel progress, or independent verification. Use tasks for independent phases. Duplicate phases are rejected before allocation. Omit isolation for automatic selection. Use wait:true for an immediate dependency; one-shot print/JSON sessions wait by default. Background results wake main to finish the task. Reuse completed work and handle gaps.",
+		description: "Delegate worthwhile bounded work for focused implementation, isolated research, parallel progress, or independent verification. Use tasks for independent phases. Duplicate phases are rejected before allocation. Omit isolation for automatic selection. Use wait:true for an immediate dependency; one-shot print/JSON sessions wait by default. Background results wake main to finish the task.",
 		// Admission and lease reservation finish synchronously before child startup.
 		// Awaited runs must not block unrelated dispatch calls.
 		exposure: "model-only",
@@ -198,13 +190,11 @@ export function registerSubagentTool(
 			monitor.beginTurn();
 			const config = await loadConfig(runtime.configPath);
 			const agents = loadBuiltinAgents();
-			// One admission snapshot: role boundaries and writer capability must
-			// describe the same catalog the batch is validated against.
-			const toolInfos = runtime.getToolInfos();
 			if (signal?.aborted) throw new Error("Subagent dispatch cancelled before any run started.");
 			core.setEnvironment({ ctx, config, agents });
 
-			const hasTasks = (params.tasks?.length ?? 0) > 0;
+			const tasks = params.tasks ?? [];
+			const hasTasks = tasks.length > 0;
 			const hasSingle = Boolean(params.agent) && params.task !== undefined;
 
 			const catalog = agents.map((a) => a.name).join(", ") || "none";
@@ -222,7 +212,7 @@ export function registerSubagentTool(
 			}
 
 			if (hasTasks) {
-				const blankTaskIndex = params.tasks?.findIndex(({ task }) => task.trim().length === 0) ?? -1;
+				const blankTaskIndex = tasks.findIndex(({ task }) => task.trim().length === 0);
 				if (blankTaskIndex !== -1) {
 					return {
 						content: [
@@ -249,31 +239,24 @@ export function registerSubagentTool(
 			// Sub-agents run detached from the foreground turn: the editor stays
 			// available for disjoint orchestration while the launch receipt leases
 			// each delegated phase. Independent child processes start without a cap.
-			if (params.tasks && params.tasks.length > 0) {
-				const prepared = prepareDispatchTasks(params.tasks, ctx.cwd);
+			if (hasTasks) {
+				const prepared = prepareDispatchTasks(tasks, ctx.cwd);
 				const conflict = parallelAdmissionConflict(prepared, runtime);
 				if (conflict) {
 					throw new Error(`Parallel admission rejected: ${conflict}. No background tasks were started.`);
 				}
 				// Duplicate admission completes for the whole batch before any
 				// startBackground call can allocate a run. Worktree preparation stays queued.
-				const results = await Promise.all(prepared.map((item) => {
-					const catalogAgent = agents.find((candidate) => candidate.name === item.agent);
-					return startBackground(
-						item.agent,
-						item.task,
-						item.cwd,
-						defaultIsolationMode(
-							item.agent,
-							item.isolation,
-							catalogAgent ? isWorktreeCapableAgent(catalogAgent, toolInfos) : undefined,
-						),
-						{
-							deliveryRoute: wait ? "await" : "background",
-							automaticIsolation: item.isolation === undefined,
-						},
-					);
-				}));
+				const results = await Promise.all(prepared.map((item) => startBackground(
+					item.agent,
+					item.task,
+					item.cwd,
+					defaultIsolationMode(item.agent, item.isolation),
+					{
+						deliveryRoute: wait ? "await" : "background",
+						automaticIsolation: item.isolation === undefined,
+					},
+				)));
 				const startedRuns = results.filter((result) => result.exitCode === -1);
 				const started = startedRuns.length;
 				const startedIds = startedRuns
@@ -283,7 +266,7 @@ export function registerSubagentTool(
 					if (result.exitCode === -1) return [];
 					const reason = getResultOutput(result).trim() || "unknown startup failure";
 					return [
-						`- tasks[${index}] (${params.tasks![index]!.agent}) failed to start: ${reason.replace(/\n/g, "\n  ")}`,
+						`- tasks[${index}] (${tasks[index]!.agent}) failed to start: ${reason.replace(/\n/g, "\n  ")}`,
 					];
 				});
 				if (started === 0) {
@@ -322,16 +305,11 @@ export function registerSubagentTool(
 				cwd: params.cwd,
 				isolation: params.isolation as IsolationMode | undefined,
 			}], ctx.cwd)[0]!;
-			const singleCatalogAgent = agents.find((candidate) => candidate.name === single.agent);
 			const result = await startBackground(
 				single.agent,
 				single.task,
 				single.cwd,
-				defaultIsolationMode(
-					single.agent,
-					single.isolation,
-					singleCatalogAgent ? isWorktreeCapableAgent(singleCatalogAgent, toolInfos) : undefined,
-				),
+				defaultIsolationMode(single.agent, single.isolation),
 				{
 					deliveryRoute: wait ? "await" : "background",
 					automaticIsolation: single.isolation === undefined,
@@ -374,7 +352,7 @@ export function registerSubagentTool(
 			}
 			const task: string = args.task ?? "";
 			const preview = formatTaskSummary(task, 60);
-			const isolation = args.isolation === "worktree" ? " [worktree]" : "";
+			const isolation = defaultIsolationMode(args.agent ?? "", args.isolation) === "worktree" ? " [worktree]" : "";
 			return new Text(
 				`${theme.fg("toolTitle", theme.bold("subagent "))}${theme.fg("accent", args.agent ?? "?")}${theme.fg("dim", `${isolation}`)} ${theme.fg("dim", preview)}`,
 				0,
