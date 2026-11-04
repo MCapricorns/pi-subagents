@@ -12,7 +12,6 @@ import { getProjectRoot, getSubagentsRoot } from "../src/execution/spawn.ts";
 import { withManifestMutation } from "../src/isolation/manifest-mutation.ts";
 import { announceRecoveryRecords, getRecoveryManifestPath, persistRecoveryRecords, readRecoveryRecords, type RecoveryRecord } from "../src/isolation/recovery.ts";
 import { measureDurableUsage } from "../src/isolation/cleanup.ts";
-import { pruneWorkflowRecords } from "../src/workflow/durable.ts";
 import { TEMP_OWNER_FILE_NAME } from "../src/isolation/temp-hygiene.ts";
 import { createWorktreeIsolation, worktreeSnapshot } from "../src/isolation/worktree.ts";
 import { getThreadsManifestPath, readThreadRecords, removeThreadRecord, threadRecordFromThread, threadRecordIdentity, upsertThreadRecord, type ThreadRecord } from "../src/lifecycle/durable.ts";
@@ -262,7 +261,7 @@ describe("recovery lock isolation", () => {
 				});
 				syncBuiltinESMExports();
 				try {
-					await Promise.all([readThreadRecords(configPath), pruneWorkflowRecords(configPath)]);
+					await readThreadRecords(configPath);
 					assert.deepEqual(measureDurableUsage(getSubagentsRoot(configPath)).projects, []);
 				} finally {
 					guard.mock.restore();

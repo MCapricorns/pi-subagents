@@ -26,7 +26,6 @@ const BUILTIN_READ_ONLY_TOOL_NAMES = ["read", "grep", "find", "ls"] as const;
 const BUILTIN_READ_ONLY_TOOL_SET: ReadonlySet<string> = new Set(BUILTIN_READ_ONLY_TOOL_NAMES);
 export const SUBAGENT_TOOL_NAMES = [
 	"subagent",
-	"subagent_workflow",
 	"subagent_status",
 	"subagent_message",
 	"subagent_stop",

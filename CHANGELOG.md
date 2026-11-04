@@ -1,5 +1,16 @@
 # Changelog
 
+## 6.0.4
+
+### Changes
+
+- Open `/subagents-setup` role configuration and model/thinking pickers in
+  standalone centered modal overlay panels instead of squeezing them into the
+  input editor dock.
+- Streamline delegation to the three core roles (`scout`, `artisan`, `sentinel`),
+  consolidating implementation review and claim-challenge verification into
+  `sentinel` and removing separate workflow/phase-scope machinery.
+
 ## 6.0.3
 
 ### Changes

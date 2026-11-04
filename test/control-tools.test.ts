@@ -105,11 +105,11 @@ describe("subagent_status", () => {
 			assert.ok(tools.has("subagent_status"), "the status interface must be registered");
 			const status = tools.get("subagent_status")!;
 			const empty = await execute(status);
-			assert.deepEqual(empty.details, { runs: [], workflows: [], retainedWorkflows: [] });
+			assert.deepEqual(empty.details, { runs: [] });
 			assert.match(resultText(empty), /no subagent runs/i);
 			const missing = await execute(status, { id: 999 });
 			assert.equal(missing.isError, true);
-			assert.deepEqual(missing.details, { runs: [], workflows: [], retainedWorkflows: [] });
+			assert.deepEqual(missing.details, { runs: [] });
 			assert.match(resultText(missing), /#999/);
 		} finally { await shutdown(runtime); }
 	});
@@ -163,8 +163,6 @@ describe("subagent_status", () => {
 	it("returns settled evidence on exact lookup without repeating it in the run list", async () => {
 		const { runtime, tools, sent } = harness();
 		const thread = makeThread(9, "completed");
-		thread.phaseId = "parser-fix";
-		thread.scope = { paths: [join(process.cwd(), "src", "parser.ts")] };
 		thread.lastResult = {
 			agent: "artisan", task: thread.task, exitCode: 0, stderr: "", usage: emptyUsage(),
 			messages: [{ role: "assistant", content: [{ type: "text", text: "Fixed parser. node --test test/parser.test.ts → 4 passed." }], stopReason: "stop" } as never],
@@ -174,8 +172,6 @@ describe("subagent_status", () => {
 			const status = tools.get("subagent_status")!;
 			assert.doesNotMatch(resultText(await execute(status)), /4 passed/);
 			const selected = resultText(await execute(status, { id: 9 }));
-			assert.match(selected, /phase: parser-fix/);
-			assert.match(selected, /scope: /);
 			assert.match(selected, /4 passed/);
 			assert.equal(sent.length, 0);
 		} finally { await shutdown(runtime); }
@@ -186,7 +182,6 @@ describe("subagent_status", () => {
 		const thread = makeThread(7);
 		const pending = deferred();
 		thread.generationCompletion = pending.promise;
-		thread.phaseId = "original-phase";
 		let stops = 0;
 		attachRunning(thread.control, { stop: async () => { stops++; } });
 		runtime.threads.set(thread.id, thread);
@@ -194,11 +189,10 @@ describe("subagent_status", () => {
 		monitor.recordToolStart(7, "read", "read src/index.ts");
 		try {
 			assert.ok(tools.has("subagent_status"), "the status interface must be registered");
-			const response = await execute(tools.get("subagent_status")!, { id: 7, workflow: 999 });
+			const response = await execute(tools.get("subagent_status")!, { id: 7 });
 			const [run] = response.details.runs;
 			assert.equal(run.id, 7);
 			assert.equal(run.state, "running");
-			assert.equal(run.phaseId, "original-phase");
 			assert.match(run.activity, /read src\/index.ts/);
 			assert.ok(run.elapsedMs >= 1200);
 			assert.equal(thread.state, "running");
@@ -329,7 +323,7 @@ describe("subagent_message", () => {
 		} finally { await shutdown(runtime); }
 	});
 
-	it("copies the completed session and preserves role, scope and workspace for the new run", async () => {
+	it("copies the completed session and preserves role and workspace for the new run", async () => {
 		const root = await mkdtemp(join(tmpdir(), "pi-subagents-followup-"));
 		let captured: any;
 		const core = { setEnvironment() {}, async startBackground(...args: any[]) { captured = args; return { runId: 77 }; } } as unknown as DispatchCore;
@@ -361,7 +355,6 @@ describe("subagent_message", () => {
 			const source = makeThread(65, "completed");
 			source.sessionId = "expired-session";
 			source.sessionDir = join(root, "expired");
-			source.scope = { paths: [join(source.cwd, "src/cache.ts")] };
 			source.lastResult = {
 				agent: source.agentName, task: source.task, exitCode: 0, stderr: "", usage: emptyUsage(),
 				messages: [{ role: "assistant", content: [{ type: "text", text: "Implemented the cache fix; next verify callers." }], stopReason: "stop" } as never],
@@ -382,7 +375,6 @@ describe("subagent_message", () => {
 					assert.match(response.details.fallbackReason, /session.*unavailable/iu);
 					assert.match(resultText(response), /summary.*session.*unavailable/iu);
 					assert.equal(captured[4].resumeSession, undefined);
-					assert.deepEqual(captured[4].scope, source.scope);
 					assert.match(captured[1], /Implemented the cache fix/u);
 					assert.match(captured[1], /Verify the callers/u);
 					assert.match(captured[1], /did not witness the earlier session/u);
@@ -541,8 +533,7 @@ describe("subagent_stop", () => {
 		runtime.threads.set(41, first);
 		runtime.threads.set(42, second);
 		try {
-			// Some clients send all optional selectors; all must not be shadowed by an unknown workflow.
-			const stopping = execute(tools.get("subagent_stop")!, { all: true, id: "", workflow: 999 });
+			const stopping = execute(tools.get("subagent_stop")!, { all: true, id: "" });
 			await started.promise;
 			assert.deepEqual(order, [41, 42]);
 			assert.equal(first.retired, true);

@@ -9,16 +9,14 @@
 
 import { randomUUID } from "node:crypto";
 import { join, resolve } from "node:path";
-import { isWriteCapableAgent, resolveAgentTools, type AgentConfig } from "../delegation/agents.ts";
+import { resolveAgentTools, type AgentConfig } from "../delegation/agents.ts";
 import type { CompletionMessageItem } from "./completion.ts";
 import { DEFAULT_IDLE_TIMEOUT_SEC, DEFAULT_MAX_RESULT_LINES, loadConfig } from "../configuration/config.ts";
 import { dispatchFailedResult, failedStartResult, formatCompletionBlock, modelLevelTakeoverNote, queuedResult } from "../presentation/format.ts";
 import { formatTaskSummary, monitor } from "../presentation/monitor.ts";
 import { findDuplicateDispatch } from "../delegation/prompt.ts";
-import { normalizePhaseId, normalizePhaseScope } from "../delegation/phase-scope.ts";
-import { findRuntimeWriterConflict } from "../delegation/ownership.ts";
 import { persistRecoveryRecords, recoveryRecordFromFinalization } from "../isolation/recovery.ts";
-import { findPendingWorkflowPhase, type SubagentRuntime, type SubagentThread, type ThreadState } from "./runtime.ts";
+import { type SubagentRuntime, type SubagentThread, type ThreadState } from "./runtime.ts";
 import {
 	getProjectRoot,
 	RunControl,
@@ -101,18 +99,6 @@ export function createBackgroundDispatcher(options: BackgroundDispatcherOptions)
 			resolveAgentTools(candidate, runtime.getActiveTools(), runtime.getToolInfos());
 		const agent = resolveLiveAgentTools(discoveredAgent);
 		const originalCwd = resolve(cwd ?? runCtx.cwd);
-		let phaseId: string | undefined;
-		let scope: ReturnType<typeof normalizePhaseScope>;
-		try {
-			phaseId = normalizePhaseId(startOptions.phaseId);
-			scope = normalizePhaseScope(startOptions.scope, originalCwd);
-		} catch (error) {
-			return failedStartResult(agentName, task, error instanceof Error ? error.message : String(error));
-		}
-		const writeCapable = Boolean(startOptions.writeCapable) || isWriteCapableAgent(agent, toolInfos);
-		// A workflow node is an ordinary managed run whose reporting belongs to
-		// the graph: it settles into the graph's single summary instead of
-		// waking the parent once per node.
 		const quiet = startOptions.quiet === true;
 		if (isolation === "worktree" && !isWorktreeCapableAgent(agent, toolInfos)) {
 			return {
@@ -120,30 +106,21 @@ export function createBackgroundDispatcher(options: BackgroundDispatcherOptions)
 				isolation,
 			};
 		}
-		const pendingOwner = findPendingWorkflowPhase(runtime, task, originalCwd, phaseId, startOptions.workflow?.workflowId);
-		if (pendingOwner) return failedStartResult(agentName, task, `Workflow #${pendingOwner.workflowId} node "${pendingOwner.nodeId}" already owns this pending phase. Inspect the graph with subagent_status; main handles follow-up work.`);
-		const duplicate = findDuplicateDispatch(runtime.threads.values(), task, originalCwd, phaseId);
+		const duplicate = findDuplicateDispatch(runtime.threads.values(), task, originalCwd);
 		if (duplicate) {
 			// A phase stays owned across reloads: an interrupted run keeps its claim
 			// until it is retired, so "let it finish" is wrong advice for a parked
 			// owner and leaves the caller with no way forward.
 			const owner = duplicate.source;
 			const remedy = owner.state === "parked" || owner.retired
-				? `That interrupted run keeps the phase claimed. Inspect its retained result with subagent_status and finish from that evidence. Retire it with subagent_stop({ id: "${owner.id}" }) only if discarding its retained session is intended; then the phase can be reused. Changing only phaseId cannot bypass equal-task ownership.`
+				? `That interrupted run keeps the phase claimed. Inspect its retained result with subagent_status and finish from that evidence. Retire it with subagent_stop({ id: "${owner.id}" }) only if discarding its retained session is intended; then the phase can be reused.`
 				: owner.state === "completed"
-					? `Reuse its result via subagent_status({ id: ${owner.id} }); use subagent_message({ id: ${owner.id}, message: "<bounded next step>" }) for additional work. A new deliverable needs its own brief and phaseId.`
+					? `Reuse its result via subagent_status({ id: ${owner.id} }); use subagent_message({ id: ${owner.id}, message: "<bounded next step>" }) for additional work. A new deliverable needs its own brief.`
 					: owner.state === "failed"
 						? "Inspect the failure with subagent_status and finish the remaining work from its evidence. Do not repeat the same phase."
 						: "Do not redispatch it; let it finish or steer it with subagent_message. Its result returns automatically; then continue the task.";
 			return failedStartResult(agentName, task,
 				`Run #${owner.id} (${owner.agentName}) already owns this logical phase (${owner.state}). ${remedy}`);
-		}
-		if (writeCapable && scope) {
-			const conflict = findRuntimeWriterConflict(runtime, scope, { excludeWorkflowId: startOptions.workflow?.workflowId });
-			if (conflict) {
-				return failedStartResult(agentName, task,
-					`Declared writer scope ${conflict.overlap.left} overlaps ${conflict.owner} scope ${conflict.overlap.right}; no run was started.`);
-			}
 		}
 		const projectRoot = getProjectRoot(runtime.configPath, originalCwd);
 		const sessionsRoot = join(projectRoot, "sessions");
@@ -159,7 +136,6 @@ export function createBackgroundDispatcher(options: BackgroundDispatcherOptions)
 		const thinkingLevel = route.thinkingLevel;
 		const runId = monitor.addRun(agent.name, task, route.agent.model, thinkingLevel, {
 			isolation,
-			...(startOptions.workflow ? { workflow: startOptions.workflow } : {}),
 		});
 		if (!quiet) runtime.claimRunDelivery(runId, startOptions.deliveryRoute ?? "background");
 		const generation = 1;
@@ -194,10 +170,6 @@ export function createBackgroundDispatcher(options: BackgroundDispatcherOptions)
 			generation,
 			agentName: agent.name,
 			task,
-			phaseId,
-			scope,
-			writeCapable,
-			...(startOptions.workflow ? { workflow: startOptions.workflow } : {}),
 			cwd: originalCwd,
 			executionCwd,
 			thinkingLevel,

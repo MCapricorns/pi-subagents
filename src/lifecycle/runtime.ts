@@ -9,9 +9,6 @@
  */
 
 import type { ExtensionAPI, ToolInfo } from "@earendil-works/pi-coding-agent";
-import { findDuplicateDispatch } from "../delegation/prompt.ts";
-import { pendingWorkflowLeases } from "../delegation/ownership.ts";
-import type { PhaseScope } from "../delegation/phase-scope.ts";
 import { rmSync } from "node:fs";
 import { BackgroundTaskQueue } from "../execution/background.ts";
 import {
@@ -23,11 +20,10 @@ import {
 } from "./completion.ts";
 import { type ThinkingLevel } from "../configuration/config.ts";
 import { removeThreadRecord, threadRecordFromThread, upsertThreadRecord, type ThreadRecord } from "./durable.ts";
-import { isRunActiveStatus, monitor, type RunWorkflowTag } from "../presentation/monitor.ts";
+import { isRunActiveStatus, monitor } from "../presentation/monitor.ts";
 import type { RunControl, SteeringReceipt } from "../execution/run-control.ts";
 import { isFailedResult, type SingleResult } from "../execution/spawn.ts";
 import type { IsolationMode, WorktreeFinalization, WorktreeIsolation } from "../isolation/worktree.ts";
-import type { WorkflowRun } from "../workflow/state.ts";
 
 export type ThreadState = "queued" | "running" | "interrupting" | "parked" | "completed" | "failed" | "stopped";
 
@@ -40,12 +36,6 @@ export interface SubagentThread {
 	generation: number;
 	agentName: string;
 	task: string;
-	phaseId?: string;
-	scope?: PhaseScope;
-	/** Capability snapshot used by declared-scope admission, including after restore. */
-	writeCapable?: boolean;
-	/** Live graph membership; graph summaries own delivery for these runs. */
-	workflow?: RunWorkflowTag;
 	/** Caller-facing cwd in the original worktree. */
 	cwd: string;
 	/** Actual child cwd (the equivalent path inside an isolated worktree). */
@@ -95,7 +85,7 @@ export interface SubagentRuntime {
 	suppressCompletions: boolean;
 	discardCompletions: () => void;
 	/** Record cancellation for the next user turn without waking the parent. */
-	recordCancellation: (runIds: number[], workflowIds: number[]) => void;
+	recordCancellation: (runIds: number[]) => void;
 	/** Resolves when the load-time durable restore pass has finished. Everything
 	 * that answers "which threads exist" awaits it — the lookup tools, a fresh
 	 * dispatch before it allocates a run id, and the restored-thread notice — so
@@ -127,18 +117,7 @@ export interface SubagentRuntime {
 	registerRunResult: (runId: number, result: SingleResult) => void;
 	/** Logical threads outlive process attempts and completed generations. */
 	threads: Map<number, SubagentThread>;
-	/** Explicit main edit/write calls hold their paths until tool_execution_end. */
-	mainWrites: Map<string, { toolName: string; scope: PhaseScope }>;
-	/** Workflow graphs started in this parent session, live and settled. */
-	workflows: Map<number, WorkflowRun>;
-	/** Stable mapping from persisted identities to this window's display ids. */
-	workflowRecordIds: Map<string, number>;
-	/** Allocate a graph id that no retained or live workflow record owns. */
-	reserveWorkflowId: () => number;
-	/** Raise the graph-id allocator above an id restored from a durable record. */
-	ensureWorkflowIdAbove: (id: number) => void;
-	/** Session-teardown tasks that must run before runtime state is released
-	 * (persisting a graph's shape, for example). */
+	/** Session-teardown tasks that must run before runtime state is released. */
 	shutdownHooks: Array<() => Promise<void> | void>;
 	/** Every session directory retained for this parent session. */
 	sessionDirs: Set<string>;
@@ -148,22 +127,8 @@ export interface SubagentRuntime {
 	shutdown: () => Promise<void>;
 }
 
-/** Pending nodes reserve their phases before they allocate ordinary run ids. */
-export function findPendingWorkflowPhase(
-	runtime: Pick<SubagentRuntime, "workflows">,
-	task: string,
-	cwd: string,
-	phaseId?: string,
-	excludeWorkflowId?: number,
-): { workflowId: number; nodeId: string; agent: string } | undefined {
-	const duplicate = findDuplicateDispatch(pendingWorkflowLeases(runtime, excludeWorkflowId), task, cwd, phaseId);
-	const owner = duplicate?.source;
-	return owner?.workflow ? { workflowId: owner.workflow.workflowId, nodeId: owner.workflow.nodeId, agent: owner.agentName } : undefined;
-}
-
 export function createRuntime(pi: ExtensionAPI, configPath: string): SubagentRuntime {
 	const backgroundQueue = new BackgroundTaskQueue();
-	let nextWorkflowId = 1;
 	// Compaction reads the whole history, summarizes it, and replaces it. A
 	// completion injected into that window can be swallowed by the summary,
 	// silently losing a result a child spent minutes producing — so delivery is
@@ -179,16 +144,14 @@ export function createRuntime(pi: ExtensionAPI, configPath: string): SubagentRun
 		getToolInfos: () => pi.getAllTools(),
 		sessionActive: true,
 		suppressCompletions: false,
-		recordCancellation: (runIds, workflowIds) => {
-			const targets = [
-				...(runIds.length ? ["runs " + runIds.map((id) => `#${id}`).join(", ")] : []),
-				...(workflowIds.length ? ["workflows " + workflowIds.map((id) => `#${id}`).join(", ")] : []),
-			].join("; ");
+		recordCancellation: (runIds) => {
+			if (!runIds.length) return;
+			const targets = "runs " + runIds.map((id) => `#${id}`).join(", ");
 			pi.sendMessage({
 				customType: "subagent-cancelled",
 				content: `Parent cancellation stopped ${targets}. These runs are already cancelled; no further subagent_stop is needed. Do not restart cancelled work unless the user requests it. Partial edits and retained integration artifacts may remain; inspect them only if continuing the task.`,
 				display: true,
-				details: { runIds, workflowIds },
+				details: { runIds },
 			}, { deliverAs: "nextTurn", triggerTurn: false });
 		},
 		discardCompletions: () => {
@@ -255,13 +218,6 @@ export function createRuntime(pi: ExtensionAPI, configPath: string): SubagentRun
 		settledRuns: new Map<number, SingleResult>(),
 		settledListeners: new Map<number, Set<(result: SingleResult) => void>>(),
 		threads: new Map<number, SubagentThread>(),
-		mainWrites: new Map(),
-		workflows: new Map<number, WorkflowRun>(),
-		workflowRecordIds: new Map(),
-		reserveWorkflowId: () => nextWorkflowId++,
-		ensureWorkflowIdAbove: (id) => {
-			if (id >= nextWorkflowId) nextWorkflowId = id + 1;
-		},
 		shutdownHooks: [],
 		sessionDirs: new Set<string>(),
 		retainSession: (result) => {
@@ -382,8 +338,6 @@ export function createRuntime(pi: ExtensionAPI, configPath: string): SubagentRun
 					/* best-effort; the state-root sweep catches leftovers later */
 				}
 			}
-			// Let owners persist their own last state (a workflow's shape) while the
-			// threads it refers to still exist.
 			for (const hook of runtime.shutdownHooks) {
 				try {
 					await hook();
@@ -399,9 +353,6 @@ export function createRuntime(pi: ExtensionAPI, configPath: string): SubagentRun
 			// manifest; the next process re-registers them at restore.
 			runtime.sessionDirs.clear();
 			runtime.threads.clear();
-			runtime.mainWrites.clear();
-			runtime.workflows.clear();
-			runtime.workflowRecordIds.clear();
 			runtime.shutdownHooks = [];
 			monitor.clear();
 		},

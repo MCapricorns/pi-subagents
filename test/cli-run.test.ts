@@ -80,7 +80,7 @@ describe("child launch arguments", () => {
 		const args = buildChildLaunchArgs({ ...base, agent: { model: "anthropic/claude-sonnet" } });
 		assert.equal(valueOf(args, "--tools"), undefined);
 		assert.equal(args.includes("--no-tools"), false);
-		assert.equal(valueOf(args, "--exclude-tools"), "subagent,subagent_workflow,subagent_status,subagent_message,subagent_stop");
+		assert.equal(valueOf(args, "--exclude-tools"), "subagent,subagent_status,subagent_message,subagent_stop");
 		assert.equal(valueOf(args, "--model"), "anthropic/claude-sonnet");
 		assert.equal(valueOf(args, "--thinking"), "high");
 	});
@@ -88,12 +88,12 @@ describe("child launch arguments", () => {
 	it("keeps an explicit role list a strict intersection, MCP tools included", () => {
 		const readOnly = buildChildLaunchArgs({ ...base, agent: { tools: ["read", "grep"] } });
 		assert.equal(valueOf(readOnly, "--tools"), "read,grep");
-		assert.equal(valueOf(readOnly, "--exclude-tools"), "subagent,subagent_workflow,subagent_status,subagent_message,subagent_stop,mcp__*");
+		assert.equal(valueOf(readOnly, "--exclude-tools"), "subagent,subagent_status,subagent_message,subagent_stop,mcp__*");
 
 		const named = buildChildLaunchArgs({ ...base, agent: { tools: ["read", "mcp__docs__search"] } });
 		assert.equal(valueOf(named, "--tools"), "read,mcp__docs__search");
 		// `--tools` filters MCP tools once an entry names one.
-		assert.equal(valueOf(named, "--exclude-tools"), "subagent,subagent_workflow,subagent_status,subagent_message,subagent_stop");
+		assert.equal(valueOf(named, "--exclude-tools"), "subagent,subagent_status,subagent_message,subagent_stop");
 	});
 
 	it("installs the console policy as an explicit extension only on Windows", () => {

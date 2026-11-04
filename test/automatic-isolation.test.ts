@@ -10,7 +10,6 @@ import { defaultIsolationMode, registerSubagentTool } from "../src/delegation/di
 import { createRuntime, type SubagentThread } from "../src/lifecycle/runtime.ts";
 import { monitor } from "../src/presentation/monitor.ts";
 import { getResultOutput, type SingleResult } from "../src/execution/spawn.ts";
-import { compileWorkflow } from "../src/workflow/plan.ts";
 
 function git(cwd: string, ...args: string[]): string {
 	return execFileSync("git", args, { cwd, encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] }).trim();
@@ -72,7 +71,7 @@ createInterface({ input: process.stdin }).on("line", (line) => {
 describe("automatic isolation and current roles", () => {
 	it("selects isolation by role and explicit override", () => {
 		assert.equal(defaultIsolationMode("artisan"), "worktree");
-		for (const name of ["scout", "sentinel", "skeptic"]) {
+		for (const name of ["scout", "sentinel"]) {
 			assert.equal(defaultIsolationMode(name, undefined, name !== "scout"), "shared");
 		}
 		assert.equal(defaultIsolationMode("artisan", "shared"), "shared");
@@ -83,9 +82,9 @@ describe("automatic isolation and current roles", () => {
 		const h = await harness(t, "committed");
 		const head = git(h.project, "rev-parse", "HEAD");
 		let dispatchedIdentity: string | undefined;
-		const { thread, result } = await h.run({ agent: "artisan", task: "Write output", scope: { paths: ["output.txt"] } }, (pending) => {
+		const { thread, result } = await h.run({ agent: "artisan", task: "Write output" }, (pending) => {
 			assert.equal(pending.worktree, undefined, "dispatch returns before asynchronous worktree preparation finishes");
-			assert.ok(pending.durableId, "workflow recovery needs the identity as soon as dispatch returns");
+			assert.ok(pending.durableId);
 			dispatchedIdentity = pending.durableId;
 		});
 		assert.equal(thread.durableId, dispatchedIdentity, "preparation and settlement preserve the dispatched identity");
@@ -101,7 +100,7 @@ describe("automatic isolation and current roles", () => {
 	for (const repository of ["none", "unborn"] as const) {
 		it(`reports automatic shared fallback for ${repository} repositories`, async (t) => {
 			const h = await harness(t, repository);
-			const { thread, result } = await h.run({ agent: "artisan", task: "Write output", scope: { paths: ["output.txt"] } });
+			const { thread, result } = await h.run({ agent: "artisan", task: "Write output" });
 			assert.equal(result.exitCode, 0);
 			assert.equal(thread.isolation, "shared");
 			assert.equal(thread.executionCwd, h.project);
@@ -111,7 +110,7 @@ describe("automatic isolation and current roles", () => {
 
 		it(`does not fall back when worktree isolation is explicitly required in ${repository}`, async (t) => {
 			const h = await harness(t, repository);
-			const { result } = await h.run({ agent: "artisan", task: "Write output", isolation: "worktree", scope: { paths: ["output.txt"] } });
+			const { result } = await h.run({ agent: "artisan", task: "Write output", isolation: "worktree" });
 			assert.equal(result.exitCode, 1);
 			assert.equal(existsSync(join(h.project, "output.txt")), false);
 			assert.match(result.errorMessage ?? result.stderr, /Worktree isolation/);
@@ -120,18 +119,15 @@ describe("automatic isolation and current roles", () => {
 
 	it("rejects retired role names before dispatch and accepts only current names", async (t) => {
 		const h = await harness(t, "none");
-		for (const name of ["reviewer", "critic"]) {
+		for (const name of ["reviewer", "critic", "skeptic"]) {
 			await assert.rejects(h.run({ agent: name, task: `Verify ${name} routing` }), /Unknown agent/);
-			assert.throws(() => compileWorkflow({ nodes: [{ id: "verify", agent: name, task: "Verify the named claim" }] }, h.project, ["sentinel", "skeptic"]), /not an enabled agent/);
 		}
 		assert.equal(h.runtime.threads.size, 0);
-		for (const name of ["sentinel", "skeptic"]) {
-			const { thread, result } = await h.run({ agent: name, task: `Verify ${name} routing` });
-			assert.equal(thread.agentName, name);
-			assert.equal(thread.isolation, "shared");
-			assert.equal(result.agent, name);
-			// Resolve macOS /var aliases and Windows short paths on both sides.
-			assert.equal(await realpath(getResultOutput(result)), await realpath(h.project));
-		}
+		const { thread, result } = await h.run({ agent: "sentinel", task: "Verify sentinel routing" });
+		assert.equal(thread.agentName, "sentinel");
+		assert.equal(thread.isolation, "shared");
+		assert.equal(result.agent, "sentinel");
+		// Resolve macOS /var aliases and Windows short paths on both sides.
+		assert.equal(await realpath(getResultOutput(result)), await realpath(h.project));
 	});
 });

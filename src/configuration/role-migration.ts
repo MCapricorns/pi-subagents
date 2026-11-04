@@ -2,8 +2,7 @@
  * current catalog names; these helpers are used only at storage boundaries. */
 
 export function migrateStoredAgentName(name: string): string {
-	if (name === "reviewer") return "sentinel";
-	if (name === "critic") return "skeptic";
+	if (name === "reviewer" || name === "critic" || name === "skeptic") return "sentinel";
 	return name;
 }
 
@@ -30,21 +29,11 @@ function migrateField(value: unknown, key: string): boolean {
 	return true;
 }
 
-/** Retained graph nodes keep their original briefs, ids, and dependencies. */
-function migrateStoredWorkflowRoles(value: unknown): boolean {
-	const nodes = Array.isArray(value) ? value : value && typeof value === "object" ? (value as { nodes?: unknown }).nodes : undefined;
-	if (!Array.isArray(nodes)) return false;
-	let changed = false;
-	for (const node of nodes) changed = migrateField(node, "agent") || changed;
-	return changed;
-}
-
-/** Thread and workflow manifests retain their ids, leases, and recovery paths. */
+/** Thread manifests retain their ids, leases, and recovery paths. */
 export function migrateStoredRecordRoles(value: unknown): boolean {
 	if (!value || typeof value !== "object") return false;
 	const summary = (value as { resultSummary?: unknown }).resultSummary;
 	const threadChanged = migrateField(value, "agentName");
 	const summaryChanged = migrateField(summary, "agent");
-	const nodesChanged = migrateStoredWorkflowRoles(value);
-	return threadChanged || summaryChanged || nodesChanged;
+	return threadChanged || summaryChanged;
 }

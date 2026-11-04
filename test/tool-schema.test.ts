@@ -8,9 +8,8 @@ import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { registerSubagentTool } from "../src/delegation/dispatch.ts";
 import { createDispatchCore } from "../src/lifecycle/dispatch-core.ts";
 import { createRuntime } from "../src/lifecycle/runtime.ts";
-import { registerWorkflowTool } from "../src/workflow/tool.ts";
 
-it("validates dispatch and workflow enums through the Pi SDK", async (t) => {
+it("validates dispatch enums through the Pi SDK", async (t) => {
 	const root = await mkdtemp(join(tmpdir(), "pi-tool-schema-"));
 	const tools = new Map<string, Tool>();
 	const pi = {
@@ -26,7 +25,6 @@ it("validates dispatch and workflow enums through the Pi SDK", async (t) => {
 	});
 	const core = createDispatchCore(runtime);
 	registerSubagentTool(pi, runtime, core);
-	registerWorkflowTool(pi, runtime, core);
 	const validate = (name: string, args: ToolCall["arguments"]) => validateToolArguments(
 		tools.get(name)!, { type: "toolCall", id: "schema-test", name, arguments: args },
 	);
@@ -38,11 +36,4 @@ it("validates dispatch and workflow enums through the Pi SDK", async (t) => {
 	}
 	assert.throws(() => validate("subagent", { ...task, isolation: "invalid" }), /isolation:/u);
 	assert.throws(() => validate("subagent", { tasks: [{ ...task, isolation: "invalid" }] }), /tasks\.0\.isolation:/u);
-	for (const workflow of ["code-review", "research", "migration"]) {
-		const args = { workflow, inputs: { TARGET: "src" } };
-		assert.deepEqual(validate("subagent_workflow", args), args);
-	}
-	assert.throws(() => validate("subagent_workflow", { workflow: "custom", inputs: {} }), /workflow:/u);
-	assert.throws(() => validate("subagent_workflow", { inputs: {} }), /workflow:/u);
-	assert.throws(() => validate("subagent_workflow", { workflow: "research", inputs: { QUESTION: " " } }), /inputs\.QUESTION:/u);
 });

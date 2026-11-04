@@ -90,7 +90,7 @@ process.stdin.on("data", (chunk) => {
 			process.argv[1] = child;
 			const core = createDispatchCore(runtime);
 			core.setEnvironment({ ctx: { cwd: root, modelRegistry: { getAvailable: () => [] }, ui: { notify: () => undefined } } as unknown as ExtensionContext, config: DEFAULT_CONFIG, agents: loadBuiltinAgents() });
-			const starts = await Promise.all(Array.from({ length: 8 }, (_, id) => core.startBackground("artisan", "Write independent file " + id, root, "shared", { phaseId: "write-" + id, scope: { paths: ["output-" + id] }, quiet: true })));
+			const starts = await Promise.all(Array.from({ length: 8 }, (_, id) => core.startBackground("artisan", "Write independent file " + id, root, "shared", { quiet: true })));
 			assert.ok(starts.every((result) => result.runId !== undefined && result.exitCode === -1));
 			// Wait for the child barrier within the overall test timeout. Cold process
 			// startup under the full suite is not a scheduler concurrency limit.

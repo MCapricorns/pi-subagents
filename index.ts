@@ -7,7 +7,6 @@
  *   - configuration/ — persisted settings, model routes, and setup UI
  *   - execution/     — background tasks, native RPC transport, and model handoff
  *   - lifecycle/     — durable threads, restoration, controls, and delivery
- *   - workflow/      — built-in plans, dependency runner, and acceptance
  *   - isolation/     — Git worktrees, recovery, and temporary-state hygiene
  *   - presentation/  — announcements, formatting, monitor, and the active-run
  *     widget
@@ -27,18 +26,15 @@ import { runSetup } from "./src/configuration/setup.ts";
 import { loadBuiltinAgents } from "./src/delegation/agents.ts";
 import { registerSubagentTool } from "./src/delegation/dispatch.ts";
 import { buildDelegationDirective, installDelegationSections } from "./src/delegation/prompt.ts";
-import { pendingWorkflowLeases, registerMainOwnershipGuard } from "./src/delegation/ownership.ts";
-import { currentSubagentDepth } from "./src/execution/spawn.ts";
+import { currentSubagentDepth, getSubagentsRoot } from "./src/execution/spawn.ts";
 import { createDispatchCore } from "./src/lifecycle/dispatch-core.ts";
 import { registerCancellationHooks } from "./src/lifecycle/cancellation.ts";
 import { createRuntime } from "./src/lifecycle/runtime.ts";
 import { bootstrapDurableState } from "./src/lifecycle/thread-restore.ts";
 import { registerLookupTools } from "./src/lifecycle/tools.ts";
-import { registerWorkflowTool, restoreWorkflowState } from "./src/workflow/tool.ts";
 import { registerAnnouncements } from "./src/presentation/announcements.ts";
 import { clearActiveRunsWidget } from "./src/presentation/widget.ts";
 import { formatBytes, measureDurableUsage, runStorageCleanup } from "./src/isolation/cleanup.ts";
-import { getSubagentsRoot } from "./src/execution/spawn.ts";
 
 export default function (pi: ExtensionAPI): void {
 	// Recursion guard: sub-agent children are leaf processes. The `subagent` tool is
@@ -71,15 +67,10 @@ export default function (pi: ExtensionAPI): void {
 		await runtime.shutdown();
 	});
 
-	// One dispatcher serves both delegation tools, so a workflow node is an
-	// ordinary managed run: same lifecycle ownership, admission, isolation, and
-	// durable checkpointing.
 	const dispatchCore = createDispatchCore(runtime);
 	registerSubagentTool(pi, runtime, dispatchCore);
-	registerWorkflowTool(pi, runtime, dispatchCore);
 	registerLookupTools(pi, runtime, dispatchCore);
 	registerCancellationHooks(pi, runtime);
-	registerMainOwnershipGuard(pi, runtime);
 
 	pi.registerCommand("subagents-setup", {
 		description: "Configure pi-subagents: model and thinking per role",
@@ -111,7 +102,6 @@ export default function (pi: ExtensionAPI): void {
 
 	pi.on("session_start", async (_event, ctx) => {
 		await bootstrapDurableState(runtime, ctx.cwd);
-		await restoreWorkflowState(runtime, ctx);
 	});
 	registerAnnouncements(pi, runtime);
 
@@ -120,7 +110,7 @@ export default function (pi: ExtensionAPI): void {
 	pi.on("before_agent_start", async (event) => {
 		await runtime.durableRestore;
 		const agents = loadBuiltinAgents();
-		const sources = [...runtime.threads.values(), ...pendingWorkflowLeases(runtime)];
+		const sources = [...runtime.threads.values()];
 		const sections = event.systemPromptOptions?.sections;
 		if (sections) {
 			installDelegationSections(sections, agents, sources);

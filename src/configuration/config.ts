@@ -17,7 +17,7 @@ import { getAgentDir, withFileMutationQueue } from "@earendil-works/pi-coding-ag
 import { migrateStoredRoleKeys } from "./role-migration.ts";
 
 /** Full catalog of agents shipped with the package; all of them always run. */
-export const BUILTIN_AGENT_NAMES = ["scout", "artisan", "sentinel", "skeptic"] as const;
+export const BUILTIN_AGENT_NAMES = ["scout", "artisan", "sentinel"] as const;
 
 /** Thinking levels accepted by pi's `--thinking` option. */
 const THINKING_LEVEL_VALUES = ["off", "minimal", "low", "medium", "high", "xhigh", "max"] as const;
@@ -32,7 +32,6 @@ export function roleThinkingLevel(agentName: string): ThinkingLevel {
 			return "low";
 		case "artisan":
 		case "sentinel":
-		case "skeptic":
 			return "high";
 		default:
 			return DEFAULT_THINKING_LEVEL;
@@ -53,10 +52,7 @@ export const AGENT_PROFILES: Record<(typeof BUILTIN_AGENT_NAMES)[number], AgentP
 		remark: "Implement one substantial change with its tests and verification.",
 	},
 	sentinel: {
-		remark: "Inspect an implementation or diff against requirements and callers for defects and regressions. No edits.",
-	},
-	skeptic: {
-		remark: "Test a named claim, design assumption, or review finding with counterexamples and focused checks. No edits.",
+		remark: "Inspect an implementation or diff and challenge claims or assumptions for defects and regressions. No edits.",
 	},
 };
 

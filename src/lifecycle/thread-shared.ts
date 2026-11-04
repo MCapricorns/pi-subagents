@@ -5,7 +5,6 @@ import { realpath } from "node:fs/promises";
 import { join, resolve } from "node:path";
 import type { ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { isWriteCapableAgent, type AgentConfig, type ToolMetadata } from "../delegation/agents.ts";
-import type { PhaseScope } from "../delegation/phase-scope.ts";
 import { roleThinkingLevel, type SubagentsConfig, type ThinkingLevel } from "../configuration/config.ts";
 import { removeThreadRecord, threadRecordFromThread, threadRecordIdentity, upsertThreadRecord } from "./durable.ts";
 import {
@@ -16,7 +15,6 @@ import {
 	resolveAgentModelRoute,
 	resolveThinkingLevel,
 } from "../configuration/models.ts";
-import type { RunWorkflowTag } from "../presentation/monitor.ts";
 import type { SubagentRuntime, SubagentThread } from "./runtime.ts";
 import { getProjectRoot, type SingleResult } from "../execution/spawn.ts";
 import { resolveRepositoryRoot, type IsolationMode } from "../isolation/worktree.ts";
@@ -129,20 +127,12 @@ export interface DispatchEnvironment {
 export interface StartBackgroundOptions {
 	/** A private copy of a settled session used for a follow-up run. */
 	resumeSession?: { sessionId: string; sessionDir: string };
-	phaseId?: string;
-	scope?: PhaseScope;
-	/** A false hint cannot downgrade a live write-capable role. */
-	writeCapable?: boolean;
 	/** Omitted public isolation may fall back only when no Git baseline exists. */
 	automaticIsolation?: boolean;
 	/** Chosen by the tool call before the queue can start a fast child. */
 	deliveryRoute?: "background" | "await";
-	/** A workflow node reports through its graph's single summary: no per-run
-	 * completion message and no per-run toast, so a wide graph cannot flood the
-	 * parent with one wake-up per node. */
+	/** Suppress per-run completion messages and toasts when needed. */
 	quiet?: boolean;
-	/** Graph membership rendered by the widget and node status rows. */
-	workflow?: RunWorkflowTag;
 }
 
 export type StartBackgroundInternal = (

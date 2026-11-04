@@ -4,7 +4,6 @@ import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { describe, it, type TestContext } from "node:test";
 import { getThreadsManifestPath, readThreadRecords } from "../src/lifecycle/durable.ts";
-import { getWorkflowsManifestPath, readWorkflowRecords } from "../src/workflow/durable.ts";
 
 async function fixture(t: TestContext) {
 	const root = await mkdtemp(join(tmpdir(), "pi-role-migration-"));
@@ -24,38 +23,21 @@ describe("stored role migration", () => {
 	it("persists renamed thread roles and result summaries without changing ownership", async (t) => {
 		const { root, configPath } = await fixture(t);
 		const path = getThreadsManifestPath(configPath, root);
-		const records = ["reviewer", "critic"].map((agentName, index) => ({
+		const records = ["reviewer", "critic", "skeptic"].map((agentName, index) => ({
 			runId: index + 1, createdAt: 1000, updatedAt: 2000, generation: 2,
-			agentName, task: "Keep reviewer and critic in the original brief", phaseId: `phase-${index}`, scope: { paths: [root] },
+			agentName, task: `Keep ${agentName} in the original brief ${index}`,
 			cwd: root, executionCwd: root, isolation: "shared", state: "parked", elapsedMs: 30, childPids: [],
 			resultSummary: { agent: agentName, task: "Original task", exitCode: 1, failed: true, output: "Original evidence" },
 		}));
 		await mkdir(dirname(path), { recursive: true });
 		await writeFile(path, JSON.stringify({ version: 1, records }));
 		const migrated = await readThreadRecords(configPath);
-		assert.deepEqual(migrated.map((record) => record.agentName), ["sentinel", "skeptic"]);
-		assert.deepEqual(migrated.map((record) => record.resultSummary?.agent), ["sentinel", "skeptic"]);
-		assert.deepEqual(migrated.map((record) => [record.runId, record.phaseId, record.state, record.task]), records.map((record) => [record.runId, record.phaseId, record.state, record.task]));
+		assert.deepEqual(migrated.map((record) => record.agentName), ["sentinel", "sentinel", "sentinel"]);
+		assert.deepEqual(migrated.map((record) => record.resultSummary?.agent), ["sentinel", "sentinel", "sentinel"]);
+		assert.deepEqual(migrated.map((record) => [record.runId, record.state, record.task]), records.map((record) => [record.runId, record.state, record.task]));
 		const saved = JSON.parse(await readFile(path, "utf8"));
-		assert.deepEqual(saved.records.map((record: { agentName: string }) => record.agentName), ["sentinel", "skeptic"]);
+		assert.deepEqual(saved.records.map((record: { agentName: string }) => record.agentName), ["sentinel", "sentinel", "sentinel"]);
 		assert.equal(saved.records[0].updatedAt, 2000);
 		await assertNoRewrite(path, () => readThreadRecords(configPath));
-	});
-
-	it("persists renamed retained graph nodes while preserving dependency and recovery facts", async (t) => {
-		const { root, configPath } = await fixture(t);
-		const path = getWorkflowsManifestPath(configPath, root);
-		const nodes = [
-			{ id: "reviewer", agent: "reviewer", task: "Original reviewer task", dependsOn: [], state: "completed", runId: 11 },
-			{ id: "critic", agent: "critic", task: "Original critic task", dependsOn: ["reviewer"], state: "pending" },
-		];
-		await mkdir(dirname(path), { recursive: true });
-		await writeFile(path, JSON.stringify({ version: 1, records: [{ workflowId: 3, name: "review", cwd: root, state: "interrupted", startedAt: 1000, updatedAt: 2000, nodes }] }));
-		const [record] = await readWorkflowRecords(configPath, root);
-		assert.deepEqual(record!.nodes, nodes.map((node, index) => ({ ...node, agent: index ? "skeptic" : "sentinel" })));
-		const saved = JSON.parse(await readFile(path, "utf8"));
-		assert.equal(saved.records[0].nodes[1].agent, "skeptic");
-		assert.equal(saved.records[0].nodes[0].runId, 11);
-		await assertNoRewrite(path, () => readWorkflowRecords(configPath, root));
 	});
 });

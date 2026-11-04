@@ -13,7 +13,6 @@ import { stripVTControlCharacters } from "node:util";
 import type { Theme } from "@earendil-works/pi-coding-agent";
 import { visibleWidth } from "@earendil-works/pi-tui";
 import { emptyUsage, type UsageStats } from "../execution/run-control.ts";
-import type { WorkflowRun } from "../workflow/state.ts";
 import type { IsolationMode, WorktreeFinalizationStatus } from "../isolation/worktree.ts";
 
 // ---------------------------------------------------------------------------
@@ -33,14 +32,6 @@ export function isRunActiveStatus(status: RunStatus): boolean {
  * settlement, finalizing while the patch is applied/cleaned up, then the
  * terminal WorktreeFinalizationStatus. */
 export type RunIntegrationStatus = "pending" | "finalizing" | WorktreeFinalizationStatus;
-
-/** Workflow membership of a run: which graph, and which node of it. Rendered so
- * a workflow's nodes read as one group in the widget and the status view. */
-export interface RunWorkflowTag {
-	workflowId: number;
-	name: string;
-	nodeId: string;
-}
 
 export interface RunView {
 	id: number;
@@ -75,15 +66,11 @@ export interface RunView {
 	elapsedMs: number;
 	/** Epoch ms when the latest active segment stopped. */
 	endedAt?: number;
-	/** Workflow membership, when this run is a node of a `subagent_workflow` graph. */
-	workflow?: RunWorkflowTag;
 }
 
 export interface RunChainMeta {
 	isolation?: IsolationMode;
 	worktreeId?: string;
-	/** Set for nodes the workflow runner dispatches. */
-	workflow?: RunWorkflowTag;
 	/** Initial startup state before the child emits activity. */
 	waitReason?: RunWaitReason;
 }
@@ -456,23 +443,10 @@ export function formatToolActivity(toolName: string, args: unknown): string {
 
 export class MonitorStore {
 	private runs: RunView[] = [];
-	private workflows = new Map<number, WorkflowRun>();
-
-	updateWorkflow(run: WorkflowRun): void {
-		this.workflows.set(run.id, run);
-		this.notify();
-	}
-
-	getWorkflows(): WorkflowRun[] {
-		return [...this.workflows.values()];
-	}
 	private nextId = 1;
 	private subscribers = new Set<() => void>();
 
 	beginTurn(): void {
-		for (const [id, run] of this.workflows) {
-			if (run.state !== "running") this.workflows.delete(id);
-		}
 		// Clear finished runs from a previous turn, but keep active and parked
 		// threads so concurrent work is not wiped between parent turns.
 		this.runs = this.runs.filter(
@@ -513,10 +487,7 @@ export class MonitorStore {
 			id,
 			agent,
 			task,
-			// A graph node is identified by its graph and node id: the task text it
-			// actually runs is interpolated with upstream answers, which makes a
-			// fragment-extracted label read like noise.
-			label: meta?.workflow ? `${meta.workflow.name}/${meta.workflow.nodeId}` : runLabel(task),
+			label: runLabel(task),
 			model,
 			thinking,
 			status: "queued",
@@ -524,7 +495,6 @@ export class MonitorStore {
 			usage: emptyUsage(),
 			elapsedMs: 0,
 			...(meta?.isolation ? { isolation: meta.isolation, integrationStatus: meta.isolation === "worktree" ? "pending" : undefined, ...(meta.worktreeId ? { worktreeId: meta.worktreeId } : {}) } : {}),
-			...(meta?.workflow ? { workflow: meta.workflow } : {}),
 		});
 		this.notify();
 		return id;
@@ -652,7 +622,6 @@ export class MonitorStore {
 	 * finishRun calls from the old session remain safe no-ops. */
 	clear(): void {
 		this.runs = [];
-		this.workflows.clear();
 		this.notify();
 	}
 

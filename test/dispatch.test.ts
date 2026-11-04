@@ -3,7 +3,6 @@ import { describe, it } from "node:test";
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import type { SubagentsConfig } from "../src/configuration/config.ts";
 import { loadBuiltinAgents, type AgentConfig } from "../src/delegation/agents.ts";
-import { normalizePhaseScope } from "../src/delegation/phase-scope.ts";
 import { defaultIsolationMode } from "../src/delegation/dispatch.ts";
 import { isWorktreeCapableAgent } from "../src/lifecycle/thread-shared.ts";
 import { createRuntime, type SubagentThread } from "../src/lifecycle/runtime.ts";
@@ -67,31 +66,13 @@ describe("isolation policy", () => {
 });
 
 describe("fresh write capability", () => {
-	it("does not let a false writeCapable hint skip writer scope admission", async () => {
-		const { runtime, start } = dispatcher([]);
-		runtime.threads.set(41, {
-			...source({ id: 41, agentName: "artisan", task: "Existing src writer", phaseId: "existing-src" }),
-			scope: normalizePhaseScope({ paths: ["src"] }, process.cwd()),
-			writeCapable: true,
-		} as unknown as SubagentThread);
-		const result = await start("artisan", "Another writer", process.cwd(), "shared", {
-			writeCapable: false,
-			phaseId: "other-phase",
-			scope: { paths: ["src/file.ts"] },
-		});
-		assert.equal(result.exitCode, 1);
-		assert.match(result.errorMessage ?? result.stderr, /scope.*run #41/i);
-		assert.equal(runtime.threads.size, 1);
-		assert.equal(runtime.runControllers.size, 0);
-	});
-
 	it("rejects explicit scout worktree isolation before allocation", async () => {
 		const scout = loadBuiltinAgents().find((agent) => agent.name === "scout");
 		assert.ok(scout);
 		const pi = {
 			on: () => undefined,
 			getActiveTools: () => ["read", "grep", "bash"],
-		getAllTools: () => [],
+			getAllTools: () => [],
 			sendMessage: () => undefined,
 		} as unknown as ExtensionAPI;
 		const runtime = createRuntime(pi, `${process.cwd()}/.pi-test/config.json`);
@@ -125,24 +106,6 @@ describe("duplicate dispatch", () => {
 			41,
 		);
 		assert.equal(findDuplicateDispatch(active, "Trace dispatch phase ownership", process.cwd()), undefined);
-	});
-
-	it("uses phaseId for rewritten tasks while preserving the exact-task fallback", () => {
-		const active = [source({ phaseId: "dispatch-admission" })];
-		assert.equal(
-			findDuplicateDispatch(active, "Rewrite the dispatch admission checks", process.cwd(), "dispatch-admission")?.source.id,
-			41,
-		);
-		assert.equal(
-			findDuplicateDispatch(active, "Trace dispatch ownership", process.cwd(), "different-phase")?.source.id,
-			41,
-			"the legacy exact task+cwd fallback still rejects equal text across phase ids",
-		);
-		assert.equal(
-			findDuplicateDispatch(active, "Rewrite the dispatch admission checks", process.cwd()),
-			undefined,
-			"calls without phaseId keep exact-match compatibility rather than fuzzy matching",
-		);
 	});
 
 	it("treats every live, parked, and settling state as an active lease", () => {
@@ -200,21 +163,6 @@ describe("duplicate dispatch", () => {
 		assert.equal(runtime.runControllers.size, 0);
 	});
 
-	it("rejects a rewritten task with the same stable phase id before allocation", async () => {
-		const { runtime, start } = dispatcher([source({ phaseId: "dispatch-admission" })]);
-		const result = await start(
-			"artisan",
-			"Rewrite the dispatch admission checks",
-			process.cwd(),
-			"shared",
-			{ phaseId: "dispatch-admission" },
-		);
-		assert.equal(result.exitCode, 1);
-		assert.match(result.errorMessage ?? "", /Run #41 \(scout\).*phase \(running\)/u);
-		assert.equal(runtime.threads.size, 1);
-		assert.equal(runtime.runControllers.size, 0);
-	});
-
 	it("rejects re-running a finished brief and points at the retained thread", async () => {
 		const { runtime, start } = dispatcher([settledSource()]);
 		const result = await start("artisan", "Trace dispatch ownership", process.cwd());
@@ -225,14 +173,46 @@ describe("duplicate dispatch", () => {
 		assert.equal(runtime.threads.size, 1);
 		assert.equal(runtime.runControllers.size, 0);
 	});
-	it("gives interrupted owners a schema-valid retirement command without promising a phase-id bypass", async () => {
-		const { start } = dispatcher([source({ state: "parked", phaseId: "old" })]);
-		const result = await start("artisan", "Trace dispatch ownership", process.cwd(), "shared", { phaseId: "new" });
+
+	it("gives interrupted owners a schema-valid retirement command", async () => {
+		const { start } = dispatcher([source({ state: "parked" })]);
+		const result = await start("artisan", "Trace dispatch ownership", process.cwd(), "shared");
 		assert.equal(result.exitCode, 1);
 		const remedy = result.errorMessage ?? "";
 		assert.match(remedy, /subagent_stop\(\{ id: "41" \}\)/u);
-		assert.match(remedy, /Changing only phaseId cannot bypass equal-task ownership/u);
-		assert.doesNotMatch(remedy, /or give this work a different phaseId/u);
+	});
+
+	it("rejects duplicate tasks inside a parallel batch before allocating any run", async () => {
+		const { registerSubagentTool } = await import("../src/delegation/dispatch.ts");
+		let tool: any;
+		const pi = {
+			on: () => undefined,
+			getActiveTools: () => ["read", "write"],
+			getAllTools: () => [],
+			registerTool: (value: any) => { tool = value; },
+			sendMessage: () => undefined,
+		} as unknown as ExtensionAPI;
+		const runtime = createRuntime(pi, `${process.cwd()}/.pi-test/config.json`);
+		registerSubagentTool(pi, runtime);
+		try {
+			await assert.rejects(
+				tool.execute("call-1", {
+					tasks: [
+						{ agent: "scout", task: "Exact duplicate" },
+						{ agent: "artisan", task: "  Exact   duplicate  " },
+					],
+				}, new AbortController().signal, () => undefined, {
+					cwd: process.cwd(),
+					modelRegistry: { getAvailable: () => [] },
+					ui: { notify: () => undefined },
+				}),
+				/parallel admission.*duplicate.*tasks\[0\].*tasks\[1\]/i,
+			);
+			assert.equal(runtime.threads.size, 0);
+		} finally {
+			await runtime.shutdown();
+			monitor.clear();
+		}
 	});
 });
 
@@ -253,5 +233,4 @@ describe("internal model handoff prompts", () => {
 		assert.match(prompt, /Current objective:\nFix the cache race\.\n- keep the API stable\.\n\nComplete the remaining work/u);
 		assert.doesNotMatch(prompt, /\.\./u);
 	});
-
 });

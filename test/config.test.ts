@@ -15,17 +15,15 @@ import {
 } from "../src/configuration/config.ts";
 
 describe("catalog", () => {
-	it("ships only the canonical research, implementation, verification, and challenge roles", () => {
-		assert.deepEqual(BUILTIN_AGENT_NAMES, ["scout", "artisan", "sentinel", "skeptic"]);
+	it("ships only the canonical research, implementation, and review roles", () => {
+		assert.deepEqual(BUILTIN_AGENT_NAMES, ["scout", "artisan", "sentinel"]);
 	});
 
 	it("assigns a role thinking default and leaves other names on medium", () => {
 		assert.equal(roleThinkingLevel("scout"), "low");
 		assert.equal(roleThinkingLevel("artisan"), "high");
-		for (const name of ["sentinel", "skeptic"]) {
-			assert.equal(roleThinkingLevel(name), "high");
-		}
-		for (const name of ["custom", "reviewer", "critic"]) {
+		assert.equal(roleThinkingLevel("sentinel"), "high");
+		for (const name of ["custom", "reviewer", "critic", "skeptic"]) {
 			assert.equal(roleThinkingLevel(name), "medium");
 		}
 	});
@@ -33,8 +31,8 @@ describe("catalog", () => {
 	it("exposes only current setup profiles", () => {
 		assert.equal(agentProfile("reviewer"), undefined);
 		assert.equal(agentProfile("critic"), undefined);
-		assert.match(agentProfile("sentinel")!.remark, /implementation or diff.*requirements and callers.*regressions/u);
-		assert.match(agentProfile("skeptic")!.remark, /named claim, design assumption, or review finding.*counterexamples/u);
+		assert.equal(agentProfile("skeptic"), undefined);
+		assert.match(agentProfile("sentinel")!.remark, /implementation or diff.*challenge claims or assumptions.*defects and regressions/u);
 		assert.equal(agentProfile("custom"), undefined);
 	});
 });
@@ -62,50 +60,50 @@ describe("normalizeConfig", () => {
 
 	it("migrates legacy model and thinking keys after trimming and is idempotent", () => {
 		const config = normalizeConfig({
-			agentModels: { " reviewer ": " test/review ", critic: "test/challenge" },
-			agentThinkingLevels: { reviewer: "xhigh", " critic ": "low" },
+			agentModels: { " reviewer ": " test/review " },
+			agentThinkingLevels: { " skeptic ": "low" },
 		});
 		assert.deepEqual(config, {
-			agentModels: { sentinel: "test/review", skeptic: "test/challenge" },
-			agentThinkingLevels: { sentinel: "xhigh", skeptic: "low" },
+			agentModels: { sentinel: "test/review" },
+			agentThinkingLevels: { sentinel: "low" },
 		});
 		assert.deepEqual(normalizeConfig(config), config);
 	});
 
 	for (const canonicalFirst of [true, false]) {
 		it(`prefers valid canonical settings with canonical keys ${canonicalFirst ? "first" : "last"}`, () => {
-			const models = [["sentinel", "test/canonical-review"], ["skeptic", "test/canonical-challenge"], ["reviewer", "test/legacy-review"], ["critic", "test/legacy-challenge"]];
-			const thinking = [["sentinel", "off"], ["skeptic", "max"], ["reviewer", "high"], ["critic", "low"]];
+			const models = [["sentinel", "test/canonical-review"], ["reviewer", "test/legacy-review"], ["skeptic", "test/legacy-challenge"]];
+			const thinking = [["sentinel", "off"], ["reviewer", "high"], ["critic", "low"]];
 			const config = normalizeConfig({
 				agentModels: Object.fromEntries(canonicalFirst ? models : models.slice().reverse()),
 				agentThinkingLevels: Object.fromEntries(canonicalFirst ? thinking : thinking.slice().reverse()),
 			});
 			assert.deepEqual(config, {
-				agentModels: { sentinel: "test/canonical-review", skeptic: "test/canonical-challenge" },
-				agentThinkingLevels: { sentinel: "off", skeptic: "max" },
+				agentModels: { sentinel: "test/canonical-review" },
+				agentThinkingLevels: { sentinel: "off" },
 			});
 		});
 	}
 
 	it("uses valid legacy settings when canonical values are invalid", () => {
 		const config = normalizeConfig({
-			agentModels: { sentinel: "no-slash", reviewer: "test/legacy-review", critic: "test/legacy-challenge", skeptic: null },
-			agentThinkingLevels: { reviewer: "low", sentinel: "ultra", skeptic: false, critic: "medium" },
+			agentModels: { sentinel: "no-slash", reviewer: "test/legacy-review", skeptic: null },
+			agentThinkingLevels: { sentinel: "ultra", skeptic: "medium" },
 		});
 		assert.deepEqual(config, {
-			agentModels: { sentinel: "test/legacy-review", skeptic: "test/legacy-challenge" },
-			agentThinkingLevels: { sentinel: "low", skeptic: "medium" },
+			agentModels: { sentinel: "test/legacy-review" },
+			agentThinkingLevels: { sentinel: "medium" },
 		});
 	});
 
 	it("ignores invalid legacy values and retains compatible unknown role keys", () => {
 		const config = normalizeConfig({
-			agentModels: { sentinel: "test/review", skeptic: "test/challenge", reviewer: false, critic: "", " custom ": " test/custom ", Reviewer: "test/uppercase" },
-			agentThinkingLevels: { sentinel: "high", skeptic: "low", reviewer: "ultra", critic: null, " custom ": "medium", Reviewer: "minimal" },
+			agentModels: { sentinel: "test/review", reviewer: false, critic: "", skeptic: "", " custom ": " test/custom ", Reviewer: "test/uppercase" },
+			agentThinkingLevels: { sentinel: "high", reviewer: "ultra", critic: null, skeptic: null, " custom ": "medium", Reviewer: "minimal" },
 		});
 		assert.deepEqual(config, {
-			agentModels: { sentinel: "test/review", skeptic: "test/challenge", custom: "test/custom", Reviewer: "test/uppercase" },
-			agentThinkingLevels: { sentinel: "high", skeptic: "low", custom: "medium", Reviewer: "minimal" },
+			agentModels: { sentinel: "test/review", custom: "test/custom", Reviewer: "test/uppercase" },
+			agentThinkingLevels: { sentinel: "high", custom: "medium", Reviewer: "minimal" },
 		});
 	});
 
@@ -174,13 +172,13 @@ describe("loadConfig", () => {
 	it("persists migrated settings without legacy role keys and retains unknown roles", async (t) => {
 		const path = join(tempDir(t), "pi-subagents.json");
 		writeFileSync(path, JSON.stringify({
-			agentModels: { reviewer: "test/legacy-review", critic: "test/legacy-challenge", custom: "test/custom" },
-			agentThinkingLevels: { reviewer: "low", critic: "max", custom: "minimal" },
+			agentModels: { reviewer: "test/legacy-review", custom: "test/custom" },
+			agentThinkingLevels: { skeptic: "max", custom: "minimal" },
 		}), "utf8");
 		const config = await loadConfig(path);
 		assert.deepEqual(config, {
-			agentModels: { sentinel: "test/legacy-review", skeptic: "test/legacy-challenge", custom: "test/custom" },
-			agentThinkingLevels: { sentinel: "low", skeptic: "max", custom: "minimal" },
+			agentModels: { sentinel: "test/legacy-review", custom: "test/custom" },
+			agentThinkingLevels: { sentinel: "max", custom: "minimal" },
 		});
 		assert.deepEqual(JSON.parse(readFileSync(path, "utf8")), config);
 		assert.deepEqual(await loadConfig(path), config);

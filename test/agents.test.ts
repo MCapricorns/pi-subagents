@@ -26,9 +26,9 @@ const READ_ONLY = tool("docs_search", { readOnlyHint: true });
 const CODEMODE = tool("codemode", undefined, () => "all", "direct");
 
 describe("loadBuiltinAgents", () => {
-	it("ships all four roles without frontmatter thinking", () => {
+	it("ships all three roles without frontmatter thinking", () => {
 		const agents = loadBuiltinAgents();
-		assert.deepEqual(agents.map((agent) => agent.name), ["scout", "artisan", "sentinel", "skeptic"]);
+		assert.deepEqual(agents.map((agent) => agent.name), ["scout", "artisan", "sentinel"]);
 		for (const agent of agents) {
 			assert.equal(agent.model, undefined);
 			assert.ok(!("thinking" in agent));
@@ -77,38 +77,25 @@ describe("loadBuiltinAgents", () => {
 		assert.match(artisan.systemPrompt, /leaf boundary below still wins/u);
 	});
 
-	it("routes implementation review to sentinel and claim challenges to skeptic", () => {
+	it("routes implementation review and claim challenges to sentinel", () => {
 		const agents = loadBuiltinAgents();
 		const sentinel = agents.find((agent) => agent.name === "sentinel");
-		const skeptic = agents.find((agent) => agent.name === "skeptic");
-		assert.ok(sentinel && skeptic);
-		assert.match(formatCatalogEntry(sentinel), /^- sentinel: Inspect.*implementation or diff.*requirements and callers/u);
+		assert.ok(sentinel);
+		assert.match(formatCatalogEntry(sentinel), /^- sentinel: Inspect.*implementation or diff.*challenge claims or assumptions/u);
 		assert.match(sentinel.systemPrompt, /For a diff, report defects introduced by the change/u);
+		assert.match(sentinel.systemPrompt, /specific claim, design assumption, or finding, seek a decisive counterexample/u);
 		assert.match(sentinel.systemPrompt, /wider codebase only when the brief explicitly requests an audit/u);
 		assert.match(sentinel.systemPrompt, /confirmed findings ordered by severity/u);
 		assert.match(sentinel.systemPrompt, /no findings were found.*what was verified/u);
-		assert.match(formatCatalogEntry(skeptic), /^- skeptic: Challenge a named claim, design assumption, or review finding/u);
-		assert.match(skeptic.systemPrompt, /Restate the specific claim.*counterexample or failing precondition/u);
-		assert.match(skeptic.systemPrompt, /only as needed to test that claim/u);
-		assert.match(skeptic.systemPrompt, /Do not perform a second general code review/u);
-		assert.match(skeptic.systemPrompt, /If no specific claim is supplied.*limits of verification, then stop/u);
-		assert.match(skeptic.systemPrompt, /Do not invent a claim or expand into a broad audit/u);
-		assert.match(skeptic.systemPrompt, /refuted, supported within checked limits, or unresolved/u);
-		assert.match(skeptic.systemPrompt, /Failure to find a counterexample is not proof/u);
-	});
-
-	it("keeps both verification roles focused, non-editing, and evidence-based", () => {
-		for (const agent of loadBuiltinAgents().filter((agent) => ["sentinel", "skeptic"].includes(agent.name))) {
-			assert.match(agent.systemPrompt, /safe focused checks/u);
-			assert.match(agent.systemPrompt, /Do not edit files or change Git state/u);
-			assert.match(agent.systemPrompt, /Main applies confirmed fixes/u);
-			assert.match(agent.systemPrompt, /Reuse main or upstream.*research, and passing checks when they still cover/u);
-			assert.match(agent.systemPrompt, /repeat or broaden checks only for changed code or a concrete uncertainty/u);
-			assert.match(agent.systemPrompt, /exact location, trigger, consequence, evidence, and smallest fix/u);
-			assert.match(agent.systemPrompt, /Separate unverified concerns from findings/u);
-			assert.match(agent.systemPrompt, /speculative hardening/u);
-			assert.match(agent.systemPrompt, /checks as `command → result`/u);
-		}
+		assert.match(sentinel.systemPrompt, /safe focused checks/u);
+		assert.match(sentinel.systemPrompt, /Do not edit files or change Git state/u);
+		assert.match(sentinel.systemPrompt, /Main applies confirmed fixes/u);
+		assert.match(sentinel.systemPrompt, /Reuse main or upstream.*research, and passing checks when they still cover/u);
+		assert.match(sentinel.systemPrompt, /repeat or broaden checks only for changed code or a concrete uncertainty/u);
+		assert.match(sentinel.systemPrompt, /exact location, trigger, consequence, evidence, and smallest fix/u);
+		assert.match(sentinel.systemPrompt, /Separate unverified concerns from findings/u);
+		assert.match(sentinel.systemPrompt, /speculative hardening/u);
+		assert.match(sentinel.systemPrompt, /checks as `command → result`/u);
 	});
 
 	it("preserves evidence reuse for research and implementation", () => {
@@ -171,13 +158,11 @@ describe("resolveAgentTools", () => {
 		assert.deepEqual(resolveAgentTools(scout, active, infos).tools, ["read", "docs_search"]);
 	});
 
-	it("lets sentinel and skeptic run checks through the active tools while keeping them leaves", () => {
-		for (const name of ["sentinel", "skeptic"]) {
-			const agent = loadBuiltinAgents().find((entry) => entry.name === name);
-			assert.ok(agent);
-			assert.deepEqual(resolveAgentTools(agent, ["read", "powershell", "codemode", "edit", "subagent", "subagent_workflow", "subagent_status", "subagent_message", "subagent_stop"], [CODEMODE]).tools,
-				["read", "powershell", "codemode", "edit"]);
-		}
+	it("lets sentinel run checks through the active tools while keeping it a leaf", () => {
+		const agent = loadBuiltinAgents().find((entry) => entry.name === "sentinel");
+		assert.ok(agent);
+		assert.deepEqual(resolveAgentTools(agent, ["read", "powershell", "codemode", "edit", "subagent", "subagent_status", "subagent_message", "subagent_stop"], [CODEMODE]).tools,
+			["read", "powershell", "codemode", "edit"]);
 	});
 
 	it("hands a read-only role the script-only read-only tools the session can reach", () => {
@@ -216,7 +201,7 @@ describe("resolveAgentTools", () => {
 			tool("subagent", undefined, undefined, "codemode"),
 			tool("subagent_message", undefined, undefined, "deferred"),
 		];
-		for (const name of ["artisan", "sentinel", "skeptic"]) {
+		for (const name of ["artisan", "sentinel"]) {
 			const agent = loadBuiltinAgents().find((entry) => entry.name === name)!;
 			for (const reachingTool of ["codemode", "tool_search"]) {
 				assert.deepEqual(resolveAgentTools(agent, ["read", reachingTool, "mcp__direct__search"], infos).tools,
@@ -233,6 +218,6 @@ describe("resolveAgentTools", () => {
 		assert.equal(isWriteCapableAgent({ name: "sentinel", tools: ["read", "docs_search"] }, infos), false);
 		assert.equal(isWriteCapableAgent({ name: "sentinel", tools: ["read", "custom_repository_tool"] }), true);
 		assert.equal(isWriteCapableAgent({ name: "sentinel", tools: ["read", "db_write"] }, infos), true);
-		assert.equal(isWriteCapableAgent({ name: "skeptic", tools: ["read", "codemode"] }, infos), true);
+		assert.equal(isWriteCapableAgent({ name: "sentinel", tools: ["read", "codemode"] }, infos), true);
 	});
 });
