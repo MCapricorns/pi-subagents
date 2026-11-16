@@ -21,11 +21,12 @@
 
 import { getAgentDir, type ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { Text } from "@earendil-works/pi-tui";
-import { getConfigPath } from "./src/configuration/config.ts";
+import { errorMessage, getConfigPath, loadConfig } from "./src/configuration/config.ts";
 import { runSetup } from "./src/configuration/setup.ts";
 import { loadBuiltinAgents } from "./src/delegation/agents.ts";
 import { registerSubagentTool } from "./src/delegation/dispatch.ts";
 import { buildDelegationDirective, installDelegationSections } from "./src/delegation/prompt.ts";
+import { buildOrchestrationSection } from "./src/delegation/orchestration.ts";
 import { currentSubagentDepth, getSubagentsRoot } from "./src/execution/spawn.ts";
 import { createDispatchCore } from "./src/lifecycle/dispatch-core.ts";
 import { registerCancellationHooks } from "./src/lifecycle/cancellation.ts";
@@ -73,7 +74,7 @@ export default function (pi: ExtensionAPI): void {
 	registerCancellationHooks(pi, runtime);
 
 	pi.registerCommand("subagents-setup", {
-		description: "Configure pi-subagents: model and thinking per role",
+		description: "Configure the worker model and thinking level",
 		handler: async (_args, ctx) => {
 			await runSetup(ctx, configPath);
 		},
@@ -112,16 +113,23 @@ export default function (pi: ExtensionAPI): void {
 
 	// Install the routing contract as prompt sections when the host can diff them.
 	// A full systemPrompt return forces an opaque prompt and invalidates the cache.
-	pi.on("before_agent_start", async (event) => {
+	pi.on("before_agent_start", async (event, ctx) => {
 		await runtime.durableRestore;
 		const agents = loadBuiltinAgents();
 		const sources = [...runtime.threads.values()];
+		let orchestration: string;
+		try {
+			orchestration = buildOrchestrationSection(await loadConfig(configPath), ctx);
+		} catch (error) {
+			orchestration = "Worker dispatch is paused because settings could not be loaded: " + errorMessage(error)
+				+ " Repair the settings or run /subagents-setup. Do not substitute main-model workers.";
+		}
 		const sections = event.systemPromptOptions?.sections;
 		if (sections) {
-			installDelegationSections(sections, agents, sources);
+			installDelegationSections(sections, agents, sources, orchestration);
 			return undefined;
 		}
-		const directive = buildDelegationDirective(agents, sources);
+		const directive = buildDelegationDirective(agents, sources, orchestration);
 		if (!directive) return undefined;
 		return { systemPrompt: `${event.systemPrompt}\n${directive}` };
 	});

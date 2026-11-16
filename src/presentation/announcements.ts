@@ -1,36 +1,34 @@
-/** Session-start recovery, stale-model cleanup, and progress-surface installation. */
+/** Session-start recovery, worker availability, and progress-surface installation. */
 
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { loadConfig, saveConfig } from "../configuration/config.ts";
-import { filterUnavailableModelOverrides } from "../configuration/models.ts";
+import { findModelByRef, modelRef } from "../configuration/models.ts";
 import { ensureDefaultConfig } from "../configuration/setup.ts";
 import { announceRecoveryRecords, relocateRecoveryManifest } from "../isolation/recovery.ts";
 import type { SubagentRuntime } from "../lifecycle/runtime.ts";
 import { installActiveRunsWidget } from "./widget.ts";
 
-/** Drop overrides that no authenticated model serves back to dynamic
- * main-model routing. A session model scope only narrows this session's
- * routing, so it never deletes a persisted override. */
-async function removeUnavailableAgentModels(
+/** Preserve the worker choice during outages instead of spending main-model quota. */
+async function checkWorkerModel(
 	ctx: Pick<ExtensionContext, "ui" | "modelRegistry">,
 	runtime: SubagentRuntime,
 ): Promise<void> {
 	try {
 		const config = await loadConfig(runtime.configPath);
-		const overrides = Object.entries(config.agentModels);
-		if (overrides.length === 0) return;
-		const { kept, dropped } = filterUnavailableModelOverrides(config.agentModels, ctx.modelRegistry.getAvailable());
-		const rewritten = JSON.stringify(kept) !== JSON.stringify(config.agentModels);
-		if (!rewritten && dropped.length === 0) return;
-		await saveConfig({ ...config, agentModels: kept }, runtime.configPath);
-		if (dropped.length === 0) return;
-		const list = dropped.map(({ agent, ref }) => `${agent}: ${ref}`).join(", ");
+		if (!config.model) return;
+		const selected = findModelByRef(ctx.modelRegistry.getAvailable(), config.model);
+		const liveRef = selected ? modelRef(selected) : undefined;
+		if (liveRef === config.model) return;
+		if (liveRef) {
+			await saveConfig({ ...config, model: liveRef }, runtime.configPath);
+			return;
+		}
 		ctx.ui.notify(
-			`pi-subagents: removed model overrides that are no longer available (${list}). Those roles now follow the main model; run /subagents-setup to choose another.`,
+			`pi-subagents: worker model ${config.model} is unavailable. Its setting is preserved and dispatch is paused. Restore availability or run /subagents-setup to choose another.`,
 			"warning",
 		);
 	} catch {
-		/* stale-model cleanup is non-fatal */
+		/* availability notices are non-fatal */
 	}
 }
 
@@ -45,7 +43,7 @@ export function registerAnnouncements(pi: ExtensionAPI, runtime: SubagentRuntime
 			// must not prevent the rest of the session UI from being installed.
 			ctx.ui.notify(`pi-subagents: recovery inspection failed; continuing startup: ${error instanceof Error ? error.message : String(error)}`, "warning");
 		}
-		await removeUnavailableAgentModels(ctx, runtime);
+		await checkWorkerModel(ctx, runtime);
 		// Bootstrap also runs on session_start; wait so this notice sees restored
 		// threads instead of racing an empty list.
 		await runtime.durableRestore;

@@ -25,8 +25,6 @@ export interface RunResult {
 	thinking?: string;
 	stopReason?: string;
 	errorMessage?: string;
-	/** Selected model when this result handed off to the current main model. */
-	modelFallbackFrom?: string;
 	dispatchFailed?: boolean;
 	/** Pi emitted agent, message, or tool activity for this attempt. */
 	activityObserved?: boolean;
@@ -90,8 +88,8 @@ export function asPlainTextPrompt(message: string): string {
 }
 
 /**
- * Stable control surface for a logical run generation. Startup/main-handoff attempts
- * attach and detach beneath it, so callers never retain a stale child handle.
+ * Stable control surface for a logical run generation. The child process
+ * attaches and detaches beneath it, so callers never retain a stale handle.
  * Control calls are serialized to prevent overlapping stop and settlement flows.
  */
 export class RunControl {

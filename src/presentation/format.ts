@@ -112,16 +112,13 @@ export function formatCompletionBlock(
 	const usage = formatUsage(result.usage);
 	const output = getResultOutput(result);
 	const overflow = inlineOverflow(output, maxResultLines);
-	const fallbackNote = result.modelFallbackFrom
-		? ` (selected model ${result.modelFallbackFrom} failed → main ${result.model ?? "dynamic default"})`
-		: "";
 	const runNote = result.runId !== undefined ? ` · run #${result.runId}` : "";
 	// A short task-derived label, not the task itself: the parent authored the
 	// task and still has it in context, but a wide fan-out of same-agent runs
 	// needs more than a run id to tell completions apart.
 	const label = shrinkRunLabel(runLabel(result.task), COMPLETION_LABEL_MAX);
 	const lines = [
-		`### [${result.agent}${label ? `·${label}` : ""}] ${status}${usage ? ` (${usage})` : ""}${fallbackNote}${runNote}`,
+		`### [${result.agent}${label ? `·${label}` : ""}] ${status}${usage ? ` (${usage})` : ""}${runNote}`,
 		"",
 	];
 	if (result.isolation === "worktree") {
@@ -167,14 +164,16 @@ export function formatCompletionBlock(
 		);
 	}
 	if (failed && isModelLevelFailure(result)) lines.push("", modelLevelTakeoverNote(result));
+	if (!failed && result.agent === "artisan") {
+		lines.push("", "Review handoff: main. Worker completion is not review approval. Inspect the actual diff, affected callers, acceptance criteria, and check evidence. Send confirmed corrections to the owning worker with subagent_message; main owns acceptance and release.");
+	}
 	return lines.join("\n");
 }
 
 /** A terminal model failure hands the unfinished task to main, not another run. */
 function modelLevelTakeoverNote(result: SingleResult): string {
-	const retry = result.modelFallbackFrom ? ", and the current main model also failed" : "";
 	const cause = getResultError(result) ?? "its model was unavailable or failed";
-	return `The sub-agent could not complete this task: ${cause}${retry}. Earlier edits and any retained result/session artifacts remain available. Main must inspect that work and finish with its own tools; do not re-dispatch this phase.`;
+	return `The worker could not complete this task: ${cause}. No main-model worker was started. Earlier edits and retained result/session artifacts remain available. Main must inspect that work and decide how to proceed; do not repeat this failed phase automatically.`;
 }
 
 /** Resolve a run-id request to actual ids: an exact numeric match always wins

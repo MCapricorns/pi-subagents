@@ -73,11 +73,11 @@ createInterface({ input: process.stdin }).on("line", (line) => {
 describe("automatic isolation and current roles", () => {
 	it("selects isolation by role and explicit override", () => {
 		assert.equal(defaultIsolationMode("artisan"), "worktree");
-		for (const name of ["scout", "sentinel"]) {
+		for (const name of ["scout"]) {
 			assert.equal(defaultIsolationMode(name), "shared");
 		}
 		assert.equal(defaultIsolationMode("artisan", "shared"), "shared");
-		assert.equal(defaultIsolationMode("sentinel", "worktree"), "worktree");
+		assert.equal(defaultIsolationMode("artisan", "worktree"), "worktree");
 	});
 
 	it("uses and integrates a worktree for a single implementation without an override", async (t) => {
@@ -130,14 +130,14 @@ describe("automatic isolation and current roles", () => {
 
 	it("rejects retired role names before dispatch and accepts only current names", async (t) => {
 		const h = await harness(t, "none");
-		for (const name of ["reviewer", "critic", "skeptic"]) {
+		for (const name of ["reviewer", "critic", "skeptic", "sentinel"]) {
 			await assert.rejects(h.run({ agent: name, task: `Verify ${name} routing` }), /Unknown agent/);
 		}
 		assert.equal(h.runtime.threads.size, 0);
-		const { thread, result } = await h.run({ agent: "sentinel", task: "Verify sentinel routing" });
-		assert.equal(thread.agentName, "sentinel");
+		const { thread, result } = await h.run({ agent: "scout", task: "Verify scout routing" });
+		assert.equal(thread.agentName, "scout");
 		assert.equal(thread.isolation, "shared");
-		assert.equal(result.agent, "sentinel");
+		assert.equal(result.agent, "scout");
 		// Resolve macOS /var aliases and Windows short paths on both sides.
 		assert.equal(await realpath(getResultOutput(result)), await realpath(h.project));
 	});

@@ -466,13 +466,13 @@ describe("subagent_message", () => {
 		const core = { setEnvironment() {}, async startBackground(...args: any[]) { captured = args; return { runId: 79 }; } } as unknown as DispatchCore;
 		const { runtime, tools } = harness(join(root, "config.json"), core);
 		const source = makeThread(64, "completed");
-		source.agentName = "sentinel";
+		source.agentName = "artisan";
 		source.sessionId = "summary-source";
 		source.sessionDir = join(root, "source");
 		await mkdir(source.sessionDir);
 		await writeFile(join(source.sessionDir, "2026_summary-source.jsonl"), "context");
 		source.lastResult = {
-			agent: "sentinel", task: source.task, exitCode: 0, stderr: "", usage: emptyUsage(),
+			agent: "artisan", task: source.task, exitCode: 0, stderr: "", usage: emptyUsage(),
 			messages: [
 				{ role: "assistant", content: [{ type: "text", text: "Found a race in src/cache.ts" }, { type: "toolCall", name: "read", arguments: { path: "src/cache.ts" } }], stopReason: "stop" } as never,
 			],

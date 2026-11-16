@@ -1,4 +1,4 @@
-/** Standalone modal panels for /subagents-setup role settings and model selection. */
+/** Compact worker settings and a searchable model picker in standalone modal panels. */
 
 import {
 	Input, fuzzyFilter, matchesKey, truncateToWidth, visibleWidth, wrapTextWithAnsi,
@@ -285,205 +285,92 @@ export function promptSelectOne(
 	}
 	return ctx.ui.custom<string | undefined>(
 		(tui, theme, keybindings, done) => new Picker(items, { title, hint, initialValue }, tui, theme, keybindings, done),
-		{ overlay: true, overlayOptions: SETUP_OVERLAY_OPTIONS },
+		{ overlay: true, overlayOptions: SETUP_OVERLAY_OPTIONS, blocked: { kind: "question", message: title } },
 	);
 }
 
-export interface RoleGridRow {
-	role: string;
-	purpose?: string;
+export interface WorkerSettingsView {
+	main: string;
 	model: string;
-	/** Effective level, optionally followed by the requested level when clamped. */
 	thinking: string;
-	thinkingOverridden?: boolean;
-	description: string;
+	note: string;
+	status: string;
+	focus: string;
 }
-export interface RoleGridFocus { row?: number; column?: number; }
-const GRID_COLUMNS = ["model", "thinking", "reset"] as const;
-export type RoleGridColumn = (typeof GRID_COLUMNS)[number];
-export interface RoleGridChoice { row: number; column: number; role: string; field: RoleGridColumn; }
 
-/** Standalone modal panel with a role register beside the selected role's settings;
- * narrow terminals stack the same regions. Full effective values are never squeezed into grid cells. */
-class RoleGrid implements Component {
-	private row: number;
-	private column: number;
-	private scrollTop = 0;
-	private pageRows = 1;
-	private viewport = "";
-	private revealField = true;
+const SETTING_KEYS = ["model", "thinking", "reset"] as const;
 
-	private readonly rows: RoleGridRow[];
-	private readonly status: string;
+class WorkerSettings implements Component {
+	private cursor: number;
+	private detailTop = 0;
+	private detailPage = 1;
+	private readonly view: WorkerSettingsView;
 	private readonly tui: TUI;
 	private readonly theme: Theme;
-	private readonly keybindings: KeybindingsManager;
-	private readonly done: (choice: RoleGridChoice | undefined) => void;
-
+	private readonly keys: KeybindingsManager;
+	private readonly done: (value: string | undefined) => void;
 	constructor(
-		rows: RoleGridRow[], status: string, focus: RoleGridFocus, tui: TUI, theme: Theme,
-		keybindings: KeybindingsManager, done: (choice: RoleGridChoice | undefined) => void,
+		view: WorkerSettingsView, tui: TUI, theme: Theme,
+		keys: KeybindingsManager, done: (value: string | undefined) => void,
 	) {
-		this.rows = rows;
-		this.status = status;
+		this.view = view;
 		this.tui = tui;
 		this.theme = theme;
-		this.keybindings = keybindings;
+		this.keys = keys;
 		this.done = done;
-		this.row = Math.min(Math.max(0, focus.row ?? 0), Math.max(0, rows.length - 1));
-		this.column = Math.min(Math.max(0, focus.column ?? 0), GRID_COLUMNS.length - 1);
-	}
-
-	private settings(width: number): { lines: string[]; start: number; end: number } {
-		const focused = this.rows[this.row];
-		if (!focused) return { lines: [this.theme.fg("dim", "No roles configured.")], start: 0, end: 1 };
-		const theme = this.theme;
-		const dim = (text: string) => theme.fg("dim", text);
-		const field = GRID_COLUMNS[this.column]!;
-		const label = field === "thinking" ? "Thinking (reasoning effort)" : field === "reset" ? "Reset" : "Model";
-		const lines = [theme.bold(focused.role + " · " + label), ""];
-		const starts: number[] = [];
-		const setting = (column: number, name: string, hint: string): void => {
-			starts.push(lines.length);
-			const active = this.column === column;
-			lines.push((active ? theme.fg("accent", "› ") : "  ") + (active ? theme.underline(theme.bold(name)) : name) + dim(" · " + hint));
-		};
-		const value = (text: string): void => {
-			lines.push(...wrapTextWithAnsi(text, Math.max(1, width - 2)).map((line) => "  " + line));
-		};
-		setting(0, "Model", "Enter edit");
-		value(focused.model);
-		setting(1, "Thinking", "effective");
-		value(focused.thinking);
-		lines.push(dim("  Source: " + (focused.thinkingOverridden ? "override *" : "role default")));
-		setting(2, "Reset", "Enter restore defaults");
-		const end = lines.length;
-		lines.push("", ...wrapTextWithAnsi(focused.description, width).map(dim));
-		return { lines, start: starts[this.column]!, end: starts[this.column + 1] ?? end };
+		this.cursor = Math.max(0, SETTING_KEYS.findIndex((key) => key === view.focus));
 	}
 
 	render(width: number): string[] {
 		if (width <= 0) return [];
-		const theme = this.theme;
-		const dim = (text: string) => theme.fg("dim", text);
 		const height = setupHeight(this.tui);
-		const framed = width >= 20 && height >= 10;
-		const innerWidth = framed ? Math.max(1, width - 4) : width;
-		const wide = innerWidth >= 72;
-		// The two panes close exactly: roleWidth + 3-column gutter + detailWidth = innerWidth.
-		const roleWidth = wide ? Math.min(28, Math.max(20, Math.floor(innerWidth * 0.28))) : innerWidth;
-		const roles: string[] = [];
-		for (const [index, role] of this.rows.entries()) {
-			const selected = index === this.row;
-			const title = role.purpose && wide ? role.role + " · " + role.purpose : role.role;
-			const clippedTitle = truncateToWidth(title, Math.max(1, roleWidth - 2), "…");
-			const name = selected ? theme.bold(clippedTitle) : clippedTitle;
-			roles.push((selected ? theme.fg("accent", "› ") : "  ") + name);
-			if (wide) {
-				const summary = role.model + " · " + role.thinking + (role.thinkingOverridden ? " *" : "");
-				roles.push(dim("  " + truncateToWidth(summary, roleWidth - 2, "…")));
-			}
+		const framed = width >= 20 && height >= 13;
+		const inner = Math.max(1, width - (framed ? 4 : 0));
+		const values = [this.view.model, this.view.thinking, "Follow main · medium"];
+		const labels = ["Model", "Thinking", "Reset"];
+		const rows = labels.map((label, index) => {
+			const line = truncateToWidth(label + "  " + values[index], Math.max(1, inner - 2), "…");
+			return index === this.cursor ? this.theme.fg("accent", "› " + this.theme.bold(line)) : "  " + line;
+		});
+		const hints = ["Worker model: " + this.view.model, "Worker thinking: " + this.view.thinking, "Restore Follow main and medium thinking."];
+		const details = [...wrapTextWithAnsi(hints[this.cursor]!, inner), ...(this.view.note ? wrapTextWithAnsi(this.view.note, inner) : [])];
+		const key = (action: Keybinding) => {
+			const name = this.keys.getKeys(action)[0] ?? "unbound";
+			return ({ escape: "Esc", enter: "Enter", up: "↑", down: "↓" } as Record<string, string>)[name] ?? name;
+		};
+		const footer = key("tui.select.cancel") + " close · " + key("tui.select.confirm") + " edit · " + key("tui.select.up") + key("tui.select.down") + " move";
+		if (height < 12) {
+			return [this.theme.bold("Subagents"), ...rows, this.view.status, footer]
+				.slice(0, height).map((line) => truncateToWidth(line, width, "…"));
 		}
-		const details = this.settings(wide ? innerWidth - roleWidth - 3 : innerWidth);
-		const detailOffset = wide ? 0 : roles.length + 1;
-		const body: string[] = [];
-		const divider = dim(" │ ");
-		if (wide) {
-			for (let i = 0; i < Math.max(roles.length, details.lines.length); i++) {
-				const left = truncateToWidth(roles[i] ?? "", roleWidth, "…");
-				body.push(left + " ".repeat(Math.max(0, roleWidth - visibleWidth(left))) + divider + (details.lines[i] ?? ""));
-			}
-		} else {
-			body.push(...roles, "", ...details.lines);
-		}
-		const footer = innerWidth >= 52
-			? [dim("↑/↓ role · ←/→ field · Enter edit · Esc close")]
-			: [dim("↑/↓ role · ←/→ field"), dim("Enter edit · Esc close")];
-
-		const chromeRows = framed ? 4 + footer.length + 1 : 3 + footer.length + 1;
-		if (body.length + chromeRows <= height) {
-			this.scrollTop = 0;
-			this.revealField = true;
-			if (!framed) {
-				return [theme.bold("Subagents · Roles"), dim(this.status), "", ...body, "", ...footer]
-					.map((line) => truncateToWidth(line, width, "…"));
-			}
-			return framePanel(theme, width, "Subagents · Roles", this.status, body, footer);
-		}
-
-		// Pin the selected identity while scrolling the existing pane content.
-		// The field's complete value and provenance remain reachable by paging.
-		const compact = height < 10;
-		const header = [details.lines[0]!];
-		const controls = innerWidth >= 58
-			? [dim("↑/↓ role · ←/→ field · PgUp/Dn scroll · Enter edit · Esc close")]
-			: compact
-				? [dim("PgUp/Dn scroll · Enter edit · Esc")]
-				: [dim("↑/↓ role · ←/→ field"), dim("PgUp/Dn scroll · Enter edit · Esc")];
-		const scrollChrome = framed ? 4 + header.length + controls.length + 1 : header.length + controls.length;
-		this.pageRows = Math.max(1, height - scrollChrome);
-		const viewport = innerWidth + ":" + this.pageRows;
-		if (this.revealField || this.viewport !== viewport) {
-			const start = detailOffset + details.start;
-			const end = detailOffset + details.end;
-			// One-line viewports show the value rather than repeating its label.
-			this.scrollTop = end - start > this.pageRows ? start + Number(this.pageRows === 1 && end > start + 1)
-				: Math.max(0, end - this.pageRows);
-		}
-		this.viewport = viewport;
-		this.revealField = false;
-		this.scrollTop = Math.max(0, Math.min(this.scrollTop, body.length - this.pageRows));
-		const visibleBody = [...header, ...body.slice(this.scrollTop, this.scrollTop + this.pageRows)];
-		if (!framed) {
-			return [...visibleBody, ...controls].map((line) => truncateToWidth(line, width, "…"));
-		}
-		return framePanel(theme, width, "Subagents · Roles", this.status, visibleBody, controls);
+		this.detailPage = Math.max(1, height - (framed ? 12 : 9));
+		this.detailTop = Math.max(0, Math.min(this.detailTop, details.length - this.detailPage));
+		const body = [
+			this.theme.fg("muted", truncateToWidth("Main · " + this.view.main, inner, "…")),
+			"", ...rows, "",
+			...details.slice(this.detailTop, this.detailTop + this.detailPage).map((line) => this.theme.fg("muted", line)),
+		];
+		const status = (details.length > this.detailPage ? "PgUp/PgDn details · " : "") + this.view.status;
+		if (framed) return framePanel(this.theme, width, "Subagents", undefined, body, [status, footer]);
+		return [this.theme.bold("Subagents"), ...body, status, footer].map((line) => truncateToWidth(line, width, "…"));
 	}
 
 	handleInput(data: string): void {
-		const kb = this.keybindings;
-		const rows = this.rows.length;
-		const previousRow = this.row;
-		const previousColumn = this.column;
-		if (kb.matches(data, "tui.select.pageUp")) {
-			this.scrollTop -= this.pageRows;
-		} else if (kb.matches(data, "tui.select.pageDown")) {
-			this.scrollTop += this.pageRows;
-		} else if (kb.matches(data, "tui.select.up")) {
-			if (rows) this.row = (this.row - 1 + rows) % rows;
-		} else if (kb.matches(data, "tui.select.down")) {
-			if (rows) this.row = (this.row + 1) % rows;
-		} else if (matchesKey(data, "left") || kb.matches(data, "tui.editor.cursorLeft")) {
-			this.column = (this.column - 1 + GRID_COLUMNS.length) % GRID_COLUMNS.length;
-		} else if (matchesKey(data, "right") || kb.matches(data, "tui.editor.cursorRight")) {
-			this.column = (this.column + 1) % GRID_COLUMNS.length;
-		} else if (kb.matches(data, "tui.select.confirm")) {
-			const focused = this.rows[this.row];
-			if (focused) {
-				this.done({ row: this.row, column: this.column, role: focused.role, field: GRID_COLUMNS[this.column]! });
-				return;
-			}
-		} else if (kb.matches(data, "tui.select.cancel")) {
-			this.done(undefined);
-			return;
-		} else return;
-		if (this.row !== previousRow || this.column !== previousColumn) this.revealField = true;
+		if (this.keys.matches(data, "tui.select.cancel")) { this.done(undefined); return; }
+		if (this.keys.matches(data, "tui.select.confirm")) { this.done(SETTING_KEYS[this.cursor]); return; }
+		if (this.keys.matches(data, "tui.select.up")) { this.cursor = (this.cursor + 2) % 3; this.detailTop = 0; }
+		else if (this.keys.matches(data, "tui.select.down")) { this.cursor = (this.cursor + 1) % 3; this.detailTop = 0; }
+		else if (this.keys.matches(data, "tui.select.pageUp")) this.detailTop -= this.detailPage;
+		else if (this.keys.matches(data, "tui.select.pageDown")) this.detailTop += this.detailPage;
 		this.tui.requestRender();
 	}
 
 	invalidate(): void {}
 }
 
-/** Role × setting modal panel. Esc closes without a change. */
-export function promptRoleGrid(
-	ctx: PickerContext, rows: RoleGridRow[], focus: RoleGridFocus = {}, status = "Changes save immediately",
-): Promise<RoleGridChoice | undefined> {
-	if (ctx.mode !== "tui") {
-		ctx.ui.notify("/subagents-setup requires Pi's interactive TUI.", "error");
-		return Promise.resolve(undefined);
-	}
-	return ctx.ui.custom<RoleGridChoice | undefined>(
-		(tui, theme, keybindings, done) => new RoleGrid(rows, status, focus, tui, theme, keybindings, done),
-		{ overlay: true, overlayOptions: SETUP_OVERLAY_OPTIONS },
+export function promptSettings(ctx: PickerContext, view: WorkerSettingsView): Promise<string | undefined> {
+	return ctx.ui.custom<string | undefined>(
+		(tui, theme, keys, done) => new WorkerSettings(view, tui, theme, keys, done),
+		{ overlay: true, overlayOptions: SETUP_OVERLAY_OPTIONS, blocked: { kind: "question", message: "Configure subagent worker" } },
 	);
 }

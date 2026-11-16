@@ -6,12 +6,12 @@ import { describe, it, type TestContext } from "node:test";
 import type { Api, Model } from "@earendil-works/pi-ai";
 import type { ExtensionContext, Theme } from "@earendil-works/pi-coding-agent";
 import {
-	CURSOR_MARKER, KeybindingsManager, TUI_KEYBINDINGS, compositeTuiLine, stripTerminalSequences, visibleWidth, wrapTextWithAnsi,
+	CURSOR_MARKER, KeybindingsManager, TUI_KEYBINDINGS, compositeTuiLine, visibleWidth,
 	type Component, type Focusable, type OverlayOptions, type TUI,
 } from "@earendil-works/pi-tui";
-import type { SubagentsConfig } from "../src/configuration/config.ts";
+import { DEFAULT_CONFIG, type SubagentsConfig } from "../src/configuration/config.ts";
 import { ensureDefaultConfig, runSetup } from "../src/configuration/setup.ts";
-import { SETUP_OVERLAY_OPTIONS, promptRoleGrid, promptSelectOne } from "../src/configuration/ui.ts";
+import { SETUP_OVERLAY_OPTIONS, promptSettings, promptSelectOne } from "../src/configuration/ui.ts";
 import { emptyUsage } from "../src/execution/run-control.ts";
 import type { RunView } from "../src/presentation/monitor.ts";
 import { formatSubagentWidgetLines } from "../src/presentation/widget.ts";
@@ -31,6 +31,7 @@ const tui = { requestRender() {}, terminal: { rows: 28, columns: 120 } } as TUI;
 type PickerFactory = (tui: TUI, theme: Theme, kb: KeybindingsManager, done: (value: unknown) => void) => Component;
 interface CustomOptions {
 	overlay?: boolean;
+	blocked?: { kind: string; message: string };
 	overlayOptions?: OverlayOptions | (() => OverlayOptions);
 }
 
@@ -42,7 +43,7 @@ function model(id: string, reasoning = true): Model<Api> {
 	};
 }
 function baseConfig(overrides: Partial<SubagentsConfig> = {}): SubagentsConfig {
-	return { agentModels: {}, agentThinkingLevels: {}, ...overrides };
+	return { ...DEFAULT_CONFIG, ...overrides };
 }
 function freshConfigPath(t: TestContext): string {
 	const dir = mkdtempSync(join(tmpdir(), "pi-subagents-setup-"));
@@ -59,7 +60,7 @@ interface Step {
 }
 async function scenario(t: TestContext, initial: SubagentsConfig | undefined, steps: Step[], models = [model("reasoning"), model("other")]) {
 	const path = freshConfigPath(t);
-	if (initial) writeFileSync(path, JSON.stringify(initial), "utf8");
+	writeFileSync(path, JSON.stringify(initial ?? baseConfig()), "utf8");
 	const notices: string[] = [];
 	const context = {
 		mode: "tui", model: models[0], scopedModels: [], modelRegistry: { getAvailable: () => models },
@@ -68,6 +69,7 @@ async function scenario(t: TestContext, initial: SubagentsConfig | undefined, st
 			custom: async (factory: PickerFactory, options?: CustomOptions) => new Promise((resolve, reject) => {
 				try {
 					assert.equal(options?.overlay, true, "setup screens must open as standalone overlay panels");
+					assert.equal(options?.blocked?.kind, "question");
 					assert.deepEqual(options?.overlayOptions, SETUP_OVERLAY_OPTIONS);
 					const component = factory(tui, theme, keybindings, resolve);
 					const screen = component.render(100).join("\n");
@@ -85,7 +87,6 @@ async function scenario(t: TestContext, initial: SubagentsConfig | undefined, st
 	return path;
 }
 
-const RIGHT = "\x1b[C";
 
 function overlayWidth(termWidth: number): number {
 	const availWidth = Math.max(1, termWidth - 4);
@@ -126,264 +127,94 @@ function hostOverlayFrame(overlay: Component, width: number, height: number) {
 	return { base, panelLines, composited };
 }
 
-describe("standalone setup overlay panel", () => {
-	it("renders as a centered modal overlay without replacing the input editor", async () => {
-		for (const height of [24, 16]) for (const width of [40, 80, 120]) {
-			const terminal = { rows: height, columns: width };
-			const context = { mode: "tui", ui: { notify() {}, custom: async (factory: PickerFactory, options?: CustomOptions) => new Promise((resolve) => {
-				assert.equal(options?.overlay, true);
-				assert.deepEqual(options?.overlayOptions, SETUP_OVERLAY_OPTIONS);
-				const c = factory({ requestRender() {}, terminal } as TUI, theme, keybindings, resolve);
-				for (const role of ["scout", "artisan", "sentinel"]) {
-					for (const field of ["Model", "Thinking", "Reset"]) {
-						const { base, panelLines, composited } = hostOverlayFrame(c, width, height);
-						assert.match(base.join("\n"), /Subagents.*8 running/u, `${width}×${height}: underlying widget stays intact`);
-						assert.match(base.join("\n"), /user prompt stays in the editor/u, `${width}×${height}: underlying editor stays intact`);
-						const panelText = panelLines.join("\n");
-						assert.ok(panelText.includes(`${role} · ${field}`), `${width}×${height}: focused role and field`);
-						assert.ok(panelLines.length <= overlayMaxHeight(height), `${width}×${height}: fits modal maxHeight`);
-						assert.ok(composited.every((line) => visibleWidth(line) <= width));
-						press(c, RIGHT);
-					}
-					press(c, KEY.down);
-				}
+describe("compact worker settings", () => {
+	it("edits the worker model and thinking, preserving focus and preferences", async (t) => {
+		const path = await scenario(t, baseConfig({ thinking: "high" }), [
+			{ title: /Subagents/u, act(c, screen) {
+				assert.match(screen, /Model.*Follow main/u);
+				assert.match(screen, /Thinking.*high/u);
+				assert.doesNotMatch(screen, /scout|artisan|sentinel|Search:/u);
+				press(c, KEY.enter);
+			} },
+			{ title: /Worker model/u, act: (c) => press(c, "other", KEY.enter) },
+			{ title: /Model saved/u, act(c, screen) {
+				assert.match(screen, /› Model.*test\/other/u);
+				press(c, KEY.down, KEY.enter);
+			} },
+			{ title: /Worker thinking/u, act: (c) => press(c, "low", KEY.enter) },
+			{ title: /Thinking saved/u, act(c, screen) {
+				assert.match(screen, /› Thinking.*low/u);
 				press(c, KEY.escape);
-			}) } } as unknown as ExtensionContext;
-			await promptRoleGrid(context, ["scout", "artisan", "sentinel"].map((role) => ({
-				role, model: "provider/非常长的推理模型-with-vision-and-tools".repeat(3),
-				thinking: "off (high requested)", thinkingOverridden: true, description: "Verify implementation. No edits. ".repeat(5),
-			})));
-		}
+			} },
+		]);
+		assert.deepEqual(saved(path), baseConfig({ model: "test/other", thinking: "low" }));
 	});
 
-	it("pages through full CJK values and descriptions in the modal, then reveals the active field after navigation and resize", async () => {
-		const modelRef = "provider/非常长的推理模型-with-vision-and-tools".repeat(4);
-		const description = "Verify implementation against callers. No edits. ".repeat(8);
-		const ansiTheme = {
-			...theme,
-			fg: (_color: string, text: string) => "\x1b[90m" + text + "\x1b[39m",
-		} as Theme;
-		for (const height of [24, 16]) for (const width of [40, 80, 120]) {
-			const terminal = { rows: height, columns: width };
-			const context = { mode: "tui", ui: { notify() {}, custom: async (factory: PickerFactory, options?: CustomOptions) => new Promise((resolve) => {
-				assert.equal(options?.overlay, true);
-				const c = factory({ requestRender() {}, terminal } as TUI, ansiTheme, keybindings, resolve);
-				c.render(width);
-				press(c, ...Array<string>(40).fill("\x1b[5~"));
-				const content: string[] = [];
-				let previous = "";
-				for (let page = 0; page < 80; page++) {
-					const lines = c.render(width);
-					assert.ok(lines.length <= overlayMaxHeight(height));
-					assert.ok(lines.every((line) => visibleWidth(line) <= width));
-					const visible = lines.map(stripTerminalSequences).join("\n");
-					if (visible === previous) break;
-					content.push(visible);
-					previous = visible;
-					press(c, KEY.pageDown);
-				}
-				const rightPaneLines = content.flatMap((page) => {
-					const lines = page.split("\n");
-					const footerSep = lines.findLastIndex((line, idx) => idx > 3 && line.startsWith("├"));
-					return lines.slice(4, footerSep > 4 ? footerSep : -2).map((line) => {
-						const stripped = line.replace(/^│\s?|\s?│$/gu, "");
-						const split = stripped.indexOf(" │ ");
-						return (split >= 0 ? stripped.slice(split + 3) : stripped).trim();
-					});
-				});
-				const text = rightPaneLines.join("").replace(/\s+/gu, "");
-				assert.ok(text.includes(modelRef), `${width}×${height}: complete model is reachable`);
-				const innerWidth = width >= 20 ? width - 4 : width;
-				const wide = innerWidth >= 72;
-				const roleWidth = wide ? Math.min(28, Math.max(20, Math.floor(innerWidth * 0.28))) : innerWidth;
-				const detailWidth = wide ? innerWidth - roleWidth - 3 : innerWidth;
-				const reachedLines = new Set(rightPaneLines);
-				for (const line of wrapTextWithAnsi(description, detailWidth)) {
-					assert.ok(reachedLines.has(stripTerminalSequences(line).trim()), `${width}×${height}: description line is reachable`);
-				}
-				press(c, RIGHT);
-				let screen = hostOverlayFrame(c, width, height).panelLines.map(stripTerminalSequences).join("\n");
-				assert.match(screen, /sentinel · Thinking/u);
+	it("leaves a picker without changing settings and resets only worker settings", async (t) => {
+		const path = await scenario(t, baseConfig({ model: "test/other", thinking: "high" }), [
+			{ title: /Subagents/u, act: (c) => press(c, KEY.enter) },
+			{ title: /Worker model/u, act: (c) => press(c, KEY.escape) },
+			{ title: /Subagents/u, act: (c) => press(c, KEY.down, KEY.down, KEY.enter) },
+			{ title: /Defaults restored/u, act(c, screen) {
+				assert.match(screen, /Model.*Follow main/u);
+				assert.match(screen, /Thinking.*medium/u);
+				press(c, KEY.escape);
+			} },
+		]);
+		assert.deepEqual(saved(path), baseConfig());
+	});
+
+	it("shows clamped thinking without discarding the saved preference", async (t) => {
+		const path = await scenario(t, baseConfig({ model: "test/plain", thinking: "high" }), [{
+			title: /Subagents/u, act(c, screen) {
 				assert.match(screen, /off \(high requested\)/u);
-				assert.match(screen, /Source: override/u);
-				terminal.rows = 28;
-				c.render(120);
-				terminal.rows = 16;
-				screen = hostOverlayFrame(c, 40, 16).panelLines.map(stripTerminalSequences).join("\n");
-				assert.match(screen, /sentinel · Thinking/u);
-				assert.match(screen, /off \(high requested\)/u);
-				press(c, KEY.enter);
-			}) } } as unknown as ExtensionContext;
-			assert.deepEqual(await promptRoleGrid(context, [
-				{ role: "sentinel", model: modelRef, thinking: "off (high requested)", thinkingOverridden: true, description },
-			]), { row: 0, column: 1, role: "sentinel", field: "thinking" });
-		}
-	});
-
-	it("keeps Unicode search and its IME marker visible when the modal overlay changes focus", async () => {
-		for (const height of [24, 16]) for (const width of [40, 80, 120]) {
-			const context = { mode: "tui", ui: { notify() {}, custom: async (factory: PickerFactory, options?: CustomOptions) => new Promise((resolve) => {
-				assert.equal(options?.overlay, true);
-				const c = factory({ requestRender() {}, terminal: { rows: height, columns: width } } as TUI, theme, keybindings, resolve);
-				const focusable = c as Component & Focusable;
-				focusable.focused = true;
-				press(c, "\x1b[200~中文模型\x1b[201~");
-				let frame = hostOverlayFrame(c, width, height).composited;
-				assert.ok(frame.some((line) => line.includes(CURSOR_MARKER) && line.includes("中文模型")));
-				assert.match(frame.join("\n"), /sentinel · Model/u);
-				assert.ok(frame.every((line) => visibleWidth(line) <= width));
-				focusable.focused = false;
-				assert.ok(hostOverlayFrame(c, width, height).composited.every((line) => !line.includes(CURSOR_MARKER)));
-				focusable.focused = true;
-				press(c, "z");
-				frame = hostOverlayFrame(c, width, height).composited;
-				assert.match(frame.join("\n"), /No matches/u);
-				press(c, "\x7f", KEY.enter);
-			}) } } as unknown as ExtensionContext;
-			assert.equal(await promptSelectOne(context, "sentinel · Model", "Search capabilities", [
-				{ value: "test/zh", label: "provider/中文模型-with-vision-and-reasoning".repeat(3), description: "推理模型 · vision · tools ".repeat(5) },
-				{ value: "test/other", label: "Other" },
-			]), "test/zh");
-		}
-	});
-});
-
-describe("role grid", () => {
-	it("highlights only the field Enter edits across both pane layouts", async () => {
-		const highlighted: string[] = [];
-		const selectedTheme = { ...theme, underline: (text: string) => { highlighted.push(text); return text; } } as Theme;
-		const context = { mode: "tui", ui: {
-			notify() {},
-			custom: async (factory: PickerFactory) => new Promise((resolve) => {
-				const c = factory(tui, selectedTheme, keybindings, resolve);
-				for (const [label, field] of [["Model", "Model"], ["Thinking (reasoning effort)", "Thinking"], ["Reset", "Reset"]]) {
-					for (const width of [40, 80, 120]) {
-						highlighted.length = 0;
-						const screen = c.render(width).join("\n");
-						assert.deepEqual(highlighted, [field]);
-						assert.ok(screen.includes(`scout · ${label}`));
-						assert.match(screen, /test\/model/u);
-						assert.match(screen, /Source: role default/u);
-					}
-					if (field !== "Reset") press(c, RIGHT);
-				}
-				press(c, KEY.enter);
-			}),
-		} } as unknown as ExtensionContext;
-		assert.deepEqual(await promptRoleGrid(context, [{ role: "scout", model: "test/model", thinking: "high", description: "Research" }]), { row: 0, column: 2, role: "scout", field: "reset" });
-	});
-
-	it("shows canonical roles with migrated model and thinking preferences side by side", async (t) => {
-		const path = await scenario(t, baseConfig({ agentModels: { reviewer: "test/other" }, agentThinkingLevels: { skeptic: "medium" } }), [{
-			title: /Subagents · Roles/u, act(c, screen) {
-				assert.match(screen, /Model · Enter edit/u);
-				for (const role of ["scout", "artisan", "sentinel"]) assert.match(screen, new RegExp(role));
-				assert.doesNotMatch(screen, /reviewer|critic|skeptic/u);
-				press(c, KEY.down, KEY.down);
-				assert.match(c.render(100).join("\n"), /sentinel · Model[\s\S]*test\/other[\s\S]*medium[\s\S]*Source: override \*/u);
 				press(c, KEY.escape);
 			},
-		}]);
-		assert.deepEqual(saved(path), baseConfig({ agentModels: { sentinel: "test/other" }, agentThinkingLevels: { sentinel: "medium" } }));
+		}], [model("plain", false)]);
+		assert.equal(saved(path).thinking, "high");
 	});
 
-	it("explains implementation verification and claim challenges in sentinel's selected row", async (t) => {
-		await scenario(t, baseConfig(), [{ title: /Roles/u, act(c) {
-			press(c, KEY.down, KEY.down);
-			const sentinel = c.render(100).map((line) => line.replace(/[│╭╮╰╯├┤─]+/gu, " ").trim()).join(" ").replace(/\s+/g, " ");
-			assert.match(sentinel, /sentinel · Model/u);
-			assert.match(sentinel, /implementation or diff and challenge claims or assumptions for defects and regressions/u);
-			assert.match(sentinel, /No edits/u);
-			press(c, KEY.escape);
-		} }]);
+	it("renders the actual Pi overlay without replacing the input editor", async () => {
+		for (const height of [24, 16, 14]) for (const width of [40, 80, 120]) {
+			const context = { mode: "tui", ui: { custom: async (factory: PickerFactory, options?: CustomOptions) => new Promise((resolve) => {
+				assert.equal(options?.overlay, true);
+				assert.equal(options?.blocked?.kind, "question");
+				const component = factory({ requestRender() {}, terminal: { rows: height, columns: width } } as TUI, theme, keybindings, resolve);
+				const { base, panelLines, composited } = hostOverlayFrame(component, width, height);
+				assert.match(base.join("\n"), /user prompt stays in the editor/u);
+				assert.match(base.join("\n"), /Subagents.*8 running/u);
+				assert.match(panelLines.join("\n"), /Model/u);
+				assert.match(panelLines.join("\n"), /Thinking/u);
+				assert.match(panelLines.join("\n"), /Reset/u);
+				assert.ok(panelLines.every((line) => visibleWidth(line) <= overlayWidth(width)));
+				assert.ok(composited.every((line) => visibleWidth(line) <= width));
+				assert.ok(component.render(overlayWidth(width)).length <= overlayMaxHeight(height));
+				press(component, KEY.escape);
+			}) } } as unknown as ExtensionContext;
+			await promptSettings(context, { main: "test/main", model: "test/worker", thinking: "medium", note: "", status: "Changes save immediately", focus: "model" });
+		}
 	});
 
-	it("edits sentinel model and thinking from one row and keeps the focused cell", async (t) => {
-		const path = await scenario(t, baseConfig({ agentModels: { artisan: "test/reasoning" } }), [
-			{ title: /Roles/u, act: (c) => press(c, KEY.down, KEY.down, KEY.enter) },
-			{ title: /sentinel · Model/u, act: (c) => press(c, "other", KEY.enter) },
-			{ title: /Saved sentinel model/u, act(c, screen) {
-				assert.match(screen, /sentinel · Model/u);
-				assert.match(screen, /test\/other/u);
-				assert.match(screen, /Source: role default/u);
-				press(c, RIGHT, KEY.enter);
-			} },
-			{ title: /sentinel · Thinking/u, act: (c) => press(c, "medium", KEY.enter) },
-			{ title: /Saved sentinel thinking/u, act(c, screen) {
-				assert.match(screen, /sentinel · Thinking/u);
-				assert.match(screen, /medium[\s\S]*Source: override \*/u);
-				press(c, KEY.escape);
-			} },
-		]);
-		assert.deepEqual(saved(path), baseConfig({ agentModels: { artisan: "test/reasoning", sentinel: "test/other" }, agentThinkingLevels: { sentinel: "medium" } }));
-	});
-
-	it("reset lives in its own column and only clears the focused role", async (t) => {
-		const path = await scenario(t, baseConfig({ agentModels: { scout: "test/other", sentinel: "test/reasoning" }, agentThinkingLevels: { scout: "high", sentinel: "low" } }), [
-			{ title: /Roles/u, act: (c) => press(c, RIGHT, RIGHT, KEY.enter) },
-			{ title: /Saved scout defaults/u, act(c, screen) {
-				assert.match(screen, /scout · Reset/u);
-				assert.match(screen, /Follow main[\s\S]*low[\s\S]*Source: role default/u);
-				press(c, KEY.down, KEY.down);
-				assert.match(c.render(100).join("\n"), /test\/reasoning[\s\S]*low[\s\S]*Source: override/u);
-				press(c, KEY.escape);
-			} },
-		]);
-		assert.deepEqual(saved(path), baseConfig({ agentModels: { sentinel: "test/reasoning" }, agentThinkingLevels: { sentinel: "low" } }));
-	});
-
-	it("Esc in a picker keeps the saved value and the focused cell", async (t) => {
-		const initial = baseConfig({ agentModels: { scout: "test/other" } });
-		const path = await scenario(t, initial, [
-			{ title: /Roles/u, act: (c) => press(c, KEY.enter) },
-			{ title: /scout · Model/u, act: (c) => press(c, "reasoning", KEY.escape) },
-			{ title: /Roles/u, act(c, screen) { assert.match(screen, /scout · Model[\s\S]*test\/other/u); press(c, KEY.escape); } },
-		]);
-		assert.deepEqual(saved(path), initial);
-	});
-
-	it("shows a clamped thinking level without overwriting the preference", async (t) => {
-		const path = await scenario(t, baseConfig({ agentThinkingLevels: { scout: "high" } }), [
-			{ title: /Roles/u, act(c, screen) { assert.match(screen, /off \(high requested\)[\s\S]*Source: override \*/u); press(c, RIGHT, KEY.enter); } },
-			{ title: /scout · Thinking/u, act(c, screen) {
-				assert.match(screen, /› high \(runs as off\) \[saved\]/u);
-				press(c, KEY.down);
-				assert.match(c.render(100).join("\n"), /› Role default[\s\S]*low → off/u);
-				press(c, KEY.escape);
-			} },
-			{ title: /Roles/u, act: (c) => press(c, KEY.escape) },
-		], [model("plain", false)]);
-		assert.equal(saved(path).agentThinkingLevels.scout, "high");
-	});
-
-	it("keeps every row inside narrow terminal widths", async (t) => {
-		await scenario(t, baseConfig(), [{ title: /Roles/u, act(c) {
-			for (const width of [1, 12, 32, 60, 120]) assert.ok(c.render(width).every((line) => visibleWidth(line) <= width));
-			press(c, KEY.down, RIGHT, KEY.escape);
-		} }]);
-	});
-
-	it("keeps full selected values and their source readable in a narrow role register", async () => {
-		const modelRef = "provider/非常长的推理模型-with-vision-and-tools";
-		const context = { mode: "tui", ui: { notify() {}, custom: async (factory: PickerFactory) => new Promise((resolve) => {
-			const c = factory(tui, theme, keybindings, resolve);
-			for (const width of [40, 80, 120]) {
-				const lines = c.render(width);
-				assert.ok(lines.every((line) => visibleWidth(line) <= width));
-				const clean = lines.join("").replace(/[│╭╮╰╯├┤─\s]+/gu, "");
-				assert.ok(clean.includes(modelRef));
-				assert.match(lines.join("\n"), /off \(high requested\)[\s\S]*Source: override \*/u);
+	it("keeps long Unicode values accessible when paging and resizing", async () => {
+		const terminal = { rows: 16, columns: 40 };
+		const ref = "provider/" + "中文模型".repeat(22) + "/end";
+		const context = { mode: "tui", ui: { custom: async (factory: PickerFactory) => new Promise((resolve) => {
+			const component = factory({ requestRender() {}, terminal } as TUI, theme, keybindings, resolve);
+			let rendered = "";
+			for (let i = 0; i < 20; i++) {
+				const frame = component.render(36);
+				assert.ok(frame.every((line) => visibleWidth(line) <= 36));
+				assert.ok(frame.length <= overlayMaxHeight(terminal.rows));
+				rendered += frame.join("\n");
+				press(component, KEY.pageDown);
 			}
-			press(c, KEY.enter);
+			assert.match(rendered, /\/end/u);
+			terminal.rows = 28;
+			press(component, KEY.down);
+			assert.match(component.render(80).join("\n"), /› Thinking/u);
+			press(component, KEY.enter);
 		}) } } as unknown as ExtensionContext;
-		assert.deepEqual(await promptRoleGrid(context, [
-			{ role: "sentinel", model: modelRef, thinking: "off (high requested)", thinkingOverridden: true, description: "Verify implementation. No edits." },
-		], { column: 1 }), { row: 0, column: 1, role: "sentinel", field: "thinking" });
-	});
-
-	it("fresh-install Esc leaves no config file", async (t) => {
-		const path = await scenario(t, undefined, [{ title: /Roles/u, act: (c) => press(c, KEY.escape) }]);
-		assert.equal(existsSync(path), false);
+		assert.equal(await promptSettings(context, { main: "test/main", model: ref, thinking: "high", note: "", status: "Saved", focus: "model" }), "thinking");
 	});
 });
 
@@ -457,6 +288,19 @@ describe("searchable picker", () => {
 });
 
 describe("first install", () => {
+	it("resets legacy config once and tells the user how to configure the worker", async (t) => {
+		const path = freshConfigPath(t);
+		writeFileSync(path, JSON.stringify({ agentModels: { artisan: "test/old" }, agentThinkingLevels: { artisan: "max" } }));
+		const notices: string[] = [];
+		const context = { ui: { notify: (message: string) => notices.push(message) } } as unknown as ExtensionContext;
+		await ensureDefaultConfig(context, path);
+		assert.ok(existsSync(path));
+		assert.deepEqual(saved(path), baseConfig());
+		assert.match(notices[0]!, /deleted the old config.*initialized.*\/subagents-setup/u);
+		await ensureDefaultConfig(context, path);
+		assert.equal(notices.length, 1);
+	});
+
 	it("writes defaults once and announces /subagents-setup", async (t) => {
 		const path = freshConfigPath(t);
 		const notices: string[] = [];

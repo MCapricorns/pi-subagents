@@ -6,7 +6,7 @@ import { describe, it, type TestContext } from "node:test";
 import { getThreadsManifestPath, readThreadRecords } from "../src/lifecycle/durable.ts";
 
 async function fixture(t: TestContext) {
-	const root = await mkdtemp(join(tmpdir(), "pi-role-migration-"));
+	const root = await mkdtemp(join(tmpdir(), "pi-retired-role-recovery-"));
 	t.after(() => rm(root, { recursive: true, force: true }));
 	return { root, configPath: join(root, "config.json") };
 }
@@ -16,14 +16,14 @@ async function assertNoRewrite(path: string, readAgain: () => Promise<unknown>):
 	await utimes(path, time, time);
 	const before = await stat(path);
 	await readAgain();
-	assert.equal((await stat(path)).mtimeMs, before.mtimeMs, "migrated files must not be rewritten on later reads");
+	assert.equal((await stat(path)).mtimeMs, before.mtimeMs, "reading recovery evidence must not rewrite it");
 }
 
-describe("stored role migration", () => {
-	it("persists renamed thread roles and result summaries without changing ownership", async (t) => {
+describe("retired role recovery", () => {
+	it("preserves retired role records and evidence without rewriting ownership", async (t) => {
 		const { root, configPath } = await fixture(t);
 		const path = getThreadsManifestPath(configPath, root);
-		const records = ["reviewer", "critic", "skeptic"].map((agentName, index) => ({
+		const records = ["reviewer", "critic", "skeptic", "sentinel"].map((agentName, index) => ({
 			runId: index + 1, createdAt: 1000, updatedAt: 2000, generation: 2,
 			agentName, task: `Keep ${agentName} in the original brief ${index}`,
 			cwd: root, executionCwd: root, isolation: "shared", state: "parked", elapsedMs: 30, childPids: [],
@@ -31,12 +31,12 @@ describe("stored role migration", () => {
 		}));
 		await mkdir(dirname(path), { recursive: true });
 		await writeFile(path, JSON.stringify({ version: 1, records }));
-		const migrated = await readThreadRecords(configPath);
-		assert.deepEqual(migrated.map((record) => record.agentName), ["sentinel", "sentinel", "sentinel"]);
-		assert.deepEqual(migrated.map((record) => record.resultSummary?.agent), ["sentinel", "sentinel", "sentinel"]);
-		assert.deepEqual(migrated.map((record) => [record.runId, record.state, record.task]), records.map((record) => [record.runId, record.state, record.task]));
+		const restored = await readThreadRecords(configPath);
+		assert.deepEqual(restored.map((record) => record.agentName), ["reviewer", "critic", "skeptic", "sentinel"]);
+		assert.deepEqual(restored.map((record) => record.resultSummary?.agent), ["reviewer", "critic", "skeptic", "sentinel"]);
+		assert.deepEqual(restored.map((record) => [record.runId, record.state, record.task]), records.map((record) => [record.runId, record.state, record.task]));
 		const saved = JSON.parse(await readFile(path, "utf8"));
-		assert.deepEqual(saved.records.map((record: { agentName: string }) => record.agentName), ["sentinel", "sentinel", "sentinel"]);
+		assert.deepEqual(saved.records.map((record: { agentName: string }) => record.agentName), ["reviewer", "critic", "skeptic", "sentinel"]);
 		assert.equal(saved.records[0].updatedAt, 2000);
 		await assertNoRewrite(path, () => readThreadRecords(configPath));
 	});

@@ -5,7 +5,6 @@ import {
 	availableModelsInScope,
 	buildModelPickerItems,
 	CURRENT_MAIN_MODEL,
-	filterUnavailableModelOverrides,
 	findModelByRef,
 	resolveAgentModelRoute,
 	type AgentModelRouteInput,
@@ -32,10 +31,10 @@ describe("agent model route boundaries", () => {
 		{ name: "main only", input: { mainRef: "test/main", availableRefs: [] }, expected: { primaryRef: "test/main" } },
 		{ name: "identical selection", input: { selectedRef: "test/main", mainRef: "test/main", availableRefs: ["test/main"] }, expected: { primaryRef: "test/main" } },
 		{ name: "selection without main", input: { selectedRef: "test/worker", availableRefs: ["test/worker"] }, expected: { primaryRef: "test/worker" } },
-		{ name: "distinct fallback", input: { selectedRef: " test/worker ", mainRef: " test/main ", availableRefs: ["test/worker"] }, expected: { primaryRef: "test/worker", mainFallbackRef: "test/main" } },
-		{ name: "unavailable selection", input: { selectedRef: "test/missing", mainRef: "test/main", availableRefs: [] }, expected: { primaryRef: "test/main", unavailableSelectedRef: "test/missing" } },
+		{ name: "configured worker", input: { selectedRef: " test/worker ", mainRef: " test/main ", availableRefs: ["test/worker"] }, expected: { primaryRef: "test/worker" } },
+		{ name: "unavailable selection", input: { selectedRef: "test/missing", mainRef: "test/main", availableRefs: [] }, expected: { primaryRef: undefined, unavailableSelectedRef: "test/missing" } },
 		{ name: "unavailable selection without main", input: { selectedRef: "test/missing", availableRefs: [] }, expected: { primaryRef: undefined, unavailableSelectedRef: "test/missing" } },
-		{ name: "missing catalog", input: { selectedRef: "test/worker", mainRef: "test/main" }, expected: { primaryRef: "test/worker", mainFallbackRef: "test/main" } },
+		{ name: "missing catalog", input: { selectedRef: "test/worker", mainRef: "test/main" }, expected: { primaryRef: "test/worker" } },
 		{ name: "empty references", input: { selectedRef: " ", mainRef: " " }, expected: { primaryRef: undefined } },
 		{ name: "alias resolves to main", input: { selectedRef: "azure-openai-responses/gpt-5.4", mainRef: "azure/gpt-5.4", availableRefs: ["azure/gpt-5.4"] }, expected: { primaryRef: "azure/gpt-5.4" } },
 	];
@@ -64,7 +63,7 @@ describe("setup model catalog", () => {
 			assert.ok(item.label.includes(entry.name));
 			assert.ok(item.label.includes(entry.provider));
 			assert.ok(item.description?.includes(item.value));
-			assert.match(item.description ?? "", /Pins this model/u);
+			assert.match(item.description ?? "", /Pins this worker/u);
 		}
 		assert.match(items.find((item) => item.value === "team-proxy/deployment-a")?.description ?? "", /vision.*thinking:/u);
 		const dynamic = buildModelPickerItems({ models: entries, mainRef: "team-proxy/deployment-a" });
@@ -92,6 +91,13 @@ describe("Pi 1.0.3 provider id rename", () => {
 	const azure = model("azure", "gpt-5.4");
 	const legacy = model("azure-openai-responses", "gpt-5.4");
 
+	it("prefers the exact configured provider over an alias regardless of catalog order", () => {
+		for (const models of [[azure, legacy], [legacy, azure]]) {
+			assert.equal(findModelByRef(models, "azure-openai-responses/gpt-5.4"), legacy);
+			assert.equal(findModelByRef(models, "azure/gpt-5.4"), azure);
+		}
+	});
+
 	it("follows a stored azure-openai-responses override onto the live azure id", () => {
 		const found = findModelByRef([azure], "azure-openai-responses/gpt-5.4");
 		assert.equal(found?.provider, "azure");
@@ -103,13 +109,6 @@ describe("Pi 1.0.3 provider id rename", () => {
 		});
 		assert.equal(route.primaryRef, "azure/gpt-5.4");
 		assert.equal(route.unavailableSelectedRef, undefined);
-
-		const { kept, dropped } = filterUnavailableModelOverrides(
-			{ artisan: "azure-openai-responses/gpt-5.4" },
-			[azure],
-		);
-		assert.deepEqual(kept, { artisan: "azure/gpt-5.4" });
-		assert.deepEqual(dropped, []);
 
 		const items = buildModelPickerItems({
 			models: [azure],
@@ -131,28 +130,16 @@ describe("Pi 1.0.3 provider id rename", () => {
 		});
 		assert.equal(route.primaryRef, "azure-openai-responses/gpt-5.4");
 
-		const { kept, dropped } = filterUnavailableModelOverrides(
-			{ artisan: "azure-openai-responses/gpt-5.4" },
-			[legacy],
-		);
-		assert.deepEqual(kept, { artisan: "azure-openai-responses/gpt-5.4" });
-		assert.deepEqual(dropped, []);
 	});
 
-	it("still drops an override when neither provider id is available", () => {
-		const { kept, dropped } = filterUnavailableModelOverrides(
-			{ artisan: "azure-openai-responses/gpt-5.4" },
-			[model("openai", "gpt-5.5")],
-		);
-		assert.deepEqual(kept, {});
-		assert.deepEqual(dropped, [{ agent: "artisan", ref: "azure-openai-responses/gpt-5.4" }]);
+	it("blocks dispatch when neither configured provider id is available", () => {
 
 		const route = resolveAgentModelRoute({
 			selectedRef: "azure-openai-responses/gpt-5.4",
 			mainRef: "openai/gpt-5.5",
 			availableRefs: ["openai/gpt-5.5"],
 		});
-		assert.equal(route.primaryRef, "openai/gpt-5.5");
+		assert.equal(route.primaryRef, undefined);
 		assert.equal(route.unavailableSelectedRef, "azure-openai-responses/gpt-5.4");
 	});
 });

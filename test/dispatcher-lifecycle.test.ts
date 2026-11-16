@@ -150,7 +150,7 @@ process.stdin.on("data", (chunk) => {
 					config: DEFAULT_CONFIG,
 					agents: loadBuiltinAgents(),
 				});
-				const started = await core.startBackground("scout", "Check completion delivery", root, "shared", {
+				const started = await core.startBackground("artisan", "Check completion delivery", root, "shared", {
 					deliveryRoute: scenario === "await" ? "await" : "background",
 				});
 				assert.ok(started.runId);
@@ -164,6 +164,8 @@ process.stdin.on("data", (chunk) => {
 					assert.equal(messages.length, 0, "the awaited result is returned only by its tool call");
 				}
 				if (messages.length) assert.match(messages[0]!.content, scenario === "failure" ? /provider failed/ : /delivery verified/);
+				if (scenario === "success") assert.match(messages[0]!.content, /Review handoff: main/u);
+				if (scenario === "failure") assert.doesNotMatch(messages[0]!.content, /Review handoff/u);
 			} finally {
 				process.argv[1] = previousScript;
 				await runtime.shutdown();

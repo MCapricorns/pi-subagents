@@ -1,198 +1,106 @@
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import assert from "node:assert/strict";
+import fs, { mkdtemp, readFile, readdir, rm, stat, utimes, writeFile } from "node:fs/promises";
+import { syncBuiltinESMExports } from "node:module";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import assert from "node:assert/strict";
 import { describe, it, type TestContext } from "node:test";
 import {
-	BUILTIN_AGENT_NAMES,
-	agentProfile,
-	DEFAULT_IDLE_TIMEOUT_SEC,
-	DEFAULT_MAX_RESULT_LINES,
-	loadConfig,
-	normalizeConfig,
-	roleThinkingLevel,
-	saveConfig,
+	BUILTIN_AGENT_NAMES, DEFAULT_CONFIG, DEFAULT_IDLE_TIMEOUT_SEC, DEFAULT_MAX_RESULT_LINES,
+	initializeConfig, loadConfig, normalizeConfig, saveConfig,
 } from "../src/configuration/config.ts";
 
-describe("catalog", () => {
-	it("ships only the canonical research, implementation, and review roles", () => {
-		assert.deepEqual(BUILTIN_AGENT_NAMES, ["scout", "artisan", "sentinel"]);
-	});
+async function fixture(t: TestContext) {
+	const root = await mkdtemp(join(tmpdir(), "pi-subagents-config-"));
+	t.after(() => rm(root, { recursive: true, force: true }));
+	return { root, path: join(root, "pi-subagents.json") };
+}
 
-	it("assigns a role thinking default and leaves other names on medium", () => {
-		assert.equal(roleThinkingLevel("scout"), "low");
-		assert.equal(roleThinkingLevel("artisan"), "high");
-		assert.equal(roleThinkingLevel("sentinel"), "high");
-		for (const name of ["custom", "reviewer", "critic", "skeptic"]) {
-			assert.equal(roleThinkingLevel(name), "medium");
-		}
-	});
-
-	it("exposes only current setup profiles", () => {
-		assert.equal(agentProfile("reviewer"), undefined);
-		assert.equal(agentProfile("critic"), undefined);
-		assert.equal(agentProfile("skeptic"), undefined);
-		assert.match(agentProfile("sentinel")!.remark, /implementation or diff.*challenge claims or assumptions.*defects and regressions/u);
-		assert.equal(agentProfile("custom"), undefined);
-	});
-});
-
-describe("normalizeConfig", () => {
-	it("starts empty on a fresh install", () => {
-		const config = normalizeConfig(undefined);
-		assert.deepEqual(config.agentModels, {});
-		assert.deepEqual(config.agentThinkingLevels, {});
-	});
-
-	it("keeps only valid provider/model references in agentModels", () => {
-		const config = normalizeConfig({
-			agentModels: { scout: "anthropic/claude-haiku-4-5", bad: "noslash", empty: "  " },
-		});
-		assert.deepEqual(config.agentModels, { scout: "anthropic/claude-haiku-4-5" });
-	});
-
-	it("keeps only valid thinking levels in agentThinkingLevels", () => {
-		const config = normalizeConfig({
-			agentThinkingLevels: { artisan: "high", bad: "ultra", empty: "" },
-		});
-		assert.deepEqual(config.agentThinkingLevels, { artisan: "high" });
-	});
-
-	it("migrates legacy model and thinking keys after trimming and is idempotent", () => {
-		const config = normalizeConfig({
-			agentModels: { " reviewer ": " test/review " },
-			agentThinkingLevels: { " skeptic ": "low" },
-		});
-		assert.deepEqual(config, {
-			agentModels: { sentinel: "test/review" },
-			agentThinkingLevels: { sentinel: "low" },
-		});
-		assert.deepEqual(normalizeConfig(config), config);
-	});
-
-	for (const canonicalFirst of [true, false]) {
-		it(`prefers valid canonical settings with canonical keys ${canonicalFirst ? "first" : "last"}`, () => {
-			const models = [["sentinel", "test/canonical-review"], ["reviewer", "test/legacy-review"], ["skeptic", "test/legacy-challenge"]];
-			const thinking = [["sentinel", "off"], ["reviewer", "high"], ["critic", "low"]];
-			const config = normalizeConfig({
-				agentModels: Object.fromEntries(canonicalFirst ? models : models.slice().reverse()),
-				agentThinkingLevels: Object.fromEntries(canonicalFirst ? thinking : thinking.slice().reverse()),
-			});
-			assert.deepEqual(config, {
-				agentModels: { sentinel: "test/canonical-review" },
-				agentThinkingLevels: { sentinel: "off" },
-			});
-		});
-	}
-
-	it("uses valid legacy settings when canonical values are invalid", () => {
-		const config = normalizeConfig({
-			agentModels: { sentinel: "no-slash", reviewer: "test/legacy-review", skeptic: null },
-			agentThinkingLevels: { sentinel: "ultra", skeptic: "medium" },
-		});
-		assert.deepEqual(config, {
-			agentModels: { sentinel: "test/legacy-review" },
-			agentThinkingLevels: { sentinel: "medium" },
-		});
-	});
-
-	it("ignores invalid legacy values and retains compatible unknown role keys", () => {
-		const config = normalizeConfig({
-			agentModels: { sentinel: "test/review", reviewer: false, critic: "", skeptic: "", " custom ": " test/custom ", Reviewer: "test/uppercase" },
-			agentThinkingLevels: { sentinel: "high", reviewer: "ultra", critic: null, skeptic: null, " custom ": "medium", Reviewer: "minimal" },
-		});
-		assert.deepEqual(config, {
-			agentModels: { sentinel: "test/review", custom: "test/custom", Reviewer: "test/uppercase" },
-			agentThinkingLevels: { sentinel: "high", custom: "medium", Reviewer: "minimal" },
-		});
-	});
-
-	it("drops removed config-file options from older versions", () => {
-		const config = normalizeConfig({
-			enabledAgents: ["artisan"],
-			knownAgents: ["scout", "artisan"],
-			agentScope: "both",
-			maxResultLines: 12,
-			maxConcurrentAgents: 3,
-			idleTimeoutSec: 60,
-			agentModels: { artisan: "anthropic/primary" },
-		});
-		assert.deepEqual(config, {
-			agentModels: { artisan: "anthropic/primary" },
-			agentThinkingLevels: {},
-		});
-	});
-
-	it("keeps the operational defaults as constants", () => {
+describe("worker configuration", () => {
+	it("ships implementation and read-only research with one default configuration", () => {
+		assert.deepEqual(BUILTIN_AGENT_NAMES, ["scout", "artisan"]);
+		assert.deepEqual(DEFAULT_CONFIG, { version: 1, thinking: "medium" });
 		assert.equal(DEFAULT_MAX_RESULT_LINES, 40);
 		assert.equal(DEFAULT_IDLE_TIMEOUT_SEC, 1800);
 	});
-});
 
-describe("loadConfig", () => {
-	function tempDir(t: TestContext): string {
-		const dir = mkdtempSync(join(tmpdir(), "pi-subagents-test-"));
-		t.after(() => rmSync(dir, { recursive: true, force: true }));
-		return dir;
+	it("accepts only the new schema and ignores every legacy role preference", () => {
+		for (const raw of [undefined, null, [], { agentModels: { artisan: "test/old" }, agentThinkingLevels: { artisan: "max" } }, { version: 0, model: "test/old", thinking: "high" }]) {
+			assert.deepEqual(normalizeConfig(raw), DEFAULT_CONFIG);
+		}
+		assert.deepEqual(normalizeConfig({ version: 1, model: " test/worker ", thinking: "high", agentModels: { sentinel: "test/review" } }),
+			{ version: 1, model: "test/worker", thinking: "high" });
+		for (const model of ["noslash", "/model", "provider/", "bad ref/model", 10]) {
+			assert.deepEqual(normalizeConfig({ version: 1, model, thinking: "ultra" }), DEFAULT_CONFIG);
+		}
+	});
+
+	it("creates missing settings once and keeps current settings untouched", async (t) => {
+		const { path } = await fixture(t);
+		assert.equal(await initializeConfig(path), "created");
+		await saveConfig({ version: 1, model: "test/worker", thinking: "high" }, path);
+		const time = new Date("2000-01-01T00:00:00Z");
+		await utimes(path, time, time);
+		const before = await stat(path);
+		assert.equal(await initializeConfig(path), undefined);
+		assert.equal((await stat(path)).mtimeMs, before.mtimeMs);
+		assert.deepEqual(await loadConfig(path), { version: 1, model: "test/worker", thinking: "high" });
+	});
+
+	for (const legacy of [JSON.stringify({ agentModels: { artisan: "test/old", sentinel: "test/review" }, agentThinkingLevels: { artisan: "max" } }), "{broken", JSON.stringify({ version: 0, model: "test/old" })]) {
+		it("deletes incompatible settings and initializes defaults without keeping legacy files: " + legacy.slice(0, 35), async (t) => {
+			const { root, path } = await fixture(t);
+			await writeFile(path, legacy);
+			const recovery = join(root, "recovery.json");
+			await writeFile(recovery, "keep recovery evidence");
+			await assert.rejects(loadConfig(path), /invalid or incompatible/u, "dispatch never turns a bad config into main-model spending");
+			assert.equal(await readFile(path, "utf8"), legacy, "dispatch reads do not own initialization");
+			assert.equal(await initializeConfig(path), "reset");
+			assert.deepEqual(JSON.parse(await readFile(path, "utf8")), DEFAULT_CONFIG);
+			assert.equal(await readFile(recovery, "utf8"), "keep recovery evidence");
+			assert.deepEqual((await readdir(root)).sort(), ["pi-subagents.json", "recovery.json"]);
+		});
 	}
 
-	it("returns defaults when the file is missing", async (t) => {
-		const dir = tempDir(t);
-		const config = await loadConfig(join(dir, "does-not-exist.json"));
-		assert.deepEqual(config, { agentModels: {}, agentThinkingLevels: {} });
+	it("serializes simultaneous initialization so only one caller reports a reset", async (t) => {
+		const { path } = await fixture(t);
+		await writeFile(path, JSON.stringify({ agentModels: { artisan: "test/old" } }));
+		const results = await Promise.all([initializeConfig(path), initializeConfig(path), initializeConfig(path)]);
+		assert.equal(results.filter((result) => result === "reset").length, 1);
+		assert.deepEqual(await loadConfig(path), DEFAULT_CONFIG);
 	});
 
-	it("falls back to defaults on corrupt JSON instead of throwing", async (t) => {
-		const dir = tempDir(t);
-		const path = join(dir, "corrupt.json");
-		writeFileSync(path, "{ not json", "utf8");
-		const config = await loadConfig(path);
-		assert.deepEqual(config, { agentModels: {}, agentThinkingLevels: {} });
+	it("rejects invalid model references without silently choosing main", async (t) => {
+		const { path } = await fixture(t);
+		for (const model of ["typo", "provider/", "", null]) {
+			await writeFile(path, JSON.stringify({ ...DEFAULT_CONFIG, model }));
+			await assert.rejects(loadConfig(path), /Invalid worker model reference/u);
+			assert.equal(await initializeConfig(path), "reset", "setup can explicitly recover invalid settings");
+			assert.deepEqual(await loadConfig(path), DEFAULT_CONFIG);
+		}
 	});
 
-	it("persists the canonical shape without obsolete or unknown keys", async (t) => {
-		const dir = tempDir(t);
-		const path = join(dir, "pi-subagents.json");
-		writeFileSync(path, JSON.stringify({
-			enabledAgents: ["artisan"],
-			agentModels: { artisan: "anthropic/primary" },
-			agentThinkingLevels: { artisan: "high" },
-			unknownKey: true,
-		}), "utf8");
-
-		const config = await loadConfig(path);
-		assert.equal(config.agentModels.artisan, "anthropic/primary");
-		assert.equal(config.agentThinkingLevels.artisan, "high");
-
-		const saved = JSON.parse(readFileSync(path, "utf8")) as Record<string, unknown>;
-		assert.ok(!("unknownKey" in saved));
-		assert.ok(!("enabledAgents" in saved));
-	});
-
-	it("persists migrated settings without legacy role keys and retains unknown roles", async (t) => {
-		const path = join(tempDir(t), "pi-subagents.json");
-		writeFileSync(path, JSON.stringify({
-			agentModels: { reviewer: "test/legacy-review", custom: "test/custom" },
-			agentThinkingLevels: { skeptic: "max", custom: "minimal" },
-		}), "utf8");
-		const config = await loadConfig(path);
-		assert.deepEqual(config, {
-			agentModels: { sentinel: "test/legacy-review", custom: "test/custom" },
-			agentThinkingLevels: { sentinel: "max", custom: "minimal" },
+	it("preserves the old file when preparing its replacement fails", async (t) => {
+		const { path } = await fixture(t);
+		const legacy = JSON.stringify({ agentModels: { artisan: "test/old" } });
+		await writeFile(path, legacy);
+		const original = fs.writeFile;
+		t.mock.method(fs, "writeFile", async (...args: any[]) => {
+			if (String(args[0]).endsWith(".tmp")) throw new Error("disk full");
+			return (original as any)(...args);
 		});
-		assert.deepEqual(JSON.parse(readFileSync(path, "utf8")), config);
-		assert.deepEqual(await loadConfig(path), config);
+		syncBuiltinESMExports();
+		try {
+			await assert.rejects(initializeConfig(path), /disk full/u);
+			assert.equal(await readFile(path, "utf8"), legacy);
+		} finally { t.mock.restoreAll(); syncBuiltinESMExports(); }
 	});
 
-	it("round-trips selected models and thinking preferences", async (t) => {
-		const dir = tempDir(t);
-		const path = join(dir, "pi-subagents.json");
-		await saveConfig(normalizeConfig({
-			agentModels: { artisan: "anthropic/primary" },
-			agentThinkingLevels: { artisan: "high" },
-		}), path);
-		const loaded = await loadConfig(path);
-		assert.deepEqual(loaded.agentModels, { artisan: "anthropic/primary" });
-		assert.deepEqual(loaded.agentThinkingLevels, { artisan: "high" });
+	it("does not delete unreadable settings", async (t) => {
+		const { path } = await fixture(t);
+		const { mkdir } = await import("node:fs/promises");
+		await mkdir(path);
+		await assert.rejects(initializeConfig(path));
+		assert.ok((await stat(path)).isDirectory());
+		await assert.rejects(loadConfig(path));
 	});
 });

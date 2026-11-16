@@ -20,7 +20,6 @@ import { mkdir, readFile, realpath, rm, writeFile } from "node:fs/promises";
 import { uptime } from "node:os";
 import { dirname, isAbsolute, join, relative, resolve } from "node:path";
 import type { UsageStats } from "../execution/run-control.ts";
-import { migrateStoredRecordRoles } from "../configuration/role-migration.ts";
 import type { SubagentThread } from "./runtime.ts";
 import { getResultOutput, isFailedResult, getProjectRoot, getSubagentsRoot, type SingleResult } from "../execution/spawn.ts";
 import { isManagedSessionDir, isManagedWorktreeLayout, samePath } from "../isolation/managed-paths.ts";
@@ -196,7 +195,6 @@ function normalizeRecord(value: unknown): ThreadRecord | undefined {
 }
 
 interface ThreadManifestRead {
-	rolesMigrated?: boolean;
 	sourceCount: number;
 	records: ThreadRecord[];
 }
@@ -205,10 +203,7 @@ async function readManifest(path: string): Promise<ThreadManifestRead> {
 	try {
 		const parsed = JSON.parse(await readFile(path, "utf8")) as { records?: unknown } | null;
 		if (!Array.isArray(parsed?.records)) throw new Error(`Invalid thread manifest: ${path}`);
-		let rolesMigrated = false;
-		for (const record of parsed.records) rolesMigrated = migrateStoredRecordRoles(record) || rolesMigrated;
 		return {
-			rolesMigrated,
 			sourceCount: parsed.records.length,
 			records: parsed.records.flatMap((record) => {
 				const normalized = normalizeRecord(record);
@@ -325,7 +320,7 @@ export async function readThreadRecords(configPath: string): Promise<ThreadRecor
 			.map((path) => withManifestMutation(path, async () => {
 				const manifest = await readManifest(path);
 				const validated = await validatedManifestRecords(configPath, path, manifest.records);
-				if (manifest.rolesMigrated || validated.length !== manifest.sourceCount) await writeManifest(path, validated);
+				if (validated.length !== manifest.sourceCount) await writeManifest(path, validated);
 				return validated;
 			})),
 	);
@@ -481,7 +476,7 @@ export async function pruneThreadRecords(
 			const records = manifest.records;
 			if (manifest.sourceCount === 0) return;
 			const validity = await Promise.all(records.map((record) => validateThreadRecord(configPath, path, record)));
-			let changed = Boolean(manifest.rolesMigrated) || manifest.sourceCount !== records.length || validity.some((valid) => !valid);
+			let changed = manifest.sourceCount !== records.length || validity.some((valid) => !valid);
 			const kept: ThreadRecord[] = [];
 			for (const [index, record] of records.entries()) {
 				if (!validity[index]) continue;

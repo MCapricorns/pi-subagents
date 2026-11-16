@@ -23,7 +23,7 @@ describe("session-start recovery announcements", () => {
 			const notices: string[] = [];
 			const widgets: string[] = [];
 			try {
-				await saveConfig({ agentModels: { artisan: "fixture/missing" }, agentThinkingLevels: {} }, configPath);
+				await saveConfig({ version: 1, model: "fixture/missing", thinking: "medium" }, configPath);
 				const path = location === "legacy" ? join(dirname(configPath), "pi-subagents-recovery.json") : getRecoveryManifestPath(configPath);
 				await mkdir(dirname(path), { recursive: true });
 				await writeFile(path, "{unfinished");
@@ -37,13 +37,14 @@ describe("session-start recovery announcements", () => {
 				assert.equal(runtime.restoredNotified, true);
 				assert.ok(notices.some((message) => /recovery inspection failed.*continuing startup/iu.test(message)));
 				assert.ok(notices.some((message) => /restored 1 interrupted run/u.test(message)));
-				assert.deepEqual((await loadConfig(configPath)).agentModels, {});
+				assert.equal((await loadConfig(configPath)).model, "fixture/missing");
+				assert.ok(notices.some((message) => /setting is preserved and dispatch is paused/u.test(message)));
 				assert.equal(await readFile(path, "utf8"), "{unfinished", "startup must preserve the unreadable manifest");
 			} finally { await runtime.shutdown(); await rm(root, { recursive: true, force: true }); }
 		});
 	}
 
-	it("keeps model overrides outside the session scope and drops only unavailable ones", async () => {
+	it("preserves worker settings outside the session scope", async () => {
 		const root = await mkdtemp(join(tmpdir(), "pi-subagents-announcements-"));
 		const configPath = join(root, "agent", "config.json");
 		const handlers = new Map<string, (event: unknown, ctx: ExtensionContext) => Promise<void>>();
@@ -56,7 +57,7 @@ describe("session-start recovery announcements", () => {
 		const scoped = { provider: "test", id: "scoped" };
 		const outside = { provider: "test", id: "outside" };
 		try {
-			await saveConfig({ agentModels: { scout: "test/outside", artisan: "test/missing" }, agentThinkingLevels: {} }, configPath);
+			await saveConfig({ version: 1, model: "test/outside", thinking: "high" }, configPath);
 			registerAnnouncements(pi, runtime);
 			await handlers.get("session_start")!({}, {
 				cwd: root, mode: "print", hasUI: false,
@@ -64,8 +65,8 @@ describe("session-start recovery announcements", () => {
 				scopedModels: [{ model: scoped }],
 				ui: { notify: (message: string) => notices.push(message) },
 			} as unknown as ExtensionContext);
-			assert.deepEqual((await loadConfig(configPath)).agentModels, { scout: "test/outside" });
-			assert.ok(notices.some((message) => /artisan: test\/missing.*follow the main model/u.test(message)));
+			assert.deepEqual((await loadConfig(configPath)).model, "test/outside");
+			assert.equal(notices.length, 0);
 		} finally { await runtime.shutdown(); await rm(root, { recursive: true, force: true }); }
 	});
 });

@@ -1,7 +1,7 @@
 {
   "name": "@ferris1225/pi-subagents",
-  "version": "6.0.5",
-  "description": "A managed sub-agent team for pi: research, implementation, independent review, interactive follow-ups, and Git worktree isolation.",
+  "version": "7.0.0",
+  "description": "Lead/worker orchestration for Pi: main plans and reviews, configurable workers execute with retained sessions and Git worktree isolation.",
   "type": "module",
   "license": "MIT",
   "repository": {
@@ -20,7 +20,8 @@
     "pi-extension",
     "subagent",
     "sub-agent",
-    "delegation"
+    "delegation",
+    "orchestration"
   ],
   "files": [
     "index.ts",
@@ -36,19 +37,19 @@
   },
   "scripts": {
     "check": "tsc --noEmit && npm test",
-    "test": "node --test test/*.test.ts",
+    "test": "node --test --test-concurrency=4 test/*.test.ts",
     "prepack": "npm run check"
   },
   "peerDependencies": {
-    "@earendil-works/pi-ai": ">=1.5.0",
-    "@earendil-works/pi-coding-agent": ">=1.5.0",
-    "@earendil-works/pi-tui": ">=1.5.0",
+    "@earendil-works/pi-ai": ">=1.5.2",
+    "@earendil-works/pi-coding-agent": ">=1.5.2",
+    "@earendil-works/pi-tui": ">=1.5.2",
     "typebox": "*"
   },
   "devDependencies": {
-    "@earendil-works/pi-ai": "^1.5.0",
-    "@earendil-works/pi-coding-agent": "^1.5.0",
-    "@earendil-works/pi-tui": "^1.5.0",
+    "@earendil-works/pi-ai": "1.5.2",
+    "@earendil-works/pi-coding-agent": "1.5.2",
+    "@earendil-works/pi-tui": "1.5.2",
     "@types/node": "^22.10.0",
     "typebox": "^1.3.27",
     "typescript": "^5.9.0"

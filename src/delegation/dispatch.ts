@@ -35,14 +35,14 @@ import type { IsolationMode } from "../isolation/worktree.ts";
 const NON_BLANK_TASK_OPTIONS = { minLength: 1, pattern: "\\S" } as const;
 
 const ISOLATION_DESCRIPTION =
-	"Usually omit: writers use an automatic Git worktree when a committed HEAD is available; reading and review use the current directory. Override worktree to require isolation, or shared to write directly in the caller's checkout. Not a sandbox.";
+	"Usually omit: implementation uses an automatic Git worktree when a committed HEAD is available; read-only research uses the current directory. Override worktree to require isolation, or shared to write directly in the caller's checkout. Not a sandbox.";
 
 export const IsolationSchema = Type.Optional(
 	stringEnum(["shared", "worktree"] as const, { description: ISOLATION_DESCRIPTION }),
 );
 
 const TASK_BRIEF_DESCRIPTION =
-	"Complete brief: objective and done condition, relevant paths/symbols, known facts with citations when available, boundaries, and needed output. The child has no parent conversation.";
+	"Self-contained plan: outcome and acceptance criteria, relevant paths, known evidence, write boundaries, required checks, when to return for re-planning, and compact expected output. The worker has no parent conversation.";
 
 const agentSchema = (description: string) => stringEnum(BUILTIN_AGENT_NAMES, { description });
 
@@ -133,7 +133,7 @@ function formatResultRow(r: SingleResult, theme: Theme): string {
 	const pending = r.exitCode === -1;
 	const icon = statusIcon(pending ? "running" : isFailedResult(r) ? "failed" : "done", theme);
 	const usage = formatUsage(r.usage);
-	const model = `${r.model ?? "?"}${r.modelFallbackFrom ? ` (main after ${r.modelFallbackFrom} failed)` : ""}`;
+	const model = r.model ?? "?";
 	const isolation = r.isolation === "worktree" ? ` · worktree ${r.integrationStatus ?? "active"}` : "";
 	const runId = r.runId === undefined ? "" : `${theme.fg("dim", `#${r.runId}`)} `;
 	const meta = `· ${model}${r.thinking ? ` · thinking ${r.thinking}` : ""}${isolation}${pending ? " · background" : ""}${usage ? ` · ${usage}` : ""}`;
@@ -162,7 +162,7 @@ export function registerSubagentTool(
 	pi.registerTool({
 		name: "subagent",
 		label: "Subagent",
-		description: "Delegate worthwhile bounded work for focused implementation, isolated research, parallel progress, or independent verification. Use tasks for independent phases. Duplicate phases are rejected before allocation. Omit isolation for automatic selection. Use wait:true for an immediate dependency; one-shot print/JSON sessions wait by default. Background results wake main to finish the task.",
+		description: "Dispatch workers to execute main's plan: artisan implements and verifies; scout retrieves read-only evidence. Main reviews the integrated changes and owns acceptance. Use tasks for independent phases. Duplicate phases are rejected before allocation. Omit isolation for automatic selection. Use wait:true for dependencies; print/JSON sessions wait by default. Background results wake main.",
 		// Admission and lease reservation finish synchronously before child startup.
 		// Awaited runs must not block unrelated dispatch calls.
 		exposure: "model-only",
@@ -183,6 +183,17 @@ export function registerSubagentTool(
 			// falls back to "(no output)" without it.
 			const makeProgress = (details: SubagentDetails): ((text: string) => void) | undefined =>
 				onUpdate ? (text: string): void => onUpdate({ content: [{ type: "text", text }], details }) : undefined;
+			const deliverAwaited = async (mode: "single" | "parallel", results: SingleResult[], ids: number[], failures: string[] = []) => {
+				const blocks = await awaitRunResults(runtime, ids, signal, DEFAULT_MAX_RESULT_LINES, ctx.cwd, makeProgress(makeDetails(mode)(results)));
+				if (signal?.aborted) await cancelActiveWork(runtime, "Parent run was cancelled.");
+				else runtime.completeAwaitDelivery(ids);
+				const settled = results.map((result) => result.runId === undefined ? result : runtime.settledRuns.get(result.runId) ?? result);
+				return {
+					content: [{ type: "text" as const, text: blocks + (failures.length ? `\n\nLaunch failures:\n${failures.join("\n")}` : "") }],
+					details: makeDetails(mode)(settled),
+					...(signal?.aborted || settled.some((result) => result.exitCode === -1 || isFailedResult(result)) ? { isError: true } : {}),
+				};
+			};
 			// Run ids are allocated below; restore raises the allocator above every
 			// id a durable record still owns, so a dispatch racing it could hand a
 			// fresh run the id of a parked thread and overwrite its record.
@@ -275,20 +286,7 @@ export function registerSubagentTool(
 					// that still carry details.
 					throw new Error(`No subagents started.\n${failureLines.join("\n")}`);
 				}
-				if (wait) {
-					const blocks = await awaitRunResults(runtime, startedIds, signal, DEFAULT_MAX_RESULT_LINES, ctx.cwd, makeProgress(makeDetails("parallel")(results)));
-					if (signal?.aborted) await cancelActiveWork(runtime, "Parent run was cancelled.");
-					else runtime.completeAwaitDelivery(startedIds);
-					const text = failureLines.length > 0
-						? `${blocks}\n\nLaunch failures:\n${failureLines.join("\n")}`
-						: blocks;
-					const settled = results.map((result) => result.runId === undefined ? result : runtime.settledRuns.get(result.runId) ?? result);
-					return {
-						content: [{ type: "text", text }],
-						details: makeDetails("parallel")(settled),
-						...(signal?.aborted || settled.some((result) => result.exitCode === -1 || isFailedResult(result)) ? { isError: true } : {}),
-					};
-				}
+				if (wait) return deliverAwaited("parallel", results, startedIds, failureLines);
 				const text = [
 					phaseLeaseReceipt(startedIds),
 					...(failureLines.length > 0 ? ["Launch failures:", ...failureLines] : []),
@@ -319,15 +317,7 @@ export function registerSubagentTool(
 				throw new Error(getResultOutput(result));
 			}
 			if (wait && result.runId !== undefined) {
-				const blocks = await awaitRunResults(runtime, [result.runId], signal, DEFAULT_MAX_RESULT_LINES, ctx.cwd, makeProgress(makeDetails("single")([result])));
-				if (signal?.aborted) await cancelActiveWork(runtime, "Parent run was cancelled.");
-				else runtime.completeAwaitDelivery([result.runId]);
-				const settled = runtime.settledRuns.get(result.runId);
-				return {
-					content: [{ type: "text", text: blocks }],
-					details: makeDetails("single")([settled ?? result]),
-					...(signal?.aborted || !settled || isFailedResult(settled) ? { isError: true } : {}),
-				};
+				return deliverAwaited("single", [result], [result.runId]);
 			}
 			return {
 				content: [{

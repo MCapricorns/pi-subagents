@@ -1,8 +1,8 @@
 /*
  * Model routing, capability-aware thinking, and setup-picker helpers.
  *
- * Runtime has one explicit fallback only: a configured agent model hands
- * off directly to the current main-window model. Setup lists only currently
+ * A configured worker never escalates to the main model automatically.
+ * Setup lists only currently
  * available models and derives thinking choices from Pi's model metadata.
  */
 
@@ -35,9 +35,7 @@ export type ModelListEntry = Pick<
 export interface ResolvedAgentModelRoute {
 	/** Effective first candidate. Undefined means let Pi use its normal default. */
 	primaryRef?: string;
-	/** Current main-window model when it differs from the selection. */
-	mainFallbackRef?: string;
-	/** Configured ref skipped because Pi does not currently report it available. */
+	/** Configured ref that blocks dispatch until it is available or changed. */
 	unavailableSelectedRef?: string;
 }
 
@@ -55,8 +53,8 @@ function cleanModelRef(ref: string | undefined): string | undefined {
 
 /**
  * Provider ids Pi renamed while keeping the model id. Pi 1.0.3 renamed
- * `azure-openai-responses` to `azure`. The old id stays valid on earlier 1.0
- * hosts, so a stored override follows whichever id the live catalog still has.
+ * `azure-openai-responses` to `azure`. Custom registries can still expose
+ * either id, so prefer the exact selection before trying its published alias.
  */
 const RENAMED_PROVIDER_IDS: Readonly<Record<string, string>> = {
 	"azure-openai-responses": "azure",
@@ -108,37 +106,15 @@ export function findModelByRef(
 ): Model<Api> | undefined {
 	const normalized = cleanModelRef(ref);
 	if (!normalized) return undefined;
-	const aliases = new Set(modelRefAliases(normalized));
-	return models.find((model) => aliases.has(modelRef(model)));
-}
-
-/** Split persisted agent model overrides into the ones Pi still reports as
- * available and the stale ones. Stale refs are dropped at session start (with
- * a user notice) so the config never carries models that can no longer run. */
-export function filterUnavailableModelOverrides(
-	agentModels: Record<string, string>,
-	models: readonly Model<Api>[],
-): { kept: Record<string, string>; dropped: Array<{ agent: string; ref: string }> } {
-	const kept: Record<string, string> = {};
-	const dropped: Array<{ agent: string; ref: string }> = [];
-	for (const [agent, ref] of Object.entries(agentModels)) {
-		const model = findModelByRef(models, ref);
-		// Persist the id the live catalog uses, so a renamed provider does not
-		// stay stored under the id Pi no longer registers.
-		if (model) kept[agent] = modelRef(model);
-		else dropped.push({ agent, ref });
-	}
-	return { kept, dropped };
+	const liveRef = resolveLiveModelRef(normalized, new Set(models.map(modelRef)));
+	return models.find((model) => modelRef(model) === liveRef);
 }
 
 /**
  * Resolve one agent's runtime route:
  *
- * configured selection -> current main-window model
- *
- * Without an override the current main model is primary, so an agent never
- * pins its own model. A configured selection that Pi no longer reports as
- * available is skipped immediately instead of spawning a doomed child.
+ * Without an override the current main model is primary. An unavailable
+ * configured selection blocks dispatch instead of spending main-model quota.
  */
 export function resolveAgentModelRoute(input: AgentModelRouteInput): ResolvedAgentModelRoute {
 	const selectedRef = cleanModelRef(input.selectedRef);
@@ -148,8 +124,7 @@ export function resolveAgentModelRoute(input: AgentModelRouteInput): ResolvedAge
 		: undefined;
 	const resolvedSelectedRef = selectedRef ? resolveLiveModelRef(selectedRef, available) : undefined;
 	return {
-		primaryRef: resolvedSelectedRef ?? mainRef,
-		...(resolvedSelectedRef && mainRef && resolvedSelectedRef !== mainRef ? { mainFallbackRef: mainRef } : {}),
+		primaryRef: selectedRef ? resolvedSelectedRef : mainRef,
 		...(selectedRef && !resolvedSelectedRef ? { unavailableSelectedRef: selectedRef } : {}),
 	};
 }
@@ -215,21 +190,9 @@ export function buildModelPickerItems(options: {
 		items.push({
 			value: ref,
 			label: name + " · " + model.provider + (duplicateName ? " (" + model.id + ")" : ""),
-			description: ["Reference: " + ref, "Pins this model; falls back to main if unavailable or it fails.", modelCapabilities(model), ...tags].join(" · "),
+			description: ["Reference: " + ref, "Pins this worker; failures return to main without changing models.", modelCapabilities(model), ...tags].join(" · "),
 			saved: ref === liveConfiguredRef,
 		});
 	}
 	return items;
-}
-
-/** The dynamic choice removes the persisted per-agent override. */
-export function applyAgentModelChoice(
-	current: Record<string, string>,
-	agentName: string,
-	choice: string,
-): Record<string, string> {
-	const next = { ...current };
-	if (choice === CURRENT_MAIN_MODEL) delete next[agentName];
-	else next[agentName] = choice.trim();
-	return next;
 }

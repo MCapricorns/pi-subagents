@@ -42,6 +42,15 @@ describe("terminal task identities", () => {
 });
 
 describe("formatCompletionBlock", () => {
+	it("hands successful implementation to main for review without approving it", () => {
+		const result = { ...answer("Changed src/cache.ts; cache tests passed."), agent: "artisan" };
+		const block = formatCompletionBlock(result, 40);
+		assert.match(block, /Review handoff: main\. Worker completion is not review approval/u);
+		assert.match(block, /actual diff, affected callers, acceptance criteria, and check evidence/u);
+		assert.doesNotMatch(formatCompletionBlock(answer("Research evidence"), 40), /Review handoff/u);
+		assert.doesNotMatch(formatCompletionBlock({ ...result, exitCode: 1 }, 40), /Review handoff/u);
+	});
+
 	it("states when no failure reason was recorded instead of showing only partial work", () => {
 		const block = formatCompletionBlock({
 			agent: "artisan", task: "Finish the change", exitCode: 1, stderr: "", usage: emptyUsage(),
@@ -58,7 +67,7 @@ describe("formatCompletionBlock", () => {
 			messages: [{ role: "assistant", content: [], stopReason: "error", errorMessage: "Provider unavailable" } as never],
 		}, 40);
 		assert.match(block, /Provider unavailable/);
-		assert.match(block, /Main must inspect that work and finish with its own tools; do not re-dispatch this phase/u);
+		assert.match(block, /Main must inspect that work and decide how to proceed; do not repeat this failed phase automatically/u);
 	});
 
 	it("inlines long prose lines that fit the character budget", () => {

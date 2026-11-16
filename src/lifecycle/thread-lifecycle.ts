@@ -22,7 +22,7 @@ import {
 	RunControl,
 	isFailedResult,
 	isModelLevelFailure,
-	runSingleAgentWithMainFallback,
+	runWorker,
 	type SingleResult,
 	type SubagentLiveEvent,
 } from "../execution/spawn.ts";
@@ -131,6 +131,7 @@ export function createBackgroundDispatcher(options: BackgroundDispatcherOptions)
 		let executionCwd = originalCwd;
 		let worktreeGroup: string | undefined;
 		const route = resolveDispatchModelRoute(agent, runConfig, runCtx);
+		if (route.error) return failedStartResult(agentName, task, route.error);
 		const thinkingLevel = route.thinkingLevel;
 		const runId = monitor.addRun(agent.name, task, route.agent.model, thinkingLevel, isolation);
 		runtime.claimRunDelivery(runId, startOptions.deliveryRoute ?? "background");
@@ -233,16 +234,16 @@ export function createBackgroundDispatcher(options: BackgroundDispatcherOptions)
 			const launchAgent = worktree ? withWorktreeSystemPrompt(activeRoute.agent, worktree) : activeRoute.agent;
 			let result: SingleResult;
 			try {
-				result = await runSingleAgentWithMainFallback(
+				if (activeRoute.error) throw new Error(activeRoute.error);
+				result = await runWorker(
 					{
 						defaultCwd: executionCwd,
 						agent: launchAgent,
-						resolveAgentForAttempt: resolveLiveAgentTools,
+						resolveAgentBeforeLaunch: resolveLiveAgentTools,
 						agentName,
 						task,
 						cwd: executionCwd,
 						thinkingLevel: activeRoute.thinkingLevel,
-						thinkingLevelForModel: activeRoute.thinkingLevelForModel,
 						signal: backgroundSignal,
 						onLive,
 						control,
@@ -251,7 +252,6 @@ export function createBackgroundDispatcher(options: BackgroundDispatcherOptions)
 						...(startOptions.resumeSession ?? {}),
 						scratchRoot,
 					},
-					activeRoute.mainFallbackRef,
 				);
 			} catch (error) {
 				const errorMessage = error instanceof Error ? error.message : String(error);

@@ -5,7 +5,7 @@ import { realpath } from "node:fs/promises";
 import { join, resolve } from "node:path";
 import type { ExtensionContext } from "@earendil-works/pi-coding-agent";
 import type { AgentConfig } from "../delegation/agents.ts";
-import { roleThinkingLevel, type SubagentsConfig, type ThinkingLevel } from "../configuration/config.ts";
+import type { SubagentsConfig, ThinkingLevel } from "../configuration/config.ts";
 import { removeThreadRecord, threadRecordFromThread, threadRecordIdentity, upsertThreadRecord } from "./durable.ts";
 import {
 	availableModelsInScope,
@@ -143,9 +143,8 @@ export interface ThreadLifecycleDeps {
 
 interface DispatchModelRoute {
 	agent: AgentConfig;
-	mainFallbackRef?: string;
+	error?: string;
 	thinkingLevel: ThinkingLevel;
-	thinkingLevelForModel: (ref?: string) => ThinkingLevel;
 }
 
 export function resolveDispatchModelRoute(
@@ -156,25 +155,16 @@ export function resolveDispatchModelRoute(
 	const availableModels = availableModelsInScope(ctx);
 	const mainRef = currentModelRef(ctx);
 	const route = resolveAgentModelRoute({
-		selectedRef: config.agentModels[agent.name],
+		selectedRef: config.model,
 		mainRef,
 		availableRefs: availableModels.map(modelRef),
 	});
-	// A `/subagents-setup` override wins; otherwise the role default. No
-	// per-call thinking.
-	const preferred =
-		config.agentThinkingLevels[agent.name] ?? roleThinkingLevel(agent.name);
-	const thinkingLevelForModel = (ref?: string): ThinkingLevel => {
-		const model = ref === mainRef && ctx.model
-			? ctx.model
-			: findModelByRef(availableModels, ref);
-		return resolveThinkingLevel(model, preferred);
-	};
+	const model = route.primaryRef === mainRef && ctx.model
+		? ctx.model : findModelByRef(availableModels, route.primaryRef);
 	return {
 		agent: { ...agent, model: route.primaryRef },
-		mainFallbackRef: route.mainFallbackRef,
-		thinkingLevel: thinkingLevelForModel(route.primaryRef),
-		thinkingLevelForModel,
+		thinkingLevel: resolveThinkingLevel(model, config.thinking),
+		...(route.unavailableSelectedRef ? { error: `Worker model ${route.unavailableSelectedRef} is unavailable in this session. Dispatch paused; restore availability or choose a worker with /subagents-setup. No main-model worker was started.` } : {}),
 	};
 }
 

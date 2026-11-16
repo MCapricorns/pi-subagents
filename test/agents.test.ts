@@ -26,9 +26,9 @@ const READ_ONLY = tool("docs_search", { readOnlyHint: true });
 const CODEMODE = tool("codemode", undefined, () => "all", "direct");
 
 describe("loadBuiltinAgents", () => {
-	it("ships all three roles without frontmatter thinking", () => {
+	it("ships two worker scopes without frontmatter thinking", () => {
 		const agents = loadBuiltinAgents();
-		assert.deepEqual(agents.map((agent) => agent.name), ["scout", "artisan", "sentinel"]);
+		assert.deepEqual(agents.map((agent) => agent.name), ["scout", "artisan"]);
 		for (const agent of agents) {
 			assert.equal(agent.model, undefined);
 			assert.ok(!("thinking" in agent));
@@ -77,27 +77,6 @@ describe("loadBuiltinAgents", () => {
 		assert.match(artisan.systemPrompt, /unrun checks and pre-existing failures accurately/u);
 		assert.match(artisan.systemPrompt, /checks as `command → result`/u);
 		assert.match(artisan.systemPrompt, /leaf boundary below still wins/u);
-	});
-
-	it("routes implementation review and claim challenges to sentinel", () => {
-		const agents = loadBuiltinAgents();
-		const sentinel = agents.find((agent) => agent.name === "sentinel");
-		assert.ok(sentinel);
-		assert.match(formatCatalogEntry(sentinel), /^- sentinel: Inspect.*implementation or diff.*challenge claims or assumptions/u);
-		assert.match(sentinel.systemPrompt, /For a diff, report defects introduced by the change/u);
-		assert.match(sentinel.systemPrompt, /specific claim, design assumption, or finding, seek a decisive counterexample/u);
-		assert.match(sentinel.systemPrompt, /wider codebase only when the brief explicitly requests an audit/u);
-		assert.match(sentinel.systemPrompt, /confirmed findings ordered by severity/u);
-		assert.match(sentinel.systemPrompt, /no findings were found.*what was verified/u);
-		assert.match(sentinel.systemPrompt, /safe focused checks/u);
-		assert.match(sentinel.systemPrompt, /Do not edit files or change Git state/u);
-		assert.match(sentinel.systemPrompt, /Main applies confirmed fixes/u);
-		assert.match(sentinel.systemPrompt, /Reuse main or upstream.*research, and passing checks when they still cover/u);
-		assert.match(sentinel.systemPrompt, /repeat or broaden checks only for changed code or a concrete uncertainty/u);
-		assert.match(sentinel.systemPrompt, /exact location, trigger, consequence, evidence, and smallest fix/u);
-		assert.match(sentinel.systemPrompt, /unverified concerns separately from findings/u);
-		assert.match(sentinel.systemPrompt, /speculative hardening/u);
-		assert.match(sentinel.systemPrompt, /checks as `command → result`/u);
 	});
 
 	it("preserves evidence reuse for research and implementation", () => {
@@ -160,8 +139,8 @@ describe("resolveAgentTools", () => {
 		assert.deepEqual(resolveAgentTools(scout, active, infos).tools, ["read", "docs_search"]);
 	});
 
-	it("lets sentinel run checks through the active tools while keeping it a leaf", () => {
-		const agent = loadBuiltinAgents().find((entry) => entry.name === "sentinel");
+	it("lets artisan run checks through the active tools while keeping it a leaf", () => {
+		const agent = loadBuiltinAgents().find((entry) => entry.name === "artisan");
 		assert.ok(agent);
 		assert.deepEqual(resolveAgentTools(agent, ["read", "powershell", "codemode", "edit", "subagent", "subagent_status", "subagent_message", "subagent_stop"], [CODEMODE]).tools,
 			["read", "powershell", "codemode", "edit"]);
@@ -203,7 +182,7 @@ describe("resolveAgentTools", () => {
 			tool("subagent", undefined, undefined, "codemode"),
 			tool("subagent_message", undefined, undefined, "deferred"),
 		];
-		for (const name of ["artisan", "sentinel"]) {
+		for (const name of ["artisan"]) {
 			const agent = loadBuiltinAgents().find((entry) => entry.name === name)!;
 			for (const reachingTool of ["codemode", "tool_search"]) {
 				assert.deepEqual(resolveAgentTools(agent, ["read", reachingTool, "mcp__direct__search"], infos).tools,
@@ -216,10 +195,10 @@ describe("resolveAgentTools", () => {
 
 	it("treats tools without a read-only proof as potentially write-capable", () => {
 		const infos = [READ_ONLY, tool("db_write", { readOnlyHint: false }), tool("codemode", undefined, () => "all")];
-		assert.equal(isWriteCapableAgent({ name: "sentinel", tools: ["read", "grep"] }), false);
-		assert.equal(isWriteCapableAgent({ name: "sentinel", tools: ["read", "docs_search"] }, infos), false);
-		assert.equal(isWriteCapableAgent({ name: "sentinel", tools: ["read", "custom_repository_tool"] }), true);
-		assert.equal(isWriteCapableAgent({ name: "sentinel", tools: ["read", "db_write"] }, infos), true);
-		assert.equal(isWriteCapableAgent({ name: "sentinel", tools: ["read", "codemode"] }, infos), true);
+		assert.equal(isWriteCapableAgent({ name: "custom", tools: ["read", "grep"] }), false);
+		assert.equal(isWriteCapableAgent({ name: "custom", tools: ["read", "docs_search"] }, infos), false);
+		assert.equal(isWriteCapableAgent({ name: "custom", tools: ["read", "custom_repository_tool"] }), true);
+		assert.equal(isWriteCapableAgent({ name: "custom", tools: ["read", "db_write"] }, infos), true);
+		assert.equal(isWriteCapableAgent({ name: "custom", tools: ["read", "codemode"] }, infos), true);
 	});
 });

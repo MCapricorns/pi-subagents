@@ -4,18 +4,18 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { describe, it } from "node:test";
-import { getResultOutput, isFailedResult, runSingleAgentWithMainFallback } from "../src/execution/spawn.ts";
+import { getResultOutput, isFailedResult, runWorker } from "../src/execution/spawn.ts";
 import { RunControl, type SteeringReceipt } from "../src/execution/run-control.ts";
 import { loadBuiltinAgents, resolveAgentTools } from "../src/delegation/agents.ts";
 
 // Exercise the actual installed Pi CLI with a local provider that never makes
 // network requests. The temporary agent directory contains no user credentials.
 describe("native Pi CLI integration", () => {
-	for (const mode of ["normal", "fallback", "fallback-alias", "steering", "handled", "dialogs", "followup", "followup-alias"] as const) {
-		const fallback = mode === "fallback" || mode === "fallback-alias";
+	for (const mode of ["normal", "failure", "failure-alias", "steering", "handled", "dialogs", "followup", "followup-alias"] as const) {
+		const failure = mode === "failure" || mode === "failure-alias";
 		const followup = mode === "followup" || mode === "followup-alias";
 		const aliased = mode.endsWith("-alias");
-		it((fallback ? "resumes the same Pi session on main-model fallback" : mode === "steering" ? "delivers steering through the real Pi RPC process" : mode === "handled" ? "reports native input-hook handling without claiming the steer was queued" : mode === "dialogs" ? "cancels real extension dialogs and leaves approval denied" : followup ? "continues a private session in a new workspace after the old workspace is removed" : "runs through Pi's own CLI, loader, provider, and RPC events") + (aliased ? " through a directory alias" : ""), { timeout: 30_000 }, async () => {
+		it((failure ? "returns provider failure without launching a main-model worker" : mode === "steering" ? "delivers steering through the real Pi RPC process" : mode === "handled" ? "reports native input-hook handling without claiming the steer was queued" : mode === "dialogs" ? "cancels real extension dialogs and leaves approval denied" : followup ? "continues a private session in a new workspace after the old workspace is removed" : "runs through Pi's own CLI, loader, provider, and RPC events") + (aliased ? " through a directory alias" : ""), { timeout: 30_000 }, async () => {
 			const root = await mkdtemp(join(tmpdir(), "pi-subagents-native-pi-"));
 			const agentDir = join(root, "agent");
 			const previousScript = process.argv[1];
@@ -78,38 +78,38 @@ export default async (pi) => {
 				const cwd = followup ? join(workspaceRoot, "first-worktree") : workspaceRoot;
 				await mkdir(cwd, { recursive: true });
 				let steering: Promise<SteeringReceipt> | undefined;
-				const result = await runSingleAgentWithMainFallback({
-					defaultCwd: cwd, cwd, agent: { name: "artisan", description: "fixture", systemPrompt: "Return the fixture answer.", model: "fixture/" + (fallback ? "selected" : "main"), tools: [] },
+				const result = await runWorker({
+					defaultCwd: cwd, cwd, agent: { name: "artisan", description: "fixture", systemPrompt: "Return the fixture answer.", model: "fixture/" + (failure ? "selected" : "main"), tools: [] },
 					agentName: "artisan", task: "Test native session preservation", thinkingLevel: "off", idleTimeoutMs: 0,
 					sessionRoot: join(root, "sessions"), scratchRoot: join(root, "scratch"),
 					env: { ...process.env, PI_CODING_AGENT_DIR: agentDir, PI_OFFLINE: "1" }, signal: AbortSignal.timeout(25_000), control,
 					onLive: (event) => {
 						if ((mode === "steering" || mode === "handled") && !steering && event.kind === "status" && event.status === "running") steering = control.steer("Additional instruction");
 					},
-				}, fallback ? "fixture/main" : undefined);
+				});
 				if (steering) {
 					const receipt = await steering;
 					assert.equal(receipt.requestId, "steer-1");
 					assert.equal(receipt.disposition, mode === "handled" ? "handled" : "queued");
 					assert.ok(receipt.acknowledgedAt <= Date.now());
 				}
-				assert.equal(isFailedResult(result), false, getResultOutput(result) + "\n" + result.stderr);
+				assert.equal(isFailedResult(result), failure, getResultOutput(result) + "\n" + result.stderr);
 				if (mode === "steering") assert.match(getResultOutput(result), /2 user messages/);
 				if (mode === "handled") assert.match(getResultOutput(result), /1 user messages/);
 				if (mode === "dialogs") {
 					assert.match(getResultOutput(result), /dialogs=\[false,null,null,null\]/u);
 					for (const method of ["confirm", "select", "input", "editor"]) assert.match(result.stderr, new RegExp(`Cancelled child extension ${method} dialog`));
 				}
-				assert.match(getResultOutput(result), /native completed/);
-				assert.equal(result.model, "fixture/main");
+				if (!failure) assert.match(getResultOutput(result), /native completed/);
+				assert.equal(result.model, failure ? "fixture/selected" : "fixture/main");
 				assert.ok(result.sessionDir && result.sessionId);
 				const sessionFiles = (await readdir(result.sessionDir)).filter((file) => file.endsWith("_" + result.sessionId + ".jsonl"));
 				assert.equal(sessionFiles.length, 1);
 				const session = await readFile(join(result.sessionDir, sessionFiles[0]!), "utf8");
 				assert.equal(JSON.parse(session.split("\n")[0]!).cwd, await realpath(cwd));
-				if (fallback) {
-					assert.equal(result.modelFallbackFrom, "fixture/selected");
-					assert.match(getResultOutput(result), /2 user messages/);
+				if (failure) {
+					assert.match(result.errorMessage ?? "", /Fixture selected model unavailable/u);
+					assert.doesNotMatch(session, /"model":"main"/u, "no expensive fallback may run");
 				}
 				if (followup) {
 					const file = (await readdir(result.sessionDir)).find((name) => name.endsWith(`_${result.sessionId}.jsonl`))!;
@@ -121,7 +121,7 @@ export default async (pi) => {
 					await mkdir(nextCwd);
 					await copyFile(originalFile, join(privateDir, file));
 					await rm(cwd, { recursive: true, force: true });
-					const continued = await runSingleAgentWithMainFallback({
+					const continued = await runWorker({
 						defaultCwd: nextCwd, cwd: nextCwd,
 						agent: { name: "artisan", description: "fixture", systemPrompt: "Return the fixture answer.", model: "fixture/main", tools: [] },
 						agentName: "artisan", task: "Verify the next step", thinkingLevel: "off", idleTimeoutMs: 0,
@@ -267,7 +267,7 @@ export default function (pi) {
 						{ name: "codemode", reachesTools: () => "all" },
 						{ name: "mcp__visible__search", annotations: { readOnlyHint: true } }, ...indirect,
 					]);
-				const result = await runSingleAgentWithMainFallback({
+				const result = await runWorker({
 					defaultCwd: root, cwd: root, agent: { ...agent, model: "fixture/tools", systemPrompt: "Exercise inherited tools." },
 					agentName: role, task: "Exercise inherited tools", thinkingLevel: "off", idleTimeoutMs: 0,
 					sessionRoot: join(root, "sessions"), scratchRoot: join(root, "scratch"),

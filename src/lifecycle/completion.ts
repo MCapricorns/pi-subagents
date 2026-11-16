@@ -15,17 +15,6 @@ const COMPLETION_MAX_WAIT_MS = 1_000;
 
 type TimerHandle = ReturnType<typeof setTimeout>;
 
-function unrefHandle(handle: TimerHandle): void {
-	if (
-		handle &&
-		typeof handle === "object" &&
-		"unref" in handle &&
-		typeof (handle as { unref: unknown }).unref === "function"
-	) {
-		(handle as { unref: () => void }).unref();
-	}
-}
-
 export interface CompletionBatcherOptions<T> {
 	emit: (items: T[]) => void;
 }
@@ -69,11 +58,11 @@ export function createCompletionBatcher<T>(options: CompletionBatcherOptions<T>)
 
 			if (debounceTimer !== null) clearTimeout(debounceTimer);
 			debounceTimer = setTimeout(emitGroup, COMPLETION_DEBOUNCE_MS);
-			unrefHandle(debounceTimer);
+			debounceTimer.unref();
 
 			if (maxWaitTimer === null) {
 				maxWaitTimer = setTimeout(emitGroup, COMPLETION_MAX_WAIT_MS);
-				unrefHandle(maxWaitTimer);
+				maxWaitTimer.unref();
 			}
 		},
 		flush: emitGroup,

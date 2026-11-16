@@ -1,5 +1,39 @@
 # Changelog
 
+## 7.0.0
+
+### Breaking changes
+
+- Make lead/worker orchestration the only workflow. Main judges difficulty,
+  delegates simple bounded work by default, splits complex tasks or handles
+  their difficult core, and always reviews the actual diff and evidence.
+  Remove sentinel and the role matrix.
+- Replace legacy configuration on startup with versioned worker settings:
+  one model and thinking preference shared by artisan and scout. Delete the
+  old config without a backup and direct users to `/subagents-setup`; preserve
+  sessions, worktrees, results, and recovery records.
+- Remove automatic main-model worker retries. Provider failures return evidence
+  to main. An unavailable configured worker blocks dispatch and keeps its setting
+  instead of silently consuming main-model quota.
+- Reject unreadable settings and invalid worker model references at dispatch,
+  while keeping main available to explain the problem.
+- Require Pi >= 1.5.2 and align development SDKs to 1.5.2.
+
+### Changes
+
+- Simplify setup to Model, Thinking, and Reset with searchable pickers, compact
+  narrow-terminal hints, and Pi's blocked status while awaiting input.
+- Keep live main/worker assignments separate from the stable prompt for caching.
+  Use compact briefs, preserved worker sessions, focused corrections, and reuse
+  of valid evidence to limit repeated work. Return invalid plans and repeated
+  failed fixes to main; worker completion explicitly requests main's review.
+- Rewrite the README around the new workflow, breaking reset, budget tradeoffs,
+  prompt research, Pi APIs, controls, and recovery behavior.
+- Prefer an exact configured provider reference over its alias regardless of
+  catalog order. Remove obsolete role migration and duplicate delivery logic.
+- Bound test-file concurrency to four so native Windows shell probes do not
+  time out under process-heavy parallel suites; retain runtime concurrency tests.
+
 ## 6.0.5
 
 ### Fixes

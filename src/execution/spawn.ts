@@ -3,9 +3,8 @@
  *
  * The process transport lives in cli-run.ts: each attempt runs Pi's own CLI in
  * `--mode rpc` with a session retained after settlement, and settles on
- * `agent_settled`. This module owns selected-to-main model handoff,
- * capability-clamped thinking, accounting, and result formatting around those
- * attempts.
+ * `agent_settled`. This module owns retained sessions and result handling.
+ * Worker failures return to main without starting a more expensive model.
  */
 
 import { createHash, randomUUID } from "node:crypto";
@@ -230,7 +229,7 @@ export function getResultOutput(result: SingleResult): string {
 	return error || output || "(no output)";
 }
 
-/** Model handoff preserves useful history, but main or siblings may have edited
+/** A continuation preserves useful history, but main or siblings may have edited
  * the workspace since the selected model last read it. */
 const RESUME_CONTINUATION_RULES =
 	"Use the earlier session history as evidence. The current objective below takes precedence over earlier task requests; preserve earlier constraints unless it changes them. Reuse relevant completed work and checks. The workspace may have changed while this thread was inactive: before editing a file, re-read it unless you read it during this continuation. The current cwd is authoritative; do not reuse paths to an earlier temporary worktree. Finish with the result-only handoff your role requires.";
@@ -251,12 +250,6 @@ async function createSessionDir(root: string): Promise<string> {
 	return dir;
 }
 
-function buildFallbackResumeReason(fromModel?: string): string {
-	return fromModel
-		? `the selected model (${fromModel}) failed at the model/provider level, so the current main model is continuing`
-		: "the selected model failed at the model/provider level, so the current main model is continuing";
-}
-
 export interface RunSingleOptions {
 	defaultCwd: string;
 	agent: AgentConfig;
@@ -264,8 +257,6 @@ export interface RunSingleOptions {
 	task: string;
 	cwd?: string;
 	thinkingLevel?: ThinkingLevel;
-	/** Resolve the effective level for each runtime model candidate. */
-	thinkingLevelForModel?: (modelRef?: string) => ThinkingLevel;
 	idleTimeoutMs?: number;
 	sessionDir?: string;
 	sessionId?: string;
@@ -276,13 +267,12 @@ export interface RunSingleOptions {
 	scratchRoot: string;
 	/** Plain-text prompt passed to Pi over stdin. */
 	stdinText?: string;
-	/** Refresh parent-derived tools immediately before every selected model and
-	 * selected-to-main fallback process is spawned. */
-	resolveAgentForAttempt?: (agent: AgentConfig) => AgentConfig;
+	/** Refresh parent-derived tools immediately before the worker is spawned. */
+	resolveAgentBeforeLaunch?: (agent: AgentConfig) => AgentConfig;
 	signal?: AbortSignal;
 	onLive?: (event: SubagentLiveEvent) => void;
 	env?: NodeJS.ProcessEnv;
-	/** Stable logical-generation controller shared across model attempts. */
+	/** Stable logical-generation controller for startup, steering, and cancellation. */
 	control?: RunControl;
 	startupTimeoutMs?: number;
 }
@@ -344,18 +334,8 @@ async function runSingleAgent(options: RunSingleOptions): Promise<SingleResult> 
 	return result;
 }
 
-/**
- * Run one logical generation on the selected model, then hand directly to the
- * current main model after any model/provider-level failure. A launch failure is returned to main without replaying an ambiguous prompt.
- * Both attempts resume the same retained Pi session.
- */
-export async function runSingleAgentWithMainFallback(
-	options: RunSingleOptions,
-	mainFallbackRef?: string,
-): Promise<SingleResult> {
-	const agent = options.agent;
-	const launchedRef = agent.model;
-
+/** Run one generation on the chosen worker, preserving its session for follow-ups. */
+export async function runWorker(options: RunSingleOptions): Promise<SingleResult> {
 	const sessionId = options.sessionId ?? randomUUID();
 	const sessionDir = options.sessionDir ?? (await createSessionDir(options.sessionRoot));
 	const baseOptions: RunSingleOptions = {
@@ -364,141 +344,37 @@ export async function runSingleAgentWithMainFallback(
 			? { stdinText: buildResumePrompt(options.task, "a follow-up was requested") }
 			: {}),
 	};
-	if (!options.sessionDir) {
-		// Surface the fresh session immediately so the dispatching thread can
-		// persist a durable checkpoint before the child settles.
-		try {
-			options.onLive?.({ kind: "session", sessionId, sessionDir });
-		} catch {
-			/* never throw from event handling */
-		}
+	try {
+		if (!options.sessionDir) options.onLive?.({ kind: "session", sessionId, sessionDir });
+		options.onLive?.({ kind: "model", model: options.agent.model, thinking: options.thinkingLevel });
+	} catch {
+		/* never throw from event handling */
 	}
-
-	const dispatchFailure = async (error: unknown): Promise<SingleResult> => {
-		const errorMessage = error instanceof Error ? error.message : String(error);
-		const hasSession = sessionExists(sessionDir, sessionId);
-		if (!hasSession && !options.sessionDir) {
-			await rm(sessionDir, { recursive: true, force: true }).catch(() => undefined);
-		}
-		return {
-			agent: options.agentName,
-			task: options.control?.getObjective() ?? options.task,
-			exitCode: 1,
-			messages: [],
-			stderr: errorMessage,
-			usage: emptyUsage(),
-			model: options.agent.model,
-			thinking: options.thinkingLevel,
-			stopReason: "error",
-			errorMessage,
-			dispatchFailed: true,
-			...(hasSession || options.sessionDir ? { sessionId, sessionDir } : {}),
-		};
-	};
-
-	const runAttempt = async (opts: RunSingleOptions): Promise<SingleResult> => {
-		const immediate = controlledDisposition(opts);
-		if (immediate) return immediate;
-		try {
-			const attemptOptions = opts.resolveAgentForAttempt ? { ...opts, agent: opts.resolveAgentForAttempt(opts.agent) } : opts;
-			const result = await runSingleAgent(attemptOptions);
-			return controlledDisposition(opts, result) ?? result;
-		} catch (error) {
-			const failed = await dispatchFailure(error);
-			return controlledDisposition(opts, failed) ?? failed;
-		}
-	};
-
-	const selectedRef = launchedRef?.trim() || undefined;
-	const normalizedMainRef = mainFallbackRef?.trim() || undefined;
-	const candidates: Array<{ agent: AgentConfig; ref?: string }> = [
-		{ agent, ref: selectedRef },
-	];
-	if (normalizedMainRef && normalizedMainRef !== selectedRef) {
-		candidates.push({ agent: { ...agent, model: normalizedMainRef }, ref: normalizedMainRef });
-	}
-
-	let fallbackUsed = false;
-	let result: SingleResult | undefined;
-	const priorFailedTools: NonNullable<SingleResult["failedTools"]> = [];
-	const priorUsage = emptyUsage();
-
-	const retainAttemptDiagnostics = (attempt: SingleResult): void => {
-		priorFailedTools.push(...(attempt.failedTools ?? []));
-		priorUsage.input += attempt.usage.input;
-		priorUsage.output += attempt.usage.output;
-		priorUsage.cacheRead += attempt.usage.cacheRead;
-		priorUsage.cacheWrite += attempt.usage.cacheWrite;
-		priorUsage.cost += attempt.usage.cost;
-		priorUsage.turns += attempt.usage.turns;
-		priorUsage.contextTokens = attempt.usage.contextTokens || priorUsage.contextTokens;
-	};
-
-	const finish = async (settled: SingleResult): Promise<SingleResult> => {
-		if (priorFailedTools.length > 0) {
-			settled.failedTools = [...priorFailedTools, ...(settled.failedTools ?? [])];
-		}
-		if (
-			priorUsage.turns || priorUsage.input || priorUsage.output || priorUsage.cacheRead ||
-			priorUsage.cacheWrite || priorUsage.cost || priorUsage.contextTokens
-		) {
-			settled.usage = {
-				input: priorUsage.input + settled.usage.input,
-				output: priorUsage.output + settled.usage.output,
-				cacheRead: priorUsage.cacheRead + settled.usage.cacheRead,
-				cacheWrite: priorUsage.cacheWrite + settled.usage.cacheWrite,
-				cost: priorUsage.cost + settled.usage.cost,
-				turns: priorUsage.turns + settled.usage.turns,
-				contextTokens: settled.usage.contextTokens || priorUsage.contextTokens,
-			};
-		}
-		const persistedSession = sessionExists(sessionDir, sessionId);
-		if (!settled.dispatchFailed || persistedSession || options.sessionDir) {
-			settled.sessionId ??= sessionId;
-			settled.sessionDir ??= sessionDir;
-		} else {
-			await rm(sessionDir, { recursive: true, force: true }).catch(() => undefined);
-			settled.sessionId = undefined;
-			settled.sessionDir = undefined;
-		}
-		settled.task = options.control?.getObjective() ?? settled.task;
-		if (fallbackUsed && launchedRef) settled.modelFallbackFrom = launchedRef;
-		options.control?.markSettled();
-		return settled;
-	};
-
-	for (let candidateIndex = 0; candidateIndex < candidates.length; candidateIndex++) {
-		const candidate = candidates[candidateIndex];
-		fallbackUsed ||= candidateIndex > 0;
-		const previousModel = result?.model ?? candidates[candidateIndex - 1]?.ref;
-		const candidateThinking = options.thinkingLevelForModel?.(candidate.ref) ?? options.thinkingLevel;
-		const candidateOptions: RunSingleOptions = {
+	let result: SingleResult;
+	try {
+		result = controlledDisposition(baseOptions) ?? await runSingleAgent({
 			...baseOptions,
-			agent: candidate.agent,
-			thinkingLevel: candidateThinking,
-			...(candidateIndex > 0
-				? {
-					stdinText: buildResumePrompt(
-						options.control?.getObjective() ?? options.task,
-						buildFallbackResumeReason(previousModel),
-					),
-				}
-				: {}),
+			agent: options.resolveAgentBeforeLaunch?.(options.agent) ?? options.agent,
+		});
+	} catch (error) {
+		const errorMessage = error instanceof Error ? error.message : String(error);
+		result = {
+			agent: options.agentName, task: options.task, exitCode: 1,
+			messages: [], stderr: errorMessage, usage: emptyUsage(),
+			model: options.agent.model, thinking: options.thinkingLevel,
+			stopReason: "error", errorMessage, dispatchFailed: true,
 		};
-		try {
-			options.onLive?.({ kind: "model", model: candidate.ref, thinking: candidateThinking });
-		} catch {
-			/* never throw from event handling */
-		}
-
-		result = await runAttempt(candidateOptions);
-		if (result.stopReason === "aborted") return finish(result);
-		if (!isModelLevelFailure(result)) return finish(result);
-		// Any model-level failure advances immediately to the sole fallback (the
-		// current main model). Retain selected-attempt tool diagnostics and usage;
-		// ordinary task/tool failures returned above without a handoff.
-		if (candidateIndex < candidates.length - 1) retainAttemptDiagnostics(result);
 	}
-
-	return finish(result!);
+	result = controlledDisposition(baseOptions, result) ?? result;
+	if (!result.dispatchFailed || sessionExists(sessionDir, sessionId) || options.sessionDir) {
+		result.sessionId ??= sessionId;
+		result.sessionDir ??= sessionDir;
+	} else {
+		await rm(sessionDir, { recursive: true, force: true }).catch(() => undefined);
+		result.sessionId = undefined;
+		result.sessionDir = undefined;
+	}
+	result.task = options.control?.getObjective() ?? result.task;
+	options.control?.markSettled();
+	return result;
 }
