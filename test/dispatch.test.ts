@@ -13,7 +13,7 @@ import { monitor } from "../src/presentation/monitor.ts";
 function source(partial: Partial<PhaseLeaseSource> = {}): PhaseLeaseSource {
 	return {
 		id: 41,
-		agentName: "scout",
+		agentName: "researcher",
 		task: "Trace dispatch ownership",
 		cwd: process.cwd(),
 		state: "running",
@@ -34,8 +34,8 @@ function dispatcher(threads: PhaseLeaseSource[]) {
 	} as unknown as ExtensionAPI;
 	const runtime = createRuntime(pi, `${process.cwd()}/.pi-test/config.json`);
 	for (const thread of threads) runtime.threads.set(thread.id, thread as unknown as SubagentThread);
-	const artisan: AgentConfig = {
-		name: "artisan",
+	const worker: AgentConfig = {
+		name: "worker",
 		description: "implementation",
 		systemPrompt: "body",
 	};
@@ -44,7 +44,7 @@ function dispatcher(threads: PhaseLeaseSource[]) {
 		getEnvironment: () => ({
 			ctx: { cwd: process.cwd() } as ExtensionContext,
 			config: {} as SubagentsConfig,
-			agents: [artisan],
+			agents: [worker],
 		}),
 		finishRun: () => undefined,
 		makeLiveHandler: () => () => undefined,
@@ -54,17 +54,17 @@ function dispatcher(threads: PhaseLeaseSource[]) {
 
 describe("isolation policy", () => {
 	it("keeps the lightweight reader on the shared checkout", () => {
-		const scout = loadBuiltinAgents().find((agent) => agent.name === "scout");
-		assert.ok(scout);
-		assert.equal(isWriteCapableAgent(scout), false);
-		assert.equal(defaultIsolationMode(scout.name), "shared");
+		const researcher = loadBuiltinAgents().find((agent) => agent.name === "researcher");
+		assert.ok(researcher);
+		assert.equal(isWriteCapableAgent(researcher), false);
+		assert.equal(defaultIsolationMode(researcher.name), "shared");
 	});
 });
 
 describe("fresh write capability", () => {
-	it("rejects explicit scout worktree isolation before allocation", async () => {
-		const scout = loadBuiltinAgents().find((agent) => agent.name === "scout");
-		assert.ok(scout);
+	it("rejects explicit researcher worktree isolation before allocation", async () => {
+		const researcher = loadBuiltinAgents().find((agent) => agent.name === "researcher");
+		assert.ok(researcher);
 		const pi = {
 			on: () => undefined,
 			getActiveTools: () => ["read", "grep", "bash"],
@@ -77,13 +77,13 @@ describe("fresh write capability", () => {
 			getEnvironment: () => ({
 				ctx: { cwd: process.cwd() } as ExtensionContext,
 				config: {} as SubagentsConfig,
-				agents: [scout],
+				agents: [researcher],
 			}),
 			finishRun: () => undefined,
 			makeLiveHandler: () => () => undefined,
 		});
 		try {
-			const result = await start("scout", "Map the dispatch path", process.cwd(), "worktree");
+			const result = await start("researcher", "Map the dispatch path", process.cwd(), "worktree");
 			assert.equal(result.exitCode, 1);
 			assert.match(result.errorMessage ?? result.stderr, /worktree isolation/i);
 			assert.equal(runtime.threads.size, 0);
@@ -152,18 +152,18 @@ describe("duplicate dispatch", () => {
 
 	it("rejects the fresh duplicate of an active run before allocating another", async () => {
 		const { runtime, start } = dispatcher([source()]);
-		const result = await start("artisan", " Trace   dispatch ownership ", `${process.cwd()}/child/..`);
+		const result = await start("worker", " Trace   dispatch ownership ", `${process.cwd()}/child/..`);
 		assert.equal(result.exitCode, 1);
-		assert.match(result.errorMessage ?? "", /Run #41 \(scout\).*phase \(running\)/u);
+		assert.match(result.errorMessage ?? "", /Run #41 \(researcher\).*phase \(running\)/u);
 		assert.equal(runtime.threads.size, 1);
 		assert.equal(runtime.runControllers.size, 0);
 	});
 
 	it("rejects re-running a finished brief and points at the retained thread", async () => {
 		const { runtime, start } = dispatcher([settledSource()]);
-		const result = await start("artisan", "Trace dispatch ownership", process.cwd());
+		const result = await start("worker", "Trace dispatch ownership", process.cwd());
 		assert.equal(result.exitCode, 1);
-		assert.match(result.errorMessage ?? "", /Run #41 \(scout\).*phase \(completed\)/u);
+		assert.match(result.errorMessage ?? "", /Run #41 \(researcher\).*phase \(completed\)/u);
 		assert.match(result.errorMessage ?? "", /subagent_status.*subagent_message/u);
 		assert.doesNotMatch(result.errorMessage ?? "", /resume|steer|park/iu);
 		assert.equal(runtime.threads.size, 1);
@@ -172,7 +172,7 @@ describe("duplicate dispatch", () => {
 
 	it("tells callers to wait for a stopping owner instead of stopping it again", async () => {
 		const { start } = dispatcher([source({ state: "stopped", retired: true, lifecycleOperation: "stop" })]);
-		const result = await start("artisan", "Trace dispatch ownership", process.cwd(), "shared");
+		const result = await start("worker", "Trace dispatch ownership", process.cwd(), "shared");
 		assert.equal(result.exitCode, 1);
 		assert.match(result.errorMessage ?? "", /still stopping; dispatch the phase again after the stop finishes/u);
 		assert.doesNotMatch(result.errorMessage ?? "", /subagent_stop/u);
@@ -180,7 +180,7 @@ describe("duplicate dispatch", () => {
 
 	it("gives interrupted owners a schema-valid retirement command", async () => {
 		const { start } = dispatcher([source({ state: "parked" })]);
-		const result = await start("artisan", "Trace dispatch ownership", process.cwd(), "shared");
+		const result = await start("worker", "Trace dispatch ownership", process.cwd(), "shared");
 		assert.equal(result.exitCode, 1);
 		const remedy = result.errorMessage ?? "";
 		assert.match(remedy, /subagent_stop\(\{ id: "41" \}\)/u);
@@ -202,12 +202,12 @@ describe("duplicate dispatch", () => {
 			await assert.rejects(
 				tool.execute("call-1", {
 					tasks: [
-						{ agent: "scout", task: "Exact duplicate" },
-						{ agent: "artisan", task: "  Exact   duplicate  " },
+						{ agent: "researcher", task: "Exact duplicate" },
+						{ agent: "worker", task: "  Exact   duplicate  " },
 					],
 				}, new AbortController().signal, () => undefined, {
 					cwd: process.cwd(),
-					modelRegistry: { getAvailable: () => [] },
+					scopedModels: [], modelRegistry: { getAvailable: () => [] },
 					ui: { notify: () => undefined },
 				}),
 				/parallel admission.*duplicate.*tasks\[0\].*tasks\[1\]/i,

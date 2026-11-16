@@ -53,7 +53,7 @@ createInterface({ input: process.stdin }).on("line", (line) => {
 		registerTool: (value: any) => { tool = value; } } as unknown as ExtensionAPI;
 	const runtime = createRuntime(pi, join(root, "config.json"));
 	registerSubagentTool(pi, runtime);
-	const ctx = { cwd: project, modelRegistry: { getAvailable: () => [] }, ui: { notify: () => undefined } } as unknown as ExtensionContext;
+	const ctx = { cwd: project, scopedModels: [], modelRegistry: { getAvailable: () => [] }, ui: { notify: () => undefined } } as unknown as ExtensionContext;
 	t.after(async () => {
 		await runtime.shutdown();
 		process.argv[1] = previousScript;
@@ -72,25 +72,25 @@ createInterface({ input: process.stdin }).on("line", (line) => {
 
 describe("automatic isolation and current roles", () => {
 	it("selects isolation by role and explicit override", () => {
-		assert.equal(defaultIsolationMode("artisan"), "worktree");
-		for (const name of ["scout"]) {
+		assert.equal(defaultIsolationMode("worker"), "worktree");
+		for (const name of ["researcher"]) {
 			assert.equal(defaultIsolationMode(name), "shared");
 		}
-		assert.equal(defaultIsolationMode("artisan", "shared"), "shared");
-		assert.equal(defaultIsolationMode("artisan", "worktree"), "worktree");
+		assert.equal(defaultIsolationMode("worker", "shared"), "shared");
+		assert.equal(defaultIsolationMode("worker", "worktree"), "worktree");
 	});
 
 	it("uses and integrates a worktree for a single implementation without an override", async (t) => {
 		const h = await harness(t, "committed");
 		const head = git(h.project, "rev-parse", "HEAD");
 		let dispatchedIdentity: string | undefined;
-		const { thread, result } = await h.run({ agent: "artisan", task: "Write output" }, (pending) => {
+		const { thread, result } = await h.run({ agent: "worker", task: "Write output" }, (pending) => {
 			assert.equal(pending.worktree, undefined, "dispatch returns before asynchronous worktree preparation finishes");
 			assert.ok(pending.durableId);
 			dispatchedIdentity = pending.durableId;
 		});
 		assert.equal(thread.durableId, dispatchedIdentity, "preparation and settlement preserve the dispatched identity");
-		assert.equal(result.exitCode, 0);
+		assert.equal(result.exitCode, 0, result.errorMessage ?? result.stderr);
 		assert.equal(thread.isolation, "worktree");
 		assert.notEqual(thread.executionCwd.toLowerCase(), h.project.toLowerCase());
 		assert.equal(result.integrationStatus, "integrated");
@@ -101,9 +101,9 @@ describe("automatic isolation and current roles", () => {
 
 	it("tells an isolated child where its worktree mirrors the original checkout", async (t) => {
 		const h = await harness(t, "committed");
-		const { thread, result } = await h.run({ agent: "artisan", task: "Report prompt" });
+		const { thread, result } = await h.run({ agent: "worker", task: "Report prompt" });
 		const prompt = getResultOutput(result);
-		assert.equal(result.exitCode, 0);
+		assert.equal(result.exitCode, 0, result.errorMessage ?? result.stderr);
 		assert.ok(prompt.includes(`temporary detached Git worktree at ${thread.executionCwd}, a snapshot of the original checkout ${await realpath(h.project)}.`), prompt);
 		assert.match(prompt, /map every brief path under the original checkout to the same relative path here/u);
 	});
@@ -111,7 +111,7 @@ describe("automatic isolation and current roles", () => {
 	for (const repository of ["none", "unborn"] as const) {
 		it(`reports automatic shared fallback for ${repository} repositories`, async (t) => {
 			const h = await harness(t, repository);
-			const { thread, result } = await h.run({ agent: "artisan", task: "Write output" });
+			const { thread, result } = await h.run({ agent: "worker", task: "Write output" });
 			assert.equal(result.exitCode, 0);
 			assert.equal(thread.isolation, "shared");
 			assert.equal(thread.executionCwd, h.project);
@@ -121,7 +121,7 @@ describe("automatic isolation and current roles", () => {
 
 		it(`does not fall back when worktree isolation is explicitly required in ${repository}`, async (t) => {
 			const h = await harness(t, repository);
-			const { result } = await h.run({ agent: "artisan", task: "Write output", isolation: "worktree" });
+			const { result } = await h.run({ agent: "worker", task: "Write output", isolation: "worktree" });
 			assert.equal(result.exitCode, 1);
 			assert.equal(existsSync(join(h.project, "output.txt")), false);
 			assert.match(result.errorMessage ?? result.stderr, /Worktree isolation/);
@@ -130,14 +130,14 @@ describe("automatic isolation and current roles", () => {
 
 	it("rejects retired role names before dispatch and accepts only current names", async (t) => {
 		const h = await harness(t, "none");
-		for (const name of ["reviewer", "critic", "skeptic", "sentinel"]) {
+		for (const name of ["scout", "artisan", "reviewer", "critic", "skeptic", "sentinel"]) {
 			await assert.rejects(h.run({ agent: name, task: `Verify ${name} routing` }), /Unknown agent/);
 		}
 		assert.equal(h.runtime.threads.size, 0);
-		const { thread, result } = await h.run({ agent: "scout", task: "Verify scout routing" });
-		assert.equal(thread.agentName, "scout");
+		const { thread, result } = await h.run({ agent: "researcher", task: "Verify researcher routing" });
+		assert.equal(thread.agentName, "researcher");
 		assert.equal(thread.isolation, "shared");
-		assert.equal(result.agent, "scout");
+		assert.equal(result.agent, "researcher");
 		// Resolve macOS /var aliases and Windows short paths on both sides.
 		assert.equal(await realpath(getResultOutput(result)), await realpath(h.project));
 	});

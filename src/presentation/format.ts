@@ -164,7 +164,7 @@ export function formatCompletionBlock(
 		);
 	}
 	if (failed && isModelLevelFailure(result)) lines.push("", modelLevelTakeoverNote(result));
-	if (!failed && result.agent === "artisan") {
+	if (!failed && result.agent === "worker") {
 		lines.push("", "Review handoff: main. Worker completion is not review approval. Inspect the actual diff, affected callers, acceptance criteria, and check evidence. Send confirmed corrections to the owning worker with subagent_message; main owns acceptance and release.");
 	}
 	return lines.join("\n");

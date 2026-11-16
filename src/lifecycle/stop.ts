@@ -136,7 +136,7 @@ export async function stopThreads(runtime: SubagentRuntime, targets: readonly nu
 					finalizationCompletion,
 					new Promise<undefined>((resolve) => {
 						const timer = setTimeout(() => resolve(undefined), CONTROL_QUIESCE_TIMEOUT_MS);
-						if (typeof timer.unref === "function") timer.unref();
+						timer.unref();
 					}),
 				]);
 			} catch {
@@ -158,7 +158,7 @@ export async function stopThreads(runtime: SubagentRuntime, targets: readonly nu
 							...(existsSync(worktree.worktreePath) ? { worktreePath: worktree.worktreePath } : {}),
 							...(existsSync(worktree.patchPath) ? { patchPath: worktree.patchPath } : {}),
 							error: "subagent_stop timed out waiting for worktree integration; it continues in the background",
-						}, Date.now(), thread.durableId),
+						}, thread.durableId!),
 					]).catch(() => undefined);
 					pendingIntegration.push(`#${runId}`);
 				}

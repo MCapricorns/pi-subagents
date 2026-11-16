@@ -32,7 +32,7 @@ async function harness() {
 	const routes: string[] = [];
 	let stops = 0;
 	const thread = (id: number, task: string, state: "running" | "completed"): SubagentThread => ({
-		id, generation: 1, agentName: "scout", task, cwd: root, executionCwd: root,
+		id, generation: 1, agentName: "researcher", task, cwd: root, executionCwd: root,
 		isolation: "shared", state, control: new RunControl(task, 1),
 		generationCompletion: Promise.resolve(), lifecycleVersion: 0, elapsedMs: 0,
 		finalizeIsolation: async () => undefined,
@@ -73,7 +73,7 @@ async function harness() {
 		runtime.publishRunCompletion(id, { agent: current.agentName, block: "Verified caller evidence" }, true);
 	};
 	const invoke = (name: string, params: Record<string, unknown>, hasUI: boolean, signal = new AbortController().signal, updates: any[] = []) => {
-		const task = name === "subagent" ? { agent: "scout", task: "Verify caller evidence" } : { id: 900, message: "Verify caller evidence", context: "summary" };
+		const task = name === "subagent" ? { agent: "researcher", task: "Verify caller evidence" } : { id: 900, message: "Verify caller evidence", context: "summary" };
 		return tools.get(name).execute("call", { ...task, ...params }, signal, (update: any) => updates.push(update), {
 			cwd: root, hasUI, ui: { notify() {} },
 		});
@@ -88,8 +88,8 @@ it("returns final states and failure evidence for an awaited parallel batch", as
 	const h = await harness();
 	try {
 		const pending = h.invoke("subagent", { agent: undefined, task: undefined, wait: true, tasks: [
-			{ agent: "scout", task: "Inspect first caller" },
-			{ agent: "scout", task: "Inspect second caller" },
+			{ agent: "researcher", task: "Inspect first caller" },
+			{ agent: "researcher", task: "Inspect second caller" },
 		] }, true);
 		await h.started.promise;
 		await new Promise<void>((resolve) => setImmediate(resolve));

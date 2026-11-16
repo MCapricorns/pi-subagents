@@ -1,15 +1,15 @@
-/** One worker, two settings. Main keeps Pi's model; workers share their own selection. */
+/** Independent model and thinking preferences for each built-in role. */
 
 import type { ExtensionContext } from "@earendil-works/pi-coding-agent";
 import {
-	DEFAULT_CONFIG, DEFAULT_THINKING_LEVEL, errorMessage, getConfigPath,
+	BUILTIN_AGENT_NAMES, DEFAULT_AGENT_SETTINGS, DEFAULT_THINKING_LEVEL, errorMessage, getConfigPath,
 	initializeConfig, loadConfig, saveConfig, type ThinkingLevel,
 } from "./config.ts";
 import {
 	CURRENT_MAIN_MODEL, availableModelsInScope, buildModelPickerItems, currentModelRef,
 	findModelByRef, resolveThinkingLevel, supportedThinkingLevels,
 } from "./models.ts";
-import { promptSelectOne, promptSettings, type SetupItem } from "./ui.ts";
+import { promptSelectOne, promptSettings, type SetupItem, type SettingKey } from "./ui.ts";
 
 const THINKING_HINTS: Record<ThinkingLevel, string> = {
 	off: "No reasoning tokens", minimal: "Minimal reasoning", low: "Light reasoning",
@@ -23,54 +23,67 @@ export async function runSetup(ctx: ExtensionContext, configPath: string = getCo
 	}
 	try {
 		await ensureDefaultConfig(ctx, configPath);
-		let focus = "model";
+		let focus: SettingKey = "researcher.model";
 		let status = "Changes save immediately";
 		while (true) {
 			const config = await loadConfig(configPath);
 			const models = availableModelsInScope(ctx);
-			const selected = findModelByRef(models, config.model);
-			const model = selected ?? ctx.model;
-			const effective = resolveThinkingLevel(model, config.thinking);
 			const choice = await promptSettings(ctx, {
 				main: currentModelRef(ctx) ?? "Pi default",
-				model: config.model ?? "Follow main",
-				thinking: config.model && !selected ? config.thinking : effective + (effective !== config.thinking ? " (" + config.thinking + " requested)" : ""),
-				note: config.model && !selected ? "Worker unavailable; dispatch paused. Select an available model." : !config.model ? "Choose a cheaper worker to reduce main-model spending." : "",
+				roles: BUILTIN_AGENT_NAMES.map((role) => {
+					const settings = config[role];
+					const selected = findModelByRef(models, settings.model);
+					const unavailable = !!settings.model && !selected;
+					const effective = resolveThinkingLevel(selected ?? ctx.model, settings.thinking);
+					return {
+						role, model: settings.model ?? "Follow main",
+						thinking: unavailable ? settings.thinking : effective + (effective !== settings.thinking ? " (" + settings.thinking + " requested)" : ""),
+						unavailable,
+					};
+				}),
 				status, focus,
 			});
 			if (!choice) return;
 			focus = choice;
-			if (choice === "model") {
-				const picked = await promptSelectOne(ctx, "Worker model", "Choose a cost-effective model · Esc back",
-					buildModelPickerItems({ models, configuredRef: config.model, mainRef: currentModelRef(ctx) }),
-					config.model ?? CURRENT_MAIN_MODEL);
+			const role = BUILTIN_AGENT_NAMES.find((name) => choice.startsWith(name + "."))!;
+			const title = role === "researcher" ? "Researcher" : "Worker";
+			const settings = config[role];
+			const selected = findModelByRef(models, settings.model);
+			const model = settings.model ? selected : ctx.model;
+			const effective = resolveThinkingLevel(model, settings.thinking);
+			if (choice === role + ".model") {
+				const picked = await promptSelectOne(ctx, title + " model", "Search available models · Enter save · Esc cancel",
+					buildModelPickerItems({ models, configuredRef: settings.model, mainRef: currentModelRef(ctx) }),
+					settings.model ?? CURRENT_MAIN_MODEL);
 				if (picked === undefined) continue;
 				const next = await loadConfig(configPath);
-				if (picked === CURRENT_MAIN_MODEL) delete next.model;
-				else next.model = picked;
+				if (picked === CURRENT_MAIN_MODEL) delete next[role].model;
+				else next[role].model = picked;
 				await saveConfig(next, configPath);
-				status = "Model saved";
-			} else if (choice === "thinking") {
-				const levels = supportedThinkingLevels(config.model && !selected ? undefined : model);
+				status = title + " model saved";
+			} else if (choice === role + ".thinking") {
+				const levels = supportedThinkingLevels(model);
 				if (!levels.length) {
 					ctx.ui.notify("Choose a model before changing thinking; its supported levels are not available yet.", "info");
 					continue;
 				}
 				const items: SetupItem[] = levels.map((level) => ({
 					value: level, label: level + (level === DEFAULT_THINKING_LEVEL ? " (default)" : ""),
-					description: THINKING_HINTS[level], saved: level === config.thinking,
+					description: THINKING_HINTS[level], saved: level === settings.thinking,
 				}));
-				if (!levels.includes(config.thinking)) items.push({
-					value: config.thinking, label: config.thinking + " (runs as " + effective + ")",
+				if (!levels.includes(settings.thinking)) items.push({
+					value: settings.thinking, label: settings.thinking + " (runs as " + effective + ")",
 					description: "Saved preference; the current model clamps it.", saved: true,
 				});
-				const picked = await promptSelectOne(ctx, "Worker thinking", "Reasoning effort · Esc back", items, config.thinking);
+				const picked = await promptSelectOne(ctx, title + " thinking", "Reasoning effort for " + role + " · Esc cancel", items, settings.thinking);
 				if (picked === undefined) continue;
-				await saveConfig({ ...await loadConfig(configPath), thinking: picked as ThinkingLevel }, configPath);
-				status = "Thinking saved";
-			} else if (choice === "reset") {
-				await saveConfig({ ...DEFAULT_CONFIG }, configPath);
-				status = "Defaults restored";
+				const next = await loadConfig(configPath);
+				next[role].thinking = picked as ThinkingLevel;
+				await saveConfig(next, configPath);
+				status = title + " thinking saved";
+			} else if (choice === role + ".reset") {
+				await saveConfig({ ...await loadConfig(configPath), [role]: { ...DEFAULT_AGENT_SETTINGS } }, configPath);
+				status = title + " defaults restored";
 			}
 		}
 	} catch (error) {
@@ -83,8 +96,8 @@ export async function ensureDefaultConfig(ctx: ExtensionContext, configPath: str
 		const result = await initializeConfig(configPath);
 		if (!result) return;
 		ctx.ui.notify(
-			"pi-subagents: " + (result === "reset" ? "deleted the old config and initialized new worker settings at " : "initialized worker settings at ")
-			+ configPath + ". Main plans and reviews; workers execute. Run /subagents-setup to choose a cost-effective worker model and thinking level. Defaults follow main with medium thinking.",
+			"pi-subagents: " + (result === "reset" ? "overwrote the old config with independent role settings at " : "initialized role settings at ")
+			+ configPath + ". Run /subagents-setup to choose a model and thinking level for Researcher and Worker. Both default to Follow main with medium thinking.",
 			"info",
 		);
 	} catch (error) {

@@ -26,8 +26,8 @@ async function fixture(run: (configPath: string, cwd: string) => Promise<void>):
 
 function record(cwd: string, sessionDir: string, overrides: Partial<ThreadRecord> = {}): ThreadRecord {
 	return {
-		runId: 71, createdAt: Date.now(), updatedAt: Date.now(), generation: 1,
-		agentName: "artisan", task: "retained work", cwd, executionCwd: cwd,
+		durableId: "fixture-71", runId: 71, createdAt: Date.now(), updatedAt: Date.now(), generation: 1,
+		agentName: "worker", task: "retained work", cwd, executionCwd: cwd,
 		isolation: "shared", state: "parked", elapsedMs: 1, childPids: [],
 		sessionDir, sessionId: "retained", ...overrides,
 	};
@@ -55,7 +55,7 @@ function age(paths: string[], milliseconds: number): void {
 
 describe("retention preserves uncertain recovery references", () => {
 	for (const kind of ["thread", "recovery"] as const) {
-		for (const failure of ["read", "json", "shape"] as const) {
+		for (const failure of ["read", "json", "shape", "version", "identity"] as const) {
 			it(`keeps artifacts and the ${kind} manifest after a ${failure} failure`, async (t) => {
 				await fixture(async (configPath, cwd) => {
 					const retained = await session(configPath, cwd, 2_147_483_647);
@@ -64,8 +64,10 @@ describe("retention preserves uncertain recovery references", () => {
 					await writeFile(join(group, "owner.json"), JSON.stringify({ pid: 2_147_483_647, createdAt: 1 }));
 					await writeFile(join(group, "changes.patch"), "retained edits\n");
 					const path = kind === "thread" ? getThreadsManifestPath(configPath, cwd) : getRecoveryManifestPath(configPath);
-					const valid = JSON.stringify({ version: 1, records: kind === "thread" ? [record(cwd, retained)] : [{ runId: 71, createdAt: Date.now(), integrated: false, worktreePath: join(group, "worktree"), patchPath: join(group, "changes.patch") }] });
-					const bytes = failure === "json" ? "{unfinished" : failure === "shape" ? '{"records":null}' : valid;
+					const valid = JSON.stringify({ version: 1, records: kind === "thread" ? [record(cwd, retained)] : [{ durableId: "fixture-71", runId: 71, createdAt: Date.now(), integrated: false, worktreePath: join(group, "worktree"), patchPath: join(group, "changes.patch") }] });
+					const bytes = failure === "json" ? "{unfinished" : failure === "shape" ? '{"records":null}'
+						: failure === "version" ? valid.replace('"version":1', '"version":0')
+						: failure === "identity" ? valid.replace(/"durableId":"[^"]+",/u, "") : valid;
 					await writeFile(path, bytes);
 					const originalRead = fsPromises.readFile;
 					if (failure === "read") {

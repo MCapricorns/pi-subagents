@@ -57,11 +57,11 @@ async function createRepository(root: string): Promise<{ cwd: string; repository
 function threadRecord(cwd: string, overrides: Partial<ThreadRecord>): ThreadRecord {
 	const now = Date.now();
 	return {
-		runId: 71,
+		durableId: "fixture-71", runId: 71,
 		createdAt: now,
 		updatedAt: now,
 		generation: 1,
-		agentName: "artisan",
+		agentName: "worker",
 		task: "recover safely",
 		cwd,
 		executionCwd: cwd,
@@ -92,7 +92,7 @@ async function createManagedRecovery(
 	return {
 		group,
 		record: {
-			runId,
+			durableId: `fixture-${runId}`, runId,
 			createdAt: Date.now(),
 			integrated: false,
 			worktreePath,
@@ -292,7 +292,7 @@ describe("durable thread path validation", () => {
 			await writeFile(join(sessionDir, `2026-01-01T00-00-00.000Z_${sessionId}.jsonl`), "{}\n", "utf8");
 			const caseVariantCwd = cwd.toUpperCase();
 			await writeThreadManifest(configPath, cwd, [threadRecord(caseVariantCwd, {
-				runId: 74,
+				durableId: "fixture-74", runId: 74,
 				executionCwd: caseVariantCwd,
 				sessionId,
 				sessionDir: sessionDir.toUpperCase(),
@@ -319,7 +319,7 @@ describe("recovery manifest path validation and retention", () => {
 			await writeFile(manifestPath, `${JSON.stringify({
 				version: 1,
 				records: [{
-					runId: 91,
+					durableId: "fixture-91", runId: 91,
 					createdAt: Date.now(),
 					integrated: true,
 					worktreePath: externalWorktree,
@@ -350,7 +350,7 @@ describe("recovery manifest path validation and retention", () => {
 			await writeFile(manifestPath, `${JSON.stringify({
 				version: 1,
 				records: [{
-					runId: 92,
+					durableId: "fixture-92", runId: 92,
 					createdAt: Date.now(),
 					integrated: true,
 					worktreePath,
@@ -440,7 +440,7 @@ describe("cross-project session isolation", () => {
 		await withFixture(async (root, configPath) => {
 			const project = await createRepository(join(root, "a"));
 			await writeThreadManifest(configPath, project.cwd, [threadRecord(project.cwd, {
-				runId: 10, childPids: [process.pid], bootId: Math.round(Date.now() - uptime() * 1000),
+				durableId: "fixture-10", runId: 10, childPids: [process.pid], bootId: Math.round(Date.now() - uptime() * 1000),
 			})]);
 			const runtime = createRuntime(fakePi(), configPath);
 			try {
@@ -459,7 +459,7 @@ describe("cross-project session isolation", () => {
 			await mkdir(sessionDir, { recursive: true });
 			await writeFile(join(sessionDir, `2026-01-01T00-00-00.000Z_${sessionId}.jsonl`), "{}\n", "utf8");
 			await writeThreadManifest(configPath, projectA.cwd, [threadRecord(projectA.cwd, {
-				runId: 9,
+				durableId: "fixture-9", runId: 9,
 				sessionId,
 				sessionDir,
 			})]);

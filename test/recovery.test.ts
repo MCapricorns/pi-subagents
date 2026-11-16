@@ -9,7 +9,6 @@ import {
 	getRecoveryManifestPath,
 	persistRecoveryRecords,
 	readRecoveryRecords,
-	relocateRecoveryManifest,
 	type RecoveryRecord,
 } from "../src/isolation/recovery.ts";
 import { isPathInside } from "../src/isolation/worktree.ts";
@@ -17,7 +16,7 @@ import { isPathInside } from "../src/isolation/worktree.ts";
 function record(configPath: string, runId: number, error: string): RecoveryRecord {
 	const group = join(getProjectRoot(configPath, process.cwd()), "worktrees", `pi-subagent-worktree-${runId}`);
 	return {
-		runId,
+		durableId: `fixture-${runId}`, runId,
 		createdAt: runId * 1000,
 		integrated: false,
 		worktreePath: join(group, "worktree"),
@@ -26,7 +25,7 @@ function record(configPath: string, runId: number, error: string): RecoveryRecor
 }
 
 describe("recovery manifest storage", () => {
-	it("relocates and merges the agent-root manifest under ferris-pi-subagents", async () => {
+	it("reads only the current recovery path and leaves unrelated files untouched", async () => {
 		const root = await mkdtemp(join(tmpdir(), "pi-subagents-recovery-"));
 		const configPath = join(root, "pi-subagents.json");
 		const legacyPath = join(root, "pi-subagents-recovery.json");
@@ -38,12 +37,11 @@ describe("recovery manifest storage", () => {
 			const legacyManifest = `${JSON.stringify({ version: 1, records: [legacy] }, null, 2)}\n`;
 			await writeFile(legacyPath, legacyManifest, "utf8");
 
-			await relocateRecoveryManifest(configPath);
 
 			const expectedPath = join(root, "ferris-pi-subagents", "pi-subagents-recovery.json");
 			assert.equal(getRecoveryManifestPath(configPath), expectedPath);
-			assert.equal(existsSync(legacyPath), false);
-			assert.deepEqual(await readRecoveryRecords(configPath), [current, legacy]);
+			assert.equal(existsSync(legacyPath), true);
+			assert.deepEqual(await readRecoveryRecords(configPath), [current]);
 		} finally {
 			await rm(root, { recursive: true, force: true });
 		}

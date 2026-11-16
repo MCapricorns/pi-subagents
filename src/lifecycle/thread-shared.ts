@@ -5,8 +5,8 @@ import { realpath } from "node:fs/promises";
 import { join, resolve } from "node:path";
 import type { ExtensionContext } from "@earendil-works/pi-coding-agent";
 import type { AgentConfig } from "../delegation/agents.ts";
-import type { SubagentsConfig, ThinkingLevel } from "../configuration/config.ts";
-import { removeThreadRecord, threadRecordFromThread, threadRecordIdentity, upsertThreadRecord } from "./durable.ts";
+import { BUILTIN_AGENT_NAMES, type AgentName, type SubagentsConfig, type ThinkingLevel } from "../configuration/config.ts";
+import { removeThreadRecord, threadRecordFromThread, upsertThreadRecord } from "./durable.ts";
 import {
 	availableModelsInScope,
 	currentModelRef,
@@ -32,7 +32,7 @@ export function quiesced(promise: Promise<unknown>, timeoutMs: number = CONTROL_
 		promise.then(() => true, () => true),
 		new Promise<boolean>((resolve) => {
 			const timer = setTimeout(() => resolve(false), timeoutMs);
-			if (typeof timer.unref === "function") timer.unref();
+			timer.unref();
 		}),
 	]);
 }
@@ -98,7 +98,7 @@ export function persistThreadCheckpoint(
 	const record = threadRecordFromThread(thread, state);
 	const write = state === "parked"
 		? upsertThreadRecord(runtime.configPath, record)
-		: removeThreadRecord(runtime.configPath, threadRecordIdentity(record), thread.cwd);
+		: removeThreadRecord(runtime.configPath, record.durableId, thread.cwd);
 	void write.catch(() => undefined);
 }
 
@@ -152,10 +152,12 @@ export function resolveDispatchModelRoute(
 	config: SubagentsConfig,
 	ctx: ExtensionContext,
 ): DispatchModelRoute {
+	if (!(BUILTIN_AGENT_NAMES as readonly string[]).includes(agent.name)) throw new Error(`Unknown subagent role: ${agent.name}`);
+	const settings = config[agent.name as AgentName];
 	const availableModels = availableModelsInScope(ctx);
 	const mainRef = currentModelRef(ctx);
 	const route = resolveAgentModelRoute({
-		selectedRef: config.model,
+		selectedRef: settings.model,
 		mainRef,
 		availableRefs: availableModels.map(modelRef),
 	});
@@ -163,8 +165,8 @@ export function resolveDispatchModelRoute(
 		? ctx.model : findModelByRef(availableModels, route.primaryRef);
 	return {
 		agent: { ...agent, model: route.primaryRef },
-		thinkingLevel: resolveThinkingLevel(model, config.thinking),
-		...(route.unavailableSelectedRef ? { error: `Worker model ${route.unavailableSelectedRef} is unavailable in this session. Dispatch paused; restore availability or choose a worker with /subagents-setup. No main-model worker was started.` } : {}),
+		thinkingLevel: resolveThinkingLevel(model, settings.thinking),
+		...(route.unavailableSelectedRef ? { error: `${agent.name} model ${route.unavailableSelectedRef} is unavailable in this session. Dispatch paused; restore availability or choose another model with /subagents-setup. No main-model worker was started.` } : {}),
 	};
 }
 

@@ -161,7 +161,7 @@ function tailGraphemes(segments: string[], maxWidth: number): string {
  * One-line task preview, capped by `maxWidth` display columns (default 80).
  * `keysOnly` (default): extracted key fragments (paths, quoted phrases,
  * symbols) are shown bare — the agent name is already displayed next to the
- * task line, so templated prose ("scout: trace how ...") adds nothing.
+ * task line, so templated prose ("researcher: trace how ...") adds nothing.
  * `keysOnly: false` keeps the prose as `head…tail` (used for completion
  * messages, where the Task line is the reader's only context).
  * Grapheme-safe — CJK, ZWJ emoji and combining sequences are never split.
@@ -303,13 +303,8 @@ export function formatDuration(ms: number): string {
 }
 
 function elapsedMilliseconds(run: RunView, now: number = Date.now()): number {
-	let elapsed = run.elapsedMs ?? 0;
+	let elapsed = run.elapsedMs;
 	if (run.activeSince !== undefined) elapsed += Math.max(0, now - run.activeSince);
-	// Keep formatting tolerant of older/synthetic RunView values that predate
-	// segmented timing and carry only startedAt/endedAt.
-	if (elapsed === 0 && run.startedAt !== undefined && run.activeSince === undefined) {
-		elapsed = Math.max(0, (run.endedAt ?? now) - run.startedAt);
-	}
 	return elapsed;
 }
 

@@ -15,11 +15,11 @@ passes, finalize the work without waiting to be asked:
    - Reuse the current package version when it is already greater than the npm
      release and belongs to the same unpublished body of work; never bump the
      same pending release twice.
-   - Otherwise use a patch bump (`0.20.0` → `0.20.1`) by default for every
-     backward-compatible fix, feature, and enhancement. This repo intentionally
-     does not raise the minor version merely because a change is labeled `feat`.
-   - Use a minor bump only for an explicitly planned broader release or when the
-     user requests it; use major only for intentional breaking changes.
+   - Otherwise increment only the patch segment for every change, including
+     features and breaking changes (`7.0.0` → `7.0.1`). Keep major and minor fixed
+     unless the user explicitly supplies a different release version.
+   - Patch numbers have no digit limit: `7.0.99` → `7.0.100`, then `7.0.101`.
+     Never roll a patch increment into the minor or major segment.
 2. Commit the change and the version bump together as one logical change,
    following the commit conventions below.
 3. Push to the current branch's upstream. A version that lands on `main` is

@@ -13,12 +13,10 @@ const RECOVERY_MANIFEST_FILE_NAME = "pi-subagents-recovery.json";
 const RECOVERY_MANIFEST_VERSION = 1;
 
 export interface RecoveryRecord {
-	durableId?: string;
+	durableId: string;
 	runId: number;
 	createdAt: number;
 	integrated: boolean;
-	/** Legacy diagnostic metadata; cleanup authorization comes only from managed paths. */
-	originalRoot?: string;
 	worktreePath?: string;
 	patchPath?: string;
 	error?: string;
@@ -36,14 +34,14 @@ export function getRecoveryManifestPath(configPath: string): string {
 function normalizeRecord(value: unknown): RecoveryRecord | undefined {
 	if (!value || typeof value !== "object") return undefined;
 	const raw = value as Record<string, unknown>;
+	if (typeof raw.durableId !== "string" || !raw.durableId) throw new Error("Unsupported recovery record: durableId is required. Recovery artifacts were left untouched.");
 	if (typeof raw.runId !== "number" || !Number.isInteger(raw.runId) || raw.runId < 1) return undefined;
 	if (typeof raw.createdAt !== "number" || !Number.isFinite(raw.createdAt)) return undefined;
 	return {
-		...(typeof raw.durableId === "string" && raw.durableId ? { durableId: raw.durableId } : {}),
+		durableId: raw.durableId,
 		runId: raw.runId,
 		createdAt: raw.createdAt,
 		integrated: raw.integrated === true,
-		...(typeof raw.originalRoot === "string" && raw.originalRoot ? { originalRoot: raw.originalRoot } : {}),
 		...(typeof raw.worktreePath === "string" && raw.worktreePath ? { worktreePath: raw.worktreePath } : {}),
 		...(typeof raw.patchPath === "string" && raw.patchPath ? { patchPath: raw.patchPath } : {}),
 		...(typeof raw.error === "string" && raw.error ? { error: raw.error } : {}),
@@ -57,8 +55,8 @@ interface RecoveryManifestRead {
 
 async function readManifest(path: string): Promise<RecoveryManifestRead> {
 	try {
-		const parsed = JSON.parse(await readFile(path, "utf8")) as { records?: unknown } | null;
-		if (!Array.isArray(parsed?.records)) throw new Error(`Invalid recovery manifest: ${path}`);
+		const parsed = JSON.parse(await readFile(path, "utf8")) as { version?: unknown; records?: unknown } | null;
+		if (parsed?.version !== RECOVERY_MANIFEST_VERSION || !Array.isArray(parsed.records)) throw new Error(`Invalid recovery manifest: ${path}`);
 		return {
 			sourceCount: parsed.records.length,
 			records: parsed.records.flatMap((record) => {
@@ -96,21 +94,8 @@ export async function readRecoveryRecords(configPath: string): Promise<RecoveryR
 	});
 }
 
-/** Move valid records from the previous agent-root manifest into the internal-state
- * root. Invalid legacy records are removed without touching their referenced paths. */
-export async function relocateRecoveryManifest(configPath: string): Promise<void> {
-	const legacyPath = join(dirname(configPath), RECOVERY_MANIFEST_FILE_NAME);
-	const currentPath = getRecoveryManifestPath(configPath);
-	if (legacyPath === currentPath || !existsSync(legacyPath)) return;
-	await withManifestMutation(legacyPath, async () => {
-		const legacy = await readManifest(legacyPath);
-		await persistRecoveryRecords(configPath, legacy.records);
-		await rm(legacyPath, { force: true });
-	});
-}
-
 function recoveryKey(record: RecoveryRecord): string {
-	return `${record.durableId ?? record.runId}\0${record.worktreePath ?? ""}\0${record.patchPath ?? ""}\0${record.error ?? ""}`;
+	return `${record.durableId}\0${record.worktreePath ?? ""}\0${record.patchPath ?? ""}\0${record.error ?? ""}`;
 }
 
 async function writeManifest(path: string, records: readonly RecoveryRecord[]): Promise<void> {
@@ -155,15 +140,14 @@ export async function persistRecoveryRecords(
 export function recoveryRecordFromFinalization(
 	runId: number,
 	finalization: WorktreeFinalization,
+	durableId: string,
 	now = Date.now(),
-	durableId?: string,
 ): RecoveryRecord {
 	return {
-		...(durableId ? { durableId } : {}),
+		durableId,
 		runId,
 		createdAt: now,
 		integrated: finalization.integrated,
-		...(finalization.originalRoot ? { originalRoot: finalization.originalRoot } : {}),
 		...(finalization.worktreePath ? { worktreePath: finalization.worktreePath } : {}),
 		...(finalization.patchPath ? { patchPath: finalization.patchPath } : {}),
 		...(finalization.error ? { error: finalization.error } : {}),

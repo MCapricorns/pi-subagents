@@ -25,7 +25,7 @@ it("resets old settings and installs live orchestration without changing the sta
 	process.env.PI_CODING_AGENT_DIR = root;
 	delete process.env.PI_SUBAGENT_DEPTH;
 	const configPath = join(root, "pi-subagents.json");
-	await writeFile(configPath, JSON.stringify({ models: { artisan: "old/worker", sentinel: "old/review" } }));
+	await writeFile(configPath, JSON.stringify({ models: { worker: "old/worker", sentinel: "old/review" } }));
 	const evidence = join(root, "existing-result.txt");
 	await writeFile(evidence, "preserved evidence");
 	const handlers = new Map<string, Array<(event: any, ctx: ExtensionContext) => Promise<any>>>();
@@ -58,7 +58,7 @@ it("resets old settings and installs live orchestration without changing the sta
 	registerExtension(pi);
 	for (const handler of handlers.get("session_start") ?? []) await handler({}, ctx);
 	assert.deepEqual(await loadConfig(configPath), DEFAULT_CONFIG);
-	assert.ok(notices.some((message) => /deleted the old config.*subagents-setup/u.test(message)));
+	assert.ok(notices.some((message) => /overwrote the old config.*subagents-setup/u.test(message)));
 	assert.equal(await readFile(evidence, "utf8"), "preserved evidence");
 	assert.deepEqual(commands, ["subagents-setup", "subagents-cleanup"]);
 
@@ -69,30 +69,28 @@ it("resets old settings and installs live orchestration without changing the sta
 	const stable = sections[DELEGATION_SECTION];
 	assert.match(stable!, /Main judges difficulty/u);
 	assert.match(stable!, /Delegate simple, bounded work by default/u);
-	assert.match(sections[ORCHESTRATION_SECTION]!, /Workers currently follow main/u);
-	await saveConfig({ ...DEFAULT_CONFIG, model: "fixture/worker", thinking: "low" }, configPath);
+	assert.match(sections[ORCHESTRATION_SECTION]!, /researcher currently follows main/u);
+	await saveConfig({ ...DEFAULT_CONFIG, worker: { model: "fixture/worker", thinking: "low" } }, configPath);
 	await before(event, ctx);
 	assert.equal(sections[DELEGATION_SECTION], stable);
 	assert.match(sections[ORCHESTRATION_SECTION]!, /Main judges difficulty, plans, handles complex work, and reviews: fixture\/main/u);
-	assert.match(sections[ORCHESTRATION_SECTION]!, /Workers execute: fixture\/worker \(thinking preference: low/u);
+	assert.match(sections[ORCHESTRATION_SECTION]!, /worker: fixture\/worker \(thinking preference: low/u);
 	assert.equal(sections.custom, "Preserve another extension");
 
 	const scoped = { ...ctx, scopedModels: [{ model: main, thinkingLevel: "high" }] } as ExtensionContext;
 	await before(event, scoped);
-	assert.match(sections[ORCHESTRATION_SECTION]!, /Dispatch is blocked/u);
+	assert.match(sections[ORCHESTRATION_SECTION]!, /worker dispatch is blocked/u);
 	assert.equal(sections[DELEGATION_SECTION], stable);
 	await assert.rejects(
-		tools.get("subagent").execute("blocked-worker", { agent: "artisan", task: "Write a file", wait: true }, new AbortController().signal, undefined, scoped),
+		tools.get("subagent").execute("blocked-worker", { agent: "worker", task: "Write a file", wait: true }, new AbortController().signal, undefined, scoped),
 		/Dispatch paused.*No main-model worker was started/u,
 	);
 	assert.equal(monitor.getRuns().length, 0, "unavailable workers fail before allocating a run");
-	assert.equal((await loadConfig(configPath)).model, "fixture/worker");
+	assert.equal((await loadConfig(configPath)).worker.model, "fixture/worker");
 
-	const opaque = await before({ systemPrompt: "opaque prompt" }, ctx);
-	assert.match(opaque.systemPrompt, /^opaque prompt[\s\S]*Workers execute: fixture\/worker/u);
 	await writeFile(configPath, "{unfinished edit");
 	assert.equal(await before(event, ctx), undefined, "a broken worker config must not prevent main from responding");
 	assert.match(sections[ORCHESTRATION_SECTION]!, /Worker dispatch is paused/u);
-	await assert.rejects(tools.get("subagent").execute("broken-config", { agent: "artisan", task: "Write a file", wait: true }, new AbortController().signal, undefined, ctx), /invalid or incompatible/u);
+	await assert.rejects(tools.get("subagent").execute("broken-config", { agent: "worker", task: "Write a file", wait: true }, new AbortController().signal, undefined, ctx), /invalid or unsupported/u);
 	assert.equal(monitor.getRuns().length, 0);
 });

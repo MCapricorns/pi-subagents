@@ -4,13 +4,13 @@ import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { describe, it } from "node:test";
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
-import { loadConfig, saveConfig } from "../src/configuration/config.ts";
+import { DEFAULT_CONFIG, loadConfig, saveConfig } from "../src/configuration/config.ts";
 import { getRecoveryManifestPath } from "../src/isolation/recovery.ts";
 import { createRuntime } from "../src/lifecycle/runtime.ts";
 import { registerAnnouncements } from "../src/presentation/announcements.ts";
 
 describe("session-start recovery announcements", () => {
-	for (const location of ["legacy", "current"] as const) {
+	for (const location of ["current"] as const) {
 		it(`continues initialization when the ${location} recovery manifest is unreadable`, async () => {
 			const root = await mkdtemp(join(tmpdir(), "pi-subagents-announcements-"));
 			const configPath = join(root, "agent", "config.json");
@@ -23,8 +23,8 @@ describe("session-start recovery announcements", () => {
 			const notices: string[] = [];
 			const widgets: string[] = [];
 			try {
-				await saveConfig({ version: 1, model: "fixture/missing", thinking: "medium" }, configPath);
-				const path = location === "legacy" ? join(dirname(configPath), "pi-subagents-recovery.json") : getRecoveryManifestPath(configPath);
+				await saveConfig({ ...DEFAULT_CONFIG, worker: { model: "fixture/missing", thinking: "medium" } }, configPath);
+				const path = getRecoveryManifestPath(configPath);
 				await mkdir(dirname(path), { recursive: true });
 				await writeFile(path, "{unfinished");
 				runtime.restoredRunIds = [9];
@@ -37,7 +37,7 @@ describe("session-start recovery announcements", () => {
 				assert.equal(runtime.restoredNotified, true);
 				assert.ok(notices.some((message) => /recovery inspection failed.*continuing startup/iu.test(message)));
 				assert.ok(notices.some((message) => /restored 1 interrupted run/u.test(message)));
-				assert.equal((await loadConfig(configPath)).model, "fixture/missing");
+				assert.equal((await loadConfig(configPath)).worker.model, "fixture/missing");
 				assert.ok(notices.some((message) => /setting is preserved and dispatch is paused/u.test(message)));
 				assert.equal(await readFile(path, "utf8"), "{unfinished", "startup must preserve the unreadable manifest");
 			} finally { await runtime.shutdown(); await rm(root, { recursive: true, force: true }); }
@@ -57,7 +57,7 @@ describe("session-start recovery announcements", () => {
 		const scoped = { provider: "test", id: "scoped" };
 		const outside = { provider: "test", id: "outside" };
 		try {
-			await saveConfig({ version: 1, model: "test/outside", thinking: "high" }, configPath);
+			await saveConfig({ ...DEFAULT_CONFIG, worker: { model: "test/outside", thinking: "high" } }, configPath);
 			registerAnnouncements(pi, runtime);
 			await handlers.get("session_start")!({}, {
 				cwd: root, mode: "print", hasUI: false,
@@ -65,7 +65,7 @@ describe("session-start recovery announcements", () => {
 				scopedModels: [{ model: scoped }],
 				ui: { notify: (message: string) => notices.push(message) },
 			} as unknown as ExtensionContext);
-			assert.deepEqual((await loadConfig(configPath)).model, "test/outside");
+			assert.deepEqual((await loadConfig(configPath)).worker.model, "test/outside");
 			assert.equal(notices.length, 0);
 		} finally { await runtime.shutdown(); await rm(root, { recursive: true, force: true }); }
 	});

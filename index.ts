@@ -25,7 +25,7 @@ import { errorMessage, getConfigPath, loadConfig } from "./src/configuration/con
 import { runSetup } from "./src/configuration/setup.ts";
 import { loadBuiltinAgents } from "./src/delegation/agents.ts";
 import { registerSubagentTool } from "./src/delegation/dispatch.ts";
-import { buildDelegationDirective, installDelegationSections } from "./src/delegation/prompt.ts";
+import { installDelegationSections } from "./src/delegation/prompt.ts";
 import { buildOrchestrationSection } from "./src/delegation/orchestration.ts";
 import { currentSubagentDepth, getSubagentsRoot } from "./src/execution/spawn.ts";
 import { createDispatchCore } from "./src/lifecycle/dispatch-core.ts";
@@ -74,7 +74,7 @@ export default function (pi: ExtensionAPI): void {
 	registerCancellationHooks(pi, runtime);
 
 	pi.registerCommand("subagents-setup", {
-		description: "Configure the worker model and thinking level",
+		description: "Configure Researcher and Worker models and thinking levels",
 		handler: async (_args, ctx) => {
 			await runSetup(ctx, configPath);
 		},
@@ -111,7 +111,7 @@ export default function (pi: ExtensionAPI): void {
 	});
 	registerAnnouncements(pi, runtime);
 
-	// Install the routing contract as prompt sections when the host can diff them.
+	// Install the routing contract as replaceable prompt sections.
 	// A full systemPrompt return forces an opaque prompt and invalidates the cache.
 	pi.on("before_agent_start", async (event, ctx) => {
 		await runtime.durableRestore;
@@ -124,13 +124,6 @@ export default function (pi: ExtensionAPI): void {
 			orchestration = "Worker dispatch is paused because settings could not be loaded: " + errorMessage(error)
 				+ " Repair the settings or run /subagents-setup. Do not substitute main-model workers.";
 		}
-		const sections = event.systemPromptOptions?.sections;
-		if (sections) {
-			installDelegationSections(sections, agents, sources, orchestration);
-			return undefined;
-		}
-		const directive = buildDelegationDirective(agents, sources, orchestration);
-		if (!directive) return undefined;
-		return { systemPrompt: `${event.systemPrompt}\n${directive}` };
+		installDelegationSections(event.systemPromptOptions.sections, agents, sources, orchestration);
 	});
 }

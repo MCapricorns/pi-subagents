@@ -63,7 +63,7 @@ export const runCommand: CommandRunner = (command, args, options) =>
 					() => terminateProcessTree(child, true, usePosixProcessGroup),
 					GIT_COMMAND_KILL_GRACE_MS,
 				);
-				if (typeof forceKillTimer.unref === "function") forceKillTimer.unref();
+				forceKillTimer.unref();
 			}
 		};
 		const fail = (error: Error): void => {
@@ -88,7 +88,7 @@ export const runCommand: CommandRunner = (command, args, options) =>
 				() => fail(new Error(`Command timed out after ${options.timeoutMs}ms: ${command}`)),
 				options.timeoutMs,
 			);
-			if (typeof timeout.unref === "function") timeout.unref();
+			timeout.unref();
 		}
 
 		child.stdout?.on("data", (chunk: Buffer | string) => append(stdout, chunk));

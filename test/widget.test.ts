@@ -16,7 +16,7 @@ describe("widget run rows", () => {
 		const now = 10_000;
 		const run: RunView = {
 			id: 7,
-			agent: "artisan",
+			agent: "worker",
 			task: "Implement the config migration",
 			model: "openai/gpt-5.4",
 			thinking: "high",
@@ -30,14 +30,14 @@ describe("widget run rows", () => {
 		const lines = formatSubagentWidgetLines([run], plainTheme, 160, now);
 		assert.equal(lines.length, 3);
 		assert.match(lines[0]!, /Subagents.*1 running/u);
-		assert.match(lines[1]!, /#7.*artisan.*running/u);
+		assert.match(lines[1]!, /#7.*worker.*running/u);
 		assert.match(lines[2]!, /openai\/gpt-5.4.*think:high/u);
 	});
 });
 
 describe("widget layout priorities", () => {
 	function run(id: number, status: RunView["status"] = "running"): RunView {
-		return { id, agent: "artisan", task: "Implement src/feature" + id + ".ts", status,
+		return { id, agent: "worker", task: "Implement src/feature" + id + ".ts", status,
 			model: "test/reasoning", thinking: "high", activity: "read src/feature.ts",
 			usage: emptyUsage(), elapsedMs: 0, activeSince: 1_000, startedAt: 1_000 };
 	}
@@ -98,7 +98,7 @@ describe("widget clocks", () => {
 		} } } as unknown as ExtensionContext;
 		installActiveRunsWidget(context);
 		t.after(() => { widget.dispose(); monitor.clear(); });
-		const id = monitor.addRun("artisan", "Start worker");
+		const id = monitor.addRun("worker", "Start worker");
 		let before = renders;
 		t.mock.timers.tick(2000);
 		assert.equal(renders, before, "queued workers do not tick");
@@ -122,7 +122,7 @@ describe("widget clocks", () => {
 describe("MonitorStore activity notifications", () => {
 	it("notifies once for a run of identical streamed activity deltas", () => {
 		const store = new MonitorStore();
-		const id = store.addRun("scout", "Map src/index.ts");
+		const id = store.addRun("researcher", "Map src/index.ts");
 		let notifications = 0;
 		store.subscribe(() => notifications++);
 		for (let index = 0; index < 50; index++) store.setActivity(id, "thinking");

@@ -48,8 +48,8 @@ process.stdin.on("data", chunk => {
 		const control = new RunControl("Test native Pi", 1);
 		let steering: Promise<SteeringReceipt> | undefined;
 		const result = await runCliAgentAttempt({
-			defaultCwd: root, agent: { name: "artisan", description: "test", systemPrompt: "" },
-			agentName: "artisan", task: "Test native Pi", thinkingLevel: "off", idleTimeoutMs: 0,
+			defaultCwd: root, agent: { name: "worker", description: "test", systemPrompt: "" },
+			agentName: "worker", task: "Test native Pi", thinkingLevel: "off", idleTimeoutMs: 0,
 			scratchRoot: join(root, "tmp"), prompt: "Test native Pi", control, env,
 			signal: AbortSignal.timeout(timeoutMs), startupTimeoutMs: 5_000,
 			onLive: (event) => {
@@ -143,17 +143,6 @@ describe("stable steering receipts", () => {
 		assert.equal(await control.steer("Additional instruction"), receipt);
 	});
 
-	it("normalizes a legacy control to accepted without claiming a queue or RPC acknowledgement", async () => {
-		const control = new RunControl("Fixture", 1);
-		const token = control.beginAttempt();
-		control.attach(token, { stop: async () => {}, steer: async () => {} });
-		control.updateAttemptPhase(token, "running");
-		const before = Date.now();
-		const receipt = await control.steer("Additional instruction");
-		assert.equal(receipt.disposition, "accepted");
-		assert.equal(receipt.requestId, undefined);
-		assert.ok(receipt.acknowledgedAt >= before && receipt.acknowledgedAt <= Date.now());
-	});
 });
 
 
@@ -180,8 +169,8 @@ for (const code of ["EMFILE", "ENFILE"]) {
  nativeProcess.spawn = () => process.binding("uv")["UV_" + code];
  try {
   const result = await runCliAgentAttempt({
-   defaultCwd: process.cwd(), agent: { name: "scout", description: "fixture", systemPrompt: "" },
-   agentName: "scout", task: "Test failed spawn", thinkingLevel: "off", idleTimeoutMs: 0,
+   defaultCwd: process.cwd(), agent: { name: "researcher", description: "fixture", systemPrompt: "" },
+   agentName: "researcher", task: "Test failed spawn", thinkingLevel: "off", idleTimeoutMs: 0,
    scratchRoot: process.cwd(), prompt: "Test failed spawn", startupTimeoutMs: 1_000,
   });
   assert.equal(result.exitCode, 1);
@@ -237,19 +226,21 @@ console.log("fixture survived both spawn failures");
 		const args = buildChildLaunchArgs({ agent: {}, thinkingLevel: "off" });
 		assert.deepEqual(args.slice(0, 2), ["--mode", "rpc"]);
 	});
-	for (const disposition of ["queued", "handled", undefined, "unknown"]) {
+	for (const disposition of ["queued", "handled"]) {
 		it(`returns the child steering receipt for ${disposition ?? "empty success"}`, async () => {
 			const before = Date.now();
 			await withChild("", (result, receipt) => {
 				assert.equal(isFailedResult(result), false);
 				assert.match(getResultOutput(result), /Please check the caller/u);
 				assert.equal(receipt?.requestId, "steer-1");
-				assert.equal(receipt.disposition, disposition === "queued" || disposition === "handled" ? disposition : "accepted");
+				assert.equal(receipt.disposition, disposition);
 				assert.ok(receipt.acknowledgedAt >= before && receipt.acknowledgedAt <= Date.now());
 			}, false, `send({ type: "response", id: command.id, command: "steer", success: true, data: ${JSON.stringify(disposition ? { disposition } : {})} }); assistant("stop", command.message); send({ type: "agent_settled" });`);
 		});
 	}
 	for (const response of [
+		{ code: `send({ type: "response", id: command.id, command: "steer", success: true }); assistant("stop", "Finished"); send({ type: "agent_settled" });`, error: /Invalid steering acknowledgement/u },
+		{ code: `send({ type: "response", id: command.id, command: "steer", success: true, data: { disposition: "unknown" } }); assistant("stop", "Finished"); send({ type: "agent_settled" });`, error: /Invalid steering acknowledgement/u },
 		{ code: `send({ type: "response", id: command.id, command: "steer", success: false, error: "Fixture rejected steer" }); assistant("stop", "Finished"); send({ type: "agent_settled" });`, error: /Fixture rejected steer/u },
 		{ code: `send({ type: "response", id: "wrong-id", command: "steer", success: true, data: { disposition: "queued" } }); assistant("stop", "Finished"); send({ type: "agent_settled" });`, error: /settled before acknowledging/u },
 		{ code: `process.exit(1);`, error: /exited before acknowledging/u },

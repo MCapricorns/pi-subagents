@@ -72,13 +72,13 @@ export type RunControlPhase =
 export interface SteeringReceipt {
 	/** Present when the child acknowledged a matching RPC request. */
 	requestId?: string;
-	disposition: "queued" | "handled" | "accepted";
+	disposition: "queued" | "handled";
 	acknowledgedAt: number;
 }
 
 export interface AttemptControl {
 	stop(reason?: string): Promise<void>;
-	steer?(message: string): Promise<SteeringReceipt | void>;
+	steer?(message: string): Promise<SteeringReceipt>;
 }
 
 /** Prevent CLI prompt expansion when a message starts with a slash command. */
@@ -172,7 +172,7 @@ export class RunControl {
 		if (this.stopRequested || this.phase !== "running" || !this.attempt?.control.steer) {
 			throw new Error("This run is not accepting steering messages.");
 		}
-		return (await this.attempt.control.steer(message)) ?? { disposition: "accepted", acknowledgedAt: Date.now() };
+		return this.attempt.control.steer(message);
 	}
 
 	async stop(reason = "Subagent was aborted"): Promise<void> {

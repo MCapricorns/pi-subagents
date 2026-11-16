@@ -79,8 +79,8 @@ export default async (pi) => {
 				await mkdir(cwd, { recursive: true });
 				let steering: Promise<SteeringReceipt> | undefined;
 				const result = await runWorker({
-					defaultCwd: cwd, cwd, agent: { name: "artisan", description: "fixture", systemPrompt: "Return the fixture answer.", model: "fixture/" + (failure ? "selected" : "main"), tools: [] },
-					agentName: "artisan", task: "Test native session preservation", thinkingLevel: "off", idleTimeoutMs: 0,
+					defaultCwd: cwd, cwd, agent: { name: "worker", description: "fixture", systemPrompt: "Return the fixture answer.", model: "fixture/" + (failure ? "selected" : "main"), tools: [] },
+					agentName: "worker", task: "Test native session preservation", thinkingLevel: "off", idleTimeoutMs: 0,
 					sessionRoot: join(root, "sessions"), scratchRoot: join(root, "scratch"),
 					env: { ...process.env, PI_CODING_AGENT_DIR: agentDir, PI_OFFLINE: "1" }, signal: AbortSignal.timeout(25_000), control,
 					onLive: (event) => {
@@ -123,8 +123,8 @@ export default async (pi) => {
 					await rm(cwd, { recursive: true, force: true });
 					const continued = await runWorker({
 						defaultCwd: nextCwd, cwd: nextCwd,
-						agent: { name: "artisan", description: "fixture", systemPrompt: "Return the fixture answer.", model: "fixture/main", tools: [] },
-						agentName: "artisan", task: "Verify the next step", thinkingLevel: "off", idleTimeoutMs: 0,
+						agent: { name: "worker", description: "fixture", systemPrompt: "Return the fixture answer.", model: "fixture/main", tools: [] },
+						agentName: "worker", task: "Verify the next step", thinkingLevel: "off", idleTimeoutMs: 0,
 						sessionRoot: join(root, "sessions"), scratchRoot: join(root, "scratch"),
 						sessionDir: privateDir, sessionId: result.sessionId,
 						env: { ...process.env, PI_CODING_AGENT_DIR: agentDir, PI_OFFLINE: "1" }, signal: AbortSignal.timeout(15_000),
@@ -147,7 +147,7 @@ export default async (pi) => {
 
 
 describe("native child tool inheritance", () => {
-	for (const [role, registration] of [["artisan", "during-turn"], ["scout", "during-turn"], ["scout", "startup"]] as const) {
+	for (const [role, registration] of [["worker", "during-turn"], ["researcher", "during-turn"], ["researcher", "startup"]] as const) {
 		it(`inherits ${role} tools across asynchronous ${registration} registration`, { timeout: 30_000 }, async () => {
 			const root = await mkdtemp(join(tmpdir(), "pi-subagents-native-tools-"));
 			const agentDir = join(root, "agent");
@@ -166,7 +166,7 @@ import assert from "node:assert/strict";
 import { Type } from ${JSON.stringify(import.meta.resolve("typebox"))};
 import { createAssistantMessageEventStream } from ${JSON.stringify(import.meta.resolve("@earendil-works/pi-ai"))};
 export default function (pi) {
- const scout = ${role === "scout"};
+ const researcher = ${role === "researcher"};
  const indirect = ${JSON.stringify(indirect)};
  const startup = ${registration === "startup"};
  const register = (info) => pi.registerTool({ ...info, label: info.name, description: "fixture lookup " + info.name,
@@ -205,7 +205,7 @@ export default function (pi) {
      let content;
      if (current === 1 && startup) {
       assert.ok(!declared.has("codemode") && !declared.has("fixture_writer"));
-      assert.ok(declared.has("mcp__late__search") && declared.has("fixture_deferred"), "Scout must await and activate late registration before its first request");
+      assert.ok(declared.has("mcp__late__search") && declared.has("fixture_deferred"), "Researcher must await and activate late registration before its first request");
       content = ["mcp__late__search", "fixture_deferred", "mcp__visible__search"].map((name, i) => ({ type: "toolCall", id: "lookup-" + i, name, arguments: {} }));
      } else if (current === 1) {
       assert.ok(!declared.has("mcp__late__search") && !declared.has("fixture_deferred"));
@@ -214,11 +214,11 @@ export default function (pi) {
       await new Promise(resolve => setTimeout(resolve, 30));
       for (const info of indirect) register(info);
       content = [{ type: "toolCall", id: "read-fixture", name: "read", arguments: { path: ${JSON.stringify(document)} } }];
-     } else if (current === 2 && scout && !startup) {
+     } else if (current === 2 && researcher && !startup) {
       assert.ok(!declared.has("codemode") && !declared.has("fixture_writer"));
-      assert.ok(declared.has("mcp__late__search") && declared.has("fixture_deferred"), "Late approved indirect tools must be declared for scout");
+      assert.ok(declared.has("mcp__late__search") && declared.has("fixture_deferred"), "Late approved indirect tools must be declared for researcher");
       content = ["mcp__late__search", "fixture_deferred", "mcp__visible__search"].map((name, i) => ({ type: "toolCall", id: "lookup-" + i, name, arguments: {} }));
-     } else if (current === 2 && !scout) {
+     } else if (current === 2 && !researcher) {
       assert.ok(declared.has("codemode"));
       for (const info of indirect) assert.ok(!declared.has(info.name), "Indirect exposure must remain indirect");
       content = [{ type: "toolCall", id: "discover-fixture", name: "codemode", arguments: { code:
@@ -232,7 +232,7 @@ export default function (pi) {
       assert.ok(results.every(m => !m.isError), JSON.stringify(results));
       const text = JSON.stringify(results);
       for (const name of ["mcp__late__search", "fixture_deferred", "mcp__visible__search"]) assert.ok(text.includes("executed " + name));
-      if (!scout) assert.ok(text.includes("executed fixture_writer"));
+      if (!researcher) assert.ok(text.includes("executed fixture_writer"));
       content = [{ type: "text", text: "native tools completed" }];
      }
      for (const block of content) {

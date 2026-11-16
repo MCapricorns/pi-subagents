@@ -100,7 +100,7 @@ export function createBackgroundDispatcher(options: BackgroundDispatcherOptions)
 		const originalCwd = resolve(cwd ?? runCtx.cwd);
 		if (isolation === "worktree" && !isWriteCapableAgent(agent, toolInfos)) {
 			return {
-				...failedStartResult(agentName, task, `Agent "${agentName}" is read-only; worktree isolation is available only to write-capable agents such as artisan.`),
+				...failedStartResult(agentName, task, `Agent "${agentName}" is read-only; worktree isolation is available only to write-capable agents such as worker.`),
 				isolation,
 			};
 		}
@@ -516,7 +516,7 @@ export function installThreadLifecycle(thread: SubagentThread, deps: ThreadLifec
 			// Every retained finalization gets a durable recovery record, so the
 			// artifacts stay findable even when the owning process dies next.
 			void persistRecoveryRecords(runtime.configPath, [
-				recoveryRecordFromFinalization(runId, finalization, Date.now(), thread.durableId),
+				recoveryRecordFromFinalization(runId, finalization, thread.durableId!),
 			]).catch(() => undefined);
 		}
 		return finalization;

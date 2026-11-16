@@ -3,13 +3,18 @@ import { describe, it } from "node:test";
 import type { AgentConfig } from "../src/delegation/agents.ts";
 import { loadBuiltinAgents } from "../src/delegation/agents.ts";
 import {
-	buildDelegationDirective,
 	DELEGATION_LEASE_SECTION,
 	DELEGATION_SECTION,
 	formatPhaseLeaseReceipt,
 	installDelegationSections,
 	type PhaseLeaseSource,
 } from "../src/delegation/prompt.ts";
+
+function renderSections(agents: AgentConfig[], leases: Iterable<PhaseLeaseSource> = []): string {
+	const sections: Record<string, string> = {};
+	installDelegationSections(sections, agents, leases);
+	return Object.values(sections).join("\n\n");
+}
 
 function agent(name: string): AgentConfig {
 	return {
@@ -21,7 +26,7 @@ function agent(name: string): AgentConfig {
 
 function lease(partial: Partial<PhaseLeaseSource> & Pick<PhaseLeaseSource, "id">): PhaseLeaseSource {
 	return {
-		agentName: "scout",
+		agentName: "researcher",
 		task: "Trace the routing flow across src modules",
 		cwd: process.cwd(),
 		state: "running",
@@ -29,13 +34,13 @@ function lease(partial: Partial<PhaseLeaseSource> & Pick<PhaseLeaseSource, "id">
 	};
 }
 
-describe("buildDelegationDirective", () => {
+describe("renderSections", () => {
 	it("omits the directive when no role or lease exists", () => {
-		assert.equal(buildDelegationDirective([]), "");
+		assert.equal(renderSections([]), "");
 	});
 
 	it("always plans and reviews in main with bounded worker execution", () => {
-		const directive = buildDelegationDirective(loadBuiltinAgents());
+		const directive = renderSections(loadBuiltinAgents());
 		assert.match(directive, /Main leads planning and review; workers execute/u);
 		assert.match(directive, /Main judges difficulty/u);
 		assert.match(directive, /Delegate simple, bounded work by default: edits, fixes, tests, docs, research/u);
@@ -66,8 +71,8 @@ describe("buildDelegationDirective", () => {
 	});
 
 	it("uses the catalog for role descriptions without including child instructions", () => {
-		const roles = [agent("artisan"), agent("custom")];
-		const directive = buildDelegationDirective(roles);
+		const roles = [agent("worker"), agent("custom")];
+		const directive = renderSections(roles);
 		for (const role of roles) {
 			assert.equal(directive.split(`${role.name}: ${role.description}`).length - 1, 1);
 			assert.ok(!directive.includes(role.systemPrompt));
@@ -79,7 +84,7 @@ describe("buildDelegationDirective", () => {
 	});
 
 	it("preserves one-shot ownership and completion requirements", () => {
-		const directive = buildDelegationDirective(loadBuiltinAgents());
+		const directive = renderSections(loadBuiltinAgents());
 		assert.match(directive, /Each dispatch or follow-up returns once/u);
 		assert.match(directive, /`subagent_message` to steer or continue a run/u);
 		assert.match(directive, /`auto` \(default\) reuses history or a summary/u);
@@ -94,13 +99,13 @@ describe("buildDelegationDirective", () => {
 	});
 
 	it("shows routing only for enabled roles", () => {
-		const directive = buildDelegationDirective([agent("artisan")]);
-		assert.match(directive, /- artisan: artisan description/u);
-		assert.doesNotMatch(directive, /\bscout\b/u);
+		const directive = renderSections([agent("worker")]);
+		assert.match(directive, /- worker: worker description/u);
+		assert.doesNotMatch(directive, /\bresearcher\b/u);
 	});
 
 	it("gives custom roles only their catalog line, never special routing", () => {
-		const directive = buildDelegationDirective([agent("custom")]);
+		const directive = renderSections([agent("custom")]);
 		assert.match(directive, /- custom: custom description/u);
 		assert.doesNotMatch(directive, /Prefer `|Use `custom`/u);
 	});
@@ -108,14 +113,14 @@ describe("buildDelegationDirective", () => {
 	it("keeps the stable contract cached when only leases change", () => {
 		const sections: Record<string, string> = {};
 		installDelegationSections(sections, loadBuiltinAgents(), []);
-		assert.match(sections[DELEGATION_SECTION] ?? "", /- scout: /u);
+		assert.match(sections[DELEGATION_SECTION] ?? "", /- researcher: /u);
 		assert.equal(sections[DELEGATION_LEASE_SECTION], undefined);
 
 		installDelegationSections(sections, loadBuiltinAgents(), [lease({ id: 3 })]);
 		const stable = sections[DELEGATION_SECTION];
-		assert.match(stable ?? "", /- scout: /u);
+		assert.match(stable ?? "", /- researcher: /u);
 		assert.doesNotMatch(stable ?? "", /Active phase leases/u);
-		assert.match(sections[DELEGATION_LEASE_SECTION] ?? "", /#3 scout \(running\)/u);
+		assert.match(sections[DELEGATION_LEASE_SECTION] ?? "", /#3 researcher \(running\)/u);
 
 		installDelegationSections(sections, loadBuiltinAgents(), [lease({ id: 3, task: "Map a different entry point" })]);
 		assert.equal(sections[DELEGATION_SECTION], stable);
@@ -127,26 +132,26 @@ describe("buildDelegationDirective", () => {
 	});
 
 	it("bounds active leases and retains recent results for reuse", () => {
-		const directive = buildDelegationDirective(loadBuiltinAgents(), [
+		const directive = renderSections(loadBuiltinAgents(), [
 			lease({ id: 11, task: "Map dispatch ownership" }),
 			lease({ id: 12, state: "completed" }),
-			lease({ id: 13, agentName: "artisan", state: "completed", lifecycleOperation: "settle", task: "Apply focused edit" }),
+			lease({ id: 13, agentName: "worker", state: "completed", lifecycleOperation: "settle", task: "Apply focused edit" }),
 			lease({ id: 14 }),
 			lease({ id: 15 }),
 			lease({ id: 16, state: "failed" }),
 		]);
-		assert.match(directive, /#11 scout \(running\): Map dispatch ownership/u);
-		assert.match(directive, /#13 artisan \(settling\): Apply focused edit/u);
+		assert.match(directive, /#11 researcher \(running\): Map dispatch ownership/u);
+		assert.match(directive, /#13 worker \(settling\): Apply focused edit/u);
 		assert.match(directive, /2 more active leases omitted/u);
 		assert.doesNotMatch(directive, /#14|#15/u);
-		assert.match(directive, /Recent settled phases[\s\S]*#12 scout \(completed\)[\s\S]*#16 scout \(failed\)/u);
+		assert.match(directive, /Recent settled phases[\s\S]*#12 researcher \(completed\)[\s\S]*#16 researcher \(failed\)/u);
 	});
 
 	it("keeps launch receipts short and clear", () => {
-		const sources = [lease({ id: 21, agentName: "artisan", task: "Implement duplicate rejection" })];
+		const sources = [lease({ id: 21, agentName: "worker", task: "Implement duplicate rejection" })];
 		const single = formatPhaseLeaseReceipt(sources);
 		assert.match(single, /^Active phase lease:/u);
-		assert.match(single, /#21 artisan \(running\): Implement duplicate rejection/u);
+		assert.match(single, /#21 worker \(running\): Implement duplicate rejection/u);
 		assert.match(single, /Do not duplicate it/u);
 		assert.doesNotMatch(single, /never blocks|dispatch more|keep working/u);
 	});
@@ -154,13 +159,13 @@ describe("buildDelegationDirective", () => {
 	it("lists every run a parallel launch started", () => {
 		const batch = formatPhaseLeaseReceipt([21, 22, 23, 24].map((id) => lease({ id, task: `Inspect module ${id}` })));
 		assert.match(batch, /^Active phase leases:/u);
-		for (const id of [21, 22, 23, 24]) assert.match(batch, new RegExp(`#${id} scout \\(running\\): Inspect module ${id}`, "u"));
+		for (const id of [21, 22, 23, 24]) assert.match(batch, new RegExp(`#${id} researcher \\(running\\): Inspect module ${id}`, "u"));
 		assert.doesNotMatch(batch, /omitted/u);
 		assert.match(batch, /Do not duplicate them/u);
 	});
 
 	it("stays within the prompt budget", () => {
-		const directive = buildDelegationDirective(loadBuiltinAgents());
+		const directive = renderSections(loadBuiltinAgents());
 		assert.ok(directive.length < 3_600, `directive is ${directive.length} characters`);
 	});
 });

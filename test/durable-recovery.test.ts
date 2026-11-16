@@ -14,7 +14,7 @@ import { announceRecoveryRecords, getRecoveryManifestPath, persistRecoveryRecord
 import { measureDurableUsage } from "../src/isolation/cleanup.ts";
 import { TEMP_OWNER_FILE_NAME } from "../src/isolation/temp-hygiene.ts";
 import { createWorktreeIsolation, worktreeSnapshot } from "../src/isolation/worktree.ts";
-import { getThreadsManifestPath, readThreadRecords, removeThreadRecord, threadRecordFromThread, threadRecordIdentity, upsertThreadRecord, type ThreadRecord } from "../src/lifecycle/durable.ts";
+import { getThreadsManifestPath, readThreadRecords, removeThreadRecord, threadRecordFromThread, upsertThreadRecord, type ThreadRecord } from "../src/lifecycle/durable.ts";
 import { createRuntime } from "../src/lifecycle/runtime.ts";
 import { bootstrapDurableState, restoreDurableThreads } from "../src/lifecycle/thread-restore.ts";
 import { monitor } from "../src/presentation/monitor.ts";
@@ -34,10 +34,10 @@ async function fixture(run: (root: string, configPath: string, cwd: string) => P
 	}
 }
 
-function legacyRecord(cwd: string, createdAt: number): ThreadRecord {
+function parkedRecord(cwd: string, createdAt: number): ThreadRecord {
 	return {
-		runId: 7, createdAt, updatedAt: Date.now(), generation: 1,
-		agentName: "artisan", task: `interrupted ${createdAt}`, cwd, executionCwd: cwd,
+		durableId: `record-${createdAt}`, runId: 7, createdAt, updatedAt: Date.now(), generation: 1,
+		agentName: "worker", task: `interrupted ${createdAt}`, cwd, executionCwd: cwd,
 		isolation: "shared", state: "parked", elapsedMs: 1, childPids: [],
 	};
 }
@@ -56,7 +56,7 @@ const pi = { getActiveTools: () => [], getAllTools: () => [], on: () => {}, send
 const runtime = createRuntime(pi, configPath);
 await restoreDurableThreads(runtime, cwd);
 const thread = {
- id: monitor.reserveRunId(), generation: 1, agentName: "artisan", task: "live window",
+ id: monitor.reserveRunId(), generation: 1, agentName: "worker", task: "live window",
  cwd, executionCwd: cwd, isolation: "shared", state: "running", control: new RunControl("live window", 1),
  generationCompletion: Promise.resolve(), lifecycleVersion: 0, elapsedMs: 1, finalizeIsolation: async () => undefined,
 };
@@ -130,6 +130,17 @@ async function killWindow(child: ChildProcess): Promise<void> {
 }
 
 describe("durable identity across Pi windows", () => {
+	it("rejects records without durable identities without rewriting recovery evidence", async () => {
+		await fixture(async (_root, configPath, cwd) => {
+			const record = { ...parkedRecord(cwd, 1), durableId: undefined };
+			const path = getThreadsManifestPath(configPath, cwd);
+			await mkdir(getProjectRoot(configPath, cwd), { recursive: true });
+			const contents = JSON.stringify({ version: 1, records: [record] });
+			await writeFile(path, contents);
+			await assert.rejects(readThreadRecords(configPath), /durableId is required/u);
+			assert.equal(await readFile(path, "utf8"), contents);
+		});
+	});
 	it("keeps colliding live #1 checkpoints separate through updates, settlement, shutdown and restore", async () => {
 		await fixture(async (_root, configPath, cwd) => {
 			const a = await startWindow(configPath, cwd);
@@ -174,11 +185,11 @@ describe("durable identity across Pi windows", () => {
 		});
 	});
 
-	it("adopts legacy records with colliding display ids and removes only the selected identity", async () => {
+	it("restores records with colliding display ids and removes only the selected identity", async () => {
 		await fixture(async (_root, configPath, cwd) => {
 			const records = [
-				{ ...legacyRecord(cwd, 1), sessionId: "missing", sessionDir: join(getProjectRoot(configPath, cwd), "sessions", "pi-subagent-session-missing") },
-				legacyRecord(cwd, 2),
+				{ ...parkedRecord(cwd, 1), sessionId: "missing", sessionDir: join(getProjectRoot(configPath, cwd), "sessions", "pi-subagent-session-missing") },
+				parkedRecord(cwd, 2),
 			];
 			const path = getThreadsManifestPath(configPath, cwd);
 			await mkdir(getProjectRoot(configPath, cwd), { recursive: true });
@@ -186,9 +197,9 @@ describe("durable identity across Pi windows", () => {
 			const runtime = createRuntime(fakePi(), configPath);
 			assert.deepEqual(await restoreDurableThreads(runtime, cwd), [7, 8]);
 			assert.equal(runtime.threads.get(7)?.sessionDir, records[0]!.sessionDir);
-			assert.equal(runtime.threads.get(7)?.durableId, threadRecordIdentity(records[0]!));
+			assert.equal(runtime.threads.get(7)?.durableId, records[0]!.durableId);
 			const second = runtime.threads.get(8)!;
-			assert.equal(second.durableId, threadRecordIdentity(records[1]!));
+			assert.equal(second.durableId, records[1]!.durableId);
 			await upsertThreadRecord(configPath, threadRecordFromThread(second, "parked"));
 			assert.equal((await readThreadRecords(configPath)).length, 2);
 			await removeThreadRecord(configPath, runtime.threads.get(7)!.durableId!, cwd);
@@ -221,7 +232,7 @@ describe("temporarily unavailable recovery sources", () => {
 				await writeFile(pending, "unintegrated edit\n");
 				await writeFile(join(worktree.tempDir, TEMP_OWNER_FILE_NAME), JSON.stringify({ pid: 2147483647, createdAt: 1 }));
 				await upsertThreadRecord(configPath, {
-					...legacyRecord(recordedCwd, Date.now()), isolation: "worktree", executionCwd: worktree.cwd,
+					...parkedRecord(recordedCwd, Date.now()), isolation: "worktree", executionCwd: worktree.cwd,
 					worktree: worktreeSnapshot(worktree),
 				});
 				const source = unavailable === "git" ? join(repository, ".git") : repository;
@@ -279,7 +290,7 @@ describe("recovery announcement mutation", () => {
 		await fixture(async (_root, configPath, cwd) => {
 			const group = (id: number) => join(getProjectRoot(configPath, cwd), "worktrees", `pi-subagent-worktree-${id}`);
 			const recovery = (id: number): RecoveryRecord => ({
-				runId: id, createdAt: Date.now(), integrated: id === 1, worktreePath: join(group(id), "worktree"), error: `failure ${id}`,
+				durableId: `fixture-${id}`, runId: id, createdAt: Date.now(), integrated: id === 1, worktreePath: join(group(id), "worktree"), error: `failure ${id}`,
 			});
 			await mkdir(recovery(1).worktreePath!, { recursive: true });
 			await mkdir(recovery(2).worktreePath!, { recursive: true });

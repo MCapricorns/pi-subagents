@@ -1,10 +1,9 @@
 /**
  * Builds the delegation directive installed into the parent prompt.
  *
- * On Pi 1.0 the stable contract and the live leases are separate system-prompt
+ * The stable contract and the live leases are separate system-prompt
  * sections. Pi appends a section delta only when that text changes, so an idle
- * turn keeps the cached prefix. Hosts without a section map still receive the
- * combined directive as a system-prompt append.
+ * turn keeps the cached prefix.
  * Detailed role guidance remains in each child's own prompt.
  */
 
@@ -124,7 +123,7 @@ function delegationBody(agents: AgentConfig[]): string {
 	const dispatchRules = [
 		"Main leads planning and review; workers execute. The user's task sets the outcome. Honor requests to work in main or avoid subagents. Answer questions and review-only requests without starting implementation.",
 		"Main judges difficulty and reads only enough to plan. Delegate simple, bounded work by default: edits, fixes, tests, docs, research. Split complex tasks to expose routine parts; keep hard or uncertain work in main when delegation would add rework. Main always reviews. Keep a change and its tests with one owner. Choose team size from independent work, not available capacity.",
-		`Children inherit this session's live tool surface, including \`codemode\` when present${agents.some((agent) => agent.name === "scout") ? "; scout keeps only read-only tools" : ""}. Call delegation tools outside codemode. Do not plan a phase that needs a tool its role cannot reach.`,
+		`Children inherit this session's live tool surface, including \`codemode\` when present${agents.some((agent) => agent.name === "researcher") ? "; researcher keeps only read-only tools" : ""}. Call delegation tools outside codemode. Do not plan a phase that needs a tool its role cannot reach.`,
 		"Use `subagent` for one bounded phase and parallel `tasks` for independent phases. Never overlap writers or duplicate an owned phase. If a result determines the next task or its scope, dispatch that phase alone and decide in main.",
 		"Children have no parent conversation; brief outcome, done condition, paths, evidence, boundaries, checks, and output. Name conditions for returning to main. Exchange compact briefs, results, and feedback. Pass completed work forward; assign only gaps.",
 		"After integration, main reviews the actual diff, callers, acceptance criteria, and check evidence. Child success is not review approval. Send authorized corrections to the owning worker. Re-check changed or unresolved areas; do not re-review unchanged work.",
@@ -158,17 +157,6 @@ function buildActiveLeaseSection(sources: Iterable<PhaseLeaseSource>): string {
 		...(activeLeases ? [`Active phase leases:\n${activeLeases}`] : []),
 		...(recent ? [`Recent settled phases — reuse results via subagent_status; continue only unfinished work:\n${recent}`] : []),
 	].join("\n");
-}
-
-export function buildDelegationDirective(
-	agents: AgentConfig[],
-	activeLeaseSources: Iterable<PhaseLeaseSource> = [],
-	orchestration = "",
-): string {
-	const leases = buildActiveLeaseSection(activeLeaseSources);
-	const stable = buildStableDelegationSection(agents, leases.length > 0);
-	if (!stable) return "";
-	return `\n${[stable, orchestration, leases].filter(Boolean).join("\n\n")}`;
 }
 
 /**

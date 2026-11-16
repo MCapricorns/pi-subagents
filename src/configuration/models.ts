@@ -15,8 +15,7 @@ import {
 import type { ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { DEFAULT_THINKING_LEVEL, type ThinkingLevel } from "./config.ts";
 
-export type ModelContext = Pick<ExtensionContext, "model" | "modelRegistry"> &
-	Partial<Pick<ExtensionContext, "scopedModels">>;
+export type ModelContext = Pick<ExtensionContext, "model" | "modelRegistry" | "scopedModels">;
 
 export const CURRENT_MAIN_MODEL = "__current_main_model__";
 
@@ -51,32 +50,6 @@ function cleanModelRef(ref: string | undefined): string | undefined {
 	return trimmed || undefined;
 }
 
-/**
- * Provider ids Pi renamed while keeping the model id. Pi 1.0.3 renamed
- * `azure-openai-responses` to `azure`. Custom registries can still expose
- * either id, so prefer the exact selection before trying its published alias.
- */
-const RENAMED_PROVIDER_IDS: Readonly<Record<string, string>> = {
-	"azure-openai-responses": "azure",
-};
-
-/** Stored ref plus the renamed provider id, when Pi published one. */
-function modelRefAliases(ref: string): readonly string[] {
-	const normalized = ref.trim();
-	const slash = normalized.indexOf("/");
-	if (slash <= 0 || slash >= normalized.length - 1) return [normalized];
-	const renamed = RENAMED_PROVIDER_IDS[normalized.slice(0, slash)];
-	if (!renamed) return [normalized];
-	return [normalized, `${renamed}${normalized.slice(slash)}`];
-}
-
-/** Prefer the alias that the live catalog actually lists. */
-function resolveLiveModelRef(ref: string, liveRefs: ReadonlySet<string> | undefined): string | undefined {
-	const aliases = modelRefAliases(ref);
-	if (!liveRefs) return aliases[0];
-	return aliases.find((candidate) => liveRefs.has(candidate));
-}
-
 export function modelRef(model: { provider: string; id: string }): string {
 	return `${model.provider}/${model.id}`;
 }
@@ -92,9 +65,7 @@ export function currentModelRef(ctx: Pick<ModelContext, "model">): string | unde
  */
 export function availableModelsInScope(ctx: ModelContext): readonly Model<Api>[] {
 	const models = ctx.modelRegistry.getAvailable();
-	// scopedModels was added after the original Pi minimum. Treat a missing field
-	// exactly like an empty scope and use the full live registry.
-	const scopedModels = ctx.scopedModels ?? [];
+	const scopedModels = ctx.scopedModels;
 	if (scopedModels.length === 0) return models;
 	const scopedRefs = new Set(scopedModels.map((entry) => modelRef(entry.model)));
 	return models.filter((model) => scopedRefs.has(modelRef(model)));
@@ -106,8 +77,7 @@ export function findModelByRef(
 ): Model<Api> | undefined {
 	const normalized = cleanModelRef(ref);
 	if (!normalized) return undefined;
-	const liveRef = resolveLiveModelRef(normalized, new Set(models.map(modelRef)));
-	return models.find((model) => modelRef(model) === liveRef);
+	return models.find((model) => modelRef(model) === normalized);
 }
 
 /**
@@ -122,7 +92,7 @@ export function resolveAgentModelRoute(input: AgentModelRouteInput): ResolvedAge
 	const available = input.availableRefs
 		? new Set(input.availableRefs.map((ref) => ref.trim()).filter(Boolean))
 		: undefined;
-	const resolvedSelectedRef = selectedRef ? resolveLiveModelRef(selectedRef, available) : undefined;
+	const resolvedSelectedRef = selectedRef && (!available || available.has(selectedRef)) ? selectedRef : undefined;
 	return {
 		primaryRef: selectedRef ? resolvedSelectedRef : mainRef,
 		...(selectedRef && !resolvedSelectedRef ? { unavailableSelectedRef: selectedRef } : {}),
@@ -162,14 +132,11 @@ export function buildModelPickerItems(options: {
 		if (!byRef.has(ref)) byRef.set(ref, model);
 	}
 	const configuredRef = cleanModelRef(options.configuredRef);
-	const liveConfiguredRef = configuredRef
-		? resolveLiveModelRef(configuredRef, new Set(byRef.keys())) ?? configuredRef
-		: undefined;
 
 	const refs = [...byRef.keys()]
 		.sort((left, right) => {
-			const leftRank = left === liveConfiguredRef ? 0 : left === mainRef ? 1 : 2;
-			const rightRank = right === liveConfiguredRef ? 0 : right === mainRef ? 1 : 2;
+			const leftRank = left === configuredRef ? 0 : left === mainRef ? 1 : 2;
+			const rightRank = right === configuredRef ? 0 : right === mainRef ? 1 : 2;
 			return leftRank - rightRank || left.localeCompare(right);
 		});
 
@@ -182,7 +149,7 @@ export function buildModelPickerItems(options: {
 	const items: ModelPickerItem[] = [dynamic];
 	for (const ref of refs) {
 		const model = byRef.get(ref)!;
-		const tags = [ref === liveConfiguredRef ? "configured" : "", ref === mainRef ? "current main" : ""]
+		const tags = [ref === configuredRef ? "configured" : "", ref === mainRef ? "current main" : ""]
 			.filter(Boolean);
 		const name = model.name.trim() || model.id;
 		const duplicateName = [...byRef.values()].some((other) =>
@@ -190,8 +157,8 @@ export function buildModelPickerItems(options: {
 		items.push({
 			value: ref,
 			label: name + " · " + model.provider + (duplicateName ? " (" + model.id + ")" : ""),
-			description: ["Reference: " + ref, "Pins this worker; failures return to main without changing models.", modelCapabilities(model), ...tags].join(" · "),
-			saved: ref === liveConfiguredRef,
+			description: ["Reference: " + ref, "Pins this role; failures return to main without changing models.", modelCapabilities(model), ...tags].join(" · "),
+			saved: ref === configuredRef,
 		});
 	}
 	return items;

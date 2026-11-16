@@ -1,5 +1,27 @@
 # Changelog
 
+## 7.0.1
+
+### Breaking changes
+
+- Rename `scout` to `researcher` and `artisan` to `worker`, without aliases.
+- Overwrite old settings with configuration version 2. Researcher and Worker
+  each have an independent model and thinking preference; neither is migrated.
+- Remove provider aliases, older Pi API shims, opaque-prompt fallback, recovery
+  path migration, synthesized record identities, and legacy steering receipts.
+  Unsupported recovery files remain untouched and prevent automated cleanup.
+
+### Fixes and changes
+
+- Restore model selection for each role throughout setup, dispatch, and live
+  orchestration. An unavailable model blocks only its assigned role.
+- Redesign setup into Researcher and Worker sections with visible Model,
+  Thinking, and role-specific Reset controls. Preserve search, paging, focus,
+  Unicode input, and a compact layout for narrow terminals.
+- Keep config replacement atomic and recovery ownership checks intact.
+- Keep automatic releases on patch increments, including three-digit patch
+  numbers such as `7.0.100`.
+
 ## 7.0.0
 
 ### Breaking changes

@@ -36,14 +36,14 @@ describe("dispatcher completion delivery", () => {
 		try {
 			const core = createDispatchCore(runtime);
 			resetAutomaticCleanupClock();
-			core.finishRun(monitor.addRun("scout", "Completed research"), "done", { silent: true });
+			core.finishRun(monitor.addRun("researcher", "Completed research"), "done", { silent: true });
 			await reading;
 			let stopped = false;
 			shutdown = runtime.shutdown().then(() => { stopped = true; });
 			await new Promise<void>((resolve) => setImmediate(resolve));
 			assert.equal(stopped, false, "shutdown must wait for an in-flight cleanup pass");
 			resetAutomaticCleanupClock();
-			core.finishRun(monitor.addRun("scout", "Settled during shutdown"), "done", { silent: true });
+			core.finishRun(monitor.addRun("researcher", "Settled during shutdown"), "done", { silent: true });
 			release();
 			await shutdown;
 			assert.equal(reads, 1, "settlement cannot start another cleanup after shutdown begins");
@@ -89,13 +89,14 @@ process.stdin.on("data", (chunk) => {
 });`, "utf8");
 			process.argv[1] = child;
 			const core = createDispatchCore(runtime);
-			core.setEnvironment({ ctx: { cwd: root, modelRegistry: { getAvailable: () => [] }, ui: { notify: () => undefined } } as unknown as ExtensionContext, config: DEFAULT_CONFIG, agents: loadBuiltinAgents() });
-			const starts = await Promise.all(Array.from({ length: 8 }, (_, id) => core.startBackground("artisan", "Write independent file " + id, root, "shared")));
+			core.setEnvironment({ ctx: { cwd: root, scopedModels: [], modelRegistry: { getAvailable: () => [] }, ui: { notify: () => undefined } } as unknown as ExtensionContext, config: DEFAULT_CONFIG, agents: loadBuiltinAgents() });
+			const starts = await Promise.all(Array.from({ length: 8 }, (_, id) => core.startBackground("worker", "Write independent file " + id, root, "shared")));
 			assert.ok(starts.every((result) => result.runId !== undefined && result.exitCode === -1));
 			// Wait for the child barrier within the overall test timeout. Cold process
 			// startup under the full suite is not a scheduler concurrency limit.
 			while ((await readdir(root)).filter((name) => name.startsWith("started-")).length < 8) {
 				t.signal.throwIfAborted();
+				assert.deepEqual([...runtime.settledRuns.values()].filter((result) => result.exitCode !== 0).map((result) => result.errorMessage ?? result.stderr), [], "all concurrent children must start successfully");
 				await new Promise((resolve) => setTimeout(resolve, 10));
 			}
 			assert.equal(runtime.settledRuns.size, 0);
@@ -146,15 +147,17 @@ process.stdin.on("data", (chunk) => {
 				process.argv[1] = child;
 				const core = createDispatchCore(runtime);
 				core.setEnvironment({
-					ctx: { cwd: root, modelRegistry: { getAvailable: () => [] }, ui: { notify: () => undefined } } as unknown as ExtensionContext,
+					ctx: { cwd: root, scopedModels: [], modelRegistry: { getAvailable: () => [] }, ui: { notify: () => undefined } } as unknown as ExtensionContext,
 					config: DEFAULT_CONFIG,
 					agents: loadBuiltinAgents(),
 				});
-				const started = await core.startBackground("artisan", "Check completion delivery", root, "shared", {
+				const started = await core.startBackground("worker", "Check completion delivery", root, "shared", {
 					deliveryRoute: scenario === "await" ? "await" : "background",
 				});
 				assert.ok(started.runId);
 				await runtime.threads.get(started.runId)!.generationCompletion;
+				const result = runtime.threads.get(started.runId)!.lastResult!;
+				assert.equal(result.exitCode, scenario === "failure" ? 1 : 0, result.errorMessage ?? result.stderr);
 				assert.ok(runtime.settledRuns.has(started.runId), "the dispatcher registered the result");
 				runtime.completionBatcher.flush();
 				assert.equal(messages.length, scenario === "await" ? 0 : 1);

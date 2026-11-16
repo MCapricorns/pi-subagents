@@ -99,13 +99,13 @@ describe("completion delivery ownership", () => {
 		const runtime = createRuntime(fakePi(sent), join(tmpdir(), "pi-subagents-test-config.json"));
 
 		runtime.claimRunDelivery(1, "await");
-		runtime.publishRunCompletion(1, completion("scout"), false);
+		runtime.publishRunCompletion(1, completion("researcher"), false);
 		assert.equal(sent.length, 0);
 		runtime.completeAwaitDelivery([1]);
 		assert.equal(sent.length, 0);
 
 		runtime.claimRunDelivery(2, "background");
-		runtime.publishRunCompletion(2, completion("artisan"), false);
+		runtime.publishRunCompletion(2, completion("worker"), false);
 		runtime.completionBatcher.flush();
 		assert.equal(sent.length, 1);
 		assert.deepEqual(sent[0]?.options, { deliverAs: "steer", triggerTurn: true });
@@ -116,13 +116,13 @@ describe("completion delivery ownership", () => {
 		const runtime = createRuntime(fakePi(sent), join(tmpdir(), "pi-subagents-test-config.json"));
 
 		runtime.claimRunDelivery(1, "background");
-		runtime.publishRunCompletion(1, completion("scout"), false);
+		runtime.publishRunCompletion(1, completion("researcher"), false);
 		runtime.claimRunDelivery(2, "background");
-		runtime.publishRunCompletion(2, completion("artisan"), true);
+		runtime.publishRunCompletion(2, completion("worker"), true);
 
 		assert.equal(sent.length, 2);
-		assert.match(sent[0]?.message.content, /scout completed/);
-		assert.match(sent[1]?.message.content, /artisan completed/);
+		assert.match(sent[0]?.message.content, /researcher completed/);
+		assert.match(sent[1]?.message.content, /worker completed/);
 	});
 });
 
@@ -139,11 +139,11 @@ describe("durable worktree restoration", () => {
 		const worktreeGroup = join(projectRoot, "worktrees", "pi-subagent-worktree-missing");
 		const missingWorktree = join(worktreeGroup, "worktree");
 		const record: ThreadRecord = {
-			runId: 41,
+			durableId: "fixture-41", runId: 41,
 			createdAt: Date.now(),
 			updatedAt: Date.now(),
 			generation: 1,
-			agentName: "artisan",
+			agentName: "worker",
 			task: "retained edits",
 			cwd,
 			executionCwd: missingWorktree,

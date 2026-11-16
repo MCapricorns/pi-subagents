@@ -189,7 +189,7 @@ export function registerLookupTools(pi: ExtensionAPI, runtime: SubagentRuntime, 
 	pi.registerTool({
 		name: "subagent_message",
 		label: "Subagent Message",
-		description: "Steer a running subagent, or continue a successfully completed run with a new bounded step in the same role and workspace. Steering waits for the child's RPC acknowledgement and reports queued, handled by an input hook, or accepted with queue state unknown; receipt is not proof of model execution, and status retains the latest acknowledgement. A continuation chooses its history with the context parameter. Use wait:true to receive its result in this call; one-shot print/JSON sessions wait by default.",
+		description: "Steer a running subagent, or continue a successfully completed run with a new bounded step in the same role and workspace. Steering waits for the child's RPC acknowledgement and reports queued or handled by an input hook; receipt is not proof of model execution, and status retains the latest acknowledgement. A continuation chooses its history with the context parameter. Use wait:true to receive its result in this call; one-shot print/JSON sessions wait by default.",
 		exposure: "model-only",
 		executionMode: "parallel",
 		parameters: Type.Object({
@@ -210,9 +210,7 @@ export function registerLookupTools(pi: ExtensionAPI, runtime: SubagentRuntime, 
 					thread.lastSteering = { ...receipt, message: formatTaskSummary(params.message, 160, false) };
 					const status = receipt.disposition === "queued"
 						? `Received by #${thread.id} · queued for the next steering boundary. Model execution is not yet confirmed.`
-						: receipt.disposition === "handled"
-							? `Received by #${thread.id} · handled by an input hook. Delivery to the model is not confirmed.`
-							: `Accepted by #${thread.id} · queue state unconfirmed. Model execution is not yet confirmed.`;
+						: `Received by #${thread.id} · handled by an input hook. Delivery to the model is not confirmed.`;
 					monitor.setActivity(thread.id, `steering ${receipt.disposition}`);
 					return {
 						content: [{ type: "text" as const, text: `${status}${receipt.requestId ? `\nChild RPC acknowledgement: ${receipt.requestId}` : ""}` }],

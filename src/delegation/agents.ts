@@ -65,7 +65,7 @@ function isReadOnlyToolName(name: string, index: ToolInfoIndex): boolean {
 }
 
 /** Resolve a child against the parent's active and callable indirect tools.
- * Inactive direct tools stay excluded. Scout promotes only tools marked
+ * Inactive direct tools stay excluded. Researcher promotes only tools marked
  * read-only; pi-subagents controls are removed so children stay leaves. */
 export function resolveAgentTools(
 	agent: AgentConfig,
@@ -79,19 +79,19 @@ export function resolveAgentTools(
 		.map((tool) => tool.name)
 		.filter((name) => !active.includes(name))
 		.sort();
-	if (agent.name !== "scout") return { ...agent, tools: [...active, ...indirect] };
-	// Scout uses the live catalog's read-only classification. Codemode and
+	if (agent.name !== "researcher") return { ...agent, tools: [...active, ...indirect] };
+	// Researcher uses the live catalog's read-only classification. Codemode and
 	// tool_search are excluded because they can reach tools outside that set.
 	const tools = active.filter((tool) => isReadOnlyToolName(tool, toolIndex));
 	// The child explicitly activates these after registration, without giving
-	// scout an orchestrating tool that could also reach writers.
+	// researcher an orchestrating tool that could also reach writers.
 	if (active.some((tool) => toolIndex.get(tool)?.reachesTools)) {
 		tools.push(...indirect.filter((name) => isReadOnlyToolName(name, toolIndex)));
 	}
 	return { ...agent, tools };
 }
 
-/** Filesystem-write capability used by worktree admission. Scout is a hard
+/** Filesystem-write capability used by worktree admission. Researcher is a hard
  * read-only boundary. An unresolved tools list means the child inherits
  * arbitrary active tools and is therefore mutable; for a resolved list only
  * proven read-only tools count as safe — shells, tool-reaching tools, and tools
@@ -100,8 +100,8 @@ export function isWriteCapableAgent(
 	agent: Pick<AgentConfig, "name" | "tools">,
 	toolInfos?: readonly ToolMetadata[],
 ): boolean {
-	if (agent.name === "scout") return false;
-	if (agent.name === "artisan") return true;
+	if (agent.name === "researcher") return false;
+	if (agent.name === "worker") return true;
 	if (!agent.tools) return true;
 	const toolIndex = indexToolInfos(toolInfos);
 	return agent.tools.some((tool) => !isReadOnlyToolName(tool, toolIndex));

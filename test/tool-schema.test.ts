@@ -28,7 +28,7 @@ it("validates dispatch roles and isolation through the Pi SDK", async (t) => {
 	const validate = (name: string, args: ToolCall["arguments"]) => validateToolArguments(
 		tools.get(name)!, { type: "toolCall", id: "schema-test", name, arguments: args },
 	);
-	const task = { agent: "artisan", task: "Implement the bounded change" };
+	const task = { agent: "worker", task: "Implement the bounded change" };
 	for (const isolation of [undefined, "shared", "worktree"]) {
 		const args = { ...task, ...(isolation ? { isolation } : {}) };
 		assert.deepEqual(validate("subagent", args), args);
@@ -36,7 +36,7 @@ it("validates dispatch roles and isolation through the Pi SDK", async (t) => {
 	}
 	assert.throws(() => validate("subagent", { ...task, isolation: "invalid" }), /isolation:/u);
 	assert.throws(() => validate("subagent", { tasks: [{ ...task, isolation: "invalid" }] }), /tasks\.0\.isolation:/u);
-	for (const agent of ["scout", "artisan"]) {
+	for (const agent of ["researcher", "worker"]) {
 		assert.deepEqual(validate("subagent", { ...task, agent }), { ...task, agent });
 	}
 	assert.throws(() => validate("subagent", { ...task, agent: "sentinel" }), /agent:/u);

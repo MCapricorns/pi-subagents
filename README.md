@@ -17,20 +17,23 @@ integration tests use the **Pi 1.5.2 SDK**.
    ```
 
 2. Choose a capable main model with Pi's model selector; it always owns review.
-3. Run `/subagents-setup` and select a capable, cost-effective worker model.
+3. Run `/subagents-setup` and choose models for **Researcher** and **Worker**.
 4. Give main your task. Orchestration is the default and only workflow.
 
-The setup panel has three rows: **Model**, **Thinking**, and **Reset**.
+The setup panel has two sections: **Researcher** for read-only research and
+**Worker** for implementation and checks. Each has its own **Model**, **Thinking**,
+and **Reset** controls. Both assignments stay visible together.
 Use ↑/↓ and Enter; Esc returns without changing a picker selection. Changes save
 immediately. The model picker supports search, paste, paging, and Tab for details.
-The menu keeps the current main model visible. Long values can be paged with
-PgUp/PgDn, and the panel adapts to narrow terminals.
+The menu keeps the current main model visible, highlights unavailable assignments,
+and returns focus to the setting you just edited. Long values can be paged with
+PgUp/PgDn, and narrow terminals use a compact list with the role on each row.
 
 Workers initially **follow main** with **medium** thinking. Choose a separate
 worker model to use a cheaper model for execution. The extension does not guess
 model quality or promise savings from token prices. A saved thinking preference
 survives model changes and is clamped to the chosen model's supported levels.
-Reset restores Follow main and medium thinking.
+Reset restores Follow main and medium thinking for that role only.
 
 The goal is to reduce expensive main-model usage, budget, and quota consumption.
 Total tokens can increase because briefs, separate contexts, and review also cost
@@ -38,33 +41,36 @@ tokens. Judge savings by total task cost and main-model usage, including retries
 and rework. Compact handoffs, retained worker sessions, reuse of valid checks, and
 delegating execution are the mechanisms; no savings benchmark is claimed here.
 
-## Upgrading to v7
+## Configuration and upgrading to 7.0.1
 
-**This is a breaking release.** On the first session start after upgrading, the
-old `pi-subagents.json` is deleted and replaced with fresh worker settings.
-Old per-role model/thinking values are discarded, with no legacy config backup.
+**This update resets settings and renames roles.** On the first session start after upgrading, the
+old `pi-subagents.json` is atomically overwritten with fresh, independent role settings.
+Previous model/thinking values are discarded, with no migration or config backup.
 Pi displays a notice directing you to `/subagents-setup`.
 
-The old role matrix, optional delegation policy, independent reviewer, and
-`sentinel` role are gone. Main performs review. Calls naming retired roles
-are rejected.
+The role names are now `researcher` and `worker`; previous names are rejected.
+Main continues to own planning and review. There are no role or provider aliases,
+old SDK shims, or recovery-path migrations. Model references must exactly match
+the available registry entry.
 
 Only the settings file is reset. Existing sessions, results, worktrees, and
-recovery evidence remain protected. Retired-role records can still be inspected
-or stopped; they do not create a supported reviewer role or resume automatically.
+recovery evidence remain protected. Unsupported recovery manifests are left
+untouched and block automated cleanup; they are not converted or resumed.
 
 The new configuration is stored at `~/.pi/agent/pi-subagents.json`:
 
 ```json
 {
-  "version": 1,
-  "thinking": "medium"
+  "version": 2,
+  "researcher": { "thinking": "medium" },
+  "worker": { "thinking": "medium" }
 }
 ```
 
-Selecting a worker adds `model: "provider/model-id"`. This is one shared worker
-setting, not a map of roles. `PI_CODING_AGENT_DIR` overrides the agent directory.
-An unavailable or out-of-scope worker stays configured and blocks dispatch until
+Selecting a model adds `model: "provider/model-id"` inside that role's object.
+Each role's model and thinking are saved independently.
+`PI_CODING_AGENT_DIR` overrides the agent directory.
+An unavailable or out-of-scope model stays configured and blocks only its role until
 availability is restored or you select another model. Provider failures return
 to main with evidence; the extension never starts a main-model worker as a retry.
 Unreadable settings or an invalid model reference also stop new dispatches instead
@@ -94,12 +100,12 @@ reviewer. Main avoids repeating completed worker effort. Questions and review-on
 implementation. Explicit requests to work in main take precedence. Parallel workers require independent
 scope and disjoint write ownership; a fix and its regression tests share an owner.
 
-There are two worker tool scopes, both using the same model/thinking settings:
+There are two roles, each using its own model/thinking settings:
 
 | Scope | Tool parameter | Access |
 | --- | --- | --- |
-| Implementation | `artisan` | Parent's live tools, including codemode; implements and checks the plan |
-| Read-only research | `scout` | Proven read-only lookups; no commands, builds, tests, or edits |
+| Implementation | `worker` | Parent's live tools, including codemode; implements and checks the plan |
+| Read-only research | `researcher` | Proven read-only lookups; no commands, builds, tests, or edits |
 
 The read-only scope preserves a tool boundary for research. It is not a separate
 reviewer. Children cannot delegate or release. Main and workers exchange briefs,
@@ -118,7 +124,7 @@ result**. Pass established facts forward and assign only missing work.
 
 ```ts
 subagent({
-  agent: "artisan",
+  agent: "worker",
   task: [
     "Fix cache invalidation in src/cache.ts and its regression test.",
     "Acceptance: a write invalidates the matching key without clearing unrelated keys.",
@@ -185,7 +191,7 @@ integration into the original checkout is serialized.
 
 Workers run the native Pi CLI in RPC mode with piped I/O and retained sessions.
 Delegation/control tools are model-only: call them directly, outside codemode.
-Workers inherit reachable tools without activating unrelated direct tools; scout
+Workers inherit reachable tools without activating unrelated direct tools; researcher
 gets only tools whose metadata proves them read-only.
 
 Unattended confirmation/input dialogs are cancelled, never auto-approved. Windows

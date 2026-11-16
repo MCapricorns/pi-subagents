@@ -68,7 +68,7 @@ describe("storage cleanup", () => {
 			await writeFile(manifest, JSON.stringify({
 				version: 1,
 				records: [{
-					runId: 11, createdAt: now, updatedAt: now, generation: 1, agentName: "artisan",
+					durableId: "fixture-11", runId: 11, createdAt: now, updatedAt: now, generation: 1, agentName: "worker",
 					task: "parked work", cwd, executionCwd: cwd, isolation: "shared", state: "parked",
 					elapsedMs: 1, childPids: [], sessionId, sessionDir: session,
 				}],
@@ -83,7 +83,7 @@ describe("storage cleanup", () => {
 describe("automatic cleanup", () => {
 	function thread(id: number, state: SubagentThread["state"], sessionDir: string): SubagentThread {
 		return {
-			id, generation: 1, agentName: "scout", task: "parked research",
+			id, generation: 1, agentName: "researcher", task: "parked research",
 			cwd: process.cwd(), executionCwd: process.cwd(), isolation: "shared",
 			state, control: new RunControl("parked research", 1),
 			generationCompletion: Promise.resolve(), lifecycleVersion: 0, elapsedMs: 0,

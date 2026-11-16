@@ -70,7 +70,7 @@ const SubagentParams = Type.Object({
 /** Explicit overrides win. Implementation uses a worktree even for a single
  * task; research and review stay in the current directory. */
 export function defaultIsolationMode(agentName: string, requested?: IsolationMode): IsolationMode {
-	return requested ?? (agentName === "artisan" ? "worktree" : "shared");
+	return requested ?? (agentName === "worker" ? "worktree" : "shared");
 }
 
 interface PreparedDispatchTask {
@@ -162,7 +162,7 @@ export function registerSubagentTool(
 	pi.registerTool({
 		name: "subagent",
 		label: "Subagent",
-		description: "Dispatch workers to execute main's plan: artisan implements and verifies; scout retrieves read-only evidence. Main reviews the integrated changes and owns acceptance. Use tasks for independent phases. Duplicate phases are rejected before allocation. Omit isolation for automatic selection. Use wait:true for dependencies; print/JSON sessions wait by default. Background results wake main.",
+		description: "Dispatch workers to execute main's plan: worker implements and verifies; researcher retrieves read-only evidence. Main reviews the integrated changes and owns acceptance. Use tasks for independent phases. Duplicate phases are rejected before allocation. Omit isolation for automatic selection. Use wait:true for dependencies; print/JSON sessions wait by default. Background results wake main.",
 		// Admission and lease reservation finish synchronously before child startup.
 		// Awaited runs must not block unrelated dispatch calls.
 		exposure: "model-only",

@@ -50,7 +50,7 @@ function makeThread(id: number, state: ThreadState = "running"): SubagentThread 
 	return {
 		id,
 		generation: 1,
-		agentName: "artisan",
+		agentName: "worker",
 		task: "Implement the original objective",
 		cwd: process.cwd(),
 		executionCwd: process.cwd(),
@@ -140,7 +140,7 @@ describe("subagent_status", () => {
 		const thread = makeThread(8, "completed");
 		const output = Array.from({ length: 80 }, (_, index) => `Result line ${index}`).join("\n");
 		thread.lastResult = {
-			agent: "artisan", task: thread.task, exitCode: 0, stderr: "", usage: emptyUsage(),
+			agent: "worker", task: thread.task, exitCode: 0, stderr: "", usage: emptyUsage(),
 			messages: [{ role: "assistant", content: [{ type: "text", text: output }], stopReason: "stop" } as never],
 		};
 		runtime.threads.set(8, thread);
@@ -164,7 +164,7 @@ describe("subagent_status", () => {
 		const { runtime, tools, sent } = harness();
 		const thread = makeThread(9, "completed");
 		thread.lastResult = {
-			agent: "artisan", task: thread.task, exitCode: 0, stderr: "", usage: emptyUsage(),
+			agent: "worker", task: thread.task, exitCode: 0, stderr: "", usage: emptyUsage(),
 			messages: [{ role: "assistant", content: [{ type: "text", text: "Fixed parser. node --test test/parser.test.ts → 4 passed." }], stopReason: "stop" } as never],
 		};
 		runtime.threads.set(thread.id, thread);
@@ -185,7 +185,7 @@ describe("subagent_status", () => {
 		let stops = 0;
 		attachRunning(thread.control, { stop: async () => { stops++; } });
 		runtime.threads.set(thread.id, thread);
-		monitor.restoreRun({ id: 7, agent: "artisan", task: thread.task, status: "running", elapsedMs: 1200 });
+		monitor.restoreRun({ id: 7, agent: "worker", task: thread.task, status: "running", elapsedMs: 1200 });
 		monitor.recordToolStart(7, "read", "read src/index.ts");
 		try {
 			assert.ok(tools.has("subagent_status"), "the status interface must be registered");
@@ -211,14 +211,14 @@ describe("subagent_status", () => {
 		const thread = makeThread(1, "failed");
 		thread.elapsedMs = 440_000;
 		thread.lastResult = {
-			agent: "artisan", task: thread.task, runId: 1, exitCode: 17, stopReason: "error",
+			agent: "worker", task: thread.task, runId: 1, exitCode: 17, stopReason: "error",
 			errorMessage: "Subagent RPC process exited before settling (code=17).",
 			messages: [], stderr: "", usage: emptyUsage(), sessionDir: "/retained/session-1",
 		};
 		runtime.threads.set(1, thread);
 		runtime.threads.set(10, makeThread(10, "queued"));
 		runtime.registerRunResult(1, thread.lastResult);
-		monitor.restoreRun({ id: 1, agent: "artisan", task: thread.task, status: "failed" });
+		monitor.restoreRun({ id: 1, agent: "worker", task: thread.task, status: "failed" });
 		monitor.beginTurn();
 		try {
 			assert.ok(tools.has("subagent_status"), "the status interface must be registered");
@@ -249,12 +249,12 @@ describe("subagent_status", () => {
 		stopping.retired = true;
 		stopping.lifecycleOperation = "stop";
 		runtime.threads.set(24, stopping);
-		monitor.restoreRun({ id: 21, agent: "artisan", task: queued.task, status: "queued" });
+		monitor.restoreRun({ id: 21, agent: "worker", task: queued.task, status: "queued" });
 		try {
 			assert.ok(tools.has("subagent_status"), "the status interface must be registered");
 			const response = await execute(tools.get("subagent_status")!);
 			assert.deepEqual(response.details.runs.map((run: any) => run.state), ["queued", "settling", "interrupted", "interrupting"]);
-			assert.match(resultText(response), /^#21 artisan · queued · \S+ — starting$/mu);
+			assert.match(resultText(response), /^#21 worker · queued · \S+ — starting$/mu);
 		} finally { await shutdown(runtime); }
 	});
 });
@@ -306,14 +306,14 @@ describe("subagent_message", () => {
 		} finally { acknowledge.resolve(); await shutdown(runtime); }
 	});
 
-	it("keeps missing queue disposition explicit and reports rejected steering", async () => {
+	it("preserves the last acknowledged message when later steering is rejected", async () => {
 		const { runtime, tools } = harness();
 		const thread = makeThread(62);
-		attachRunning(thread.control, { stop: async () => {}, steer: async () => {} });
+		attachRunning(thread.control, { stop: async () => {}, steer: async () => ({ disposition: "queued", acknowledgedAt: Date.now() }) });
 		runtime.threads.set(62, thread);
 		try {
 			const result = await execute(tools.get("subagent_message")!, { id: 62, message: "Check" });
-			assert.match(resultText(result), /queue state unconfirmed/u);
+			assert.match(resultText(result), /queued for the next steering boundary/u);
 			attachRunning(thread.control, { stop: async () => {}, steer: async () => { throw new Error("child rejected message"); } });
 			const rejected = await execute(tools.get("subagent_message")!, { id: 62, message: "Another check" });
 			assert.equal(rejected.isError, true);
@@ -328,7 +328,7 @@ describe("subagent_message", () => {
 		const core = { setEnvironment() {}, async startBackground(...args: any[]) { captured = args; return { runId: 77 }; } } as unknown as DispatchCore;
 		const { runtime, tools } = harness(join(root, "config.json"), core);
 		const source = makeThread(63, "completed");
-		source.agentName = "scout";
+		source.agentName = "researcher";
 		source.sessionId = "test-session";
 		source.sessionDir = join(root, "source");
 		await mkdir(source.sessionDir);
@@ -338,7 +338,7 @@ describe("subagent_message", () => {
 			const response = await execute(tools.get("subagent_message")!, { id: 63, message: "Find the missing evidence" });
 			assert.equal(response.isError, undefined);
 			assert.equal(response.details.id, 77);
-			assert.equal(captured[0], "scout");
+			assert.equal(captured[0], "researcher");
 			assert.equal(captured[1], "Follow-up to run #63:\nFind the missing evidence", "a deterministic objective keeps duplicate admission");
 			assert.equal(captured[2], source.cwd);
 			assert.notEqual(captured[4].resumeSession.sessionDir, source.sessionDir);
@@ -466,13 +466,13 @@ describe("subagent_message", () => {
 		const core = { setEnvironment() {}, async startBackground(...args: any[]) { captured = args; return { runId: 79 }; } } as unknown as DispatchCore;
 		const { runtime, tools } = harness(join(root, "config.json"), core);
 		const source = makeThread(64, "completed");
-		source.agentName = "artisan";
+		source.agentName = "worker";
 		source.sessionId = "summary-source";
 		source.sessionDir = join(root, "source");
 		await mkdir(source.sessionDir);
 		await writeFile(join(source.sessionDir, "2026_summary-source.jsonl"), "context");
 		source.lastResult = {
-			agent: "artisan", task: source.task, exitCode: 0, stderr: "", usage: emptyUsage(),
+			agent: "worker", task: source.task, exitCode: 0, stderr: "", usage: emptyUsage(),
 			messages: [
 				{ role: "assistant", content: [{ type: "text", text: "Found a race in src/cache.ts" }, { type: "toolCall", name: "read", arguments: { path: "src/cache.ts" } }], stopReason: "stop" } as never,
 			],
@@ -497,14 +497,14 @@ describe("subagent_stop", () => {
 		const { runtime, tools, sent } = harness(join(root, "config.json"));
 		const thread = makeThread(31);
 		thread.lastResult = {
-			agent: "artisan", task: thread.task, exitCode: 1,
+			agent: "worker", task: thread.task, exitCode: 1,
 			messages: [{ role: "assistant", content: [{ type: "text", text: "Partial edits are in src/index.ts" }], stopReason: "toolUse" } as never],
 			stderr: "", usage: emptyUsage(),
 		};
 		let stops = 0;
 		attachRunning(thread.control, { stop: async () => { stops++; } });
 		runtime.threads.set(31, thread);
-		monitor.restoreRun({ id: 31, agent: "artisan", task: thread.task, status: "running" });
+		monitor.restoreRun({ id: 31, agent: "worker", task: thread.task, status: "running" });
 		try {
 			const response = await execute(tools.get("subagent_stop")!, { id: "31" });
 			assert.equal(thread.state, "stopped");
@@ -526,7 +526,7 @@ describe("subagent_stop", () => {
 		for (const [id, model] of [[51, "test/alpha"], [52, "test/beta"]] as const) {
 			const thread = makeThread(id);
 			thread.lastResult = {
-				agent: "artisan", task: thread.task, exitCode: 1, messages: [], stderr: "", model,
+				agent: "worker", task: thread.task, exitCode: 1, messages: [], stderr: "", model,
 				usage: { ...emptyUsage(), input: 1_000, cost: 0.01 },
 			};
 			attachRunning(thread.control, { stop: async () => {} });

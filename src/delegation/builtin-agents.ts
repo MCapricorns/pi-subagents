@@ -6,7 +6,7 @@
  *
  * Worker prompts stay tool-agnostic: the host decides whether a writer
  * reaches its tools directly or through a script tool such as
- * codemode. Scout receives only direct read-only tools.
+ * codemode. Researcher receives only direct read-only tools.
  */
 
 export interface BuiltinAgentDefinition {
@@ -15,7 +15,7 @@ export interface BuiltinAgentDefinition {
 	systemPrompt: string;
 }
 
-const SCOUT_SYSTEM_PROMPT = `Answer the brief's bounded research question. Follow the brief within loaded project instructions; this role supplies the working method. The read-only boundary still wins. You have no interactive clarification; state material assumptions and gaps, then finish.
+const RESEARCHER_SYSTEM_PROMPT = `Answer the brief's bounded research question. Follow the brief within loaded project instructions; this role supplies the working method. The read-only boundary still wins. You have no interactive clarification; state material assumptions and gaps, then finish.
 
 ## Rules
 
@@ -30,7 +30,7 @@ const SCOUT_SYSTEM_PROMPT = `Answer the brief's bounded research question. Follo
 Lead with the answer. Return only findings needed for the brief, with decisive citations rather than raw search logs or whole files. Cite repository facts as \`path:line-range\` and external facts as source URLs. Distinguish inference from verified facts, and name unresolved gaps.
 `;
 
-const ARTISAN_SYSTEM_PROMPT = `Execute the lead's bounded plan: implementation, fix, tests, or docs. Main owns architecture, ambiguity, review, and acceptance. Follow the brief within loaded project instructions; this role supplies the working method. The leaf boundary below still wins. You have no interactive clarification; resolve routine details, state material assumptions, and finish the authorized outcome.
+const WORKER_SYSTEM_PROMPT = `Execute the lead's bounded plan: implementation, fix, tests, or docs. Main owns architecture, ambiguity, review, and acceptance. Follow the brief within loaded project instructions; this role supplies the working method. The leaf boundary below still wins. You have no interactive clarification; resolve routine details, state material assumptions, and finish the authorized outcome.
 
 ## Rules
 
@@ -48,14 +48,14 @@ Lead with the outcome and whether the done condition was met. Keep the handoff c
 
 export const BUILTIN_AGENTS: readonly BuiltinAgentDefinition[] = [
 	{
-		name: "scout",
+		name: "researcher",
 		description:
 			"Search code, documentation, or external facts with citations; retrieval only, no commands or edits.",
-		systemPrompt: SCOUT_SYSTEM_PROMPT,
+		systemPrompt: RESEARCHER_SYSTEM_PROMPT,
 	},
 	{
-		name: "artisan",
+		name: "worker",
 		description: "Implement a bounded change through its tests, docs, and verification.",
-		systemPrompt: ARTISAN_SYSTEM_PROMPT,
+		systemPrompt: WORKER_SYSTEM_PROMPT,
 	},
 ];

@@ -13,7 +13,7 @@
  * through the same cross-process manifest lock as recovery records.
  */
 
-import { createHash, randomUUID } from "node:crypto";
+import { randomUUID } from "node:crypto";
 import { replaceManifestFile, withManifestMutation } from "../isolation/manifest-mutation.ts";
 import { existsSync, type Dirent, readdirSync, statSync } from "node:fs";
 import { mkdir, readFile, realpath, rm, writeFile } from "node:fs/promises";
@@ -71,8 +71,8 @@ export interface ThreadResultSummary {
 }
 
 export interface ThreadRecord {
-	/** Stable identity across windows and locally renumbered restores. Absent in legacy records. */
-	durableId?: string;
+	/** Stable identity across windows and locally renumbered restores. */
+	durableId: string;
 	runId: number;
 	createdAt: number;
 	updatedAt: number;
@@ -102,11 +102,7 @@ function currentBootId(now = Date.now()): number {
 	return Math.round(now - uptime() * 1_000);
 }
 
-/** Whether a record's `childPids` can still name processes of this boot. Pids
- * are only unique within a boot: after a restart the same number belongs to
- * whatever claimed it, so restore must not signal them. Records written before
- * this field existed carry no boot id and count as unverifiable; leaving a
- * stray child alive is safer than killing an unrelated process tree. */
+/** Only verified process identities from this boot can authorize signaling. */
 export function isCurrentBoot(record: ThreadRecord, now = Date.now()): boolean {
 	if (record.bootId === undefined) return false;
 	return Math.abs(record.bootId - currentBootId(now)) <= BOOT_ID_TOLERANCE_MS;
@@ -158,18 +154,20 @@ function normalizeResultSummary(value: unknown): ThreadResultSummary | undefined
 function normalizeRecord(value: unknown): ThreadRecord | undefined {
 	if (!value || typeof value !== "object") return undefined;
 	const raw = value as Record<string, unknown>;
+	if (typeof raw.durableId !== "string" || !raw.durableId) throw new Error("Unsupported thread record: durableId is required. Recovery artifacts were left untouched.");
 	if (typeof raw.runId !== "number" || !Number.isInteger(raw.runId) || raw.runId < 1) return undefined;
 	if (typeof raw.createdAt !== "number" || !Number.isFinite(raw.createdAt)) return undefined;
 	if (typeof raw.updatedAt !== "number" || !Number.isFinite(raw.updatedAt)) return undefined;
 	if (typeof raw.agentName !== "string" || !raw.agentName) return undefined;
 	if (typeof raw.task !== "string" || !raw.task) return undefined;
 	if (typeof raw.cwd !== "string" || !raw.cwd) return undefined;
+	if (typeof raw.executionCwd !== "string" || !raw.executionCwd) return undefined;
 	if (raw.isolation !== "shared" && raw.isolation !== "worktree") return undefined;
 	if (raw.state !== "parked" && raw.state !== "completed" && raw.state !== "failed") return undefined;
 	const worktree = raw.worktree === undefined ? undefined : normalizeWorktreeSnapshot(raw.worktree);
 	if (worktree === null) return undefined;
 	return {
-		...(typeof raw.durableId === "string" && raw.durableId ? { durableId: raw.durableId } : {}),
+		durableId: raw.durableId,
 		runId: raw.runId,
 		createdAt: raw.createdAt,
 		updatedAt: raw.updatedAt,
@@ -177,7 +175,7 @@ function normalizeRecord(value: unknown): ThreadRecord | undefined {
 		agentName: raw.agentName,
 		task: raw.task,
 		cwd: raw.cwd,
-		executionCwd: typeof raw.executionCwd === "string" && raw.executionCwd ? raw.executionCwd : raw.cwd,
+		executionCwd: raw.executionCwd,
 		...(typeof raw.thinkingLevel === "string" && raw.thinkingLevel ? { thinkingLevel: raw.thinkingLevel } : {}),
 		isolation: raw.isolation,
 		state: raw.state,
@@ -201,8 +199,8 @@ interface ThreadManifestRead {
 
 async function readManifest(path: string): Promise<ThreadManifestRead> {
 	try {
-		const parsed = JSON.parse(await readFile(path, "utf8")) as { records?: unknown } | null;
-		if (!Array.isArray(parsed?.records)) throw new Error(`Invalid thread manifest: ${path}`);
+		const parsed = JSON.parse(await readFile(path, "utf8")) as { version?: unknown; records?: unknown } | null;
+		if (parsed?.version !== THREADS_MANIFEST_VERSION || !Array.isArray(parsed.records)) throw new Error(`Invalid thread manifest: ${path}`);
 		return {
 			sourceCount: parsed.records.length,
 			records: parsed.records.flatMap((record) => {
@@ -282,15 +280,6 @@ export async function isThreadSourceAvailable(record: ThreadRecord): Promise<boo
 	}
 }
 
-/** Legacy identities include immutable source/artifact metadata, so adopting a
- * record does not let a fresh run with the same display id overwrite it. */
-export function threadRecordIdentity(record: ThreadRecord): string {
-	return record.durableId ?? `legacy-${createHash("sha256").update(JSON.stringify([
-		record.cwd, record.runId, record.createdAt, record.ownerPid, record.bootId,
-		record.sessionDir, record.worktree?.tempDir,
-	])).digest("hex")}`;
-}
-
 async function validatedManifestRecords(
 	configPath: string,
 	path: string,
@@ -350,11 +339,10 @@ export async function upsertThreadRecord(configPath: string, record: ThreadRecor
 	const path = getThreadsManifestPath(configPath, record.cwd);
 	await withManifestMutation(path, async () => {
 		const records = await readManifestRecords(path);
-		const identity = threadRecordIdentity(record);
-		const index = records.findIndex((candidate) => threadRecordIdentity(candidate) === identity);
+		const index = records.findIndex((candidate) => candidate.durableId === record.durableId);
 		const merged: ThreadRecord = index === -1
-			? { ...record, durableId: identity }
-			: { ...record, durableId: identity, createdAt: records[index]!.createdAt };
+			? record
+			: { ...record, createdAt: records[index]!.createdAt };
 		if (index === -1) records.push(merged);
 		else records[index] = merged;
 		await writeManifest(path, records);
@@ -365,7 +353,7 @@ export async function removeThreadRecord(configPath: string, identity: string, c
 	const path = getThreadsManifestPath(configPath, cwd);
 	await withManifestMutation(path, async () => {
 		const records = await readManifestRecords(path);
-		const next = records.filter((record) => threadRecordIdentity(record) !== identity);
+		const next = records.filter((record) => record.durableId !== identity);
 		if (next.length === records.length) return;
 		await writeManifest(path, next);
 	});
@@ -418,7 +406,7 @@ export function threadRecordFromThread(
 		elapsedMs: thread.elapsedMs,
 		...(thread.sessionId && thread.sessionDir ? { sessionId: thread.sessionId, sessionDir: thread.sessionDir } : {}),
 		...(worktree ? { worktree } : {}),
-		childPids: thread.control?.getChildPids?.() ?? [],
+		childPids: thread.control.getChildPids(),
 		ownerPid: process.pid,
 		bootId: currentBootId(now),
 		...(thread.lastResult ? { resultSummary: summarizeResult(thread.lastResult) } : {}),

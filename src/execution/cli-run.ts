@@ -142,7 +142,7 @@ export interface ChildLaunchOptions {
 	resumeExistingSession?: boolean;
 	/** Appended system prompt file, when the role carries one. */
 	promptPath?: string;
-	/** Activate scout's approved indirect tools after they register. */
+	/** Activate researcher's approved indirect tools after they register. */
 	toolActivationPath?: string;
 }
 
@@ -211,11 +211,11 @@ export async function runCliAgentAttempt(options: RunCliAttemptOptions): Promise
 		if (signal?.aborted || control?.isStopRequested()) {
 			return { ...result, exitCode: 1, stopReason: "aborted", errorMessage: control?.getStopMessage() ?? "Subagent was aborted" };
 		}
-		const activateScoutTools = agent.name === "scout" && !!agent.tools?.length;
-		if (agent.systemPrompt.trim() || activateScoutTools) promptFile = await writePromptToTempFile(options.scratchRoot, agent.name, agent.systemPrompt);
+		const activateResearcherTools = agent.name === "researcher" && !!agent.tools?.length;
+		if (agent.systemPrompt.trim() || activateResearcherTools) promptFile = await writePromptToTempFile(options.scratchRoot, agent.name, agent.systemPrompt);
 		let toolActivationPath: string | undefined;
-		if (activateScoutTools && promptFile) {
-			toolActivationPath = join(promptFile.dir, "activate-scout-tools.mjs");
+		if (activateResearcherTools && promptFile) {
+			toolActivationPath = join(promptFile.dir, "activate-researcher-tools.mjs");
 			await writeFile(toolActivationPath, `
 export default function (pi) {
  const approved = new Set(${JSON.stringify(agent.tools)});
@@ -348,9 +348,11 @@ export default function (pi) {
 					pendingSteers.delete(record.id);
 					if (record.success) {
 						const disposition = record.data?.disposition;
-						pending.resolve({
+						if (disposition !== "queued" && disposition !== "handled") {
+							pending.reject(new Error("Invalid steering acknowledgement: missing or unsupported disposition."));
+						} else pending.resolve({
 							requestId: record.id, acknowledgedAt: Date.now(),
-							disposition: disposition === "queued" || disposition === "handled" ? disposition : "accepted",
+							disposition,
 						});
 					}
 					else pending.reject(new Error(record.error || "Steering was rejected."));

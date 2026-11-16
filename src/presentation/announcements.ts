@@ -1,10 +1,10 @@
 /** Session-start recovery, worker availability, and progress-surface installation. */
 
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
-import { loadConfig, saveConfig } from "../configuration/config.ts";
-import { findModelByRef, modelRef } from "../configuration/models.ts";
+import { BUILTIN_AGENT_NAMES, loadConfig } from "../configuration/config.ts";
+import { findModelByRef } from "../configuration/models.ts";
 import { ensureDefaultConfig } from "../configuration/setup.ts";
-import { announceRecoveryRecords, relocateRecoveryManifest } from "../isolation/recovery.ts";
+import { announceRecoveryRecords } from "../isolation/recovery.ts";
 import type { SubagentRuntime } from "../lifecycle/runtime.ts";
 import { installActiveRunsWidget } from "./widget.ts";
 
@@ -15,18 +15,15 @@ async function checkWorkerModel(
 ): Promise<void> {
 	try {
 		const config = await loadConfig(runtime.configPath);
-		if (!config.model) return;
-		const selected = findModelByRef(ctx.modelRegistry.getAvailable(), config.model);
-		const liveRef = selected ? modelRef(selected) : undefined;
-		if (liveRef === config.model) return;
-		if (liveRef) {
-			await saveConfig({ ...config, model: liveRef }, runtime.configPath);
-			return;
+		const models = ctx.modelRegistry.getAvailable();
+		for (const role of BUILTIN_AGENT_NAMES) {
+			const ref = config[role].model;
+			if (!ref || findModelByRef(models, ref)) continue;
+			ctx.ui.notify(
+				`pi-subagents: ${role} model ${ref} is unavailable. Its setting is preserved and dispatch is paused for this role. Restore availability or run /subagents-setup to choose another.`,
+				"warning",
+			);
 		}
-		ctx.ui.notify(
-			`pi-subagents: worker model ${config.model} is unavailable. Its setting is preserved and dispatch is paused. Restore availability or run /subagents-setup to choose another.`,
-			"warning",
-		);
 	} catch {
 		/* availability notices are non-fatal */
 	}
@@ -36,7 +33,6 @@ export function registerAnnouncements(pi: ExtensionAPI, runtime: SubagentRuntime
 	pi.on("session_start", async (_event, ctx) => {
 		await ensureDefaultConfig(ctx, runtime.configPath);
 		try {
-			await relocateRecoveryManifest(runtime.configPath);
 			await announceRecoveryRecords(runtime.configPath, ctx);
 		} catch (error) {
 			// Recovery readers must fail closed for cleanup, but a failed notice

@@ -27,7 +27,7 @@ import { join } from "node:path";
 export const TEMP_OWNER_FILE_NAME = "owner.json";
 
 /** Transient directories created under `<project>/tmp`: the child prompt
- * copies (`pi-subagents-*`), including policy-shim leftovers from older releases. The singular `pi-subagent-` prefixes below belong
+ * copies (`pi-subagents-*`). The singular `pi-subagent-` prefixes below belong
  * to the durable roots and are swept separately, under a reference guard. */
 const TEMP_DIR_PREFIXES = ["pi-subagents-"] as const;
 

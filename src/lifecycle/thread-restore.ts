@@ -11,7 +11,6 @@ import {
 	readThreadRecords,
 	removeThreadRecord,
 	restoredResultFromSummary,
-	threadRecordIdentity,
 	type ThreadRecord,
 } from "./durable.ts";
 import { monitor } from "../presentation/monitor.ts";
@@ -38,7 +37,7 @@ import { installThreadLifecycle } from "./thread-lifecycle.ts";
 async function discardRestoredRecord(runtime: SubagentRuntime, record: ThreadRecord): Promise<void> {
 	await discardRecordArtifacts(record);
 	if (record.sessionDir) runtime.sessionDirs.delete(record.sessionDir);
-	await removeThreadRecord(runtime.configPath, threadRecordIdentity(record), record.cwd).catch(() => undefined);
+	await removeThreadRecord(runtime.configPath, record.durableId, record.cwd).catch(() => undefined);
 }
 
 function createRestoredThread(
@@ -48,7 +47,7 @@ function createRestoredThread(
 	state: ThreadState,
 ): SubagentThread {
 	const thread: SubagentThread = {
-		durableId: threadRecordIdentity(record),
+		durableId: record.durableId,
 		id: record.runId,
 		generation: record.generation,
 		agentName: record.agentName,
@@ -80,15 +79,14 @@ function belongsToSessionProject(configPath: string, cwd: string, record: Thread
  * Other projects' parked threads stay on disk for their own window; this process
  * must not restore them or kill their children. Records with a live owner or
  * child are left alone; missing session files do not discard isolated
- * edits. Already-settled records from older versions are removed with their
- * managed artifacts. */
+ * edits. Settled records are removed with their managed artifacts. */
 export async function restoreDurableThreads(runtime: SubagentRuntime, cwd: string): Promise<number[]> {
 	const records = await readThreadRecords(runtime.configPath);
 	const restoredIds: number[] = [];
 	const localRecords = records.filter((record) => belongsToSessionProject(runtime.configPath, cwd, record));
 	for (const record of localRecords) monitor.ensureNextIdAbove(record.runId);
 	for (let record of localRecords) {
-		const identity = threadRecordIdentity(record);
+		const identity = record.durableId;
 		if ([...runtime.threads.values()].some((thread) => thread.durableId === identity)) continue;
 		// Another Pi window may own this checkpoint, and PID reuse means a live
 		// recorded child is not proof of ownership. Never kill either on restore.

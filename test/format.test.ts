@@ -11,7 +11,7 @@ import { visibleWidth } from "@earendil-works/pi-tui";
 
 function answer(text: string): SingleResult {
 	return {
-		agent: "scout",
+		agent: "researcher",
 		task: "survey modules",
 		exitCode: 0,
 		messages: [{ role: "assistant", content: [{ type: "text", text }], stopReason: "stop" } as never],
@@ -43,7 +43,7 @@ describe("terminal task identities", () => {
 
 describe("formatCompletionBlock", () => {
 	it("hands successful implementation to main for review without approving it", () => {
-		const result = { ...answer("Changed src/cache.ts; cache tests passed."), agent: "artisan" };
+		const result = { ...answer("Changed src/cache.ts; cache tests passed."), agent: "worker" };
 		const block = formatCompletionBlock(result, 40);
 		assert.match(block, /Review handoff: main\. Worker completion is not review approval/u);
 		assert.match(block, /actual diff, affected callers, acceptance criteria, and check evidence/u);
@@ -53,7 +53,7 @@ describe("formatCompletionBlock", () => {
 
 	it("states when no failure reason was recorded instead of showing only partial work", () => {
 		const block = formatCompletionBlock({
-			agent: "artisan", task: "Finish the change", exitCode: 1, stderr: "", usage: emptyUsage(),
+			agent: "worker", task: "Finish the change", exitCode: 1, stderr: "", usage: emptyUsage(),
 			messages: [{ role: "assistant", content: [{ type: "text", text: "Partial work" }], stopReason: "toolUse" } as never],
 		}, 40);
 		assert.match(block, /no failure reason was recorded/i);
@@ -63,7 +63,7 @@ describe("formatCompletionBlock", () => {
 
 	it("recovers a recorded assistant error and hands the model-level failure to main", () => {
 		const block = formatCompletionBlock({
-			agent: "artisan", task: "Finish the change", exitCode: 1, stderr: "", usage: emptyUsage(),
+			agent: "worker", task: "Finish the change", exitCode: 1, stderr: "", usage: emptyUsage(),
 			messages: [{ role: "assistant", content: [], stopReason: "error", errorMessage: "Provider unavailable" } as never],
 		}, 40);
 		assert.match(block, /Provider unavailable/);

@@ -29,9 +29,9 @@ async function harness() {
 	const cleanupEntered = deferred();
 	const cleanupRelease = deferred();
 	let finalized = false;
-	const id = monitor.addRun("artisan", "Apply change");
+	const id = monitor.addRun("worker", "Apply change");
 	const thread: SubagentThread = {
-		id, generation: 1, agentName: "artisan", task: "Apply change", cwd: root, executionCwd: root, isolation: "shared", state: "running",
+		id, generation: 1, agentName: "worker", task: "Apply change", cwd: root, executionCwd: root, isolation: "shared", state: "running",
 		control: new RunControl("Apply change", 1), lifecycleVersion: 0, elapsedMs: 0, generationCompletion: Promise.resolve(),
 		finalizeIsolation: async (_generation, result) => {
 			cleanupEntered.resolve();
@@ -91,11 +91,11 @@ describe("parent cancellation", () => {
 		const h = await harness();
 		try {
 			let stoppedWriter = false;
-			const id = monitor.addRun("artisan", "Unrelated shared writer");
+			const id = monitor.addRun("worker", "Unrelated shared writer");
 			const control = new RunControl("Unrelated shared writer", 1);
 			const token = control.beginAttempt();
 			control.attach(token, { stop: async () => { stoppedWriter = true; h.cleanupRelease.resolve(); } });
-			h.runtime.threads.set(id, { id, generation: 1, agentName: "artisan", task: "Unrelated shared writer", cwd: h.root, executionCwd: h.root, isolation: "shared", state: "running", control, lifecycleVersion: 0, elapsedMs: 0, generationCompletion: Promise.resolve(), finalizeIsolation: async () => undefined });
+			h.runtime.threads.set(id, { id, generation: 1, agentName: "worker", task: "Unrelated shared writer", cwd: h.root, executionCwd: h.root, isolation: "shared", state: "running", control, lifecycleVersion: 0, elapsedMs: 0, generationCompletion: Promise.resolve(), finalizeIsolation: async () => undefined });
 			let stopTool: any;
 			registerLookupTools({ ...h.pi, registerTool: (tool: any) => { if (tool.name === "subagent_stop") stopTool = tool; } } as ExtensionAPI, h.runtime);
 			await stopTool.execute("stop-all", { all: true }, undefined, undefined, { cwd: h.root });

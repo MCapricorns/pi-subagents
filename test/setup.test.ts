@@ -11,7 +11,7 @@ import {
 } from "@earendil-works/pi-tui";
 import { DEFAULT_CONFIG, type SubagentsConfig } from "../src/configuration/config.ts";
 import { ensureDefaultConfig, runSetup } from "../src/configuration/setup.ts";
-import { SETUP_OVERLAY_OPTIONS, promptSettings, promptSelectOne } from "../src/configuration/ui.ts";
+import { SETUP_OVERLAY_OPTIONS, promptSettings, promptSelectOne, type SettingsView } from "../src/configuration/ui.ts";
 import { emptyUsage } from "../src/execution/run-control.ts";
 import type { RunView } from "../src/presentation/monitor.ts";
 import { formatSubagentWidgetLines } from "../src/presentation/widget.ts";
@@ -44,6 +44,15 @@ function model(id: string, reasoning = true): Model<Api> {
 }
 function baseConfig(overrides: Partial<SubagentsConfig> = {}): SubagentsConfig {
 	return { ...DEFAULT_CONFIG, ...overrides };
+}
+function settingsView(model = "test/worker"): SettingsView {
+	return {
+		main: "test/main", status: "Changes save immediately", focus: "researcher.model",
+		roles: [
+			{ role: "researcher", model, thinking: "high", unavailable: false },
+			{ role: "worker", model: "Follow main", thinking: "medium", unavailable: false },
+		],
+	};
 }
 function freshConfigPath(t: TestContext): string {
 	const dir = mkdtempSync(join(tmpdir(), "pi-subagents-setup-"));
@@ -101,7 +110,7 @@ function overlayMaxHeight(termHeight: number): number {
 
 function hostOverlayFrame(overlay: Component, width: number, height: number) {
 	const runs: RunView[] = Array.from({ length: 8 }, (_, i) => ({
-		id: i + 1, agent: "artisan", task: "Work " + i, status: "running",
+		id: i + 1, agent: "worker", task: "Work " + i, status: "running",
 		usage: emptyUsage(), elapsedMs: 0, startedAt: 1_000, activeSince: 1_000,
 	}));
 	const empty = { render: () => [], invalidate() {} };
@@ -127,51 +136,63 @@ function hostOverlayFrame(overlay: Component, width: number, height: number) {
 	return { base, panelLines, composited };
 }
 
-describe("compact worker settings", () => {
-	it("edits the worker model and thinking, preserving focus and preferences", async (t) => {
-		const path = await scenario(t, baseConfig({ thinking: "high" }), [
+describe("independent role settings", () => {
+	it("edits both roles independently, preserving focus and saved preferences", async (t) => {
+		const path = await scenario(t, baseConfig({ researcher: { thinking: "high" } }), [
 			{ title: /Subagents/u, act(c, screen) {
+				assert.match(screen, /Researcher.*Read-only research/u);
+				assert.match(screen, /Worker.*Implementation & checks/u);
 				assert.match(screen, /Model.*Follow main/u);
 				assert.match(screen, /Thinking.*high/u);
-				assert.doesNotMatch(screen, /scout|artisan|sentinel|Search:/u);
 				press(c, KEY.enter);
 			} },
-			{ title: /Worker model/u, act: (c) => press(c, "other", KEY.enter) },
-			{ title: /Model saved/u, act(c, screen) {
+			{ title: /Researcher model/u, act: (c) => press(c, "other", KEY.enter) },
+			{ title: /Researcher model saved/u, act(c, screen) {
 				assert.match(screen, /› Model.*test\/other/u);
 				press(c, KEY.down, KEY.enter);
 			} },
-			{ title: /Worker thinking/u, act: (c) => press(c, "low", KEY.enter) },
-			{ title: /Thinking saved/u, act(c, screen) {
+			{ title: /Researcher thinking/u, act: (c) => press(c, "low", KEY.enter) },
+			{ title: /Researcher thinking saved/u, act(c, screen) {
 				assert.match(screen, /› Thinking.*low/u);
+				press(c, KEY.down, KEY.down, KEY.enter);
+			} },
+			{ title: /Worker model/u, act: (c) => press(c, "test/reasoning", KEY.enter) },
+			{ title: /Worker model saved/u, act: (c) => press(c, KEY.down, KEY.enter) },
+			{ title: /Worker thinking/u, act: (c) => press(c, "high", KEY.enter) },
+			{ title: /Worker thinking saved/u, act(c, screen) {
+				assert.match(screen, /› Thinking.*high/u);
+				assert.match(screen, /Model.*test\/other/u);
 				press(c, KEY.escape);
 			} },
 		]);
-		assert.deepEqual(saved(path), baseConfig({ model: "test/other", thinking: "low" }));
+		assert.deepEqual(saved(path), baseConfig({ researcher: { model: "test/other", thinking: "low" }, worker: { model: "test/reasoning", thinking: "high" } }));
 	});
 
-	it("leaves a picker without changing settings and resets only worker settings", async (t) => {
-		const path = await scenario(t, baseConfig({ model: "test/other", thinking: "high" }), [
-			{ title: /Subagents/u, act: (c) => press(c, KEY.enter) },
-			{ title: /Worker model/u, act: (c) => press(c, KEY.escape) },
-			{ title: /Subagents/u, act: (c) => press(c, KEY.down, KEY.down, KEY.enter) },
-			{ title: /Defaults restored/u, act(c, screen) {
-				assert.match(screen, /Model.*Follow main/u);
-				assert.match(screen, /Thinking.*medium/u);
-				press(c, KEY.escape);
-			} },
-		]);
-		assert.deepEqual(saved(path), baseConfig());
-	});
+	for (const role of ["researcher", "worker"] as const) {
+		it(`cancels model changes and resets only ${role}`, async (t) => {
+			const initial = baseConfig({ researcher: { model: "test/other", thinking: "high" }, worker: { model: "test/reasoning", thinking: "low" } });
+			const path = await scenario(t, initial, [
+				{ title: /Subagents/u, act: (c) => press(c, ...(role === "worker" ? [KEY.down, KEY.down, KEY.down] : []), KEY.enter) },
+				{ title: /model/u, act: (c) => press(c, "unmatched", KEY.escape) },
+				{ title: /Subagents/u, act: (c) => press(c, KEY.down, KEY.down, KEY.enter) },
+				{ title: /defaults restored/u, act(c, screen) {
+					assert.match(screen, /Model.*Follow main/u);
+					assert.match(screen, /Thinking.*medium/u);
+					press(c, KEY.escape);
+				} },
+			]);
+			assert.deepEqual(saved(path), { ...initial, [role]: { thinking: "medium" } });
+		});
+	}
 
 	it("shows clamped thinking without discarding the saved preference", async (t) => {
-		const path = await scenario(t, baseConfig({ model: "test/plain", thinking: "high" }), [{
+		const path = await scenario(t, baseConfig({ researcher: { model: "test/plain", thinking: "high" } }), [{
 			title: /Subagents/u, act(c, screen) {
 				assert.match(screen, /off \(high requested\)/u);
 				press(c, KEY.escape);
 			},
 		}], [model("plain", false)]);
-		assert.equal(saved(path).thinking, "high");
+		assert.equal(saved(path).researcher.thinking, "high");
 	});
 
 	it("renders the actual Pi overlay without replacing the input editor", async () => {
@@ -191,7 +212,7 @@ describe("compact worker settings", () => {
 				assert.ok(component.render(overlayWidth(width)).length <= overlayMaxHeight(height));
 				press(component, KEY.escape);
 			}) } } as unknown as ExtensionContext;
-			await promptSettings(context, { main: "test/main", model: "test/worker", thinking: "medium", note: "", status: "Changes save immediately", focus: "model" });
+			await promptSettings(context, settingsView());
 		}
 	});
 
@@ -214,7 +235,7 @@ describe("compact worker settings", () => {
 			assert.match(component.render(80).join("\n"), /› Thinking/u);
 			press(component, KEY.enter);
 		}) } } as unknown as ExtensionContext;
-		assert.equal(await promptSettings(context, { main: "test/main", model: ref, thinking: "high", note: "", status: "Saved", focus: "model" }), "thinking");
+		assert.equal(await promptSettings(context, settingsView(ref)), "researcher.thinking");
 	});
 });
 
@@ -290,13 +311,13 @@ describe("searchable picker", () => {
 describe("first install", () => {
 	it("resets legacy config once and tells the user how to configure the worker", async (t) => {
 		const path = freshConfigPath(t);
-		writeFileSync(path, JSON.stringify({ agentModels: { artisan: "test/old" }, agentThinkingLevels: { artisan: "max" } }));
+		writeFileSync(path, JSON.stringify({ agentModels: { worker: "test/old" }, agentThinkingLevels: { worker: "max" } }));
 		const notices: string[] = [];
 		const context = { ui: { notify: (message: string) => notices.push(message) } } as unknown as ExtensionContext;
 		await ensureDefaultConfig(context, path);
 		assert.ok(existsSync(path));
 		assert.deepEqual(saved(path), baseConfig());
-		assert.match(notices[0]!, /deleted the old config.*initialized.*\/subagents-setup/u);
+		assert.match(notices[0]!, /overwrote the old config.*independent role settings.*\/subagents-setup/u);
 		await ensureDefaultConfig(context, path);
 		assert.equal(notices.length, 1);
 	});

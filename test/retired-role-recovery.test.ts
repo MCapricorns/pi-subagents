@@ -24,7 +24,7 @@ describe("retired role recovery", () => {
 		const { root, configPath } = await fixture(t);
 		const path = getThreadsManifestPath(configPath, root);
 		const records = ["reviewer", "critic", "skeptic", "sentinel"].map((agentName, index) => ({
-			runId: index + 1, createdAt: 1000, updatedAt: 2000, generation: 2,
+			durableId: "fixture-" + (index + 1), runId: index + 1, createdAt: 1000, updatedAt: 2000, generation: 2,
 			agentName, task: `Keep ${agentName} in the original brief ${index}`,
 			cwd: root, executionCwd: root, isolation: "shared", state: "parked", elapsedMs: 30, childPids: [],
 			resultSummary: { agent: agentName, task: "Original task", exitCode: 1, failed: true, output: "Original evidence" },
