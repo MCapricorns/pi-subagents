@@ -67,6 +67,7 @@ describe("formatCompletionBlock", () => {
 			messages: [{ role: "assistant", content: [], stopReason: "error", errorMessage: "Provider unavailable" } as never],
 		}, 40);
 		assert.match(block, /Provider unavailable/);
+		assert.match(block, /No automatic model upgrade was attempted/u);
 		assert.match(block, /Main must inspect that work and decide how to proceed; do not repeat this failed phase automatically/u);
 	});
 

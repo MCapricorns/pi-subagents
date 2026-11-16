@@ -173,7 +173,7 @@ export function formatCompletionBlock(
 /** A terminal model failure hands the unfinished task to main, not another run. */
 function modelLevelTakeoverNote(result: SingleResult): string {
 	const cause = getResultError(result) ?? "its model was unavailable or failed";
-	return `The worker could not complete this task: ${cause}. No main-model worker was started. Earlier edits and retained result/session artifacts remain available. Main must inspect that work and decide how to proceed; do not repeat this failed phase automatically.`;
+	return `The worker could not complete this task: ${cause}. No automatic model upgrade was attempted. Earlier edits and retained result/session artifacts remain available. Main must inspect that work and decide how to proceed; do not repeat this failed phase automatically.`;
 }
 
 /** Resolve a run-id request to actual ids: an exact numeric match always wins
