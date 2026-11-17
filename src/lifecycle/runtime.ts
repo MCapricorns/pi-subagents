@@ -45,6 +45,10 @@ export interface SubagentThread {
 	worktree?: WorktreeIsolation;
 	/** Original durable evidence retained when its worktree handle is unavailable. */
 	restorationRecord?: ThreadRecord;
+	/** Last-activity time of the restored checkpoint. A restored thread never
+	 * runs again, so rewriting its record keeps this time and the record still
+	 * reaches its retention age. */
+	restoredUpdatedAt?: number;
 	state: ThreadState;
 	control: RunControl;
 	/** Last child acknowledgement; queued delivery does not prove model execution. */
@@ -296,10 +300,10 @@ export function createRuntime(pi: ExtensionAPI, configPath: string): SubagentRun
 			for (const thread of runtime.threads.values()) {
 				if (thread.retired) continue;
 				if (thread.restorationRecord) {
-					// Keep recovery evidence until an explicit destructive stop retires it.
+					// Keep recovery evidence until an explicit destructive stop retires
+					// it; its stored updatedAt keeps the retention clock running.
 					records.push({
 						...thread.restorationRecord,
-						updatedAt: Date.now(),
 						elapsedMs: thread.elapsedMs,
 					});
 					continue;

@@ -9,7 +9,7 @@
  */
 
 import { existsSync, symlinkSync } from "node:fs";
-import { copyFile, mkdir, mkdtemp, realpath, rm, stat, writeFile } from "node:fs/promises";
+import { copyFile, mkdir, mkdtemp, realpath, rm, stat, unlink, writeFile } from "node:fs/promises";
 import { isAbsolute, join, relative, resolve, sep } from "node:path";
 import {
 	GIT_COMMAND_TIMEOUT_MS,
@@ -146,6 +146,12 @@ function commandFailure(action: string, result: CommandResult): Error {
 	return new Error(`${action} failed (exit ${result.code})${detail ? `: ${detail}` : "."}`);
 }
 
+function gitArgs(args: readonly string[]): readonly string[] {
+	// core.longpaths only exists in Git for Windows, and some POSIX builds
+	// reject unknown -c core keys, so the flag stays platform-gated.
+	return process.platform === "win32" ? ["-c", "core.longpaths=true", ...args] : args;
+}
+
 async function runGit(
 	runner: CommandRunner,
 	cwd: string,
@@ -156,7 +162,7 @@ async function runGit(
 ): Promise<CommandResult> {
 	let result: CommandResult;
 	try {
-		result = await runner("git", args, {
+		result = await runner("git", gitArgs(args), {
 			cwd,
 			input,
 			env,
@@ -188,14 +194,11 @@ export async function removeWorktreeGroup(
 ): Promise<string | undefined> {
 	let removeError: string | undefined;
 	if (paths.originalRoot && existsSync(paths.worktreePath)) {
-		// core.longpaths only exists in Git for Windows, and some POSIX builds
-		// reject unknown -c core keys, so the flag stays platform-gated.
-		const longPaths = process.platform === "win32" ? ["-c", "core.longpaths=true"] : [];
 		try {
 			await runGit(
 				runner,
 				paths.originalRoot,
-				[...longPaths, "worktree", "remove", "--force", paths.worktreePath],
+				["worktree", "remove", "--force", paths.worktreePath],
 				`Removing isolated worktree ${paths.worktreePath}`,
 			);
 		} catch (error) {
@@ -219,6 +222,8 @@ export async function removeWorktreeGroup(
 			`Pruning Git worktree metadata for ${paths.originalRoot}`,
 		);
 	} catch (error) {
+		// Temp artifacts are already deleted; stale worktree metadata alone is non-fatal.
+		if (!existsSync(paths.tempDir)) return undefined;
 		return error instanceof Error ? error.message : String(error);
 	}
 	return undefined;
@@ -289,7 +294,7 @@ async function resolveWorktreeTarget(
 	const { originalCwd, originalRoot } = await resolveRepositoryLocation(cwd, runner);
 	let headResult: CommandResult;
 	try {
-		headResult = await runner("git", ["rev-parse", "--verify", "--quiet", "HEAD"], {
+		headResult = await runner("git", gitArgs(["rev-parse", "--verify", "--quiet", "HEAD"]), {
 			cwd: originalRoot,
 			timeoutMs: GIT_COMMAND_TIMEOUT_MS,
 			maxOutputBytes: GIT_OUTPUT_MAX_BYTES,
@@ -393,7 +398,7 @@ class GitWorktreeIsolation implements WorktreeIsolation {
 		return this.finalization;
 	}
 
-	private async collectChanges(baseHead: string): Promise<CommandResult> {
+	private async collectChanges(): Promise<CommandResult> {
 		await runGit(
 			this.runner,
 			this.worktreePath,
@@ -403,7 +408,18 @@ class GitWorktreeIsolation implements WorktreeIsolation {
 		return runGit(
 			this.runner,
 			this.worktreePath,
-			["diff", "--binary", baseHead, "--"],
+			[
+				"diff",
+				"--binary",
+				"--no-ext-diff",
+				"--no-textconv",
+				"--no-color",
+				"--src-prefix=a/",
+				"--dst-prefix=b/",
+				"--no-relative",
+				this.head,
+				"--",
+			],
 			`Collecting isolated changes from ${this.worktreePath}`,
 		);
 	}
@@ -448,11 +464,8 @@ class GitWorktreeIsolation implements WorktreeIsolation {
 		let patchWritten = false;
 		let integrated = false;
 		try {
-			const diff = await this.collectChanges(this.integrationBaseHead);
-			const snapshot = this.integrationBaseHead === this.head
-				? diff
-				: await this.collectChanges(this.head);
-			this.continuationCheckpoint = await this.createCheckpoint(snapshot.stdout);
+			const diff = await this.collectChanges();
+			this.continuationCheckpoint = await this.createCheckpoint(diff.stdout);
 			hadChanges = diff.stdout.length > 0;
 			if (hadChanges) {
 				await writeFile(this.patchPath, diff.stdout, { flag: "wx" });
@@ -578,13 +591,32 @@ async function linkNodeModules(
 	const link = join(worktreePath, "node_modules");
 	if (!existsSync(target) || existsSync(link)) return;
 	try {
-		const ignored = await runner("git", ["check-ignore", "-q", "--", "node_modules"], {
+		const ignored = await runner("git", gitArgs(["check-ignore", "-q", "--", "node_modules"]), {
 			cwd: originalRoot,
 			timeoutMs: GIT_COMMAND_TIMEOUT_MS,
 			maxOutputBytes: GIT_OUTPUT_MAX_BYTES,
 		});
 		if (ignored.code !== 0) return;
 		symlinkSync(target, link, process.platform === "win32" ? "junction" : "dir");
+		// Directory-only patterns (e.g. `node_modules/`) match real directories in
+		// originalRoot, not POSIX symlinks in the worktree; verify against the
+		// created link so unignored links cannot enter integration patches.
+		try {
+			const worktreeIgnored = await runner(
+				"git",
+				gitArgs(["check-ignore", "-q", "--", "node_modules"]),
+				{
+					cwd: worktreePath,
+					timeoutMs: GIT_COMMAND_TIMEOUT_MS,
+					maxOutputBytes: GIT_OUTPUT_MAX_BYTES,
+				},
+			);
+			if (worktreeIgnored.code !== 0) await unlink(link);
+		} catch {
+			// unlink removes only the link (a POSIX symlink or a Windows junction),
+			// never the shared dependency tree it points to.
+			await unlink(link).catch(() => undefined);
+		}
 	} catch {
 		/* dependency linking is an optimization, never a setup requirement */
 	}

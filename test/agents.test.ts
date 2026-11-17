@@ -55,9 +55,11 @@ describe("loadBuiltinAgents", () => {
 		assert.ok(researcher.systemPrompt.includes("untrusted data"));
 		assert.match(researcher.systemPrompt, /primary sources/u);
 		assert.match(researcher.systemPrompt, /URL/u);
-		assert.match(researcher.systemPrompt, /supplied facts.*then stop/u);
+		assert.match(researcher.systemPrompt, /Follow relevant leads until the question is answered or the evidence runs out, then stop/u);
 		assert.match(researcher.systemPrompt, /read-only boundary still wins/u);
 		assert.match(researcher.systemPrompt, /Distinguish inference from verified facts/u);
+		assert.match(researcher.systemPrompt, /^Answer: /mu);
+		assert.match(researcher.systemPrompt, /^Evidence: /mu);
 		assert.ok(!isWriteCapableAgent(researcher));
 	});
 
@@ -69,21 +71,25 @@ describe("loadBuiltinAgents", () => {
 		assert.match(worker.systemPrompt, /confirm current behavior.*root cause/u);
 		assert.match(worker.systemPrompt, /affected tests, docs, comments, local cleanup, and verification/u);
 		assert.match(worker.systemPrompt, /Do not stop at a plan or a first draft/u);
-		assert.match(worker.systemPrompt, /premise is disproved.*approval boundary.*report the blocker with evidence/u);
+		assert.match(worker.systemPrompt, /premise is disproved.*approval boundary.*Report the blocker with evidence/u);
 		assert.match(worker.systemPrompt, /Tests should catch the relevant failure/u);
 		assert.match(worker.systemPrompt, /checks and gates the brief or project requires/u);
 		assert.match(worker.systemPrompt, /reversible, low-impact edit/u);
 		assert.match(worker.systemPrompt, /Repeat or broaden checks only for new edits, failures, or unresolved concerns/u);
 		assert.match(worker.systemPrompt, /unrun checks and pre-existing failures accurately/u);
-		assert.match(worker.systemPrompt, /checks as `command → result`/u);
+		assert.match(worker.systemPrompt, /one per line as `command → result`/u);
 		assert.match(worker.systemPrompt, /leaf boundary below still wins/u);
+		// A fixed handoff shape keeps weaker workers predictable and main's review cheap.
+		assert.match(worker.systemPrompt, /^Status: done, partial, or blocked/mu);
+		assert.match(worker.systemPrompt, /^Changes: /mu);
+		assert.match(worker.systemPrompt, /^Checks: /mu);
 	});
 
 	it("preserves evidence reuse for research and implementation", () => {
 		const researcher = loadBuiltinAgents().find((agent) => agent.name === "researcher");
 		const worker = loadBuiltinAgents().find((agent) => agent.name === "worker");
 		assert.ok(researcher && worker);
-		assert.match(researcher.systemPrompt, /fill gaps in main or upstream findings instead of repeating their research/u);
+		assert.match(researcher.systemPrompt, /Fill gaps in main or upstream findings instead of repeating their research/u);
 		assert.match(worker.systemPrompt, /Reuse completed main or upstream work; implement only the remaining delta/u);
 		assert.match(worker.systemPrompt, /Reuse supplied passing checks when they cover the current files/u);
 	});

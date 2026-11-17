@@ -14,7 +14,7 @@ import { announceRecoveryRecords, getRecoveryManifestPath, persistRecoveryRecord
 import { measureDurableUsage } from "../src/isolation/cleanup.ts";
 import { TEMP_OWNER_FILE_NAME } from "../src/isolation/temp-hygiene.ts";
 import { createWorktreeIsolation, worktreeSnapshot } from "../src/isolation/worktree.ts";
-import { getThreadsManifestPath, readThreadRecords, removeThreadRecord, threadRecordFromThread, upsertThreadRecord, type ThreadRecord } from "../src/lifecycle/durable.ts";
+import { getThreadsManifestPath, PARKED_RECORD_MAX_AGE_MS, pruneThreadRecords, readThreadRecords, removeThreadRecord, threadRecordFromThread, upsertThreadRecord, type ThreadRecord } from "../src/lifecycle/durable.ts";
 import { createRuntime } from "../src/lifecycle/runtime.ts";
 import { bootstrapDurableState, restoreDurableThreads } from "../src/lifecycle/thread-restore.ts";
 import { monitor } from "../src/presentation/monitor.ts";
@@ -208,6 +208,29 @@ describe("durable identity across Pi windows", () => {
 			const [remaining] = await readThreadRecords(configPath);
 			assert.equal(remaining?.runId, 8);
 			assert.equal(remaining?.durableId, second.durableId);
+		});
+	});
+
+	it("keeps a restored parked record's activity time so it still expires", async () => {
+		await fixture(async (_root, configPath, cwd) => {
+			const lastActivity = Date.now() - 10 * 24 * 60 * 60 * 1_000;
+			const record = { ...parkedRecord(cwd, 1), updatedAt: lastActivity };
+			await mkdir(getProjectRoot(configPath, cwd), { recursive: true });
+			await writeFile(getThreadsManifestPath(configPath, cwd), JSON.stringify({ version: 1, records: [record] }));
+			for (let reload = 0; reload < 2; reload++) {
+				const runtime = createRuntime(fakePi(), configPath);
+				assert.deepEqual(await restoreDurableThreads(runtime, cwd), [7]);
+				await runtime.shutdown();
+				const [stored] = await readThreadRecords(configPath);
+				assert.equal(stored?.updatedAt, lastActivity, "a reload must not restart the retention clock");
+			}
+			// Expiry applies once the recorded owner (this test process) is gone.
+			const path = getThreadsManifestPath(configPath, cwd);
+			const manifest = JSON.parse(await readFile(path, "utf8"));
+			for (const stored of manifest.records) delete stored.ownerPid;
+			await writeFile(path, JSON.stringify(manifest));
+			await pruneThreadRecords(configPath, lastActivity + PARKED_RECORD_MAX_AGE_MS + 1);
+			assert.deepEqual(await readThreadRecords(configPath), []);
 		});
 	});
 });

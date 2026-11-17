@@ -65,6 +65,7 @@ function createRestoredThread(
 		sessionId: record.sessionId,
 		sessionDir: record.sessionDir,
 		lastResult: restoredResultFromSummary(record),
+		restoredUpdatedAt: record.updatedAt,
 		finalizeIsolation: async () => undefined,
 	};
 	installThreadLifecycle(thread, { runtime });

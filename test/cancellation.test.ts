@@ -114,3 +114,22 @@ describe("parent cancellation", () => {
 		} finally { h.cleanupRelease.resolve(); await h.runtime.shutdown(); await rm(h.root, { recursive: true, force: true }); }
 	});
 });
+
+describe("run control stop", () => {
+	it("stays stopped when the child spawns after a stop found no attempt", async () => {
+		const phases: string[] = [];
+		const control = new RunControl("Late spawn", 1, (phase) => phases.push(phase));
+		await control.stop("Stopped by subagent_stop.");
+		// The cli-run sequence for a child spawned during its pre-spawn awaits.
+		const token = control.beginAttempt();
+		const attempt = { stop: async () => { control.updateAttemptPhase(token, "interrupting"); } };
+		control.attach(token, attempt);
+		control.markStarting();
+		assert.equal(control.isStopRequested(), true);
+		await attempt.stop();
+		control.detach(token);
+		control.markSettled();
+		assert.equal(control.getPhase(), "stopped");
+		assert.deepEqual(phases, ["stopped"]);
+	});
+});

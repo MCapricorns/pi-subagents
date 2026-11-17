@@ -44,7 +44,7 @@ describe("session-start recovery announcements", () => {
 		});
 	}
 
-	it("preserves worker settings outside the session scope", async () => {
+	it("preserves worker settings outside the session scope and warns at startup", async () => {
 		const root = await mkdtemp(join(tmpdir(), "pi-subagents-announcements-"));
 		const configPath = join(root, "agent", "config.json");
 		const handlers = new Map<string, (event: unknown, ctx: ExtensionContext) => Promise<void>>();
@@ -66,7 +66,36 @@ describe("session-start recovery announcements", () => {
 				ui: { notify: (message: string) => notices.push(message) },
 			} as unknown as ExtensionContext);
 			assert.deepEqual((await loadConfig(configPath)).worker.model, "test/outside");
-			assert.equal(notices.length, 0);
+			assert.equal(notices.length, 1);
+			assert.match(notices[0]!, /worker model test\/outside is unavailable.*setting is preserved and dispatch is paused/u);
 		} finally { await runtime.shutdown(); await rm(root, { recursive: true, force: true }); }
 	});
+
+	for (const broken of ["{broken", JSON.stringify({ ...DEFAULT_CONFIG, worker: { model: "typo", thinking: "medium" } })]) {
+		it(`preserves invalid current settings on session_start and warns: ${broken.slice(0, 20)}`, async () => {
+			const root = await mkdtemp(join(tmpdir(), "pi-subagents-announcements-"));
+			const configPath = join(root, "agent", "config.json");
+			const handlers = new Map<string, (event: unknown, ctx: ExtensionContext) => Promise<void>>();
+			const pi = {
+				getActiveTools: () => [], getAllTools: () => [],
+				on: (name: string, handler: (event: unknown, ctx: ExtensionContext) => Promise<void>) => handlers.set(name, handler),
+			} as unknown as ExtensionAPI;
+			const runtime = createRuntime(pi, configPath);
+			const notices: string[] = [];
+			try {
+				await mkdir(dirname(configPath), { recursive: true });
+				await writeFile(configPath, broken, "utf8");
+				registerAnnouncements(pi, runtime);
+				await handlers.get("session_start")!({}, {
+					cwd: root, mode: "print", hasUI: false,
+					modelRegistry: { getAvailable: () => [] },
+					scopedModels: [],
+					ui: { notify: (message: string) => notices.push(message) },
+				} as unknown as ExtensionContext);
+				assert.equal(await readFile(configPath, "utf8"), broken);
+				assert.equal(notices.length, 1);
+				assert.match(notices[0]!, /Dispatch is paused/u);
+			} finally { await runtime.shutdown(); await rm(root, { recursive: true, force: true }); }
+		});
+	}
 });

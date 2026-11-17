@@ -253,6 +253,11 @@ export default function (pi) {
 		});
 		const invocation = getPiInvocation(args);
 		const processGroup = process.platform !== "win32";
+		// A stop can land during the file preparation above, before any attempt
+		// is attached; it must not still launch a child that is killed at once.
+		if (signal?.aborted || control?.isStopRequested()) {
+			return { ...result, exitCode: 1, stopReason: "aborted", errorMessage: control?.getStopMessage() ?? "Subagent was aborted" };
+		}
 		const proc = spawn(invocation.command, invocation.args, {
 			cwd: executionCwd, shell: false, stdio: ["pipe", "pipe", "pipe"],
 			windowsHide: true,
@@ -263,6 +268,7 @@ export default function (pi) {
 		let closed = false;
 		let settled = false;
 		let stopping = false;
+		let postSettlementKill = false;
 		let lastActivityAt = Date.now();
 		let forceKillTimer: ReturnType<typeof setTimeout> | undefined;
 		let shutdownTimer: ReturnType<typeof setTimeout> | undefined;
@@ -406,7 +412,12 @@ export default function (pi) {
 				for (const pending of pendingSteers.values()) pending.reject(new Error("Subagent settled before acknowledging the message."));
 				pendingSteers.clear();
 				proc.stdin.end();
-				if (!closed) shutdownTimer ??= setTimeout(terminate, SUBAGENT_KILL_GRACE_MS);
+				// Pi disposes its runtime (extensions, MCP servers) after stdin EOF.
+				// Ending a slow disposal is our own shutdown, not a child failure.
+				if (!closed) shutdownTimer ??= setTimeout(() => {
+					postSettlementKill = true;
+					terminate();
+				}, SUBAGENT_KILL_GRACE_MS);
 			}
 		};
 		const stdoutDecoder = new StringDecoder("utf8");
@@ -429,8 +440,11 @@ export default function (pi) {
 			stdoutBuffer += stdoutDecoder.end();
 			result.stderr = appendBoundedStderr(result.stderr, stderrDecoder.end());
 			if (stdoutBuffer.trim()) processLine(stdoutBuffer);
-			// A settlement event does not excuse an abnormal process exit.
-			if (!stopping && (!settled || code !== 0)) {
+			// A settlement event does not excuse an abnormal process exit, unless
+			// the exit is our own kill of a slow post-settlement shutdown.
+			if (!stopping && settled && postSettlementKill) {
+				result.stderr = appendBoundedStderr(result.stderr, "Subagent process was terminated after settlement because shutdown exceeded the grace period; its answer is complete.\n");
+			} else if (!stopping && (!settled || code !== 0)) {
 				const detail = exitSignal ? "signal=" + exitSignal : "code=" + code;
 				const error = "Subagent JSON process exited " + (settled ? "after settlement" : "before settling") + " (" + detail + ").";
 				result.errorMessage = [result.errorMessage, error, result.stderr.trim()].filter(Boolean).join("\n");

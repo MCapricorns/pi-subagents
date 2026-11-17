@@ -5,6 +5,7 @@ import { loadBuiltinAgents } from "../src/delegation/agents.ts";
 import {
 	DELEGATION_LEASE_SECTION,
 	DELEGATION_SECTION,
+	duplicateDispatchRemedy,
 	formatPhaseLeaseReceipt,
 	installDelegationSections,
 	type PhaseLeaseSource,
@@ -41,7 +42,7 @@ describe("renderSections", () => {
 
 	it("always plans and reviews in main with bounded worker execution", () => {
 		const directive = renderSections(loadBuiltinAgents());
-		assert.match(directive, /Main leads planning and review; workers execute/u);
+		assert.match(directive, /Main is the orchestrator: it plans, briefs, reviews, and integrates; workers execute/u);
 		assert.match(directive, /Main judges difficulty/u);
 		assert.match(directive, /Delegate simple, bounded work by default: edits, fixes, tests, docs, research/u);
 		// The routing contract states the live tool policy without naming tools.
@@ -77,7 +78,8 @@ describe("renderSections", () => {
 			assert.equal(directive.split(`${role.name}: ${role.description}`).length - 1, 1);
 			assert.ok(!directive.includes(role.systemPrompt));
 		}
-		assert.match(directive, /Children have no parent conversation/u);
+		assert.match(directive, /Children may run weaker models and have no parent conversation; write briefs they can execute without guessing/u);
+		assert.match(directive, /send broad searches and multi-file reading to a read-only role/u);
 		assert.match(directive, /brief outcome, done condition, paths, evidence, boundaries, checks, and output/u);
 		assert.match(directive, /Pass completed work forward; assign only gaps/u);
 		assert.match(directive, /Reuse valid work and checks; fix confirmed defects and gaps/u);
@@ -89,7 +91,7 @@ describe("renderSections", () => {
 		assert.match(directive, /`subagent_message` to steer or continue a run/u);
 		assert.match(directive, /`auto` \(default\) reuses history or a summary/u);
 		assert.match(directive, /`session` requires full history/u);
-		assert.match(directive, /Main handles failed or interrupted work from partial edits and artifacts/u);
+		assert.match(directive, /Failed or interrupted runs cannot be continued: inspect partial edits and artifacts, then dispatch a corrected brief or finish in main/u);
 		assert.match(directive, /`wait: true` for an immediate dependency, including follow-ups; print\/JSON sessions wait by default/u);
 		assert.match(directive, /completions wake you to continue\. Do not poll or sleep to wait/u);
 		assert.match(directive, /A launch receipt is not completion\. Finish the requested outcome and final checks before concluding/u);
@@ -167,5 +169,17 @@ describe("renderSections", () => {
 	it("stays within the prompt budget", () => {
 		const directive = renderSections(loadBuiltinAgents());
 		assert.ok(directive.length < 3_600, `directive is ${directive.length} characters`);
+	});
+});
+
+describe("duplicateDispatchRemedy", () => {
+	it("keeps follow-up work with the owning run instead of moving it to main", () => {
+		assert.match(duplicateDispatchRemedy(lease({ id: 4, state: "completed" })), /subagent_message\(\{ id: 4/u);
+		const failed = duplicateDispatchRemedy(lease({ id: 5, state: "failed" }));
+		assert.match(failed, /dispatch a corrected brief/u);
+		assert.match(failed, /Do not repeat the same brief/u);
+		assert.match(duplicateDispatchRemedy(lease({ id: 6, state: "parked" })), /subagent_stop\(\{ id: "6" \}\)/u);
+		assert.match(duplicateDispatchRemedy(lease({ id: 7, state: "completed", retired: true })), /still stopping/u);
+		assert.match(duplicateDispatchRemedy(lease({ id: 8 })), /let it finish or steer it/u);
 	});
 });

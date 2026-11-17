@@ -14,7 +14,7 @@ import type { CompletionMessageItem } from "./completion.ts";
 import { DEFAULT_IDLE_TIMEOUT_SEC, DEFAULT_MAX_RESULT_LINES, loadConfig } from "../configuration/config.ts";
 import { dispatchFailedResult, failedStartResult, formatCompletionBlock, queuedResult } from "../presentation/format.ts";
 import { formatTaskSummary, monitor } from "../presentation/monitor.ts";
-import { findDuplicateDispatch } from "../delegation/prompt.ts";
+import { duplicateDispatchRemedy, findDuplicateDispatch } from "../delegation/prompt.ts";
 import { persistRecoveryRecords, recoveryRecordFromFinalization } from "../isolation/recovery.ts";
 import { type SubagentRuntime, type SubagentThread, type ThreadState } from "./runtime.ts";
 import {
@@ -111,17 +111,8 @@ export function createBackgroundDispatcher(options: BackgroundDispatcherOptions)
 			// owner and leaves the caller with no way forward. A retired owner is
 			// still releasing its child or worktree after subagent_stop.
 			const owner = duplicate.source;
-			const remedy = owner.retired
-				? "It is still stopping; dispatch the phase again after the stop finishes."
-				: owner.state === "parked"
-					? `That interrupted run keeps the phase claimed. Inspect its retained result with subagent_status and finish from that evidence. Retire it with subagent_stop({ id: "${owner.id}" }) only if discarding its retained session is intended; then the phase can be reused.`
-					: owner.state === "completed"
-						? `Reuse its result via subagent_status({ id: ${owner.id} }); use subagent_message({ id: ${owner.id}, message: "<bounded next step>" }) for additional work. A new deliverable needs its own brief.`
-						: owner.state === "failed"
-							? "Inspect the failure with subagent_status and finish the remaining work from its evidence. Do not repeat the same phase."
-							: "Do not redispatch it; let it finish or steer it with subagent_message. Its result returns automatically; then continue the task.";
 			return failedStartResult(agentName, task,
-				`Run #${owner.id} (${owner.agentName}) already owns this logical phase (${owner.state}). ${remedy}`);
+				`Run #${owner.id} (${owner.agentName}) already owns this logical phase (${owner.state}). ${duplicateDispatchRemedy(owner)}`);
 		}
 		const projectRoot = getProjectRoot(runtime.configPath, originalCwd);
 		const sessionsRoot = join(projectRoot, "sessions");
@@ -350,24 +341,11 @@ export function createBackgroundDispatcher(options: BackgroundDispatcherOptions)
 				if (ownsSettlement()) thread.lifecycleOperation = undefined;
 			}
 		};
+		// No await separates the sessionActive check above from this enqueue, and
+		// only shutdown stops the queue after clearing sessionActive, so the
+		// queue always accepts this task.
 		const queueController = runtime.backgroundQueue.enqueue(
 			runGeneration,
-			() => {
-				if (runtime.threads.get(runId)?.generation !== generation) return;
-				// A destructive stop owns publication and may still be finalizing an
-				// isolated worktree. Do not expose a
-				// terminal monitor state before that owner records its outcome.
-				if (thread.lifecycleOperation === "stop") return;
-				runtime.runControllers.delete(runId);
-				thread.queueController = undefined;
-				thread.state = "stopped";
-				monitor.setStatus(runId, "failed");
-				if (!runtime.sessionActive) {
-					monitor.removeRun(runId);
-					return;
-				}
-				finishRun(runId, "failed");
-			},
 			async (error) => {
 				if (runtime.threads.get(runId)?.generation !== generation) return;
 				// Queue-level crashes use the same settlement reservation as ordinary

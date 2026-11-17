@@ -46,7 +46,7 @@ describe("worker configuration", () => {
 		assert.deepEqual(await loadConfig(path), { ...DEFAULT_CONFIG, worker: { model: "test/worker", thinking: "high" } });
 	});
 
-	for (const legacy of [JSON.stringify({ agentModels: { worker: "test/old", sentinel: "test/review" }, agentThinkingLevels: { worker: "max" } }), "{broken", JSON.stringify({ version: 1, model: "test/old", thinking: "high" })]) {
+	for (const legacy of [JSON.stringify({ agentModels: { worker: "test/old", sentinel: "test/review" }, agentThinkingLevels: { worker: "max" } }), JSON.stringify({ version: 1, model: "test/old", thinking: "high" })]) {
 		it("overwrites unsupported settings and initializes defaults without keeping legacy files: " + legacy.slice(0, 35), async (t) => {
 			const { root, path } = await fixture(t);
 			await writeFile(path, legacy);
@@ -61,6 +61,24 @@ describe("worker configuration", () => {
 		});
 	}
 
+	it("preserves unparseable JSON instead of overwriting half-edited settings", async (t) => {
+		const { path } = await fixture(t);
+		const broken = "{broken";
+		await writeFile(path, broken);
+		assert.equal(await initializeConfig(path), undefined);
+		assert.equal(await readFile(path, "utf8"), broken);
+		await assert.rejects(loadConfig(path), /invalid or unsupported/u);
+	});
+
+	it("accepts a leading UTF-8 BOM without overwriting valid settings", async (t) => {
+		const { path } = await fixture(t);
+		const content = "\uFEFF" + JSON.stringify({ ...DEFAULT_CONFIG, worker: { model: "test/worker", thinking: "high" } });
+		await writeFile(path, content, "utf8");
+		assert.equal(await initializeConfig(path), undefined);
+		assert.equal(await readFile(path, "utf8"), content);
+		assert.deepEqual(await loadConfig(path), { ...DEFAULT_CONFIG, worker: { model: "test/worker", thinking: "high" } });
+	});
+
 	it("serializes simultaneous initialization so only one caller reports a reset", async (t) => {
 		const { path } = await fixture(t);
 		await writeFile(path, JSON.stringify({ agentModels: { worker: "test/old" } }));
@@ -69,14 +87,36 @@ describe("worker configuration", () => {
 		assert.deepEqual(await loadConfig(path), DEFAULT_CONFIG);
 	});
 
-	it("rejects invalid model references without silently choosing main", async (t) => {
+	it("rejects and preserves invalid current-version model references without silently choosing main", async (t) => {
 		const { path } = await fixture(t);
 		for (const model of ["typo", "provider/", "", null]) {
-			await writeFile(path, JSON.stringify({ ...DEFAULT_CONFIG, worker: { model, thinking: "medium" } }));
+			const raw = JSON.stringify({ ...DEFAULT_CONFIG, worker: { model, thinking: "medium" } });
+			await writeFile(path, raw);
 			await assert.rejects(loadConfig(path), /Invalid worker model reference/u);
-			assert.equal(await initializeConfig(path), "reset", "setup can explicitly recover invalid settings");
-			assert.deepEqual(await loadConfig(path), DEFAULT_CONFIG);
+			assert.equal(await initializeConfig(path), undefined);
+			assert.equal(await readFile(path, "utf8"), raw);
+			await assert.rejects(loadConfig(path), /Invalid worker model reference/u);
 		}
+	});
+
+	it("repairs a broken file only when setup asks, keeping every valid field", async (t) => {
+		const { path } = await fixture(t);
+		await writeFile(path, "{broken");
+		assert.equal(await initializeConfig(path, { repair: true }), "replaced-unreadable");
+		assert.deepEqual(await loadConfig(path), DEFAULT_CONFIG);
+
+		await writeFile(path, JSON.stringify({
+			...DEFAULT_CONFIG,
+			researcher: { model: "test/researcher", thinking: "low" },
+			worker: { model: "typo", thinking: "high" },
+		}));
+		assert.equal(await initializeConfig(path, { repair: true }), "repaired");
+		assert.deepEqual(await loadConfig(path), {
+			...DEFAULT_CONFIG,
+			researcher: { model: "test/researcher", thinking: "low" },
+			worker: { thinking: "high" },
+		});
+		assert.equal(await initializeConfig(path, { repair: true }), undefined, "a valid file is never rewritten");
 	});
 
 	it("preserves the old file when preparing its replacement fails", async (t) => {

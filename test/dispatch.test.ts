@@ -218,6 +218,78 @@ describe("duplicate dispatch", () => {
 			monitor.clear();
 		}
 	});
+
+	it("gives a parallel duplicate of a settled run the same follow-up remedy as single dispatch", async () => {
+		const { registerSubagentTool } = await import("../src/delegation/dispatch.ts");
+		let tool: any;
+		const pi = {
+			on: () => undefined,
+			getActiveTools: () => ["read", "write"],
+			getAllTools: () => [],
+			registerTool: (value: any) => { tool = value; },
+			sendMessage: () => undefined,
+		} as unknown as ExtensionAPI;
+		const runtime = createRuntime(pi, `${process.cwd()}/.pi-test/config.json`);
+		runtime.threads.set(41, settledSource() as unknown as SubagentThread);
+		registerSubagentTool(pi, runtime);
+		try {
+			await assert.rejects(
+				tool.execute("call-2", {
+					tasks: [
+						{ agent: "worker", task: "Trace dispatch ownership" },
+						{ agent: "worker", task: "Something else" },
+					],
+				}, new AbortController().signal, () => undefined, {
+					cwd: process.cwd(),
+					scopedModels: [], modelRegistry: { getAvailable: () => [] },
+					ui: { notify: () => undefined },
+				}),
+				(error: Error) => {
+					assert.match(error.message, /tasks\[0\] duplicates settled run #41 \(researcher\)\. Reuse its result/u);
+					assert.match(error.message, /subagent_message\(\{ id: 41/u);
+					assert.doesNotMatch(error.message, /handle follow-up work in main/u);
+					return true;
+				},
+			);
+			assert.equal(runtime.threads.size, 1);
+		} finally {
+			await runtime.shutdown();
+			monitor.clear();
+		}
+	});
+
+	it("applies top-level isolation as the default for parallel tasks", async () => {
+		const { registerSubagentTool } = await import("../src/delegation/dispatch.ts");
+		let tool: any;
+		const pi = {
+			on: () => undefined,
+			getActiveTools: () => ["read", "write"],
+			getAllTools: () => [],
+			registerTool: (value: any) => { tool = value; },
+			sendMessage: () => undefined,
+		} as unknown as ExtensionAPI;
+		const runtime = createRuntime(pi, `${process.cwd()}/.pi-test/config.json`);
+		registerSubagentTool(pi, runtime);
+		try {
+			// A read-only role cannot take worktree isolation, so the rejection
+			// proves the batch-level value reached each task.
+			await assert.rejects(
+				tool.execute("call-3", {
+					tasks: [{ agent: "researcher", task: "Map the dispatch path" }],
+					isolation: "worktree",
+				}, new AbortController().signal, () => undefined, {
+					cwd: process.cwd(),
+					scopedModels: [], modelRegistry: { getAvailable: () => [] },
+					ui: { notify: () => undefined },
+				}),
+				/tasks\[0\] \(researcher\) failed to start: .*worktree isolation/u,
+			);
+			assert.equal(runtime.threads.size, 0);
+		} finally {
+			await runtime.shutdown();
+			monitor.clear();
+		}
+	});
 });
 
 describe("internal model handoff prompts", () => {

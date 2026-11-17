@@ -74,7 +74,9 @@ An unavailable or out-of-scope model stays configured and blocks only its role u
 availability is restored or you select another model. Provider failures return
 to main with evidence; the extension never starts a main-model worker as a retry.
 Unreadable settings or an invalid model reference also stop new dispatches instead
-of silently selecting main. Repair the file or run `/subagents-setup`.
+of silently selecting main. Startup leaves such a file untouched and warns; repair
+it by hand or run `/subagents-setup`, which replaces an unreadable file with
+defaults or clears only the invalid model reference. A UTF-8 BOM is accepted.
 
 ## How orchestration works
 
@@ -82,9 +84,11 @@ of silently selecting main. Repair the file or run `/subagents-setup`.
    determine the approach, resolves ambiguity, and defines acceptance criteria
    and write boundaries. It splits complex tasks into simple worker briefs and
    keeps the difficult core when delegation would create more rework.
-2. **Workers execute.** Main sends a self-contained brief. Each worker owns a
-   bounded task and its checks, returning a compact result with changed paths,
-   verification evidence, and blockers.
+2. **Workers execute.** Main sends a self-contained brief written so a cheaper
+   model can act without guessing: files, symbols, acceptance criteria, write
+   boundary, and exact check commands. Each worker owns a bounded task and its
+   checks, returning a fixed handoff (`Status`, `Changes`, `Checks`, `Notes`;
+   researcher: `Answer`, `Evidence`, `Gaps`) that main can review quickly.
 3. **Main reviews.** After worktree integration, main checks the actual diff,
    relevant callers, acceptance criteria, and test evidence. Worker completion
    is explicitly marked as a review handoff, not approval.
@@ -138,8 +142,9 @@ subagent({
 ```
 
 Independent tasks use `tasks: [{ agent, task }, ...]`. Each task can also specify
-`cwd` and `isolation`. Duplicate normalized tasks in the same cwd are rejected
-while active or settled; reuse the result or continue the existing work.
+`cwd` and `isolation`; a top-level `isolation` is the default for tasks that omit
+it. Duplicate normalized tasks in the same cwd are rejected while active or
+settled; reuse the result or continue the existing run with `subagent_message`.
 
 Use `wait: true` for an immediate dependency. Print/JSON sessions wait by
 default; TUI/RPC sessions return background receipts. A launch receipt is not
@@ -152,7 +157,7 @@ Answers exceeding 40 lines or 8,000 characters link their full-result artifact.
 | `subagent_status({ id: 12 })` | Inspect progress, result, session availability, and recovery paths |
 | `subagent_message({ id: 12, message: "Fix the remaining edge case", wait: true })` | Steer an active worker or continue completed work |
 | `subagent_message({ id: 12, message: "Next bounded task", context: "summary" })` | Start from a compact summary instead of the earlier transcript |
-| `subagent_stop({ id: "12" })` | Stop a run and retire its retained session |
+| `subagent_stop({ id: "12" })` | Stop a run (exact id; `#12` also accepted) and retire its retained session |
 | `subagent_stop({ all: true })` | Stop all active work in this session |
 
 Follow-ups use `context: "auto"` by default: a private copy of the retained session,

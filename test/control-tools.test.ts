@@ -564,4 +564,27 @@ describe("subagent_stop", () => {
 			assert.equal(runtime.settledRuns.size, 2);
 		} finally { release.resolve(); await shutdown(runtime); await rm(root, { recursive: true, force: true }); }
 	});
+
+	it("requires an exact numeric id and does not prefix-match other runs", async () => {
+		const root = await mkdtemp(join(tmpdir(), "pi-subagents-stop-exact-"));
+		const { runtime, tools, sent } = harness(join(root, "config.json"));
+		const thread12 = makeThread(12);
+		let stops12 = 0;
+		attachRunning(thread12.control, { stop: async () => { stops12++; } });
+		runtime.threads.set(12, thread12);
+		try {
+			const miss = await execute(tools.get("subagent_stop")!, { id: "1" });
+			assert.match(resultText(miss), /No subagent thread matches "1"/u);
+			assert.equal(thread12.state, "running");
+			assert.equal(thread12.retired, undefined);
+			assert.equal(stops12, 0);
+			assert.equal(sent.length, 0);
+
+			const hit = await execute(tools.get("subagent_stop")!, { id: " #12 " });
+			assert.match(resultText(hit), /Stopped 1 thread: #12/u);
+			assert.equal(thread12.state, "stopped");
+			assert.equal(thread12.retired, true);
+			assert.equal(stops12, 1);
+		} finally { await shutdown(runtime); await rm(root, { recursive: true, force: true }); }
+	});
 });

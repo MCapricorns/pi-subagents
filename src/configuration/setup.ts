@@ -22,7 +22,8 @@ export async function runSetup(ctx: ExtensionContext, configPath: string = getCo
 		return;
 	}
 	try {
-		await ensureDefaultConfig(ctx, configPath);
+		// Setup is the explicit recovery path for a file startup kept untouched.
+		await ensureDefaultConfig(ctx, configPath, { repair: true });
 		let focus: SettingKey = "researcher.model";
 		let status = "Changes save immediately";
 		while (true) {
@@ -91,13 +92,22 @@ export async function runSetup(ctx: ExtensionContext, configPath: string = getCo
 	}
 }
 
-export async function ensureDefaultConfig(ctx: ExtensionContext, configPath: string = getConfigPath()): Promise<void> {
+export async function ensureDefaultConfig(
+	ctx: ExtensionContext,
+	configPath: string = getConfigPath(),
+	options: { repair?: boolean } = {},
+): Promise<void> {
 	try {
-		const result = await initializeConfig(configPath);
+		const result = await initializeConfig(configPath, options);
 		if (!result) return;
+		const action = result === "reset" ? "overwrote the old config with independent role settings at "
+			: result === "replaced-unreadable" ? "replaced the unreadable config with default role settings at "
+				: result === "repaired" ? "removed invalid model references (those roles now follow main) at "
+					: "initialized role settings at ";
 		ctx.ui.notify(
-			"pi-subagents: " + (result === "reset" ? "overwrote the old config with independent role settings at " : "initialized role settings at ")
-			+ configPath + ". Run /subagents-setup to choose a model and thinking level for Researcher and Worker. Both default to Follow main with medium thinking.",
+			"pi-subagents: " + action + configPath
+			+ ". Run /subagents-setup to choose a model and thinking level for Researcher and Worker."
+			+ (result === "repaired" ? "" : " Both default to Follow main with medium thinking."),
 			"info",
 		);
 	} catch (error) {

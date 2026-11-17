@@ -14,7 +14,7 @@ import type { DispatchCore } from "./dispatch-core.ts";
 import { awaitRunResults, WaitSchema } from "./await-results.ts";
 import { cancelActiveWork } from "./cancellation.ts";
 import { stopThreads } from "./stop.ts";
-import { formatCompletionBlock, matchRunIds } from "../presentation/format.ts";
+import { formatCompletionBlock } from "../presentation/format.ts";
 import { emptyUsage } from "../execution/run-control.ts";
 import { formatDuration, formatTaskSummary, monitor } from "../presentation/monitor.ts";
 import type { SubagentRuntime, SubagentThread } from "./runtime.ts";
@@ -222,7 +222,7 @@ export function registerLookupTools(pi: ExtensionAPI, runtime: SubagentRuntime, 
 				const state = thread.state === "parked" ? "interrupted" : thread.state;
 				const terminal = !thread.lifecycleOperation && ["parked", "failed", "stopped"].includes(thread.state);
 				return fail(`Run #${thread.id} is ${state}; ${terminal
-					? "inspect retained results with subagent_status and handle unfinished work in main. This run cannot be continued with subagent_message."
+					? "this run cannot be continued with subagent_message. Inspect retained results with subagent_status, then dispatch a corrected brief with subagent or finish the unfinished work in main."
 					: "messages require a running or successfully completed run. Results arrive automatically."}`);
 			}
 			if (!dispatchCore) return fail("Follow-up dispatch is unavailable in this process.");
@@ -296,13 +296,20 @@ export function registerLookupTools(pi: ExtensionAPI, runtime: SubagentRuntime, 
 		},
 	});
 
+	function parseExactRunId(raw: string | undefined): number | undefined {
+		const cleaned = raw?.trim().replace(/^#/u, "").trim() ?? "";
+		if (!/^[1-9]\d*$/u.test(cleaned)) return undefined;
+		const parsed = Number(cleaned);
+		return Number.isSafeInteger(parsed) ? parsed : undefined;
+	}
+
 	// Cancel one or more active runs: aborts the queue controller, which
 	// terminates the child and delivers an aborted result (with whatever partial
 	// output it produced) so the main agent always knows the run stopped.
 	const SubagentStopParams = Type.Object({
 		id: Type.Optional(
 			Type.String({
-				description: "Run id or prefix to stop (see subagent dispatch output).",
+				description: "Run id to stop.",
 			}),
 		),
 		all: Type.Optional(Type.Boolean({ description: "Stop every active run (default false)." })),
@@ -311,7 +318,7 @@ export function registerLookupTools(pi: ExtensionAPI, runtime: SubagentRuntime, 
 	pi.registerTool({
 		name: "subagent_stop",
 		label: "Subagent Stop",
-		description: "Destructively stop and retire one run by id/prefix, or this session’s active runs with all: true. all takes precedence over id. Other Pi sessions and projects are not targeted. Delivers partial results; stopped runs cannot resume.",
+		description: "Destructively stop and retire one run by id, or this session’s active runs with all: true. all takes precedence over id. Other Pi sessions and projects are not targeted. Delivers partial results; stopped runs cannot resume.",
 		exposure: "model-only",
 		executionMode: "sequential",
 		annotations: {
@@ -332,9 +339,10 @@ export function registerLookupTools(pi: ExtensionAPI, runtime: SubagentRuntime, 
 						.map((thread) => thread.id),
 				])]
 				: [...runtime.threads.keys()];
+			const requestedId = params.all === true ? undefined : parseExactRunId(params.id);
 			const targets = params.all === true
 				? candidateIds
-				: params.id?.trim() ? matchRunIds(candidateIds, params.id.trim()) : [];
+				: requestedId !== undefined && candidateIds.includes(requestedId) ? [requestedId] : [];
 
 			if (targets.length === 0) {
 				const available = [...runtime.threads.keys()].map((id) => `#${id}`).join(", ");

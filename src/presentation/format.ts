@@ -1,7 +1,6 @@
 /**
  * Pure formatting/result helpers shared by the subagent tool and completion
- * delivery: usage rendering, completion blocks, synthetic result constructors,
- * and run-id matching.
+ * delivery: usage rendering, completion blocks, and synthetic result constructors.
  */
 
 import { readFileSync } from "node:fs";
@@ -101,6 +100,17 @@ function inlineOverflow(output: string, maxLines: number): string | undefined {
 	return overflow.length > 0 ? overflow.join(" · ") : undefined;
 }
 
+/** Bounded head of an oversized output for inline fallback when no artifact file
+ * is available: at most `maxLines` lines and `maxLines * RESULT_LINE_CHARS` chars. */
+function truncateHead(output: string, maxLines: number): string {
+	const lineLimit = Math.max(0, maxLines);
+	if (lineLimit === 0) return "";
+	const charLimit = lineLimit * RESULT_LINE_CHARS;
+	let head = output.split("\n").slice(0, lineLimit).join("\n");
+	if (head.length > charLimit) head = head.slice(0, charLimit);
+	return head;
+}
+
 export function formatCompletionBlock(
 	result: SingleResult,
 	maxResultLines: number,
@@ -151,17 +161,42 @@ export function formatCompletionBlock(
 		);
 	}
 	if (overflow) {
-		// No inline copy at all: a truncated dump reads as complete while
-		// hiding the rest, and the parent re-reads the full text from the file
-		// anyway, paying for the same content twice. The notice only routes it.
-		// Every delivery of the same result names one artifact.
-		const artifact = reusableArtifact(result, output)
-			?? (options.resultRoot ? writeResultArtifact(output, result.agent, options.resultRoot) : "(result root unavailable)");
-		if (options.resultRoot) result.resultFile = artifact;
-		lines.push(
-			"",
-			`⚠ The child's answer (${overflow}) is not inlined here, so it is delivered exactly once. Read the complete result file \`${artifact}\`; it holds the full, untruncated output.`,
-		);
+		// No inline copy when the full output is saved to a file: a truncated
+		// dump reads as complete while hiding the rest, and the parent re-reads
+		// the full text from the file anyway. Fall back to a bounded head only
+		// when the artifact cannot be written or no result root is available.
+		let artifact = reusableArtifact(result, output);
+		let saveFailure: string | undefined;
+		if (!artifact) {
+			if (!options.resultRoot) {
+				saveFailure = "result root unavailable";
+			} else {
+				try {
+					artifact = writeResultArtifact(output, result.agent, options.resultRoot);
+					result.resultFile = artifact;
+				} catch (error) {
+					saveFailure = error instanceof Error ? error.message : String(error);
+				}
+			}
+		}
+		if (artifact) {
+			if (options.resultRoot) result.resultFile = artifact;
+			lines.push(
+				"",
+				`⚠ The child's answer (${overflow}) is not inlined here, so it is delivered exactly once. Read the complete result file \`${artifact}\`; it holds the full, untruncated output.`,
+			);
+		} else {
+			delete result.resultFile;
+			const head = truncateHead(output, maxResultLines);
+			if (head) {
+				if (lines[lines.length - 1] !== "") lines.push("");
+				lines.push(head);
+			}
+			lines.push(
+				"",
+				`⚠ The child's answer (${overflow}) was truncated above because the full result could not be saved (${saveFailure ?? "unknown error"}).`,
+			);
+		}
 	}
 	if (failed && isModelLevelFailure(result)) lines.push("", modelLevelTakeoverNote(result));
 	if (!failed && result.agent === "worker") {
@@ -173,15 +208,6 @@ export function formatCompletionBlock(
 /** A terminal model failure hands the unfinished task to main, not another run. */
 function modelLevelTakeoverNote(result: SingleResult): string {
 	const cause = getResultError(result) ?? "its model was unavailable or failed";
-	return `The worker could not complete this task: ${cause}. No automatic model upgrade was attempted. Earlier edits and retained result/session artifacts remain available. Main must inspect that work and decide how to proceed; do not repeat this failed phase automatically.`;
-}
-
-/** Resolve a run-id request to actual ids: an exact numeric match always wins
- * (so "1" never fans out to 10, 11, …); only when no exact match exists does a
- * prefix match run, as a convenience for partial ids. Keeps single-digit lookups
- * from returning — or, for subagent_stop, acting on — a whole prefix family. */
-export function matchRunIds(ids: number[], requested: string): number[] {
-	const exact = ids.filter((id) => String(id) === requested);
-	if (exact.length > 0) return exact;
-	return ids.filter((id) => String(id).startsWith(requested));
+	const role = result.agent || "subagent";
+	return `The ${role} could not complete this task: ${cause}. No automatic model upgrade was attempted. Earlier edits and retained result/session artifacts remain available. Main must inspect that work and decide how to proceed; do not repeat this failed phase automatically.`;
 }

@@ -394,7 +394,7 @@ export function threadRecordFromThread(
 		durableId: thread.durableId,
 		runId: thread.id,
 		createdAt: now,
-		updatedAt: now,
+		updatedAt: thread.restoredUpdatedAt ?? now,
 		generation: thread.generation,
 		agentName: thread.agentName,
 		task: thread.task,

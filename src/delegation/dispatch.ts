@@ -19,7 +19,7 @@ import {
 	monitor,
 	statusIcon,
 } from "../presentation/monitor.ts";
-import { findDuplicateDispatch, formatPhaseLeaseReceipt } from "./prompt.ts";
+import { duplicateDispatchRemedy, findDuplicateDispatch, formatPhaseLeaseReceipt } from "./prompt.ts";
 import type { SubagentRuntime, SubagentThread } from "../lifecycle/runtime.ts";
 import { cancelActiveWork } from "../lifecycle/cancellation.ts";
 import { awaitRunResults, WaitSchema } from "../lifecycle/await-results.ts";
@@ -63,7 +63,9 @@ const SubagentParams = Type.Object({
 	),
 	tasks: Type.Optional(Type.Array(TaskItem, { description: "Independently justified, disjoint phases for parallel execution" })),
 	cwd: Type.Optional(Type.String({ description: "Working directory for the agent process (single mode)" })),
-	isolation: IsolationSchema,
+	isolation: Type.Optional(stringEnum(["shared", "worktree"] as const, {
+		description: `${ISOLATION_DESCRIPTION} In parallel mode this is the default for tasks that omit their own isolation.`,
+	})),
 	wait: WaitSchema,
 });
 
@@ -110,18 +112,16 @@ function parallelAdmissionConflict(
 				state: "queued",
 			}], right.task, right.cwd);
 			if (duplicate) {
-				return `deterministic duplicate between tasks[${left.index}] and tasks[${right.index}]`;
+				return `deterministic duplicate between tasks[${left.index}] and tasks[${right.index}]; merge them into one brief or make them disjoint.`;
 			}
 		}
 	}
 	const leases = [...runtime.threads.values()];
 	for (const task of tasks) {
 		const duplicate = findDuplicateDispatch(leases, task.task, task.cwd);
-		if (duplicate?.kind === "active") {
-			return `tasks[${task.index}] duplicates active run #${duplicate.source.id} (${duplicate.source.agentName})`;
-		}
-		if (duplicate?.kind === "settled") {
-			return `tasks[${task.index}] duplicates settled run #${duplicate.source.id} (${duplicate.source.agentName}); inspect it with subagent_status and handle follow-up work in main`;
+		if (duplicate) {
+			const owner = duplicate.source;
+			return `tasks[${task.index}] duplicates ${duplicate.kind} run #${owner.id} (${owner.agentName}). ${duplicateDispatchRemedy(owner)}`;
 		}
 	}
 	return undefined;
@@ -251,10 +251,13 @@ export function registerSubagentTool(
 			// available for disjoint orchestration while the launch receipt leases
 			// each delegated phase. Independent child processes start without a cap.
 			if (hasTasks) {
-				const prepared = prepareDispatchTasks(tasks, ctx.cwd);
+				const prepared = prepareDispatchTasks(
+					tasks.map((item) => ({ ...item, isolation: item.isolation ?? params.isolation })),
+					ctx.cwd,
+				);
 				const conflict = parallelAdmissionConflict(prepared, runtime);
 				if (conflict) {
-					throw new Error(`Parallel admission rejected: ${conflict}. No background tasks were started.`);
+					throw new Error(`Parallel admission rejected: ${conflict} No background tasks were started.`);
 				}
 				// Duplicate admission completes for the whole batch before any
 				// startBackground call can allocate a run. Worktree preparation stays queued.
@@ -334,7 +337,7 @@ export function registerSubagentTool(
 				let text = `${theme.fg("toolTitle", theme.bold("subagent "))}${theme.fg("accent", `parallel (${args.tasks.length})`)}`;
 				for (const t of args.tasks.slice(0, 4)) {
 					const preview = formatTaskSummary(t.task, 48);
-					const isolation = defaultIsolationMode(t.agent, t.isolation) === "worktree" ? " [worktree]" : "";
+					const isolation = defaultIsolationMode(t.agent, t.isolation ?? args.isolation) === "worktree" ? " [worktree]" : "";
 					text += `\n  ${theme.fg("accent", t.agent)}${theme.fg("dim", isolation)} ${theme.fg("dim", preview)}`;
 				}
 				if (args.tasks.length > 4) text += `\n  ${theme.fg("dim", `… +${args.tasks.length - 4} more`)}`;

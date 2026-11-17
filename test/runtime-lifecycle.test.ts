@@ -57,7 +57,7 @@ describe("unlimited background execution", () => {
 		const queue = new BackgroundTaskQueue();
 		const errors: unknown[] = [];
 		const failure = new Error("synchronous failure");
-		const controller = queue.enqueue(() => { throw failure; }, undefined, (error) => { errors.push(error); });
+		const controller = queue.enqueue(() => { throw failure; }, (error) => { errors.push(error); });
 		await queue.waitForTask(controller);
 		assert.deepEqual(errors, [failure]);
 		assert.equal(queue.activeCount, 0);
@@ -81,11 +81,11 @@ describe("background task ownership", () => {
 		assert.equal(queue.activeCount, 0);
 	});
 
-	it("rejects new work after shutdown and tolerates cancellation callback failures", async () => {
+	it("rejects new work after shutdown", async () => {
 		const queue = new BackgroundTaskQueue();
 		queue.cancelAll();
 		let ran = false;
-		const controller = queue.enqueue(async () => { ran = true; }, () => { throw new Error("callback failed"); });
+		const controller = queue.enqueue(async () => { ran = true; });
 		assert.equal(controller.signal.aborted, true);
 		assert.equal(ran, false);
 		await queue.waitForTask(controller);
@@ -138,10 +138,11 @@ describe("durable worktree restoration", () => {
 		await writeFile(join(sessionDir, `2026-01-01T00-00-00.000Z_${sessionId}.jsonl`), "{}\n", "utf8");
 		const worktreeGroup = join(projectRoot, "worktrees", "pi-subagent-worktree-missing");
 		const missingWorktree = join(worktreeGroup, "worktree");
+		const lastActivity = Date.now() - 10 * 24 * 60 * 60 * 1_000;
 		const record: ThreadRecord = {
 			durableId: "fixture-41", runId: 41,
-			createdAt: Date.now(),
-			updatedAt: Date.now(),
+			createdAt: lastActivity,
+			updatedAt: lastActivity,
 			generation: 1,
 			agentName: "worker",
 			task: "retained edits",
@@ -181,6 +182,7 @@ describe("durable worktree restoration", () => {
 			const retained = (await readThreadRecords(configPath)).find((candidate) => candidate.runId === 41);
 			assert.equal(retained?.state, "parked");
 			assert.equal(retained?.worktree?.worktreePath, missingWorktree);
+			assert.equal(retained?.updatedAt, lastActivity, "a reload must not restart the retention clock");
 		} finally {
 			monitor.clear();
 			await rm(root, { recursive: true, force: true });

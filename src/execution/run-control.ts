@@ -147,6 +147,9 @@ export class RunControl {
 
 	markSettled(): void {
 		this.attempt = undefined;
+		// Settlement follows process close, so these pids name nothing of ours;
+		// persisting them could later match a reused pid (see stop()).
+		this.childPids.clear();
 		if (!this.stopRequested) this.setPhase("settled");
 	}
 
@@ -191,7 +194,10 @@ export class RunControl {
 	}
 
 	private setPhase(phase: RunControlPhase): void {
-		if (this.phase === phase) return;
+		// A completed stop is terminal. A child that spawns after stop() found
+		// no attempt is killed at once, but its startup and interrupt phases must
+		// not reopen the generation and leave its thread "interrupting".
+		if (this.phase === phase || this.phase === "stopped") return;
 		this.phase = phase;
 		try {
 			this.onPhase?.(phase);

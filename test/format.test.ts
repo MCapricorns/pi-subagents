@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { existsSync, mkdtempSync, readdirSync, rmSync } from "node:fs";
+import { existsSync, mkdtempSync, readdirSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, it } from "node:test";
@@ -67,8 +67,16 @@ describe("formatCompletionBlock", () => {
 			messages: [{ role: "assistant", content: [], stopReason: "error", errorMessage: "Provider unavailable" } as never],
 		}, 40);
 		assert.match(block, /Provider unavailable/);
+		assert.match(block, /The worker could not complete this task:/u);
 		assert.match(block, /No automatic model upgrade was attempted/u);
 		assert.match(block, /Main must inspect that work and decide how to proceed; do not repeat this failed phase automatically/u);
+
+		const researcherBlock = formatCompletionBlock({
+			agent: "researcher", task: "Inspect callers", exitCode: 1, stderr: "", usage: emptyUsage(),
+			messages: [{ role: "assistant", content: [], stopReason: "error", errorMessage: "Provider unavailable" } as never],
+		}, 40);
+		assert.match(researcherBlock, /The researcher could not complete this task:/u);
+		assert.doesNotMatch(researcherBlock, /The worker could not complete this task:/u);
 	});
 
 	it("inlines long prose lines that fit the character budget", () => {
@@ -103,10 +111,53 @@ describe("formatCompletionBlock", () => {
 	});
 
 	it("inlines no output copy when lines were dropped, and names the true total", () => {
+		const root = mkdtempSync(join(tmpdir(), "pi-subagents-format-lines-"));
+		try {
+			const output = ["one", "two", "three", "four", "five"].join("\n");
+			const block = formatCompletionBlock(answer(output), 2, { resultRoot: root });
+			assert.ok(!block.includes("three"), "dropped lines must not appear inline");
+			assert.ok(!block.includes("one"), "saved artifact must not be duplicated inline");
+			assert.ok(block.includes("5 lines"));
+			assert.match(block, /read the complete result file/i);
+		} finally {
+			rmSync(root, { recursive: true, force: true });
+		}
+	});
+
+	it("inlines a bounded head without faking a file path when resultRoot is unavailable", () => {
 		const output = ["one", "two", "three", "four", "five"].join("\n");
-		const block = formatCompletionBlock(answer(output), 2);
-		assert.ok(!block.includes("three"), "dropped lines must not appear inline");
+		const result = answer(output);
+		const block = formatCompletionBlock(result, 2);
+		assert.equal(result.resultFile, undefined);
+		assert.ok(block.includes("one\ntwo"));
+		assert.ok(!block.includes("three"));
 		assert.ok(block.includes("5 lines"));
-		assert.match(block, /read the complete result file/i);
+		assert.doesNotMatch(block, /read the complete result file/i);
+		assert.match(block, /could not be saved.*result root unavailable/i);
+	});
+
+	it("falls back to a bounded head when writing the result artifact fails", () => {
+		const root = mkdtempSync(join(tmpdir(), "pi-subagents-format-fail-"));
+		const blockingFile = join(root, "not-a-dir");
+		writeFileSync(blockingFile, "occupied", "utf8");
+		try {
+			const lineOutput = ["alpha", "beta", "gamma", "delta"].join("\n");
+			const lineResult = answer(lineOutput);
+			const lineBlock = formatCompletionBlock(lineResult, 2, { resultRoot: blockingFile });
+			assert.equal(lineResult.resultFile, undefined);
+			assert.ok(lineBlock.includes("alpha\nbeta"));
+			assert.ok(!lineBlock.includes("gamma"));
+			assert.match(lineBlock, /could not be saved/i);
+
+			const charOutput = "a".repeat(2 * RESULT_LINE_CHARS + 50);
+			const charResult = answer(charOutput);
+			const charBlock = formatCompletionBlock(charResult, 2, { resultRoot: blockingFile });
+			assert.equal(charResult.resultFile, undefined);
+			assert.ok(charBlock.includes("a".repeat(2 * RESULT_LINE_CHARS)));
+			assert.ok(!charBlock.includes(charOutput));
+			assert.match(charBlock, /could not be saved/i);
+		} finally {
+			rmSync(root, { recursive: true, force: true });
+		}
 	});
 });

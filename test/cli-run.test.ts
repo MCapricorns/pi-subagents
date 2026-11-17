@@ -305,6 +305,49 @@ console.log("fixture survived both spawn failures");
 		});
 	});
 
+	it("keeps a settled answer successful when a slow shutdown is ended after the grace period", { timeout: 20_000 }, async () => {
+		// The child keeps running after stdin EOF, like Pi disposing slow MCP servers.
+		await withChild('assistant("stop", "Complete answer"); send({ type: "agent_settled" }); setInterval(() => undefined, 1_000);', (result) => {
+			assert.equal(isFailedResult(result), false);
+			assert.equal(result.dispatchFailed, undefined);
+			assert.equal(getResultOutput(result), "Complete answer");
+			assert.match(result.stderr, /terminated after settlement/u);
+		}, false, undefined, undefined, undefined, 18_000);
+	});
+
+	it("still reports a child that crashes on its own after settlement", async () => {
+		await withChild('assistant("stop", "Answer"); send({ type: "agent_settled" }); process.stdout.write("", () => process.exit(3));', (result) => {
+			assert.equal(isFailedResult(result), true);
+			assert.match(result.errorMessage ?? "", /exited after settlement \(code=3\)/u);
+		});
+	});
+
+	it("does not launch a child when a stop lands during launch preparation", async () => {
+		const root = await mkdtemp(join(tmpdir(), "pi-subagents-cli-prestop-"));
+		const previousScript = process.argv[1];
+		try {
+			process.argv[1] = join(root, "must-not-run.mjs");
+			const control = new RunControl("Prepared then stopped", 1);
+			// A non-empty system prompt makes the attempt await a prompt-file write
+			// before spawning; the stop lands inside that window.
+			const pending = runCliAgentAttempt({
+				defaultCwd: root, agent: { name: "worker", description: "test", systemPrompt: "Do the work." },
+				agentName: "worker", task: "Prepared then stopped", thinkingLevel: "off", idleTimeoutMs: 0,
+				scratchRoot: join(root, "tmp"), prompt: "Prepared then stopped", control,
+				startupTimeoutMs: 5_000,
+			});
+			await control.stop("User cancelled");
+			const result = await pending;
+			assert.equal(result.stopReason, "aborted");
+			assert.equal(result.errorMessage, "User cancelled");
+			assert.deepEqual(control.getChildPids(), []);
+			assert.equal(control.getPhase(), "stopped");
+		} finally {
+			process.argv[1] = previousScript;
+			await rm(root, { recursive: true, force: true });
+		}
+	});
+
 	it("includes stderr without replacing a recorded provider error", async () => {
 		await withChild('assistant("error", "", "Provider connection closed"); process.stderr.write("child shutdown detail\\n"); process.exit(23);', (result) => {
 			assert.equal(isFailedResult(result), true);

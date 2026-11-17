@@ -8,11 +8,10 @@ export class BackgroundTaskQueue {
 	private readonly idleWaiters = new Set<() => void>();
 	private stopped = false;
 
-	enqueue(task: BackgroundTask, onCancelled?: () => void, onError?: (error: unknown) => void | Promise<void>): AbortController {
+	enqueue(task: BackgroundTask, onError?: (error: unknown) => void | Promise<void>): AbortController {
 		const controller = new AbortController();
 		if (this.stopped) {
 			controller.abort();
-			try { onCancelled?.(); } catch { /* cancellation callbacks must not break teardown */ }
 			return controller;
 		}
 		let complete!: () => void;

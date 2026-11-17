@@ -1,5 +1,53 @@
 # Changelog
 
+## 7.0.2
+
+### Orchestration prompts
+
+- Frame main as the orchestrator: spend its effort on decisions, send broad
+  searches and multi-file reading to the read-only role, and write briefs a
+  weaker worker model can execute without guessing (files, symbols, exact
+  check commands, design choices settled first).
+- Give Worker and Researcher an ordered method and a fixed handoff
+  (`Status/Changes/Checks/Notes`, `Answer/Evidence/Gaps`) so cheaper models stay
+  predictable and main reviews faster.
+- After a failed run, re-brief with the correction instead of defaulting to
+  doing the work in main. Parallel duplicate rejections now give the same
+  follow-up remedy as single dispatch (continue the owner with `subagent_message`).
+- The live orchestration section no longer asks main to run `/subagents-setup`,
+  which only the user can do.
+
+### Fixes
+
+- Worktree integration patches ignore user diff settings (`diff.external`,
+  textconv, `diff.noprefix`, `color.ui=always`) that could break or misplace
+  `git apply`.
+- On POSIX, an unignored `node_modules` symlink no longer enters every patch;
+  the link is removed with `unlink`, never touching the shared dependency tree.
+- Windows long paths apply to every worktree Git command, not only removal.
+- A failing `git worktree prune` after artifacts are already gone no longer
+  marks a successful integration as failed.
+- A run stopped just before its child spawned no longer stays `interrupting`
+  forever and blocks its phase, and no longer launches a child that is killed
+  at once.
+- A worker that settled with a complete answer but whose Pi process shut down
+  slower than the grace period is no longer reported as a failed dispatch.
+- Settled runs no longer persist dead child pids that a reused pid could match.
+- Interrupted records keep their original timestamp across restarts, so the
+  30-day expiry actually applies.
+- `subagent_stop` requires an exact run id (`#12` accepted); a prefix such as
+  `1` no longer stops `#12` and `#15`.
+- A result file that cannot be written no longer loses a successful result;
+  a bounded head is inlined with the save error instead.
+- Startup keeps an unreadable or invalid current settings file (and accepts a
+  UTF-8 BOM) instead of silently resetting roles to follow main;
+  `/subagents-setup` repairs it, keeping every valid field.
+- The startup availability warning uses the session's scoped models, matching
+  dispatch.
+- Parallel dispatch applies a top-level `isolation` as the default for tasks.
+- Model-failure notes name the actual role instead of always saying "worker".
+- Remove an unreachable queue cancellation callback and a dead diff branch.
+
 ## 7.0.1
 
 ### Breaking changes

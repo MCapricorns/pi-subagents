@@ -1,4 +1,4 @@
-/** Independent role settings. Unsupported configuration is replaced with defaults. */
+/** Independent role settings. Legacy configuration is replaced with defaults; a broken current file is kept until setup repairs it. */
 
 import { mkdir, readFile, rename, rm, writeFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
@@ -58,7 +58,7 @@ export function normalizeConfig(raw: unknown): SubagentsConfig {
 	return config;
 }
 
-async function readStoredConfig(configPath: string): Promise<{ exists: boolean; raw?: unknown }> {
+async function readStoredConfig(configPath: string): Promise<{ exists: boolean; raw?: unknown; parseError?: Error }> {
 	let text: string;
 	try {
 		text = await readFile(configPath, "utf8");
@@ -66,10 +66,11 @@ async function readStoredConfig(configPath: string): Promise<{ exists: boolean; 
 		if ((error as NodeJS.ErrnoException).code === "ENOENT") return { exists: false };
 		throw error;
 	}
+	const clean = text.startsWith("\uFEFF") ? text.slice(1) : text;
 	try {
-		return { exists: true, raw: JSON.parse(text) };
-	} catch {
-		return { exists: true };
+		return { exists: true, raw: JSON.parse(clean) };
+	} catch (error) {
+		return { exists: true, parseError: error instanceof Error ? error : new Error(String(error)) };
 	}
 }
 
@@ -85,13 +86,32 @@ async function writeConfig(config: SubagentsConfig, configPath: string): Promise
 	}
 }
 
-/** Called at startup and setup. A reset affects this config file only, never recovery artifacts. */
-export async function initializeConfig(configPath: string = getConfigPath()): Promise<"created" | "reset" | undefined> {
+export type ConfigInitialization = "created" | "reset" | "replaced-unreadable" | "repaired";
+
+/** Called at startup and setup. A reset affects this config file only, never recovery artifacts.
+ * Legacy shapes are always replaced (the upgrade path). An unreadable file or an invalid
+ * current-version field is kept at startup so dispatch fails closed instead of silently
+ * following main; only an explicit `repair` (setup) rewrites it, keeping every valid field. */
+export async function initializeConfig(
+	configPath: string = getConfigPath(),
+	options: { repair?: boolean } = {},
+): Promise<ConfigInitialization | undefined> {
 	return withFileMutationQueue(configPath, async () => {
 		const stored = await readStoredConfig(configPath);
-		const raw = stored.raw;
-		if (isCurrentConfig(raw) && BUILTIN_AGENT_NAMES.every((role) =>
-			(raw[role] as Record<string, unknown>).model === undefined || normalizeConfig(raw)[role].model)) return undefined;
+		if (stored.parseError) {
+			if (!options.repair) return undefined;
+			await writeConfig(normalizeConfig(undefined), configPath);
+			return "replaced-unreadable";
+		}
+		if (isCurrentConfig(stored.raw)) {
+			const raw = stored.raw;
+			const normalized = normalizeConfig(raw);
+			const invalid = BUILTIN_AGENT_NAMES.some((role) =>
+				(raw[role] as Record<string, unknown>).model !== undefined && !normalized[role].model);
+			if (!options.repair || !invalid) return undefined;
+			await writeConfig(normalized, configPath);
+			return "repaired";
+		}
 		await writeConfig(normalizeConfig(undefined), configPath);
 		return stored.exists ? "reset" : "created";
 	});
@@ -102,12 +122,12 @@ export async function loadConfig(configPath: string = getConfigPath()): Promise<
 	const stored = await readStoredConfig(configPath);
 	if (!stored.exists) return normalizeConfig(undefined);
 	if (!isCurrentConfig(stored.raw)) {
-		throw new Error("Subagent settings are invalid or unsupported. Run /subagents-setup to initialize the current configuration.");
+		throw new Error("Subagent settings are invalid or unsupported. Repair the file or run /subagents-setup to replace it with the current configuration.");
 	}
 	const config = normalizeConfig(stored.raw);
 	for (const role of BUILTIN_AGENT_NAMES) {
 		if ((stored.raw[role] as Record<string, unknown>).model !== undefined && !config[role].model) {
-			throw new Error(`Invalid ${role} model reference. Use provider/model-id or remove model to explicitly follow main.`);
+			throw new Error(`Invalid ${role} model reference. Use provider/model-id, remove model to explicitly follow main, or run /subagents-setup to clear it.`);
 		}
 	}
 	return config;

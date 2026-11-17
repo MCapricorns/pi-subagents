@@ -69,7 +69,7 @@ it("resets old settings and installs live orchestration without changing the sta
 	const stable = sections[DELEGATION_SECTION];
 	assert.match(stable!, /Main judges difficulty/u);
 	assert.match(stable!, /Delegate simple, bounded work by default/u);
-	assert.match(sections[ORCHESTRATION_SECTION]!, /researcher currently follows main/u);
+	assert.match(sections[ORCHESTRATION_SECTION]!, /researcher follows main's model/u);
 	await saveConfig({ ...DEFAULT_CONFIG, worker: { model: "fixture/worker", thinking: "low" } }, configPath);
 	await before(event, ctx);
 	assert.equal(sections[DELEGATION_SECTION], stable);

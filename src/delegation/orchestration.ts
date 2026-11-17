@@ -18,7 +18,7 @@ export function buildOrchestrationSection(config: SubagentsConfig, ctx: ModelCon
 			return [
 				role + ": " + (route.unavailableSelectedRef ? "unavailable (" + route.unavailableSelectedRef + ")" : route.primaryRef ?? "Pi default") + " (thinking preference: " + settings.thinking + "; clamped per model)",
 				...(route.unavailableSelectedRef ? [role + " dispatch is blocked. Restore availability or choose a model in /subagents-setup."] : []),
-				...(!settings.model ? [role + " currently follows main; choose a cheaper model in /subagents-setup to reduce main-model spending."] : []),
+				...(!settings.model ? [role + " follows main's model; delegating still keeps main's context focused. Only the user can assign a cheaper model, with /subagents-setup."] : []),
 			];
 		}),
 		"Worker failures return to main with evidence; never auto-upgrade a worker to main. No price or quality ordering is assumed.",
