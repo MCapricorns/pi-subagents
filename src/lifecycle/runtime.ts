@@ -86,6 +86,11 @@ export interface SubagentRuntime {
 	/** Cancelling a parent must not wake it again with old child results. */
 	suppressCompletions: boolean;
 	discardCompletions: () => void;
+	/** Hand held completions to the next user turn without waking the parent. */
+	deferPendingCompletions: () => void;
+	/** Route a run that already finished its child to the next user turn, even
+	 * while completions are suppressed: its result is real and must not be lost. */
+	deferRunDelivery: (runId: number) => void;
 	/** Record cancellation for the next user turn without waking the parent. */
 	recordCancellation: (runIds: number[]) => void;
 	/** Resolves when the load-time durable restore pass has finished. Everything
@@ -139,6 +144,15 @@ export function createRuntime(pi: ExtensionAPI, configPath: string): SubagentRun
 	let heldCompletions: CompletionMessageItem[] = [];
 
 	const runDeliveries = new Map<number, "background" | "await">();
+	const deferredRuns = new Set<number>();
+	const sendNextTurn = (items: CompletionMessageItem[]): void => {
+		if (!runtime.sessionActive || items.length === 0) return;
+		pi.sendMessage({
+			customType: "subagent-result",
+			content: formatCompletionMessage(items),
+			display: true,
+		}, { deliverAs: "nextTurn", triggerTurn: false });
+	};
 	const runtime: SubagentRuntime = {
 		configPath,
 		backgroundQueue,
@@ -160,6 +174,14 @@ export function createRuntime(pi: ExtensionAPI, configPath: string): SubagentRun
 			runtime.completionBatcher.dispose();
 			heldCompletions = [];
 			runDeliveries.clear();
+		},
+		deferPendingCompletions: () => {
+			const pending = [...runtime.completionBatcher.dispose(), ...heldCompletions];
+			heldCompletions = [];
+			sendNextTurn(pending);
+		},
+		deferRunDelivery: (runId) => {
+			deferredRuns.add(runId);
 		},
 		durableRestore: Promise.resolve(),
 		restoredRunIds: [],
@@ -200,6 +222,11 @@ export function createRuntime(pi: ExtensionAPI, configPath: string): SubagentRun
 			runDeliveries.set(runId, route);
 		},
 		publishRunCompletion: (runId, item, immediate) => {
+			if (deferredRuns.delete(runId)) {
+				runDeliveries.delete(runId);
+				sendNextTurn([item]);
+				return;
+			}
 			if (runtime.suppressCompletions) { runDeliveries.delete(runId); return; }
 			if (runDeliveries.get(runId) === "await") return;
 			runDeliveries.delete(runId);

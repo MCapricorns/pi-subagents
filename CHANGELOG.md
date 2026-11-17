@@ -1,5 +1,20 @@
 # Changelog
 
+## 7.0.3
+
+### Fixes
+
+- Escape no longer cancels a run whose child already finished and is only
+  integrating its worktree. It settles normally, and its real result is
+  delivered on the next turn without waking main, instead of being reported as
+  aborted partial work while its changes were applied anyway.
+- Escape hands successes already queued for delivery to the next turn instead
+  of discarding them. Branch navigation still stops everything and discards
+  results for the abandoned branch.
+- `subagent_stop({ all: true })` skips settling runs and runs that are already
+  stopping. An explicit stop of a settling run retires it but keeps its real
+  result and integration status.
+
 ## 7.0.2
 
 ### Orchestration prompts

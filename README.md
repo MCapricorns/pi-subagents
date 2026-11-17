@@ -185,8 +185,12 @@ and preserves the caller's index, branch, and HEAD. Failures retain recovery
 artifacts. Worktrees isolate Git changes, not permissions.
 
 Escape cancels unfinished workers without waking main. Main receives a cancellation
-receipt on the next user turn. Tree navigation, new/resume/fork/reload, and shutdown
-stop old work; interrupted evidence remains available for recovery.
+receipt on the next user turn. A worker whose child already finished and is only
+integrating its worktree is not cancelled: it settles normally, and its real
+result, like any result already queued for delivery, arrives on the next user
+turn. `subagent_stop({ all: true })` also leaves such runs alone. Tree navigation,
+new/resume/fork/reload, and shutdown stop old work; interrupted evidence remains
+available for recovery.
 
 The task widget shows status, elapsed time, model, thinking, tokens, and worktree
 state in at most ten lines. Independent workers can start together; only

@@ -12,7 +12,7 @@ import { findSessionFile, getProjectRoot, getResultOutput, isFailedResult, sessi
 import { writeTempOwnerMarker } from "../isolation/temp-hygiene.ts";
 import type { DispatchCore } from "./dispatch-core.ts";
 import { awaitRunResults, WaitSchema } from "./await-results.ts";
-import { cancelActiveWork } from "./cancellation.ts";
+import { cancelActiveWork, isSettlingThread } from "./cancellation.ts";
 import { stopThreads } from "./stop.ts";
 import { formatCompletionBlock } from "../presentation/format.ts";
 import { emptyUsage } from "../execution/run-control.ts";
@@ -337,7 +337,12 @@ export function registerLookupTools(pi: ExtensionAPI, runtime: SubagentRuntime, 
 					...[...runtime.threads.values()]
 						.filter((thread) => thread.lifecycleOperation !== undefined || ["queued", "running", "interrupting"].includes(thread.state))
 						.map((thread) => thread.id),
-				])]
+				])].filter((id) => {
+					// A settling run's child is already done, so stop-all leaves its
+					// integration and real result alone; a retired run is already stopping.
+					const thread = runtime.threads.get(id);
+					return !thread || (!thread.retired && !isSettlingThread(thread));
+				})
 				: [...runtime.threads.keys()];
 			const requestedId = params.all === true ? undefined : parseExactRunId(params.id);
 			const targets = params.all === true

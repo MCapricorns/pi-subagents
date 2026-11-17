@@ -19,6 +19,7 @@ export async function stopThreads(runtime: SubagentRuntime, targets: readonly nu
 		previousState: SubagentThread["state"];
 		wasQueued: boolean;
 		wasActive: boolean;
+		wasSettling: boolean;
 		generation: number;
 		controller: AbortController | undefined;
 		completion: Promise<void>;
@@ -32,6 +33,8 @@ export async function stopThreads(runtime: SubagentRuntime, targets: readonly nu
 		const previousState = thread.state;
 		const wasQueued = previousState === "queued";
 		const wasActive = thread.lifecycleOperation !== undefined || ["queued", "running", "interrupting"].includes(previousState);
+		// The child already settled; only integration and delivery remained.
+		const wasSettling = thread.lifecycleOperation === "settle" && !thread.retired;
 		const stopVersion = ++thread.lifecycleVersion;
 		thread.lifecycleOperation = "stop";
 		thread.retired = true;
@@ -48,7 +51,7 @@ export async function stopThreads(runtime: SubagentRuntime, targets: readonly nu
 				: previousState === "parked" ? "Stopped by subagent_stop from an interrupted checkpoint."
 					: "Retired by subagent_stop.");
 		claimed.push({
-			runId, thread, run: monitor.findRun(runId), previousState, wasQueued, wasActive,
+			runId, thread, run: monitor.findRun(runId), previousState, wasQueued, wasActive, wasSettling,
 			generation: thread.generation,
 			controller: thread.queueController,
 			completion, releaseQuiescence,
@@ -77,6 +80,7 @@ export async function stopThreads(runtime: SubagentRuntime, targets: readonly nu
 			previousState,
 			wasQueued,
 			wasActive,
+			wasSettling,
 			generation,
 			controller,
 			completion,
@@ -105,7 +109,11 @@ export async function stopThreads(runtime: SubagentRuntime, targets: readonly nu
 			!runtime.settledRuns.has(runId)
 		) {
 			const prior = thread.lastResult;
-			stoppedResult = prior
+			// A settled child already produced its real result; stopping during
+			// integration retires the run but must not relabel finished work.
+			stoppedResult = wasSettling && prior
+				? { ...prior, runId }
+				: prior
 				? {
 					...prior,
 					exitCode: 1,
@@ -184,7 +192,7 @@ export async function stopThreads(runtime: SubagentRuntime, targets: readonly nu
 			}
 			releaseQuiescence();
 		});
-		stopped.push(`#${runId} ${thread.agentName}${wasQueued ? " (queued)" : wasActive ? "" : ` (${previousState})`}`);
+		stopped.push(`#${runId} ${thread.agentName}${wasQueued ? " (queued)" : wasSettling ? " (already finished; result kept)" : wasActive ? "" : ` (${previousState})`}`);
 	}
 	return { stopped, retainedIntegration, pendingIntegration, completionResults };
 }
