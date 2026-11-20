@@ -20,7 +20,7 @@ import type { IsolationMode, WorktreeFinalizationStatus } from "../isolation/wor
 // ---------------------------------------------------------------------------
 
 /** A queued run is preparing its child process; execution has no capacity wait. */
-export type RunStatus = "queued" | "running" | "interrupting" | "parked" | "done" | "failed";
+type RunStatus = "queued" | "running" | "interrupting" | "parked" | "done" | "failed";
 
 export function isRunActiveStatus(status: RunStatus): boolean {
 	return status === "queued" || status === "running" || status === "interrupting";
@@ -29,7 +29,7 @@ export function isRunActiveStatus(status: RunStatus): boolean {
 /** Durable integration projection of a worktree-isolated run: pending before
  * settlement, finalizing while the patch is applied/cleaned up, then the
  * terminal WorktreeFinalizationStatus. */
-export type RunIntegrationStatus = "pending" | "finalizing" | WorktreeFinalizationStatus;
+type RunIntegrationStatus = "pending" | "finalizing" | WorktreeFinalizationStatus;
 
 export interface RunView {
 	id: number;

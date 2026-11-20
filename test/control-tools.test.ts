@@ -489,6 +489,35 @@ describe("subagent_message", () => {
 			assert.equal(existsSync(join(getProjectRoot(join(root, "config.json"), process.cwd()), "sessions")), false, "a summary follow-up must not copy the session");
 		} finally { await shutdown(runtime); await rm(root, { recursive: true, force: true }); }
 	});
+
+	it("allows steering an active run at 5/5 capacity while blocking a 6th follow-up continuation", async () => {
+		const root = await mkdtemp(join(tmpdir(), "pi-subagents-followup-cap-"));
+		let starts = 0;
+		const core = { setEnvironment() {}, async startBackground() { starts++; return { runId: 90 }; } } as unknown as DispatchCore;
+		const { runtime, tools } = harness(join(root, "config.json"), core);
+		for (const id of [1, 2, 3, 4, 5]) {
+			const active = makeThread(id, "running");
+			attachRunning(active.control, { stop: async () => {}, steer: async () => ({ disposition: "queued", acknowledgedAt: Date.now(), requestId: `steer-${id}` }) });
+			runtime.threads.set(id, active);
+		}
+		const completed = makeThread(6, "completed");
+		completed.sessionId = "retained";
+		completed.sessionDir = join(root, "source");
+		await mkdir(completed.sessionDir);
+		await writeFile(join(completed.sessionDir, "2026_retained.jsonl"), "history");
+		runtime.threads.set(6, completed);
+		try {
+			const steered = await execute(tools.get("subagent_message")!, { id: 3, message: "Refine boundary" });
+			assert.equal(steered.isError, undefined);
+			assert.match(resultText(steered), /Received by #3/u);
+
+			const blocked = await execute(tools.get("subagent_message")!, { id: 6, message: "Spawn sixth run" });
+			assert.equal(blocked.isError, true);
+			assert.match(resultText(blocked), /concurrency limit of 5 active subagents is full/u);
+			assert.equal(starts, 0);
+			assert.equal(existsSync(join(getProjectRoot(join(root, "config.json"), completed.cwd), "sessions")), false, "rejected follow-up must not copy session files");
+		} finally { await shutdown(runtime); await rm(root, { recursive: true, force: true }); }
+	});
 });
 
 describe("subagent_stop", () => {

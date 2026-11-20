@@ -80,7 +80,7 @@ export async function isManagedSessionDir(
 	return isManagedDirectory(sessionsRoot, sessionDir, SESSION_DIR_NAME);
 }
 
-export interface PersistedWorktreePaths {
+interface PersistedWorktreePaths {
 	cwd: string;
 	worktreePath: string;
 	tempDir: string;

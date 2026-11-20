@@ -15,7 +15,7 @@ const COMPLETION_MAX_WAIT_MS = 1_000;
 
 type TimerHandle = ReturnType<typeof setTimeout>;
 
-export interface CompletionBatcherOptions<T> {
+interface CompletionBatcherOptions<T> {
 	emit: (items: T[]) => void;
 }
 
@@ -119,7 +119,7 @@ export function perModelTotals(items: readonly CompletionMessageItem[]): string 
 /** Minimal shape of an active run, for the "others still running" footer. Kept
  * decoupled from the monitor's RunView so this stays a pure, easily tested
  * formatter; the caller maps its live runs into this shape. */
-export interface ActiveRunFoot {
+interface ActiveRunFoot {
 	id: number;
 	agent: string;
 	/** Optional content label (task-derived) shown next to the agent name. */

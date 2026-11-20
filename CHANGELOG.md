@@ -1,5 +1,27 @@
 # Changelog
 
+## 7.0.4
+
+### Changes and fixes
+
+- Cap concurrent subagents at **5** (`MAX_CONCURRENT_SUBAGENTS = 5`) across the
+  `tasks` tool schema, dispatch/follow-up admission, and the background task
+  scheduler. Settling, stopped, and restored parked runs do not consume live
+  concurrency slots, and steering an active run still works at full capacity.
+- Serialize per-repository Git baseline snapshots, `git worktree add/remove/prune`,
+  and three-way patch integration so five parallel isolated workers start and
+  settle reliably without colliding on `.git/worktrees` metadata while their
+  child processes execute concurrently.
+- Keep all five active phase leases and five recent settled phases visible in
+  `<subagent_leases>` so main does not lose track of concurrent owners and
+  repeat or overwrite their work.
+- Strengthen orchestration prompts and tool schemas to batch independent tasks
+  together in `tasks` (up to 5 concurrently instead of serializing one by one),
+  forbid duplicating leased scopes in main or sibling subagents, and leave
+  `wait` omitted by default so main continues disjoint work in parallel.
+- Remove duplicate repository-lane locking, unused internal exports, and
+  redundant/brittle test cases and child-process spawns.
+
 ## 7.0.3
 
 ### Fixes

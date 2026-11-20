@@ -19,14 +19,14 @@ export type ModelContext = Pick<ExtensionContext, "model" | "modelRegistry" | "s
 
 export const CURRENT_MAIN_MODEL = "__current_main_model__";
 
-export interface ModelPickerItem {
+interface ModelPickerItem {
 	value: string;
 	label: string;
 	description?: string;
 	saved?: boolean;
 }
 
-export type ModelListEntry = Pick<
+type ModelListEntry = Pick<
 	Model<Api>,
 	"provider" | "id" | "name" | "input" | "reasoning" | "thinkingLevelMap"
 >;

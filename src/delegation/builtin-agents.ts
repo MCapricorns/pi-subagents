@@ -12,7 +12,7 @@
  * codemode. Researcher receives only direct read-only tools.
  */
 
-export interface BuiltinAgentDefinition {
+interface BuiltinAgentDefinition {
 	name: string;
 	description: string;
 	systemPrompt: string;

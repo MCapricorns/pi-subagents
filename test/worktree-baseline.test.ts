@@ -3,11 +3,12 @@ import { execFile } from "node:child_process";
 import { existsSync } from "node:fs";
 import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { join, resolve } from "node:path";
+import { dirname, join, resolve } from "node:path";
 import { describe, it } from "node:test";
 import { promisify } from "node:util";
 import {
 	createWorktreeIsolation,
+	isPathInside,
 	restoreWorktreeIsolation,
 	worktreeSnapshot,
 	type WorktreeIsolation,
@@ -157,5 +158,34 @@ describe("worktree caller baselines (real Git)", () => {
 			assert.equal(existsSync(join(repository, "untracked.txt")), false);
 			assert.deepEqual(await callerState(repository), before);
 		});
+	});
+
+	it("creates and integrates five concurrent isolated worktrees without Git metadata races", async () => {
+		await withRepository(async (repository, isolate) => {
+			await writeFile(join(repository, "tracked.txt"), "shared baseline\n");
+			const before = await callerState(repository);
+			const worktrees = await Promise.all(Array.from({ length: 5 }, () => isolate()));
+			await Promise.all(
+				worktrees.map((worktree, index) =>
+					writeFile(join(worktree.cwd, `parallel-${index}.txt`), `worker-${index}\n`),
+				),
+			);
+			const outcomes = await Promise.all(worktrees.map((worktree) => worktree.finalize()));
+			for (const [index, outcome] of outcomes.entries()) {
+				assert.equal(outcome.status, "integrated", outcome.error);
+				assert.equal(await readFile(join(repository, `parallel-${index}.txt`), "utf8"), `worker-${index}\n`);
+				assert.equal(existsSync(worktrees[index]!.tempDir), false);
+			}
+			assert.equal(await readFile(join(repository, "tracked.txt"), "utf8"), "shared baseline\n");
+			assert.deepEqual(await callerState(repository), before);
+		});
+	});
+
+	it("treats dot-dot-prefixed child names as inside the root while rejecting parents and siblings", () => {
+		const root = resolve("repo");
+		assert.equal(isPathInside(root, root), true);
+		assert.equal(isPathInside(root, join(root, "..cache", "file")), true);
+		assert.equal(isPathInside(root, resolve("other")), false);
+		assert.equal(isPathInside(root, dirname(root)), false);
 	});
 });

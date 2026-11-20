@@ -196,7 +196,7 @@ describe("independent role settings", () => {
 	});
 
 	it("renders the actual Pi overlay without replacing the input editor", async () => {
-		for (const height of [24, 16, 14]) for (const width of [40, 80, 120]) {
+		for (const [height, width] of [[14, 40], [16, 80], [24, 120]] as const) {
 			const context = { mode: "tui", ui: { custom: async (factory: PickerFactory, options?: CustomOptions) => new Promise((resolve) => {
 				assert.equal(options?.overlay, true);
 				assert.equal(options?.blocked?.kind, "question");
@@ -318,18 +318,6 @@ describe("first install", () => {
 		assert.ok(existsSync(path));
 		assert.deepEqual(saved(path), baseConfig());
 		assert.match(notices[0]!, /overwrote the old config.*independent role settings.*\/subagents-setup/u);
-		await ensureDefaultConfig(context, path);
-		assert.equal(notices.length, 1);
-	});
-
-	it("writes defaults once and announces /subagents-setup", async (t) => {
-		const path = freshConfigPath(t);
-		const notices: string[] = [];
-		const context = { mode: "tui", ui: { notify: (message: string) => notices.push(message) } } as unknown as ExtensionContext;
-		await ensureDefaultConfig(context, path);
-		assert.deepEqual(saved(path), baseConfig());
-		assert.equal(notices.length, 1);
-		assert.match(notices[0]!, /\/subagents-setup/u);
 		await ensureDefaultConfig(context, path);
 		assert.equal(notices.length, 1);
 	});

@@ -10,39 +10,37 @@ import { createRuntime } from "../src/lifecycle/runtime.ts";
 import { registerAnnouncements } from "../src/presentation/announcements.ts";
 
 describe("session-start recovery announcements", () => {
-	for (const location of ["current"] as const) {
-		it(`continues initialization when the ${location} recovery manifest is unreadable`, async () => {
-			const root = await mkdtemp(join(tmpdir(), "pi-subagents-announcements-"));
-			const configPath = join(root, "agent", "config.json");
-			const handlers = new Map<string, (event: unknown, ctx: ExtensionContext) => Promise<void>>();
-			const pi = {
-				getActiveTools: () => [], getAllTools: () => [],
-				on: (name: string, handler: (event: unknown, ctx: ExtensionContext) => Promise<void>) => handlers.set(name, handler),
-			} as unknown as ExtensionAPI;
-			const runtime = createRuntime(pi, configPath);
-			const notices: string[] = [];
-			const widgets: string[] = [];
-			try {
-				await saveConfig({ ...DEFAULT_CONFIG, worker: { model: "fixture/missing", thinking: "medium" } }, configPath);
-				const path = getRecoveryManifestPath(configPath);
-				await mkdir(dirname(path), { recursive: true });
-				await writeFile(path, "{unfinished");
-				runtime.restoredRunIds = [9];
-				registerAnnouncements(pi, runtime);
-				await handlers.get("session_start")!({}, {
-					cwd: root, mode: "tui", hasUI: true, modelRegistry: { getAvailable: () => [] },
-					ui: { notify: (message: string) => notices.push(message), setWidget: (id: string) => widgets.push(id) },
-				} as unknown as ExtensionContext);
-				assert.deepEqual(widgets, ["pi-subagents"]);
-				assert.equal(runtime.restoredNotified, true);
-				assert.ok(notices.some((message) => /recovery inspection failed.*continuing startup/iu.test(message)));
-				assert.ok(notices.some((message) => /restored 1 interrupted run/u.test(message)));
-				assert.equal((await loadConfig(configPath)).worker.model, "fixture/missing");
-				assert.ok(notices.some((message) => /setting is preserved and dispatch is paused/u.test(message)));
-				assert.equal(await readFile(path, "utf8"), "{unfinished", "startup must preserve the unreadable manifest");
-			} finally { await runtime.shutdown(); await rm(root, { recursive: true, force: true }); }
-		});
-	}
+	it("continues initialization when the recovery manifest is unreadable", async () => {
+		const root = await mkdtemp(join(tmpdir(), "pi-subagents-announcements-"));
+		const configPath = join(root, "agent", "config.json");
+		const handlers = new Map<string, (event: unknown, ctx: ExtensionContext) => Promise<void>>();
+		const pi = {
+			getActiveTools: () => [], getAllTools: () => [],
+			on: (name: string, handler: (event: unknown, ctx: ExtensionContext) => Promise<void>) => handlers.set(name, handler),
+		} as unknown as ExtensionAPI;
+		const runtime = createRuntime(pi, configPath);
+		const notices: string[] = [];
+		const widgets: string[] = [];
+		try {
+			await saveConfig({ ...DEFAULT_CONFIG, worker: { model: "fixture/missing", thinking: "medium" } }, configPath);
+			const path = getRecoveryManifestPath(configPath);
+			await mkdir(dirname(path), { recursive: true });
+			await writeFile(path, "{unfinished");
+			runtime.restoredRunIds = [9];
+			registerAnnouncements(pi, runtime);
+			await handlers.get("session_start")!({}, {
+				cwd: root, mode: "tui", hasUI: true, modelRegistry: { getAvailable: () => [] },
+				ui: { notify: (message: string) => notices.push(message), setWidget: (id: string) => widgets.push(id) },
+			} as unknown as ExtensionContext);
+			assert.deepEqual(widgets, ["pi-subagents"]);
+			assert.equal(runtime.restoredNotified, true);
+			assert.ok(notices.some((message) => /recovery inspection failed.*continuing startup/iu.test(message)));
+			assert.ok(notices.some((message) => /restored 1 interrupted run/u.test(message)));
+			assert.equal((await loadConfig(configPath)).worker.model, "fixture/missing");
+			assert.ok(notices.some((message) => /setting is preserved and dispatch is paused/u.test(message)));
+			assert.equal(await readFile(path, "utf8"), "{unfinished", "startup must preserve the unreadable manifest");
+		} finally { await runtime.shutdown(); await rm(root, { recursive: true, force: true }); }
+	});
 
 	it("preserves worker settings outside the session scope and warns at startup", async () => {
 		const root = await mkdtemp(join(tmpdir(), "pi-subagents-announcements-"));

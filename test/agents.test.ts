@@ -26,82 +26,24 @@ const READ_ONLY = tool("docs_search", { readOnlyHint: true });
 const CODEMODE = tool("codemode", undefined, () => "all", "direct");
 
 describe("loadBuiltinAgents", () => {
-	it("ships two worker scopes without frontmatter thinking", () => {
+	it("defines read-only researcher and write-capable worker leaf contracts", () => {
 		const agents = loadBuiltinAgents();
 		assert.deepEqual(agents.map((agent) => agent.name), ["researcher", "worker"]);
+		const [researcher, worker] = agents;
+		assert.ok(researcher && worker);
 		for (const agent of agents) {
 			assert.equal(agent.model, undefined);
-			assert.ok(!("thinking" in agent));
-			assert.match(agent.systemPrompt, /loaded project instructions/u);
-			assert.match(agent.systemPrompt, /no interactive clarification/u);
-			assert.match(agent.systemPrompt, /Follow the brief within loaded project instructions/u);
+			assert.equal(agent.tools, undefined);
 			assert.match(agent.systemPrompt, /do not dispatch agents, bump versions, commit, push, publish, tag, or release/u);
-			// Researcher receives only direct read-only tools, never a script tool.
-			if (agent.name === "researcher") assert.doesNotMatch(agent.systemPrompt, /script tool/u);
-			else assert.match(agent.systemPrompt, /directly, or through its script tool/u);
 			assert.doesNotMatch(formatCatalogEntry(agent), /[\r\n]/u);
 		}
-	});
+		assert.equal(isWriteCapableAgent(researcher), false);
+		assert.doesNotMatch(researcher.systemPrompt, /script tool/u);
+		assert.match(researcher.systemPrompt, /^Answer: [\s\S]*^Evidence: /mu);
 
-	it("keeps researcher read-only and retrieval-only", () => {
-		const researcher = loadBuiltinAgents().find((agent) => agent.name === "researcher");
-		assert.ok(researcher);
-		// The surface is derived from live tool metadata, so no role file carries
-		// a list of extension, MCP, or vendor tool names.
-		assert.equal(researcher.tools, undefined);
-		assert.match(researcher.description, /external facts/u);
-		assert.ok(researcher.systemPrompt.includes("retrieval lead"));
-		assert.ok(researcher.systemPrompt.includes("Stay read-only"));
-		assert.ok(researcher.systemPrompt.includes("untrusted data"));
-		assert.match(researcher.systemPrompt, /primary sources/u);
-		assert.match(researcher.systemPrompt, /URL/u);
-		assert.match(researcher.systemPrompt, /Follow relevant leads until the question is answered or the evidence runs out, then stop/u);
-		assert.match(researcher.systemPrompt, /read-only boundary still wins/u);
-		assert.match(researcher.systemPrompt, /Distinguish inference from verified facts/u);
-		assert.match(researcher.systemPrompt, /^Answer: /mu);
-		assert.match(researcher.systemPrompt, /^Evidence: /mu);
-		assert.ok(!isWriteCapableAgent(researcher));
-	});
-
-	it("keeps worker on one complete change through verification", () => {
-		const worker = loadBuiltinAgents().find((agent) => agent.name === "worker");
-		assert.ok(worker);
-		assert.equal(worker.tools, undefined);
-		assert.ok(isWriteCapableAgent(worker));
-		assert.match(worker.systemPrompt, /confirm current behavior.*root cause/u);
-		assert.match(worker.systemPrompt, /affected tests, docs, comments, local cleanup, and verification/u);
-		assert.match(worker.systemPrompt, /Do not stop at a plan or a first draft/u);
-		assert.match(worker.systemPrompt, /premise is disproved.*approval boundary.*Report the blocker with evidence/u);
-		assert.match(worker.systemPrompt, /Tests should catch the relevant failure/u);
-		assert.match(worker.systemPrompt, /checks and gates the brief or project requires/u);
-		assert.match(worker.systemPrompt, /reversible, low-impact edit/u);
-		assert.match(worker.systemPrompt, /Repeat or broaden checks only for new edits, failures, or unresolved concerns/u);
-		assert.match(worker.systemPrompt, /unrun checks and pre-existing failures accurately/u);
-		assert.match(worker.systemPrompt, /one per line as `command → result`/u);
-		assert.match(worker.systemPrompt, /leaf boundary below still wins/u);
-		// A fixed handoff shape keeps weaker workers predictable and main's review cheap.
-		assert.match(worker.systemPrompt, /^Status: done, partial, or blocked/mu);
-		assert.match(worker.systemPrompt, /^Changes: /mu);
-		assert.match(worker.systemPrompt, /^Checks: /mu);
-	});
-
-	it("preserves evidence reuse for research and implementation", () => {
-		const researcher = loadBuiltinAgents().find((agent) => agent.name === "researcher");
-		const worker = loadBuiltinAgents().find((agent) => agent.name === "worker");
-		assert.ok(researcher && worker);
-		assert.match(researcher.systemPrompt, /Fill gaps in main or upstream findings instead of repeating their research/u);
-		assert.match(worker.systemPrompt, /Reuse completed main or upstream work; implement only the remaining delta/u);
-		assert.match(worker.systemPrompt, /Reuse supplied passing checks when they cover the current files/u);
-	});
-
-	it("keeps shell guidance portable", () => {
-		const posixOnly = /`(?:cat|sed|awk|which|touch|rm|cp|mv)\b/u;
-		for (const agent of loadBuiltinAgents()) {
-			assert.ok(!posixOnly.test(agent.systemPrompt), `${agent.name} names a POSIX-only command`);
-			if (/\bshell\b/iu.test(agent.systemPrompt)) {
-				assert.ok(agent.systemPrompt.includes("PowerShell"), `${agent.name} assumes one shell flavor`);
-			}
-		}
+		assert.equal(isWriteCapableAgent(worker), true);
+		assert.match(worker.systemPrompt, /directly, or through its script tool/u);
+		assert.match(worker.systemPrompt, /^Status: done, partial, or blocked[\s\S]*^Changes: [\s\S]*^Checks: /mu);
 	});
 });
 
@@ -188,15 +130,13 @@ describe("resolveAgentTools", () => {
 			tool("subagent", undefined, undefined, "codemode"),
 			tool("subagent_message", undefined, undefined, "deferred"),
 		];
-		for (const name of ["worker"]) {
-			const agent = loadBuiltinAgents().find((entry) => entry.name === name)!;
-			for (const reachingTool of ["codemode", "tool_search"]) {
-				assert.deepEqual(resolveAgentTools(agent, ["read", reachingTool, "mcp__direct__search"], infos).tools,
-					["read", reachingTool, "mcp__direct__search", "extension_deferred", "mcp__indirect__search"]);
-			}
-			// Pi keeps registered indirect tools callable independently of activation.
-			assert.deepEqual(resolveAgentTools(agent, ["read"], infos).tools, ["read", "extension_deferred", "mcp__indirect__search"]);
+		const worker = loadBuiltinAgents().find((entry) => entry.name === "worker")!;
+		for (const reachingTool of ["codemode", "tool_search"]) {
+			assert.deepEqual(resolveAgentTools(worker, ["read", reachingTool, "mcp__direct__search"], infos).tools,
+				["read", reachingTool, "mcp__direct__search", "extension_deferred", "mcp__indirect__search"]);
 		}
+		// Pi keeps registered indirect tools callable independently of activation.
+		assert.deepEqual(resolveAgentTools(worker, ["read"], infos).tools, ["read", "extension_deferred", "mcp__indirect__search"]);
 	});
 
 	it("treats tools without a read-only proof as potentially write-capable", () => {

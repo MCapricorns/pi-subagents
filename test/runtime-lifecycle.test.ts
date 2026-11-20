@@ -4,7 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, it } from "node:test";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
-import { BackgroundTaskQueue } from "../src/execution/background.ts";
+import { BackgroundTaskQueue, MAX_CONCURRENT_SUBAGENTS } from "../src/execution/background.ts";
 import { getProjectRoot } from "../src/execution/spawn.ts";
 import type { CompletionMessageItem } from "../src/lifecycle/completion.ts";
 import { readThreadRecords, upsertThreadRecord, type ThreadRecord } from "../src/lifecycle/durable.ts";
@@ -36,21 +36,57 @@ function completion(agent: string): CompletionMessageItem {
 	return { agent, block: `${agent} completed`, usage: emptyUsage() };
 }
 
-describe("unlimited background execution", () => {
-	it("starts every task without waiting for one of six slots", async () => {
+describe("bounded background execution", () => {
+	it("runs up to five tasks concurrently, queues overflow FIFO, and frees slots on releaseSlot or cancel", async () => {
 		const queue = new BackgroundTaskQueue();
-		const release = deferred();
+		assert.equal(MAX_CONCURRENT_SUBAGENTS, 5);
+		assert.equal(queue.capacity, 5);
+		const gate = deferred();
+		const settlementGate = deferred();
 		const started: number[] = [];
-		const controllers = Array.from({ length: 12 }, (_, id) => queue.enqueue(async () => {
+		const releaseSlots: Array<() => void> = [];
+		const controllers = Array.from({ length: 8 }, (_, id) => queue.enqueue(async (_signal, releaseSlot) => {
 			started.push(id);
-			await release.promise;
+			releaseSlots[id] = releaseSlot;
+			await gate.promise;
+			if (id === 0) await settlementGate.promise;
 		}));
 		try {
-			assert.equal(started.length, 12);
-			assert.equal(queue.activeCount, 12);
-			controllers.forEach((controller) => queue.cancel(controller));
-			assert.ok(controllers.every((controller) => controller.signal.aborted));
-		} finally { release.resolve(); await queue.waitForIdle(); }
+			assert.deepEqual(started, [0, 1, 2, 3, 4]);
+			assert.equal(queue.activeCount, 5);
+			assert.equal(queue.pendingCount, 3);
+
+			// Releasing a slot during settlement starts the next queued child while keeping ownership.
+			releaseSlots[0]!();
+			assert.deepEqual(started, [0, 1, 2, 3, 4, 5]);
+			assert.equal(queue.activeCount, 5);
+			assert.equal(queue.pendingCount, 2);
+
+			// Cancelling a queued task removes it immediately without running its body.
+			queue.cancel(controllers[6]);
+			assert.equal(controllers[6]!.signal.aborted, true);
+			await queue.waitForTask(controllers[6]);
+			assert.equal(queue.pendingCount, 1);
+
+			gate.resolve();
+			await queue.waitForTask(controllers[1]);
+			assert.deepEqual(started, [0, 1, 2, 3, 4, 5, 7]);
+
+			let idle = false;
+			void queue.waitForIdle().then(() => { idle = true; });
+			await Promise.resolve();
+			assert.equal(idle, false, "slot-released task still owns settlement until its body finishes");
+
+			settlementGate.resolve();
+			await queue.waitForIdle();
+			assert.equal(idle, true);
+			assert.equal(queue.activeCount, 0);
+			assert.equal(queue.pendingCount, 0);
+		} finally {
+			gate.resolve();
+			settlementGate.resolve();
+			await queue.waitForIdle();
+		}
 	});
 
 	it("reports a synchronous task exception and still releases ownership", async () => {

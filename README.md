@@ -100,7 +100,11 @@ Simple edits, fixes, tests, docs, and bounded research go to cheaper workers by
 default. Main decides what is simple enough for the configured worker; there is
 no keyword classifier or automatic model ranking. Complex or uncertain work can
 stay in main. Review and final acceptance always stay in main, never in a cheap
-reviewer. Main avoids repeating completed worker effort. Questions and review-only requests do not authorize
+reviewer. At most **five** subagents can run concurrently (`tasks` accepts up to
+five independent phases). Independent phases should be batched together in one
+parallel `subagent({ tasks })` call so they execute concurrently rather than one
+by one. Once a phase, file, or question is leased to a subagent, neither another
+subagent nor main repeats or edits that scope. Questions and review-only requests do not authorize
 implementation. Explicit requests to work in main take precedence. Parallel workers require independent
 scope and disjoint write ownership; a fix and its regression tests share an owner.
 
@@ -137,18 +141,23 @@ subagent({
     "Run the cache tests. Return to main if the storage interface contradicts this plan.",
     "Report the outcome, changed paths, command/results, and blockers for main's review.",
   ].join("\n"),
-  wait: true,
 });
 ```
 
-Independent tasks use `tasks: [{ agent, task }, ...]`. Each task can also specify
-`cwd` and `isolation`; a top-level `isolation` is the default for tasks that omit
-it. Duplicate normalized tasks in the same cwd are rejected while active or
-settled; reuse the result or continue the existing run with `subagent_message`.
+Independent tasks use `tasks: [{ agent, task }, ...]` (up to five concurrent
+subagents total). Batch independent tasks together in one `tasks` call so they
+execute concurrently instead of running sequentially one by one. Each task can
+also specify `cwd` and `isolation`; a top-level `isolation` is the default for
+tasks that omit it. Duplicate normalized tasks in the same cwd are rejected
+while active or settled; reuse the result or continue the existing run with
+`subagent_message`.
 
-Use `wait: true` for an immediate dependency. Print/JSON sessions wait by
-default; TUI/RPC sessions return background receipts. A launch receipt is not
-completion. Main continues independent work, then pauses until results arrive.
+Leave `wait` omitted (`false` in TUI/RPC) by default so subagents run in the
+background while main immediately continues its own disjoint work in parallel.
+Set `wait: true` only when no disjoint main work remains and planning the next
+step requires that result. Print/JSON sessions wait by default. A launch receipt
+is not completion; when no disjoint work remains, main ends its turn and pauses
+until background results wake it automatically.
 Results are delivered once, after integration. Awaited failures are tool errors.
 Answers exceeding 40 lines or 8,000 characters link their full-result artifact.
 

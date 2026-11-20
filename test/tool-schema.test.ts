@@ -41,4 +41,8 @@ it("validates dispatch roles and isolation through the Pi SDK", async (t) => {
 	}
 	assert.throws(() => validate("subagent", { ...task, agent: "sentinel" }), /agent:/u);
 	assert.throws(() => validate("subagent", { tasks: [{ ...task, agent: "critic" }] }), /tasks\.0\.agent:/u);
+	const fiveTasks = Array.from({ length: 5 }, (_, index) => ({ agent: "worker", task: `Bounded task ${index}` }));
+	assert.deepEqual(validate("subagent", { tasks: fiveTasks }), { tasks: fiveTasks });
+	const sixTasks = Array.from({ length: 6 }, (_, index) => ({ agent: "worker", task: `Bounded task ${index}` }));
+	assert.throws(() => validate("subagent", { tasks: sixTasks }), /tasks:/u);
 });

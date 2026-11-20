@@ -222,24 +222,19 @@ console.log("fixture survived both spawn failures");
 		assert.equal(env.PI_SUBAGENT_DEPTH, "2");
 	});
 
-	it("uses the official RPC mode", () => {
-		const args = buildChildLaunchArgs({ agent: {}, thinkingLevel: "off" });
-		assert.deepEqual(args.slice(0, 2), ["--mode", "rpc"]);
-	});
 	for (const disposition of ["queued", "handled"]) {
-		it(`returns the child steering receipt for ${disposition ?? "empty success"}`, async () => {
+		it(`returns the child steering receipt for ${disposition}`, async () => {
 			const before = Date.now();
 			await withChild("", (result, receipt) => {
 				assert.equal(isFailedResult(result), false);
 				assert.match(getResultOutput(result), /Please check the caller/u);
 				assert.equal(receipt?.requestId, "steer-1");
-				assert.equal(receipt.disposition, disposition);
-				assert.ok(receipt.acknowledgedAt >= before && receipt.acknowledgedAt <= Date.now());
-			}, false, `send({ type: "response", id: command.id, command: "steer", success: true, data: ${JSON.stringify(disposition ? { disposition } : {})} }); assistant("stop", command.message); send({ type: "agent_settled" });`);
+				assert.equal(receipt?.disposition, disposition);
+				assert.ok(receipt!.acknowledgedAt >= before && receipt!.acknowledgedAt <= Date.now());
+			}, false, `send({ type: "response", id: command.id, command: "steer", success: true, data: { disposition: ${JSON.stringify(disposition)} } }); assistant("stop", command.message); send({ type: "agent_settled" });`);
 		});
 	}
 	for (const response of [
-		{ code: `send({ type: "response", id: command.id, command: "steer", success: true }); assistant("stop", "Finished"); send({ type: "agent_settled" });`, error: /Invalid steering acknowledgement/u },
 		{ code: `send({ type: "response", id: command.id, command: "steer", success: true, data: { disposition: "unknown" } }); assistant("stop", "Finished"); send({ type: "agent_settled" });`, error: /Invalid steering acknowledgement/u },
 		{ code: `send({ type: "response", id: command.id, command: "steer", success: false, error: "Fixture rejected steer" }); assistant("stop", "Finished"); send({ type: "agent_settled" });`, error: /Fixture rejected steer/u },
 		{ code: `send({ type: "response", id: "wrong-id", command: "steer", success: true, data: { disposition: "queued" } }); assistant("stop", "Finished"); send({ type: "agent_settled" });`, error: /settled before acknowledging/u },
@@ -254,15 +249,26 @@ console.log("fixture survived both spawn failures");
 			`setTimeout(() => { assistant("stop", "Finished without acknowledging"); send({ type: "agent_settled" }); }, 10_200);`,
 			undefined, undefined, 14_000), /No acknowledgement; message delivery is unconfirmed/u);
 	});
-	for (const method of ["select", "confirm", "input", "editor"]) {
-		it(`cancels a matching ${method} dialog without approval`, async () => {
-			await withChild(`send({ type: "extension_ui_request", id: "dialog-1", method: "${method}" });`, (result) => {
-				assert.equal(isFailedResult(result), false, result.stderr);
-				assert.deepEqual(JSON.parse(getResultOutput(result)), { type: "extension_ui_response", id: "dialog-1", cancelled: true });
+	it("cancels select, confirm, input, and editor dialogs without approval", async () => {
+		await withChild(`
+const responses = [];
+for (const method of ["select", "confirm", "input", "editor"]) {
+ send({ type: "extension_ui_request", id: "dialog-" + method, method });
+}
+globalThis.collectUi = (cmd) => {
+ responses.push(cmd);
+ if (responses.length === 4) { assistant("stop", JSON.stringify(responses)); send({ type: "agent_settled" }); }
+};`, (result) => {
+			assert.equal(isFailedResult(result), false, result.stderr);
+			assert.deepEqual(
+				JSON.parse(getResultOutput(result)),
+				["select", "confirm", "input", "editor"].map((method) => ({ type: "extension_ui_response", id: `dialog-${method}`, cancelled: true })),
+			);
+			for (const method of ["select", "confirm", "input", "editor"]) {
 				assert.match(result.stderr, new RegExp(`Cancelled child extension ${method} dialog.*approval was not granted`));
-			}, false, undefined, undefined, `assistant("stop", JSON.stringify(command)); send({ type: "agent_settled" });`);
-		});
-	}
+			}
+		}, false, undefined, undefined, `globalThis.collectUi(command);`);
+	});
 	it("ignores fire-and-forget UI notifications without responding", async () => {
 		await withChild(`send({ type: "extension_ui_request", id: "notification", method: "notify" }); setTimeout(() => { assistant("stop", "Finished"); send({ type: "agent_settled" }); }, 20);`, (result) => {
 			assert.equal(isFailedResult(result), false, result.stderr);

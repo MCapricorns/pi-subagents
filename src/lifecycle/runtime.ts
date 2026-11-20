@@ -27,7 +27,7 @@ import type { IsolationMode, WorktreeFinalization, WorktreeIsolation } from "../
 
 export type ThreadState = "queued" | "running" | "interrupting" | "parked" | "completed" | "failed" | "stopped";
 
-export type ThreadLifecycleOperation = "stop" | "settle";
+type ThreadLifecycleOperation = "stop" | "settle";
 
 export interface SubagentThread {
 	/** Stable manifest identity; display ids are local to a Pi window. */

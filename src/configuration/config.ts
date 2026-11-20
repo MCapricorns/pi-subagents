@@ -4,7 +4,7 @@ import { mkdir, readFile, rename, rm, writeFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import { getAgentDir, withFileMutationQueue } from "@earendil-works/pi-coding-agent";
 
-export const CONFIG_VERSION = 2;
+const CONFIG_VERSION = 2;
 export const BUILTIN_AGENT_NAMES = ["researcher", "worker"] as const;
 export type AgentName = (typeof BUILTIN_AGENT_NAMES)[number];
 const THINKING_LEVEL_VALUES = ["off", "minimal", "low", "medium", "high", "xhigh", "max"] as const;
@@ -13,7 +13,7 @@ export const DEFAULT_THINKING_LEVEL: ThinkingLevel = "medium";
 export const DEFAULT_MAX_RESULT_LINES = 40;
 export const DEFAULT_IDLE_TIMEOUT_SEC = 1800;
 
-export interface AgentSettings {
+interface AgentSettings {
 	/** Missing follows the main model. */
 	model?: string;
 	thinking: ThinkingLevel;
@@ -86,7 +86,7 @@ async function writeConfig(config: SubagentsConfig, configPath: string): Promise
 	}
 }
 
-export type ConfigInitialization = "created" | "reset" | "replaced-unreadable" | "repaired";
+type ConfigInitialization = "created" | "reset" | "replaced-unreadable" | "repaired";
 
 /** Called at startup and setup. A reset affects this config file only, never recovery artifacts.
  * Legacy shapes are always replaced (the upgrade path). An unreadable file or an invalid

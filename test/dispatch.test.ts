@@ -2,8 +2,7 @@ import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import type { SubagentsConfig } from "../src/configuration/config.ts";
-import { isWriteCapableAgent, loadBuiltinAgents, type AgentConfig } from "../src/delegation/agents.ts";
-import { defaultIsolationMode } from "../src/delegation/dispatch.ts";
+import { loadBuiltinAgents, type AgentConfig } from "../src/delegation/agents.ts";
 import { createRuntime, type SubagentThread } from "../src/lifecycle/runtime.ts";
 import { findDuplicateDispatch, type PhaseLeaseSource } from "../src/delegation/prompt.ts";
 import { buildResumePrompt } from "../src/execution/spawn.ts";
@@ -51,15 +50,6 @@ function dispatcher(threads: PhaseLeaseSource[]) {
 	});
 	return { runtime, start };
 }
-
-describe("isolation policy", () => {
-	it("keeps the lightweight reader on the shared checkout", () => {
-		const researcher = loadBuiltinAgents().find((agent) => agent.name === "researcher");
-		assert.ok(researcher);
-		assert.equal(isWriteCapableAgent(researcher), false);
-		assert.equal(defaultIsolationMode(researcher.name), "shared");
-	});
-});
 
 describe("fresh write capability", () => {
 	it("rejects explicit researcher worktree isolation before allocation", async () => {
@@ -286,6 +276,85 @@ describe("duplicate dispatch", () => {
 			);
 			assert.equal(runtime.threads.size, 0);
 		} finally {
+			await runtime.shutdown();
+			monitor.clear();
+		}
+	});
+
+	it("enforces the five-subagent concurrency limit atomically while ignoring settling and parked threads", async () => {
+		const { registerSubagentTool } = await import("../src/delegation/dispatch.ts");
+		let tool: any;
+		const pi = {
+			on: () => undefined,
+			getActiveTools: () => ["read", "write"],
+			getAllTools: () => [],
+			registerTool: (value: any) => { tool = value; },
+			sendMessage: () => undefined,
+		} as unknown as ExtensionAPI;
+		const runtime = createRuntime(pi, `${process.cwd()}/.pi-test/config.json`);
+		// 3 live runs + non-active settling/parked/completed/stopped threads => 2 free slots.
+		runtime.threads.set(1, source({ id: 1, task: "Active 1", state: "running" }) as unknown as SubagentThread);
+		runtime.threads.set(2, source({ id: 2, task: "Active 2", state: "queued" }) as unknown as SubagentThread);
+		runtime.threads.set(3, source({ id: 3, task: "Active 3", state: "interrupting" }) as unknown as SubagentThread);
+		runtime.threads.set(4, source({ id: 4, task: "Settling 4", state: "running", lifecycleOperation: "settle" }) as unknown as SubagentThread);
+		runtime.threads.set(5, source({ id: 5, task: "Parked 5", state: "parked" }) as unknown as SubagentThread);
+		runtime.threads.set(6, settledSource({ id: 6, task: "Completed 6" }) as unknown as SubagentThread);
+		runtime.threads.set(7, source({ id: 7, task: "Stopped 7", state: "stopped", retired: true, lifecycleOperation: "stop" }) as unknown as SubagentThread);
+		let startedCount = 0;
+		registerSubagentTool(pi, runtime, {
+			setEnvironment() {},
+			makeDetails: (mode) => (results) => ({ mode, results }),
+			finishRun() {},
+			makeLiveHandler: () => () => undefined,
+			async startBackground(agentName, task) {
+				startedCount++;
+				return {
+					agent: agentName,
+					task,
+					runId: 100 + startedCount,
+					exitCode: -1,
+					messages: [],
+					stderr: "",
+					usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, cost: 0, contextTokens: 0, turns: 0 },
+				};
+			},
+		});
+		const ctx = {
+			cwd: process.cwd(),
+			scopedModels: [], modelRegistry: { getAvailable: () => [] },
+			ui: { notify: () => undefined },
+		};
+		try {
+			await assert.rejects(
+				tool.execute("call-over-batch", {
+					tasks: Array.from({ length: 6 }, (_, index) => ({ agent: "researcher", task: `Batch task ${index}` })),
+				}, new AbortController().signal, () => undefined, ctx),
+				/requested 6 tasks, exceeding the maximum concurrency of 5/u,
+			);
+			assert.equal(startedCount, 0);
+
+			await assert.rejects(
+				tool.execute("call-over-active", {
+					tasks: [
+						{ agent: "researcher", task: "Disjoint A" },
+						{ agent: "researcher", task: "Disjoint B" },
+						{ agent: "researcher", task: "Disjoint C" },
+					],
+				}, new AbortController().signal, () => undefined, ctx),
+				/3\/5 subagents are already active \(#1, #2, #3\), leaving 2 free slots for 3 requested tasks/u,
+			);
+			assert.equal(startedCount, 0, "batch admission must reject atomically before starting any task");
+
+			const admitted = await tool.execute("call-fits-slots", {
+				tasks: [
+					{ agent: "researcher", task: "Disjoint A" },
+					{ agent: "researcher", task: "Disjoint B" },
+				],
+			}, new AbortController().signal, () => undefined, ctx);
+			assert.equal(startedCount, 2);
+			assert.equal(admitted.details.results.length, 2);
+		} finally {
+			runtime.threads.clear();
 			await runtime.shutdown();
 			monitor.clear();
 		}

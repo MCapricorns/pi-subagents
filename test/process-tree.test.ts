@@ -26,45 +26,39 @@ console.log("fixture survived");
 }
 
 describe("Windows process-tree termination", () => {
-	for (const force of [false, true]) {
-		for (const caller of ["timer", "stop"]) {
-			it(`falls back after native taskkill ENOMEM from ${caller} (force=${force})`, () => {
-				runFixture(`
-let launches = 0;
-// Keep Node's own synchronous spawn failure path without launching taskkill.
-process.binding("process_wrap").Process.prototype.spawn = function () {
- launches++;
- return process.binding("uv").UV_ENOMEM;
-};
-${caller === "timer"
- ? `await new Promise((resolve) => setTimeout(() => { terminateProcessTree(proc, ${force}); resolve(); }, 0));`
- : `void (async () => { terminateProcessTree(proc, ${force}); })();
-await new Promise((resolve) => setImmediate(resolve));`}
-assert.equal(launches, 1);
-assert.deepEqual(signals, [${JSON.stringify(force ? "SIGKILL" : "SIGTERM")}]);
-`);
-			});
-		}
-	}
+	it("falls back to direct signals across taskkill spawn and close failures", () => {
+		runFixture(`
+const nativeSpawn = process.binding("process_wrap").Process.prototype.spawn;
+for (const force of [false, true]) {
+ signals.length = 0;
+ let launches = 0;
+ process.binding("process_wrap").Process.prototype.spawn = function () {
+  launches++;
+  return process.binding("uv").UV_ENOMEM;
+ };
+ terminateProcessTree(proc, force);
+ assert.equal(launches, 1);
+ assert.deepEqual(signals, [force ? "SIGKILL" : "SIGTERM"]);
+}
+process.binding("process_wrap").Process.prototype.spawn = nativeSpawn;
 
-	for (const outcome of ["error", "nonzero close", "successful close", "listener failure"]) {
-		it(`preserves the direct-kill fallback policy for taskkill ${outcome}`, () => {
-			runFixture(`
-const killer = new EventEmitter();
-childProcess.spawn = (command, args, options) => {
- assert.equal(command, "taskkill");
- assert.deepEqual(args, ["/pid", "12345", "/t", "/f"]);
- assert.deepEqual(options, { stdio: "ignore", windowsHide: true });
- return killer;
-};
-syncBuiltinESMExports();
-${outcome === "listener failure" ? `killer.once = () => { throw new Error("listener installation failed"); };` : ""}
-terminateProcessTree(proc, false);
-${outcome === "error" ? `killer.emit("error", new Error("taskkill unavailable"));`
- : outcome === "nonzero close" ? `killer.emit("close", 1);`
- : outcome === "successful close" ? `killer.emit("close", 0);` : ""}
-assert.deepEqual(signals, ${outcome === "successful close" ? "[]" : '["SIGTERM"]'});
+for (const outcome of ["error", "nonzero close", "successful close", "listener failure"]) {
+ signals.length = 0;
+ const killer = new EventEmitter();
+ childProcess.spawn = (command, args, options) => {
+  assert.equal(command, "taskkill");
+  assert.deepEqual(args, ["/pid", "12345", "/t", "/f"]);
+  assert.deepEqual(options, { stdio: "ignore", windowsHide: true });
+  return killer;
+ };
+ syncBuiltinESMExports();
+ if (outcome === "listener failure") killer.once = () => { throw new Error("listener installation failed"); };
+ terminateProcessTree(proc, false);
+ if (outcome === "error") killer.emit("error", new Error("taskkill unavailable"));
+ else if (outcome === "nonzero close") killer.emit("close", 1);
+ else if (outcome === "successful close") killer.emit("close", 0);
+ assert.deepEqual(signals, outcome === "successful close" ? [] : ["SIGTERM"], outcome);
+}
 `);
-		});
-	}
+	});
 });

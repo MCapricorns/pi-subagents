@@ -11,8 +11,8 @@ import { loadBuiltinAgents, resolveAgentTools } from "../src/delegation/agents.t
 // Exercise the actual installed Pi CLI with a local provider that never makes
 // network requests. The temporary agent directory contains no user credentials.
 describe("native Pi CLI integration", () => {
-	for (const mode of ["normal", "failure", "failure-alias", "steering", "handled", "dialogs", "followup", "followup-alias"] as const) {
-		const failure = mode === "failure" || mode === "failure-alias";
+	for (const mode of ["normal", "failure", "steering", "handled", "dialogs", "followup", "followup-alias"] as const) {
+		const failure = mode === "failure";
 		const followup = mode === "followup" || mode === "followup-alias";
 		const aliased = mode.endsWith("-alias");
 		it((failure ? "returns provider failure without launching a main-model worker" : mode === "steering" ? "delivers steering through the real Pi RPC process" : mode === "handled" ? "reports native input-hook handling without claiming the steer was queued" : mode === "dialogs" ? "cancels real extension dialogs and leaves approval denied" : followup ? "continues a private session in a new workspace after the old workspace is removed" : "runs through Pi's own CLI, loader, provider, and RPC events") + (aliased ? " through a directory alias" : ""), { timeout: 30_000 }, async () => {

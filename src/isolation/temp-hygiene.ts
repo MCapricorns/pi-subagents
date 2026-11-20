@@ -82,7 +82,7 @@ export function readTempOwnerMarker(dir: string): TempOwner | undefined {
 	}
 }
 
-export interface SweepOptions {
+interface SweepOptions {
 	now?: number;
 	/** Injectable pid liveness probe for tests. */
 	isAlive?: (pid: number) => boolean;

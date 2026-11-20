@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { execFile, spawn, type ChildProcess } from "node:child_process";
 import { existsSync } from "node:fs";
-import fsPromises, { mkdir, mkdtemp, readFile, rename, rm, symlink, writeFile } from "node:fs/promises";
+import fsPromises, { mkdir, mkdtemp, readFile, rename, rm, stat, symlink, utimes, writeFile } from "node:fs/promises";
 import { syncBuiltinESMExports } from "node:module";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -339,6 +339,35 @@ describe("recovery announcement mutation", () => {
 				removal.mock.restore();
 				syncBuiltinESMExports();
 			}
+		});
+	});
+
+	it("reads only the current recovery manifest path and preserves retired role thread records without rewriting", async () => {
+		await fixture(async (root, configPath, cwd) => {
+			const currentGroup = join(getProjectRoot(configPath, cwd), "worktrees", "pi-subagent-worktree-2");
+			const current: RecoveryRecord = {
+				durableId: "fixture-2", runId: 2, createdAt: 2_000, integrated: false, worktreePath: join(currentGroup, "worktree"), error: "current",
+			};
+			await persistRecoveryRecords(configPath, [current]);
+			const legacyPath = join(root, "agent", "pi-subagents-recovery.json");
+			await writeFile(legacyPath, JSON.stringify({ version: 1, records: [{ ...current, runId: 1, error: "legacy" }] }), "utf8");
+			assert.equal(existsSync(legacyPath), true);
+			assert.deepEqual(await readRecoveryRecords(configPath), [current]);
+
+			const manifestPath = getThreadsManifestPath(configPath, cwd);
+			const retiredRecords = ["reviewer", "sentinel"].map((agentName, index) => ({
+				durableId: `retired-${index + 1}`, runId: index + 1, createdAt: 1_000, updatedAt: 2_000, generation: 1,
+				agentName, task: `Original ${agentName} brief`, cwd, executionCwd: cwd, isolation: "shared", state: "parked",
+				elapsedMs: 10, childPids: [], resultSummary: { agent: agentName, task: "Original", exitCode: 1, failed: true, output: "Evidence" },
+			}));
+			await mkdir(getProjectRoot(configPath, cwd), { recursive: true });
+			await writeFile(manifestPath, JSON.stringify({ version: 1, records: retiredRecords }));
+			const time = new Date("2000-01-01T00:00:00Z");
+			await utimes(manifestPath, time, time);
+			const before = (await stat(manifestPath)).mtimeMs;
+			const restored = await readThreadRecords(configPath);
+			assert.deepEqual(restored.map((record) => record.agentName), ["reviewer", "sentinel"]);
+			assert.equal((await stat(manifestPath)).mtimeMs, before);
 		});
 	});
 });

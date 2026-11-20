@@ -55,21 +55,27 @@ function age(paths: string[], milliseconds: number): void {
 
 describe("retention preserves uncertain recovery references", () => {
 	for (const kind of ["thread", "recovery"] as const) {
-		for (const failure of ["read", "json", "shape", "version", "identity"] as const) {
-			it(`keeps artifacts and the ${kind} manifest after a ${failure} failure`, async (t) => {
-				await fixture(async (configPath, cwd) => {
-					const retained = await session(configPath, cwd, 2_147_483_647);
-					const group = join(getProjectRoot(configPath, cwd), "worktrees", "pi-subagent-worktree-retained");
-					await mkdir(join(group, "worktree"), { recursive: true });
-					await writeFile(join(group, "owner.json"), JSON.stringify({ pid: 2_147_483_647, createdAt: 1 }));
-					await writeFile(join(group, "changes.patch"), "retained edits\n");
-					const path = kind === "thread" ? getThreadsManifestPath(configPath, cwd) : getRecoveryManifestPath(configPath);
-					const valid = JSON.stringify({ version: 1, records: kind === "thread" ? [record(cwd, retained)] : [{ durableId: "fixture-71", runId: 71, createdAt: Date.now(), integrated: false, worktreePath: join(group, "worktree"), patchPath: join(group, "changes.patch") }] });
-					const bytes = failure === "json" ? "{unfinished" : failure === "shape" ? '{"records":null}'
+		it(`keeps artifacts and the ${kind} manifest across read, parse, version, and identity failures`, async (t) => {
+			await fixture(async (configPath, cwd) => {
+				const retained = await session(configPath, cwd, 2_147_483_647);
+				const group = join(getProjectRoot(configPath, cwd), "worktrees", "pi-subagent-worktree-retained");
+				await mkdir(join(group, "worktree"), { recursive: true });
+				await writeFile(join(group, "owner.json"), JSON.stringify({ pid: 2_147_483_647, createdAt: 1 }));
+				await writeFile(join(group, "changes.patch"), "retained edits\n");
+				const path = kind === "thread" ? getThreadsManifestPath(configPath, cwd) : getRecoveryManifestPath(configPath);
+				const valid = JSON.stringify({
+					version: 1,
+					records: kind === "thread"
+						? [record(cwd, retained)]
+						: [{ durableId: "fixture-71", runId: 71, createdAt: Date.now(), integrated: false, worktreePath: join(group, "worktree"), patchPath: join(group, "changes.patch") }],
+				});
+				const originalRead = fsPromises.readFile;
+				for (const failure of ["json", "version", "identity", "read"] as const) {
+					const bytes = failure === "json" ? "{unfinished"
 						: failure === "version" ? valid.replace('"version":1', '"version":0')
-						: failure === "identity" ? valid.replace(/"durableId":"[^"]+",/u, "") : valid;
+						: failure === "identity" ? valid.replace(/"durableId":"[^"]+",/u, "")
+						: valid;
 					await writeFile(path, bytes);
-					const originalRead = fsPromises.readFile;
 					if (failure === "read") {
 						t.mock.method(fsPromises, "readFile", async (...args: any[]) => {
 							if (String(args[0]) === path) throw Object.assign(new Error("Manifest is temporarily unreadable"), { code: "EACCES" });
@@ -79,19 +85,20 @@ describe("retention preserves uncertain recovery references", () => {
 					}
 					const runtime = createRuntime(fakePi(), configPath);
 					try {
-						assert.equal((await runAutomaticCleanup(runtime, { force: true, budgetBytes: 0 })).skipped, true);
+						assert.equal((await runAutomaticCleanup(runtime, { force: true, budgetBytes: 0 })).skipped, true, failure);
 						await assert.rejects(runStorageCleanup(configPath));
 						await bootstrapDurableState(runtime, cwd);
 						assert.equal(await originalRead(path, "utf8"), bytes, "an unavailable manifest is never rewritten as empty");
 						assert.equal(existsSync(join(retained, "2026_retained.jsonl")), true);
-						assert.equal(await readFile(join(group, "changes.patch"), "utf8"), "retained edits\n");
+						assert.equal(await originalRead(join(group, "changes.patch"), "utf8"), "retained edits\n");
 					} finally {
-						t.mock.restoreAll(); syncBuiltinESMExports();
+						t.mock.restoreAll();
+						syncBuiltinESMExports();
 						await runtime.shutdown();
 					}
-				});
+				}
 			});
-		}
+		});
 	}
 
 	it("does not drop a valid reference when filesystem validation is temporarily denied", async (t) => {

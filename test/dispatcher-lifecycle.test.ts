@@ -56,7 +56,7 @@ describe("dispatcher completion delivery", () => {
 		}
 	});
 
-	it("starts eight disjoint shared writers in one repository before any finishes", { timeout: 45_000 }, async (t) => {
+	it("starts five disjoint shared writers concurrently, rejects a sixth while full, and admits new work after settlement", { timeout: 45_000 }, async (t) => {
 		const root = await mkdtemp(join(tmpdir(), "pi-subagents-concurrent-shared-"));
 		const previousScript = process.argv[1];
 		const pi = { on: () => undefined, getActiveTools: () => ["write"], getAllTools: () => [], sendMessage: () => undefined } as unknown as ExtensionAPI;
@@ -90,20 +90,29 @@ process.stdin.on("data", (chunk) => {
 			process.argv[1] = child;
 			const core = createDispatchCore(runtime);
 			core.setEnvironment({ ctx: { cwd: root, scopedModels: [], modelRegistry: { getAvailable: () => [] }, ui: { notify: () => undefined } } as unknown as ExtensionContext, config: DEFAULT_CONFIG, agents: loadBuiltinAgents() });
-			const starts = await Promise.all(Array.from({ length: 8 }, (_, id) => core.startBackground("worker", "Write independent file " + id, root, "shared")));
-			assert.ok(starts.every((result) => result.runId !== undefined && result.exitCode === -1));
-			// Wait for the child barrier within the overall test timeout. Cold process
-			// startup under the full suite is not a scheduler concurrency limit.
-			while ((await readdir(root)).filter((name) => name.startsWith("started-")).length < 8) {
+			const starts = await Promise.all(Array.from({ length: 6 }, (_, id) => core.startBackground("worker", "Write independent file " + id, root, "shared")));
+			assert.ok(starts.slice(0, 5).every((result) => result.runId !== undefined && result.exitCode === -1));
+			assert.equal(starts[5]?.exitCode, 1);
+			assert.match(starts[5]?.errorMessage ?? "", /concurrency limit of 5 active subagents is full/u);
+			assert.equal(runtime.threads.size, 5);
+			// Wait for all five concurrent children to reach the barrier before any finishes.
+			while ((await readdir(root)).filter((name) => name.startsWith("started-")).length < 5) {
 				t.signal.throwIfAborted();
-				assert.deepEqual([...runtime.settledRuns.values()].filter((result) => result.exitCode !== 0).map((result) => result.errorMessage ?? result.stderr), [], "all concurrent children must start successfully");
+				assert.deepEqual([...runtime.settledRuns.values()].filter((result) => result.exitCode !== 0).map((result) => result.errorMessage ?? result.stderr), [], "all five concurrent children must start successfully");
 				await new Promise((resolve) => setTimeout(resolve, 10));
 			}
 			assert.equal(runtime.settledRuns.size, 0);
 			await writeFile(join(root, "release"), "");
 			await runtime.backgroundQueue.waitForIdle();
-			assert.equal(runtime.settledRuns.size, 8);
+			assert.equal(runtime.settledRuns.size, 5);
 			assert.ok([...runtime.settledRuns.values()].every((result) => result.exitCode === 0));
+
+			// Once the five runs settle, slots reopen for remaining phases.
+			const sixth = await core.startBackground("worker", "Write independent file 5", root, "shared");
+			assert.ok(sixth.runId !== undefined && sixth.exitCode === -1);
+			await runtime.backgroundQueue.waitForIdle();
+			assert.equal(runtime.settledRuns.size, 6);
+			assert.equal(runtime.settledRuns.get(sixth.runId)?.exitCode, 0);
 		} finally {
 			process.argv[1] = previousScript;
 			await writeFile(join(root, "release"), "");

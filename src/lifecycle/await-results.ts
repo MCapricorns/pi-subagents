@@ -8,7 +8,7 @@ import type { SubagentRuntime } from "./runtime.ts";
 import { projectResultsRoot } from "./thread-shared.ts";
 
 export const WaitSchema = Type.Optional(Type.Boolean({
-	description: "Wait for runs started by this call and return their results once, after integration. Defaults to true in one-shot print/JSON sessions, false in TUI/RPC. Use true when the next step depends on the result; false to continue independent work. Cancelling the parent stops unfinished runs without background wake-ups.",
+	description: "Omit (false in TUI/RPC) so subagents run concurrently in the background while main continues disjoint work; completions wake main automatically after integration. Defaults to true only in one-shot print/JSON sessions. Set true only when no disjoint main work remains and planning the next step requires this result. Cancelling the parent stops unfinished runs without background wake-ups.",
 }));
 
 /** In-turn wait for a new run or completed-run follow-up. Registration resolves it without a model-chosen

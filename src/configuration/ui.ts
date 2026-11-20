@@ -294,7 +294,7 @@ export function promptSelectOne(
 	);
 }
 
-export interface RoleSettingsView {
+interface RoleSettingsView {
 	role: AgentName;
 	model: string;
 	thinking: string;

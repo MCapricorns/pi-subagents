@@ -24,6 +24,8 @@ import type { SubagentRuntime, SubagentThread } from "../lifecycle/runtime.ts";
 import { cancelActiveWork } from "../lifecycle/cancellation.ts";
 import { awaitRunResults, WaitSchema } from "../lifecycle/await-results.ts";
 import { createDispatchCore, type DispatchCore } from "../lifecycle/dispatch-core.ts";
+import { concurrencyAdmissionConflict } from "../lifecycle/thread-shared.ts";
+import { MAX_CONCURRENT_SUBAGENTS } from "../execution/background.ts";
 import {
 	getResultOutput,
 	isFailedResult,
@@ -37,7 +39,7 @@ const NON_BLANK_TASK_OPTIONS = { minLength: 1, pattern: "\\S" } as const;
 const ISOLATION_DESCRIPTION =
 	"Usually omit: implementation uses an automatic Git worktree when a committed HEAD is available; read-only research uses the current directory. Override worktree to require isolation, or shared to write directly in the caller's checkout. Not a sandbox.";
 
-export const IsolationSchema = Type.Optional(
+const IsolationSchema = Type.Optional(
 	stringEnum(["shared", "worktree"] as const, { description: ISOLATION_DESCRIPTION }),
 );
 
@@ -61,7 +63,10 @@ const SubagentParams = Type.Object({
 	task: Type.Optional(
 		Type.String({ ...NON_BLANK_TASK_OPTIONS, description: `${TASK_BRIEF_DESCRIPTION} (single mode)` }),
 	),
-	tasks: Type.Optional(Type.Array(TaskItem, { description: "Independently justified, disjoint phases for parallel execution" })),
+	tasks: Type.Optional(Type.Array(TaskItem, {
+		maxItems: MAX_CONCURRENT_SUBAGENTS,
+		description: `Up to ${MAX_CONCURRENT_SUBAGENTS} independent, disjoint phases to execute concurrently in one batch (max ${MAX_CONCURRENT_SUBAGENTS} active subagents total). Batch independent work together instead of dispatching one by one.`,
+	})),
 	cwd: Type.Optional(Type.String({ description: "Working directory for the agent process (single mode)" })),
 	isolation: Type.Optional(stringEnum(["shared", "worktree"] as const, {
 		description: `${ISOLATION_DESCRIPTION} In parallel mode this is the default for tasks that omit their own isolation.`,
@@ -124,7 +129,7 @@ function parallelAdmissionConflict(
 			return `tasks[${task.index}] duplicates ${duplicate.kind} run #${owner.id} (${owner.agentName}). ${duplicateDispatchRemedy(owner)}`;
 		}
 	}
-	return undefined;
+	return concurrencyAdmissionConflict(runtime, tasks.length);
 }
 
 /** One compact tool-card row: status, run id, agent, model route, thinking,
@@ -162,7 +167,7 @@ export function registerSubagentTool(
 	pi.registerTool({
 		name: "subagent",
 		label: "Subagent",
-		description: "Dispatch workers to execute main's plan: worker implements and verifies; researcher retrieves read-only evidence. Main reviews the integrated changes and owns acceptance. Use tasks for independent phases. Duplicate phases are rejected before allocation. Omit isolation for automatic selection. Use wait:true for dependencies; print/JSON sessions wait by default. Background results wake main.",
+		description: `Dispatch workers to execute main's plan (at most ${MAX_CONCURRENT_SUBAGENTS} active subagents concurrently): worker implements and verifies; researcher retrieves read-only evidence. Main reviews integrated changes and owns acceptance. Batch independent phases in one parallel tasks call (up to ${MAX_CONCURRENT_SUBAGENTS}) so they run together — never serialize independent work one by one, overlap writers, or repeat a leased scope in main or another subagent. Duplicate phases are rejected before allocation. Omit isolation for automatic selection. Omit wait (background by default) so main continues disjoint work immediately while subagents run; completions wake main automatically. Use wait:true only when no disjoint main work remains and planning requires the result (print/JSON sessions wait by default).`,
 		// Admission and lease reservation finish synchronously before child startup.
 		// Awaited runs must not block unrelated dispatch calls.
 		exposure: "model-only",
@@ -247,9 +252,9 @@ export function registerSubagentTool(
 				};
 			}
 
-			// Sub-agents run detached from the foreground turn: the editor stays
-			// available for disjoint orchestration while the launch receipt leases
-			// each delegated phase. Independent child processes start without a cap.
+			// Sub-agents run detached from the foreground turn: the editor and main
+			// remain free for disjoint work while the launch receipt leases each phase.
+			// Up to MAX_CONCURRENT_SUBAGENTS independent child processes run concurrently.
 			if (hasTasks) {
 				const prepared = prepareDispatchTasks(
 					tasks.map((item) => ({ ...item, isolation: item.isolation ?? params.isolation })),

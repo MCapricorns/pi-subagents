@@ -58,7 +58,7 @@ const RESULT_SUMMARY_MAX_CHARS = 4_000;
  * that matters here survives a tolerance this wide. */
 const BOOT_ID_TOLERANCE_MS = 60_000;
 
-export interface ThreadResultSummary {
+interface ThreadResultSummary {
 	agent: string;
 	task: string;
 	exitCode: number;

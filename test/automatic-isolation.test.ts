@@ -73,9 +73,7 @@ createInterface({ input: process.stdin }).on("line", (line) => {
 describe("automatic isolation and current roles", () => {
 	it("selects isolation by role and explicit override", () => {
 		assert.equal(defaultIsolationMode("worker"), "worktree");
-		for (const name of ["researcher"]) {
-			assert.equal(defaultIsolationMode(name), "shared");
-		}
+		assert.equal(defaultIsolationMode("researcher"), "shared");
 		assert.equal(defaultIsolationMode("worker", "shared"), "shared");
 		assert.equal(defaultIsolationMode("worker", "worktree"), "worktree");
 	});

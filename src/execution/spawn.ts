@@ -250,7 +250,7 @@ async function createSessionDir(root: string): Promise<string> {
 	return dir;
 }
 
-export interface RunSingleOptions {
+interface RunSingleOptions {
 	defaultCwd: string;
 	agent: AgentConfig;
 	agentName: string;

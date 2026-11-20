@@ -62,7 +62,7 @@ export function formatUsage(usage: UsageStats): string {
 	return [turns, formatUsageCompact(usage)].filter(Boolean).join(" ");
 }
 
-export interface CompletionFormatOptions {
+interface CompletionFormatOptions {
 	/** Project-scoped directory the full result is written to when the output
 	 * is truncated: <projectRoot>/results. */
 	resultRoot?: string;

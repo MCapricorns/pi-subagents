@@ -60,7 +60,7 @@ export type SubagentLiveEvent =
 	| { kind: "thinking" }
 	| { kind: "text" };
 
-export type RunControlPhase =
+type RunControlPhase =
 	| "queued"
 	| "starting"
 	| "running"

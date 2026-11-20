@@ -17,7 +17,7 @@ import type { SubagentRuntime } from "../lifecycle/runtime.ts";
 import { isProcessAlive, readTempOwnerMarker, sweepProjectDurableDirs, sweepProjectTempDirs } from "./temp-hygiene.ts";
 
 /** Bytes a directory tree occupies, without following symlinks. */
-export function directoryBytes(path: string): number {
+function directoryBytes(path: string): number {
 	let total = 0;
 	const stack = [path];
 	while (stack.length > 0) {
@@ -45,7 +45,7 @@ export function directoryBytes(path: string): number {
 	return total;
 }
 
-export interface CleanupUsage {
+interface CleanupUsage {
 	/** Absolute path of the extension's durable root. */
 	root: string;
 	/** Per-project usage, largest first. */
@@ -117,7 +117,7 @@ function removeEmptySessionCopies(path: string, claimed: readonly string[]): voi
 	}
 }
 
-export interface CleanupResult {
+interface CleanupResult {
 	before: CleanupUsage;
 	after: CleanupUsage;
 	/** Bytes actually reclaimed, measured rather than estimated. */
@@ -178,7 +178,7 @@ export function formatBytes(bytes: number): string {
 /** Sessions of settled runs are kept only so a follow-up can resume them. After
  * this window they are pure disk cost: `subagent_message` with
  * `context: "summary"` still works, and rework usually starts long before it. */
-export const SETTLED_SESSION_MAX_AGE_MS = 30 * 60 * 1_000;
+const SETTLED_SESSION_MAX_AGE_MS = 30 * 60 * 1_000;
 
 /** Recent sessions are never reclaimed regardless of budget: a follow-up can
  * legitimately arrive seconds after settlement. */
@@ -190,11 +190,11 @@ const AUTO_CLEANUP_INTERVAL_MS = 5 * 60 * 1_000;
 
 /** Upper bound for one project's artifacts; the oldest settled sessions go
  * first until the project fits. */
-export const PROJECT_BUDGET_BYTES = 1.5 * 1024 * 1024 * 1024;
+const PROJECT_BUDGET_BYTES = 1.5 * 1024 * 1024 * 1024;
 
 let lastAutomaticCleanupAt = 0;
 
-export interface AutomaticCleanupOptions {
+interface AutomaticCleanupOptions {
 	now?: number;
 	/** Retained-session age before automatic reclamation. */
 	maxSessionAgeMs?: number;

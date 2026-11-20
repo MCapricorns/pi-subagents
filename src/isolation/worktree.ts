@@ -24,6 +24,35 @@ export type IsolationMode = "shared" | "worktree";
 
 const WORKTREE_TEMP_DIR_PREFIX = "pi-subagent-worktree-";
 
+const repositoryOperationTails = new Map<string, Promise<void>>();
+
+/** Serialize original-repository index snapshots, patch integration, and Git
+ * worktree metadata mutations per repository root so concurrent parallel workers
+ * never collide on `.git/worktrees` creation, locks, or `worktree prune` while
+ * their child processes execute in parallel inside detached worktrees. */
+function runInRepositoryWorktreeLock<T>(
+	repositoryRoot: string,
+	operation: () => Promise<T>,
+): Promise<T> {
+	const key = process.platform === "win32" ? resolve(repositoryRoot).toLowerCase() : resolve(repositoryRoot);
+	const previous = repositoryOperationTails.get(key) ?? Promise.resolve();
+	let release!: () => void;
+	const gate = new Promise<void>((resolveGate) => {
+		release = resolveGate;
+	});
+	const tail = previous.catch(() => undefined).then(() => gate);
+	repositoryOperationTails.set(key, tail);
+	return previous
+		.catch(() => undefined)
+		.then(operation)
+		.finally(() => {
+			release();
+			void tail.then(() => {
+				if (repositoryOperationTails.get(key) === tail) repositoryOperationTails.delete(key);
+			});
+		});
+}
+
 /** Short stable identity of one isolated worktree group (the mkdtemp suffix). */
 export function worktreeGroupId(worktree: Pick<WorktreeIsolation, "tempDir">): string {
 	const base = worktree.tempDir.split(/[\\/]/).filter(Boolean).pop() ?? worktree.tempDir;
@@ -32,7 +61,7 @@ export function worktreeGroupId(worktree: Pick<WorktreeIsolation, "tempDir">): s
 		: base;
 }
 
-export interface WorktreeTarget {
+interface WorktreeTarget {
 	/** Canonical cwd requested by the caller. */
 	originalCwd: string;
 	/** Canonical top-level directory of the source Git worktree. */
@@ -42,7 +71,7 @@ export interface WorktreeTarget {
 	head: string;
 }
 
-export interface WorktreeCheckpoint {
+interface WorktreeCheckpoint {
 	/** Commit checked out when this isolated generation began. */
 	baseHead: string;
 	/** Synthetic commit whose tree is the generation's complete final state. */
@@ -51,7 +80,7 @@ export interface WorktreeCheckpoint {
 	patch: Buffer;
 }
 
-export interface WorktreeCheckpointRef {
+interface WorktreeCheckpointRef {
 	baseHead: string;
 	commit: string;
 }
@@ -72,7 +101,7 @@ export interface WorktreeSnapshot {
 	checkpoint?: WorktreeCheckpointRef;
 }
 
-export interface WorktreeCreateOptions {
+interface WorktreeCreateOptions {
 	runner?: CommandRunner;
 	/** Parent directory for the worktree group: the project-scoped durable
 	 * worktrees root, so isolation never lands in the OS temp directory. */
@@ -188,7 +217,7 @@ export function isPathInside(root: string, candidate: string): boolean {
  * ("Filename too long"), so the Node removal decides the outcome and the prune
  * clears any stale registration left behind. Returns an error string when
  * artifacts still exist afterwards. */
-export async function removeWorktreeGroup(
+async function removeWorktreeGroupUnlocked(
 	paths: { originalRoot?: string; tempDir: string; worktreePath: string },
 	runner: CommandRunner = runCommand,
 ): Promise<string | undefined> {
@@ -227,6 +256,14 @@ export async function removeWorktreeGroup(
 		return error instanceof Error ? error.message : String(error);
 	}
 	return undefined;
+}
+
+export async function removeWorktreeGroup(
+	paths: { originalRoot?: string; tempDir: string; worktreePath: string },
+	runner: CommandRunner = runCommand,
+): Promise<string | undefined> {
+	if (!paths.originalRoot) return removeWorktreeGroupUnlocked(paths, runner);
+	return runInRepositoryWorktreeLock(paths.originalRoot, () => removeWorktreeGroupUnlocked(paths, runner));
 }
 
 interface RepositoryLocation {
@@ -378,7 +415,10 @@ class GitWorktreeIsolation implements WorktreeIsolation {
 			return this.finalization.then(() => undefined);
 		}
 		this.currentState = "finalizing";
-		this.discardPromise = this.removeAndPrune().then((error) => {
+		this.discardPromise = removeWorktreeGroup(
+			{ originalRoot: this.originalRoot, worktreePath: this.worktreePath, tempDir: this.tempDir },
+			this.runner,
+		).then((error) => {
 			if (error) {
 				this.currentState = "retained";
 				throw new Error(error);
@@ -470,10 +510,14 @@ class GitWorktreeIsolation implements WorktreeIsolation {
 			if (hadChanges) {
 				await writeFile(this.patchPath, diff.stdout, { flag: "wx" });
 				patchWritten = true;
-				integrated = await this.applyPatchThreeWay();
 			}
-
-			const cleanupError = await this.removeAndPrune();
+			const cleanupError = await runInRepositoryWorktreeLock(this.originalRoot, async () => {
+				if (hadChanges) integrated = await this.applyPatchThreeWay();
+				return removeWorktreeGroupUnlocked(
+					{ originalRoot: this.originalRoot, worktreePath: this.worktreePath, tempDir: this.tempDir },
+					this.runner,
+				);
+			});
 			if (cleanupError) {
 				return this.retainedResult(hadChanges, integrated, patchWritten, cleanupError);
 			}
@@ -562,14 +606,6 @@ class GitWorktreeIsolation implements WorktreeIsolation {
 		} finally {
 			await rm(indexCopy, { force: true }).catch(() => undefined);
 		}
-	}
-
-	/** Return an error string instead of throwing so applied work is never retried. */
-	private removeAndPrune(): Promise<string | undefined> {
-		return removeWorktreeGroup(
-			{ originalRoot: this.originalRoot, worktreePath: this.worktreePath, tempDir: this.tempDir },
-			this.runner,
-		);
 	}
 }
 
@@ -700,14 +736,17 @@ export async function createWorktreeIsolation(
 	const patchPath = join(tempDir, "changes.patch");
 	let added = false;
 	try {
-		const baseline = await createWorktreeBaseline(target, tempDir, runner);
-		await runGit(
-			runner,
-			target.originalRoot,
-			["worktree", "add", "--detach", worktreePath, baseline],
-			`Creating detached worktree from ${target.originalRoot}`,
-		);
-		added = true;
+		const baseline = await runInRepositoryWorktreeLock(target.originalRoot, async () => {
+			const commit = await createWorktreeBaseline(target, tempDir, runner);
+			await runGit(
+				runner,
+				target.originalRoot,
+				["worktree", "add", "--detach", worktreePath, commit],
+				`Creating detached worktree from ${target.originalRoot}`,
+			);
+			added = true;
+			return commit;
+		});
 		const isolatedCwd = target.relativeCwd ? join(worktreePath, target.relativeCwd) : worktreePath;
 		// A requested subdirectory can be untracked/empty in the source worktree;
 		// recreate the directory so the child still starts at the equivalent path.
@@ -726,28 +765,30 @@ export async function createWorktreeIsolation(
 		);
 	} catch (error) {
 		const rollbackErrors: string[] = [];
-		if (added || existsSync(worktreePath)) {
+		await runInRepositoryWorktreeLock(target.originalRoot, async () => {
+			if (added || existsSync(worktreePath)) {
+				try {
+					await runGit(
+						runner,
+						target.originalRoot,
+						["worktree", "remove", "--force", worktreePath],
+						`Rolling back isolated worktree ${worktreePath}`,
+					);
+				} catch (rollbackError) {
+					rollbackErrors.push(rollbackError instanceof Error ? rollbackError.message : String(rollbackError));
+				}
+			}
 			try {
 				await runGit(
 					runner,
 					target.originalRoot,
-					["worktree", "remove", "--force", worktreePath],
-					`Rolling back isolated worktree ${worktreePath}`,
+					["worktree", "prune"],
+					`Pruning Git worktree metadata after setup failure`,
 				);
 			} catch (rollbackError) {
 				rollbackErrors.push(rollbackError instanceof Error ? rollbackError.message : String(rollbackError));
 			}
-		}
-		try {
-			await runGit(
-				runner,
-				target.originalRoot,
-				["worktree", "prune"],
-				`Pruning Git worktree metadata after setup failure`,
-			);
-		} catch (rollbackError) {
-			rollbackErrors.push(rollbackError instanceof Error ? rollbackError.message : String(rollbackError));
-		}
+		});
 		try {
 			await rm(tempDir, { recursive: true, force: true });
 		} catch (rollbackError) {

@@ -32,18 +32,18 @@ function runFixture(source: string, nodeOptions?: string): void {
 }
 
 describe("hidden child consoles", () => {
-	for (const platform of ["darwin", "linux"]) {
-		it(`leaves ${platform} process and signal options untouched`, () => {
-			runFixture(`
+	it("leaves non-Windows process and signal options untouched", () => {
+		runFixture(`
 const assert = require("node:assert/strict");
 const cp = require("node:child_process");
 const original = [cp.ChildProcess.prototype.spawn, cp.spawnSync, cp.execFileSync, cp.execSync];
-Object.defineProperty(process, "platform", { value: ${JSON.stringify(platform)} });
-require(${JSON.stringify(preload)})();
-assert.deepEqual([cp.ChildProcess.prototype.spawn, cp.spawnSync, cp.execFileSync, cp.execSync], original);
+for (const platform of ["darwin", "linux"]) {
+ Object.defineProperty(process, "platform", { value: platform });
+ require(${JSON.stringify(preload)})();
+ assert.deepEqual([cp.ChildProcess.prototype.spawn, cp.spawnSync, cp.execFileSync, cp.execSync], original);
+}
 `);
-		});
-	}
+	});
 
 	it("installs once and keeps CommonJS and ESM synchronous exports aligned", { skip: process.platform !== "win32" }, () => {
 		runFixture(`

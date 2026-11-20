@@ -1,8 +1,7 @@
 /** Shared contracts and coordination primitives for logical sub-agent threads. */
 
 import { utimesSync } from "node:fs";
-import { realpath } from "node:fs/promises";
-import { join, resolve } from "node:path";
+import { join } from "node:path";
 import type { ExtensionContext } from "@earendil-works/pi-coding-agent";
 import type { AgentConfig } from "../delegation/agents.ts";
 import { BUILTIN_AGENT_NAMES, type AgentName, type SubagentsConfig, type ThinkingLevel } from "../configuration/config.ts";
@@ -16,8 +15,40 @@ import {
 	resolveThinkingLevel,
 } from "../configuration/models.ts";
 import type { SubagentRuntime, SubagentThread } from "./runtime.ts";
+import { MAX_CONCURRENT_SUBAGENTS } from "../execution/background.ts";
 import { getProjectRoot, type SingleResult } from "../execution/spawn.ts";
-import { resolveRepositoryRoot, type IsolationMode, type WorktreeIsolation } from "../isolation/worktree.ts";
+import type { IsolationMode, WorktreeIsolation } from "../isolation/worktree.ts";
+
+/** True while a logical thread holds one of the live concurrency slots.
+ * Settling runs (child finished, only Git integration remains), stopped runs,
+ * and restored parked records hold no live child process. */
+function isConcurrencyActiveThread(
+	thread: Pick<SubagentThread, "state" | "retired" | "lifecycleOperation">,
+): boolean {
+	if (thread.retired || thread.lifecycleOperation === "settle" || thread.lifecycleOperation === "stop") return false;
+	return thread.state === "queued" || thread.state === "running" || thread.state === "interrupting";
+}
+
+function activeConcurrencyThreads(runtime: Pick<SubagentRuntime, "threads">): SubagentThread[] {
+	return [...runtime.threads.values()].filter(isConcurrencyActiveThread);
+}
+
+export function concurrencyAdmissionConflict(
+	runtime: Pick<SubagentRuntime, "threads">,
+	requestedCount: number,
+): string | undefined {
+	if (requestedCount > MAX_CONCURRENT_SUBAGENTS) {
+		return `requested ${requestedCount} tasks, exceeding the maximum concurrency of ${MAX_CONCURRENT_SUBAGENTS}. Batch at most ${MAX_CONCURRENT_SUBAGENTS} independent, disjoint tasks at once; continue disjoint work in main and dispatch remaining phases after active runs finish.`;
+	}
+	const active = activeConcurrencyThreads(runtime);
+	const available = Math.max(0, MAX_CONCURRENT_SUBAGENTS - active.length);
+	if (requestedCount <= available) return undefined;
+	const activeIds = active.map((thread) => `#${thread.id}`).join(", ");
+	if (available === 0) {
+		return `concurrency limit of ${MAX_CONCURRENT_SUBAGENTS} active subagents is full (${activeIds} active). Do not duplicate their work; continue disjoint work in main until an active run finishes.`;
+	}
+	return `${active.length}/${MAX_CONCURRENT_SUBAGENTS} subagents are already active (${activeIds}), leaving ${available} free slot${available === 1 ? "" : "s"} for ${requestedCount} requested tasks. Dispatch at most ${available} independent task${available === 1 ? "" : "s"} now, or continue disjoint work in main until active runs finish.`;
+}
 
 /** Control operations must never wait forever on a settling generation: the
  * queue task can legitimately spend minutes in worktree finalization (bounded
@@ -35,47 +66,6 @@ export function quiesced(promise: Promise<unknown>, timeoutMs: number = CONTROL_
 			timer.unref();
 		}),
 	]);
-}
-
-const managedRepositoryRootTails = new Map<string, Promise<void>>();
-
-async function canonicalManagedRepositoryRoot(cwd: string): Promise<string> {
-	try {
-		// Repository identity does not depend on HEAD: empty repositories must
-		// serialize root and nested cwd requests under the same lane too.
-		return await resolveRepositoryRoot(cwd);
-	} catch {
-		try {
-			return await realpath(resolve(cwd));
-		} catch {
-			return resolve(cwd);
-		}
-	}
-}
-
-/** Serialize only worktree integration into the original checkout. */
-export async function runInManagedRepositoryLane<T>(
-	cwd: string,
-	task: () => Promise<T>,
-): Promise<T> {
-	const root = await canonicalManagedRepositoryRoot(cwd);
-	const key = process.platform === "win32" ? root.toLowerCase() : root;
-	const previous = managedRepositoryRootTails.get(key) ?? Promise.resolve();
-	let release!: () => void;
-	const gate = new Promise<void>((resolveGate) => {
-		release = resolveGate;
-	});
-	const tail = previous.catch(() => undefined).then(() => gate);
-	managedRepositoryRootTails.set(key, tail);
-	try {
-		await previous.catch(() => undefined);
-		return await task();
-	} finally {
-		release();
-		void tail.then(() => {
-			if (managedRepositoryRootTails.get(key) === tail) managedRepositoryRootTails.delete(key);
-		});
-	}
 }
 
 /** Best-effort recovery checkpoint. Interrupted work retains its artifacts;

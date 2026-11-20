@@ -3,7 +3,7 @@
 import { spawn } from "node:child_process";
 import { terminateProcessTree } from "../execution/process-tree.ts";
 
-export interface CommandRunOptions {
+interface CommandRunOptions {
 	cwd: string;
 	input?: Buffer;
 	signal?: AbortSignal;

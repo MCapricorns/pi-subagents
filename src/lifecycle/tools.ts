@@ -18,7 +18,7 @@ import { formatCompletionBlock } from "../presentation/format.ts";
 import { emptyUsage } from "../execution/run-control.ts";
 import { formatDuration, formatTaskSummary, monitor } from "../presentation/monitor.ts";
 import type { SubagentRuntime, SubagentThread } from "./runtime.ts";
-import { projectResultsRoot } from "./thread-shared.ts";
+import { concurrencyAdmissionConflict, projectResultsRoot } from "./thread-shared.ts";
 import { getResultError } from "../execution/spawn.ts";
 
 function renderFirstLine(result: { content?: unknown }, label: string, theme: Theme): Text {
@@ -189,7 +189,7 @@ export function registerLookupTools(pi: ExtensionAPI, runtime: SubagentRuntime, 
 	pi.registerTool({
 		name: "subagent_message",
 		label: "Subagent Message",
-		description: "Steer a running subagent, or continue a successfully completed run with a new bounded step in the same role and workspace. Steering waits for the child's RPC acknowledgement and reports queued or handled by an input hook; receipt is not proof of model execution, and status retains the latest acknowledgement. A continuation chooses its history with the context parameter. Use wait:true to receive its result in this call; one-shot print/JSON sessions wait by default.",
+		description: "Steer a running subagent, or continue a successfully completed run with a new bounded step in the same role and workspace (within the 5-active-subagent limit). Steering waits for the child's RPC acknowledgement and reports queued or handled by an input hook; receipt is not proof of model execution, and status retains the latest acknowledgement. A continuation chooses its history with the context parameter. Omit wait so main continues disjoint work in parallel without duplicating leased scopes; use wait:true only when no disjoint main work remains (one-shot print/JSON sessions wait by default).",
 		exposure: "model-only",
 		executionMode: "parallel",
 		parameters: Type.Object({
@@ -226,6 +226,8 @@ export function registerLookupTools(pi: ExtensionAPI, runtime: SubagentRuntime, 
 					: "messages require a running or successfully completed run. Results arrive automatically."}`);
 			}
 			if (!dispatchCore) return fail("Follow-up dispatch is unavailable in this process.");
+			const capacityConflict = concurrencyAdmissionConflict(runtime, 1);
+			if (capacityConflict) return fail(`Could not continue #${thread.id}: ${capacityConflict}`);
 			const context = params.context ?? "auto";
 			const sourceFile = context !== "summary" && thread.sessionDir && thread.sessionId
 				? findSessionFile(thread.sessionDir, thread.sessionId) : undefined;
@@ -280,7 +282,7 @@ export function registerLookupTools(pi: ExtensionAPI, runtime: SubagentRuntime, 
 					};
 				}
 				return {
-					content: [{ type: "text" as const, text: `${receipt} started; results arrive automatically. Continue independent work, then use the result to finish the task.` }], details,
+					content: [{ type: "text" as const, text: `${receipt} started; results arrive automatically. Do not duplicate its scope; continue disjoint work in main, then use the result to finish the task.` }], details,
 				};
 			} catch (error) {
 				if (copyDir) await rm(copyDir, { recursive: true, force: true }).catch(() => undefined);

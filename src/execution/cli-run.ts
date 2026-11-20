@@ -133,7 +133,7 @@ async function writePromptToTempFile(
 }
 
 
-export interface ChildLaunchOptions {
+interface ChildLaunchOptions {
 	agent: Pick<AgentConfig, "model" | "tools">;
 	thinkingLevel: ThinkingLevel;
 	sessionDir?: string;
@@ -180,7 +180,7 @@ export function buildChildLaunchArgs(options: ChildLaunchOptions): string[] {
 }
 
 
-export interface RunCliAttemptOptions {
+interface RunCliAttemptOptions {
 	defaultCwd: string;
 	agent: AgentConfig;
 	agentName: string;

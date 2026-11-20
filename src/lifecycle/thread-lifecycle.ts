@@ -27,10 +27,10 @@ import {
 	type SubagentLiveEvent,
 } from "../execution/spawn.ts";
 import {
+	concurrencyAdmissionConflict,
 	persistThreadCheckpoint,
 	projectResultsRoot,
 	resolveDispatchModelRoute,
-	runInManagedRepositoryLane,
 	withWorktreeSystemPrompt,
 	type DispatchEnvironment,
 	type StartBackgroundInternal,
@@ -114,6 +114,10 @@ export function createBackgroundDispatcher(options: BackgroundDispatcherOptions)
 			return failedStartResult(agentName, task,
 				`Run #${owner.id} (${owner.agentName}) already owns this logical phase (${owner.state}). ${duplicateDispatchRemedy(owner)}`);
 		}
+		const capacityConflict = concurrencyAdmissionConflict(runtime, 1);
+		if (capacityConflict) {
+			return failedStartResult(agentName, task, `Subagent dispatch rejected: ${capacityConflict}`);
+		}
 		const projectRoot = getProjectRoot(runtime.configPath, originalCwd);
 		const sessionsRoot = join(projectRoot, "sessions");
 		const worktreesRoot = join(projectRoot, "worktrees");
@@ -179,7 +183,7 @@ export function createBackgroundDispatcher(options: BackgroundDispatcherOptions)
 		if (isolation === "shared") installCurrentLifecycle();
 
 		const onLive = makeLiveHandler(runId, generation);
-		const runGeneration = async (backgroundSignal: AbortSignal): Promise<void> => {
+		const runGeneration = async (backgroundSignal: AbortSignal, releaseSlot: () => void): Promise<void> => {
 			if (runtime.threads.get(runId)?.generation !== generation) return;
 			if (isolation === "worktree" && !worktree) {
 				let prepared: WorktreeIsolation | undefined;
@@ -255,6 +259,9 @@ export function createBackgroundDispatcher(options: BackgroundDispatcherOptions)
 					errorMessage,
 					dispatchFailed: true,
 				};
+			} finally {
+				// The child process has exited; Git integration no longer holds a concurrency slot.
+				releaseSlot();
 			}
 
 			// Stale work from a retired parent owns no publication or monitor updates.
@@ -451,10 +458,7 @@ export function installThreadLifecycle(thread: SubagentThread, deps: ThreadLifec
 				"finalizing",
 				worktreeGroupId(generationWorktree),
 			);
-			generationFinalization = runInManagedRepositoryLane(
-				generationWorktree.originalRoot,
-				() => generationWorktree.finalize(),
-			);
+			generationFinalization = generationWorktree.finalize();
 		}
 		const finalization = await generationFinalization;
 		monitor.setIsolation(runId, "worktree", finalization.status, worktreeGroupId(generationWorktree));
