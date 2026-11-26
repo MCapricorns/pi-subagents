@@ -45,6 +45,8 @@ export interface SingleResult extends RunResult {}
 export interface SubagentDetails {
 	mode: "single" | "parallel";
 	results: SingleResult[];
+	/** Present on final tool results that waited for settlement. */
+	awaited?: boolean;
 }
 
 /** Text of the newest assistant message that has any. A final answer may be

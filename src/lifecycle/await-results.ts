@@ -8,7 +8,7 @@ import type { SubagentRuntime } from "./runtime.ts";
 import { projectResultsRoot } from "./thread-shared.ts";
 
 export const WaitSchema = Type.Optional(Type.Boolean({
-	description: "Omit (false in TUI/RPC) so subagents run concurrently in the background while main continues disjoint work; completions wake main automatically after integration. Defaults to true only in one-shot print/JSON sessions. Set true only when no disjoint main work remains and planning the next step requires this result. Cancelling the parent stops unfinished runs without background wake-ups.",
+	description: "Wait for results in this turn when they are needed for the next step. Defaults to false in TUI/RPC and true in print/JSON. Background results arrive after integration. Cancelling the parent stops unfinished runs.",
 }));
 
 /** In-turn wait for a new run or completed-run follow-up. Registration resolves it without a model-chosen
@@ -89,7 +89,9 @@ export async function awaitRunResults(
 				const settled = runtime.settledRuns.get(id);
 				if (settled) return `#${id} ${isFailedResult(settled) ? "failed" : "done"}`;
 				const live = monitor.findRun(id);
-				return live ? `#${id} ${statusLabel(live.status)}` : `#${id} …`;
+				if (!live) return `#${id} …`;
+				const state = live.integrationStatus === "finalizing" ? "integrating" : live.status === "failed" ? "failed" : statusLabel(live.status);
+				return `#${id} ${state}`;
 			});
 			const text = `Waiting in-turn on ${runIds.length} run${runIds.length === 1 ? "" : "s"} · ${parts.join(", ")}`;
 			// The monitor notifies on every usage and activity change; this line

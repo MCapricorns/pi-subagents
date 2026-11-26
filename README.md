@@ -23,11 +23,12 @@ integration tests use the **Pi 1.5.2 SDK**.
 The setup panel has two sections: **Researcher** for read-only research and
 **Worker** for implementation and checks. Each has its own **Model**, **Thinking**,
 and **Reset** controls. Both assignments stay visible together.
-Use ↑/↓ and Enter; Esc returns without changing a picker selection. Changes save
-immediately. The model picker supports search, paste, paging, and Tab for details.
-The menu keeps the current main model visible, highlights unavailable assignments,
-and returns focus to the setting you just edited. Long values can be paged with
-PgUp/PgDn, and narrow terminals use a compact list with the role on each row.
+Use ↑/↓ and Enter to edit. Changes save immediately. The model picker supports
+search and paste. On either screen, press Tab to inspect the full model reference
+or setting, PgUp/PgDn to page through it, and Esc to return to the list. Esc from
+the picker list cancels the selection. The setup menu highlights unavailable
+models and returns focus to the setting you just edited. Narrow terminals use a
+compact list with the role on each row.
 
 Workers initially **follow main** with **medium** thinking. Choose a separate
 worker model to use a cheaper model for execution. The extension does not guess
@@ -144,13 +145,16 @@ subagent({
 });
 ```
 
-Independent tasks use `tasks: [{ agent, task }, ...]` (up to five concurrent
-subagents total). Batch independent tasks together in one `tasks` call so they
-execute concurrently instead of running sequentially one by one. Each task can
-also specify `cwd` and `isolation`; a top-level `isolation` is the default for
-tasks that omit it. Duplicate normalized tasks in the same cwd are rejected
-while active or settled; reuse the result or continue the existing run with
-`subagent_message`.
+Use `{ agent, task }` for a single phase and `{ tasks: [{ agent, task }, ...] }`
+for a batch of independent phases. A batch can use up to five free slots and
+must omit the top-level `agent` and `task` fields. Top-level `cwd` sets the batch
+directory. A task can override it with an absolute path or a path relative to
+that directory. Top-level `isolation` is the default for tasks that omit their
+own. Duplicate normalized tasks in the same directory are rejected while an
+active or settled run owns them. Use its result or continue it with `subagent_message`.
+
+A batch receipt lists the accepted run IDs and any tasks that failed to start.
+Address the failed launches individually while the accepted runs proceed.
 
 Leave `wait` omitted (`false` in TUI/RPC) by default so subagents run in the
 background while main immediately continues its own disjoint work in parallel.
@@ -160,6 +164,10 @@ is not completion; when no disjoint work remains, main ends its turn and pauses
 until background results wake it automatically.
 Results are delivered once, after integration. Awaited failures are tool errors.
 Answers exceeding 40 lines or 8,000 characters link their full-result artifact.
+The terminal card shows live progress for awaited runs, including worktree
+integration, and gives each accepted run its own status row. Expand the tool
+output with Ctrl+O in Pi's default keybindings to read the result and recovery
+details.
 
 | Tool | Purpose |
 | --- | --- |

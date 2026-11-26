@@ -46,7 +46,7 @@ function framePanel(theme: Theme, width: number, title: string, subtitle: string
 	const border = (text: string) => theme.fg("border", text);
 	const innerWidth = Math.max(1, width - 4);
 	const topInner = Math.max(1, width - 2);
-	const titleBadge = truncateToWidth(" " + title + " ", topInner, "…");
+	const titleBadge = truncateToWidth(" " + title + " ", topInner - 1, "…");
 	const titleWidth = visibleWidth(titleBadge);
 	const topFill = Math.max(0, topInner - titleWidth - 1);
 	const row = (line = "") => border("│") + " " + padToWidth(line, innerWidth) + " " + border("│");
@@ -148,59 +148,39 @@ class Picker implements Component, Focusable {
 		const pageKeys = this.keyLabel("tui.select.pageUp") + "/" + this.keyLabel("tui.select.pageDown");
 		const page = pageKeys === "PgUp/PgDn" ? "PgUp/Dn" : pageKeys;
 		const matchCount = this.filtered.length ? (this.cursor + 1) + "/" + this.filtered.length + " matches" : "0 results";
+		const selectionKeys = `${confirm} select · ${cancel} back · Tab details`;
+		const controls = this.details
+			? [`Tab list · ${cancel} back · ${confirm} select`, `${move} scroll · ${page} page`]
+			: [visibleWidth(selectionKeys) <= innerWidth ? selectionKeys : `Tab details · ${confirm}/${cancel}`,
+				`${move} move · ${page} · ${matchCount}`];
+		const joinedControls = controls.join(" · ");
+		const footer = (visibleWidth(joinedControls) <= innerWidth ? [joinedControls] : controls)
+			.slice(0, Math.max(0, height - (this.details ? 2 : 3))).map(dim);
 
-		if (!framed && height < 8) {
-			this.pageRows = 1;
-			const item = this.filtered[this.cursor];
-			return [
-				theme.bold(this.options.title + (this.details ? " · Details" : "")),
-				...(this.details ? [] : this.search.render(innerWidth)),
-				item ? theme.fg("accent", "› ") + theme.underline(item.label + (this.isSaved(item) ? " [saved]" : "")) : "No matches. Clear or change the search.",
-			].slice(0, height).map((line) => truncateToWidth(line, width, "…"));
-		}
-
-		const navigation = move + " move · " + confirm + " select · " + cancel + " back";
-		const selectionHint = visibleWidth(navigation) <= innerWidth ? navigation : confirm + " select · " + cancel + " back · " + move;
-		const footer = this.details
-			? (innerWidth >= 56
-				? [dim(move + " scroll · " + page + " page · Tab list · " + confirm + " select · " + cancel + " back")]
-				: [dim(move + " scroll · Tab list · " + cancel + " back"), dim(page + " page · " + confirm + " select")])
-			: (innerWidth >= 64
-				? [dim(selectionHint + " · " + matchCount + " · " + page + " · Tab details")]
-				: [dim(selectionHint), dim(matchCount + " · " + page + " · Tab details")]);
-
-		const titleText = "Subagents · " + this.options.title + (this.details ? " · Details" : "");
-		const subtitle = !this.details && this.options.hint ? this.options.hint : undefined;
-		const chromeRows = framed ? (subtitle ? 4 : 3) + footer.length + 1 : 2 + footer.length;
+		const titleText = (framed ? "Subagents · " : "") + this.options.title + (this.details ? " · Details" : "");
+		const subtitle = framed && height >= 12 && !this.details && this.options.hint ? this.options.hint : undefined;
+		const chromeRows = (framed ? (subtitle ? 4 : 3) + Number(footer.length > 0) : 1) + footer.length;
+		const renderPanel = (body: string[]): string[] => framed ? framePanel(theme, width, titleText, subtitle, body, footer)
+			: [theme.bold(titleText), ...body, ...footer].slice(0, height).map((line) => truncateToWidth(line, width, "…"));
 
 		if (this.details) {
 			const budget = Math.max(1, height - chromeRows);
 			this.pageRows = budget;
 			const details = this.detailLines(innerWidth);
 			this.detailTop = Math.max(0, Math.min(this.detailTop, details.length - budget));
-			const body = details.slice(this.detailTop, this.detailTop + budget);
-			if (!framed) {
-				return [theme.bold(titleText), ...body, ...footer].map((line) => truncateToWidth(line, width, "…"));
-			}
-			return framePanel(theme, width, titleText, subtitle, body, footer);
+			return renderPanel(details.slice(this.detailTop, this.detailTop + budget));
 		}
 
-		const searchLines = [...this.search.render(innerWidth), ""];
+		const searchLines = this.search.render(innerWidth);
+		if (framed && height >= 14) searchLines.push("");
 		const item = this.filtered[this.cursor];
-		const previewLines = item?.description
-			? ["", ...wrapTextWithAnsi(item.description, innerWidth).slice(0, 3).map((line, idx, arr) => {
-				const allWrapped = wrapTextWithAnsi(item.description!, innerWidth);
-				if (idx === arr.length - 1 && allWrapped.length > arr.length) {
-					return muted(truncateToWidth(line + "…", innerWidth, "…"));
-				}
-				return muted(line);
-			})]
-			: [];
-
 		const availAfterSearch = Math.max(1, height - chromeRows - searchLines.length);
 		const minListRows = Math.min(Math.max(1, this.filtered.length), Math.min(6, availAfterSearch));
-		const detailBudget = Math.max(0, Math.min(previewLines.length, availAfterSearch - minListRows));
-		const visibleDetails = previewLines.slice(0, detailBudget);
+		const previewBudget = Math.max(0, Math.min(3, availAfterSearch - minListRows - 1));
+		const wrappedPreview = item?.description && previewBudget ? wrapTextWithAnsi(item.description, innerWidth) : [];
+		const visibleDetails = wrappedPreview.slice(0, previewBudget).map((line, index) =>
+			muted(index === previewBudget - 1 && wrappedPreview.length > previewBudget ? truncateToWidth(line + "…", innerWidth, "…") : line));
+		if (visibleDetails.length) visibleDetails.unshift("");
 		this.pageRows = Math.max(1, Math.min(PAGE_SIZE, availAfterSearch - visibleDetails.length));
 		const start = Math.max(0, Math.min(this.cursor - Math.floor(this.pageRows / 2), this.filtered.length - this.pageRows));
 		const visible = this.filtered.slice(start, start + this.pageRows);
@@ -216,16 +196,7 @@ class Picker implements Component, Focusable {
 			body.push(selected ? theme.fg("accent", "› ") + theme.underline(theme.bold(label)) : "  " + label);
 		}
 		body.push(...visibleDetails);
-
-		if (!framed) {
-			return [
-				theme.bold(titleText),
-				...(subtitle && height >= 12 ? [muted(subtitle)] : []),
-				...body,
-				...footer,
-			].map((line) => truncateToWidth(line, width, "…"));
-		}
-		return framePanel(theme, width, titleText, subtitle, body, footer);
+		return renderPanel(body);
 	}
 
 	handleInput(data: string): void {
@@ -309,6 +280,7 @@ export interface SettingsView {
 }
 
 const SETTING_FIELDS = ["model", "thinking", "reset"] as const;
+const SETTING_LABELS: Record<(typeof SETTING_FIELDS)[number], string> = { model: "Model", thinking: "Thinking", reset: "Reset" };
 export type SettingKey = `${AgentName}.${(typeof SETTING_FIELDS)[number]}`;
 const SETTING_KEYS = BUILTIN_AGENT_NAMES.flatMap((role) => SETTING_FIELDS.map((field): SettingKey => `${role}.${field}`));
 const ROLE_LABELS: Record<AgentName, string> = { researcher: "Researcher", worker: "Worker" };
@@ -316,6 +288,7 @@ const ROLE_DESCRIPTIONS: Record<AgentName, string> = { researcher: "Read-only re
 
 class RoleSettings implements Component {
 	private cursor: number;
+	private showDetails = false;
 	private detailTop = 0;
 	private detailPage = 1;
 	private readonly view: SettingsView;
@@ -348,25 +321,41 @@ class RoleSettings implements Component {
 		const active = entries[this.cursor]!;
 		const label = ROLE_LABELS[active.role];
 		const key = (action: Keybinding) => keyLabel(this.keys, action);
-		const navigation = key("tui.select.up") + key("tui.select.down") + " move · " + key("tui.select.confirm") + " edit · " + key("tui.select.cancel") + " close";
+		const movement = key("tui.select.up") + "/" + key("tui.select.down");
+		const pageKeys = key("tui.select.pageUp") + "/" + key("tui.select.pageDown");
+		const cancel = key("tui.select.cancel");
+		const confirm = key("tui.select.confirm");
+		const warning = active.view.unavailable ? "Choose an available model to resume dispatch for this role." : "";
+		const detail = active.field === "reset"
+			? `Restore ${label} to Follow main and medium thinking.`
+			: active.view[active.field];
+		const detailText = [detail, warning].filter(Boolean).join(" · ");
+		if (this.showDetails) {
+			const footer = height >= 3 ? [theme.fg("dim", `Tab/${cancel} back · ${movement} scroll · ${pageKeys} page`)] : [];
+			const heading = `${label} · ${SETTING_LABELS[active.field]}`;
+			const lines = wrapTextWithAnsi(detailText, inner);
+			this.detailPage = Math.max(1, height - (framed ? 4 : 1) - footer.length);
+			this.detailTop = Math.max(0, Math.min(this.detailTop, lines.length - this.detailPage));
+			const body = lines.slice(this.detailTop, this.detailTop + this.detailPage);
+			if (framed) return framePanel(theme, width, heading, undefined, body, footer);
+			return [theme.bold(heading), ...body, ...footer].slice(0, height).map((line) => truncateToWidth(line, width, "…"));
+		}
+		const navigation = `${confirm} edit · ${cancel} close · Tab details · ${movement} move`;
 		const rows: string[] = [];
 		for (const [index, { role, field, view }] of entries.entries()) {
 			if (framed && field === "model") {
 				if (index) rows.push("");
 				rows.push(theme.bold(ROLE_LABELS[role]) + theme.fg("muted", " · " + ROLE_DESCRIPTIONS[role]));
 			}
-			const name = field === "model" ? "Model" : field === "thinking" ? "Thinking" : "Reset";
+			const name = SETTING_LABELS[field];
 			const value = field === "model" ? view.model : field === "thinking" ? view.thinking : "Follow main · medium";
 			const prefix = framed ? name.padEnd(10) : ROLE_LABELS[role] + " " + name + "  ";
-			const warning = field === "model" && view.unavailable ? " [unavailable]" : "";
-			const line = truncateToWidth(prefix + value, Math.max(1, inner - 2 - visibleWidth(warning)), "…") + theme.fg("warning", warning);
+			const badge = field === "model" && view.unavailable ? " [unavailable]" : "";
+			const line = truncateToWidth(prefix + value, Math.max(1, inner - 2 - visibleWidth(badge)), "…") + theme.fg("warning", badge);
 			rows.push(index === this.cursor ? theme.fg("accent", "› " + theme.bold(line)) : "  " + line);
 		}
-		const detail = active.field === "reset"
-			? "Reset only " + label + " to Follow main and medium thinking."
-			: label + " " + active.field + ": " + active.view[active.field];
-		const details = wrapTextWithAnsi(detail + (active.view.unavailable ? " · Model unavailable; choose an available model to resume this role." : ""), inner);
-		const footer = [this.view.status, navigation];
+		const details = wrapTextWithAnsi(detailText, inner);
+		const footer = [this.view.status, visibleWidth(navigation) <= inner ? navigation : `Tab details · ${confirm}/${cancel} · ${movement}`];
 		const header = [theme.fg("muted", truncateToWidth("Main · " + this.view.main, inner, "…"))];
 		if (framed) header.push("");
 		const chrome = framed ? 4 : 1;
@@ -377,20 +366,28 @@ class RoleSettings implements Component {
 		this.detailPage = Math.max(1, detailBudget);
 		this.detailTop = Math.max(0, Math.min(this.detailTop, details.length - this.detailPage));
 		const body = [...header, ...visibleRows];
-		if (detailBudget) {
+		if (detailBudget && (warning || details.length > 1)) {
 			body.push("", ...details.slice(this.detailTop, this.detailTop + detailBudget).map((line) => theme.fg(active.view.unavailable ? "warning" : "muted", line)));
-			if (details.length > detailBudget) footer[0] = key("tui.select.pageUp") + "/" + key("tui.select.pageDown") + " details · " + this.view.status;
+			if (details.length > detailBudget) footer[0] = pageKeys + " details · " + this.view.status;
 		}
 		if (framed) return framePanel(theme, width, "Subagents · Models & thinking", undefined, body, footer);
-		if (height < 6) return [theme.bold(label), rows[this.cursor]!, key("tui.select.confirm") + " edit · " + key("tui.select.cancel") + " close"]
+		if (height < 6) return [theme.bold(label), rows[this.cursor]!, `Tab details · ${confirm} edit · ${cancel} close`]
 			.slice(0, height).map((line) => truncateToWidth(line, width, "…"));
 		return [theme.bold("Subagents"), ...body, ...footer].map((line) => truncateToWidth(line, width, "…"));
 	}
 
 	handleInput(data: string): void {
-		if (this.keys.matches(data, "tui.select.cancel")) { this.done(undefined); return; }
-		if (this.keys.matches(data, "tui.select.confirm")) { this.done(SETTING_KEYS[this.cursor]); return; }
-		if (this.keys.matches(data, "tui.select.up")) { this.cursor = (this.cursor + SETTING_KEYS.length - 1) % SETTING_KEYS.length; this.detailTop = 0; }
+		const cancel = this.keys.matches(data, "tui.select.cancel");
+		if (matchesKey(data, "tab") || (cancel && this.showDetails)) { this.showDetails = !this.showDetails; this.detailTop = 0; }
+		else if (cancel) { this.done(undefined); return; }
+		else if (this.showDetails) {
+			if (this.keys.matches(data, "tui.select.up")) this.detailTop--;
+			else if (this.keys.matches(data, "tui.select.down")) this.detailTop++;
+			else if (this.keys.matches(data, "tui.select.pageUp")) this.detailTop -= this.detailPage;
+			else if (this.keys.matches(data, "tui.select.pageDown")) this.detailTop += this.detailPage;
+		}
+		else if (this.keys.matches(data, "tui.select.confirm")) { this.done(SETTING_KEYS[this.cursor]); return; }
+		else if (this.keys.matches(data, "tui.select.up")) { this.cursor = (this.cursor + SETTING_KEYS.length - 1) % SETTING_KEYS.length; this.detailTop = 0; }
 		else if (this.keys.matches(data, "tui.select.down")) { this.cursor = (this.cursor + 1) % SETTING_KEYS.length; this.detailTop = 0; }
 		else if (this.keys.matches(data, "tui.select.pageUp")) this.detailTop -= this.detailPage;
 		else if (this.keys.matches(data, "tui.select.pageDown")) this.detailTop += this.detailPage;

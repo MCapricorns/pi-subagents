@@ -42,7 +42,7 @@ describe("loadBuiltinAgents", () => {
 		assert.match(researcher.systemPrompt, /^Answer: [\s\S]*^Evidence: /mu);
 
 		assert.equal(isWriteCapableAgent(worker), true);
-		assert.match(worker.systemPrompt, /directly, or through its script tool/u);
+		assert.match(worker.systemPrompt, /directly, or through a script tool/u);
 		assert.match(worker.systemPrompt, /^Status: done, partial, or blocked[\s\S]*^Changes: [\s\S]*^Checks: /mu);
 	});
 });

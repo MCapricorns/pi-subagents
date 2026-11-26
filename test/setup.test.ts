@@ -19,7 +19,7 @@ import { formatSubagentWidgetLines } from "../src/presentation/widget.ts";
 import { createChatViewport } from "../node_modules/@earendil-works/pi-coding-agent/dist/modes/interactive/chat-viewport.js";
 import { renderLayoutFrame } from "../node_modules/@earendil-works/pi-tui/dist/layout.js";
 
-const KEY = { enter: "\r", escape: "\x1b", down: "\x1b[B", up: "\x1b[A", pageDown: "\x1b[6~" };
+const KEY = { enter: "\r", escape: "\x1b", tab: "\t", down: "\x1b[B", up: "\x1b[A", pageDown: "\x1b[6~" };
 const theme = {
 	fg: (_color: string, text: string) => text,
 	bg: (_color: string, text: string) => text,
@@ -230,6 +230,17 @@ describe("independent role settings", () => {
 				press(component, KEY.pageDown);
 			}
 			assert.match(rendered, /\/end/u);
+			terminal.rows = 8;
+			press(component, KEY.tab);
+			assert.match(component.render(36).join("\n"), /Researcher · Model/u);
+			for (let i = 0; i < 10; i++) {
+				press(component, KEY.pageDown);
+				const frame = component.render(36);
+				assert.ok(frame.length <= overlayMaxHeight(terminal.rows));
+				rendered = frame.join("\n");
+			}
+			assert.match(rendered, /\/end/u);
+			press(component, KEY.escape);
 			terminal.rows = 28;
 			press(component, KEY.down);
 			assert.match(component.render(80).join("\n"), /› Thinking/u);
@@ -256,7 +267,7 @@ describe("searchable picker", () => {
 				press(c, "z");
 				assert.match(c.render(80).join("\n"), /No matches/u);
 				press(c, "\x7f");
-				for (const width of [1, 16, 40, 80]) assert.ok(c.render(width).every((line) => visibleWidth(line) <= width));
+				for (const width of [1, 16, 20, 40, 80]) assert.ok(c.render(width).every((line) => visibleWidth(line) <= width));
 				press(c, KEY.enter);
 			}),
 		} } as unknown as ExtensionContext;
@@ -265,6 +276,28 @@ describe("searchable picker", () => {
 			{ value: "test/other", label: "Other" },
 		]);
 		assert.equal(choice, "test/zh");
+	});
+
+	it("shows and scrolls match details in a short picker", async () => {
+		const terminal = { rows: 8, columns: 36 };
+		const context = { mode: "tui", ui: { custom: async (factory: PickerFactory) => new Promise((resolve) => {
+			const c = factory({ requestRender() {}, terminal } as TUI, theme, keybindings, resolve);
+			assert.match(c.render(32).join("\n"), /Tab details/u);
+			press(c, KEY.tab);
+			assert.match(c.render(32).join("\n"), /Full reference/u);
+			for (let i = 0; i < 8; i++) {
+				press(c, KEY.pageDown);
+				assert.ok(c.render(32).length <= overlayMaxHeight(terminal.rows));
+			}
+			assert.match(c.render(32).join("\n"), /End of description/u);
+			press(c, KEY.escape);
+			assert.match(c.render(32).join("\n"), /Search:/u);
+			press(c, KEY.enter);
+		}) } } as unknown as ExtensionContext;
+		assert.equal(await promptSelectOne(context, "Researcher model", "", [{
+			value: "test/zh", label: "中文模型",
+			description: "Full reference " + "中文模型".repeat(22) + " End of description",
+		}]), "test/zh");
 	});
 
 	it("pages by the rendered modal viewport after a terminal resize", async () => {

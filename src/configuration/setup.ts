@@ -53,7 +53,9 @@ export async function runSetup(ctx: ExtensionContext, configPath: string = getCo
 			const model = settings.model ? selected : ctx.model;
 			const effective = resolveThinkingLevel(model, settings.thinking);
 			if (choice === role + ".model") {
-				const picked = await promptSelectOne(ctx, title + " model", "Search available models · Enter save · Esc cancel",
+				const hint = settings.model && !selected ? "Saved model unavailable. Choose an available model to resume this role."
+					: "Models available in this session";
+				const picked = await promptSelectOne(ctx, title + " model", hint,
 					buildModelPickerItems({ models, configuredRef: settings.model, mainRef: currentModelRef(ctx) }),
 					settings.model ?? CURRENT_MAIN_MODEL);
 				if (picked === undefined) continue;
@@ -76,7 +78,7 @@ export async function runSetup(ctx: ExtensionContext, configPath: string = getCo
 					value: settings.thinking, label: settings.thinking + " (runs as " + effective + ")",
 					description: "Saved preference; the current model clamps it.", saved: true,
 				});
-				const picked = await promptSelectOne(ctx, title + " thinking", "Reasoning effort for " + role + " · Esc cancel", items, settings.thinking);
+				const picked = await promptSelectOne(ctx, title + " thinking", "Reasoning effort for the selected model", items, settings.thinking);
 				if (picked === undefined) continue;
 				const next = await loadConfig(configPath);
 				next[role].thinking = picked as ThinkingLevel;

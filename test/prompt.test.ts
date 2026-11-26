@@ -43,18 +43,18 @@ describe("renderSections", () => {
 	it("renders the orchestration, parallel concurrency, non-duplication, and background-wait contract within budget", () => {
 		const roles = loadBuiltinAgents();
 		const directive = renderSections(roles);
-		assert.ok(directive.length < 3_600, `directive is ${directive.length} characters`);
+		assert.ok(directive.length < 2_600, `directive is ${directive.length} characters`);
 		for (const role of roles) {
 			assert.equal(directive.split(role.description).length - 1, 1);
 			assert.ok(!directive.includes(role.systemPrompt));
 		}
-		assert.match(directive, /Main is the orchestrator: it plans, briefs, reviews, and integrates; workers execute/u);
-		assert.match(directive, /Children inherit this session's live tool surface, including `codemode` when present; researcher keeps only read-only tools/u);
-		assert.match(directive, /at most 5 concurrent subagents total; `tasks` accepts up to 5/u);
-		assert.match(directive, /Batch independent phases together in one `tasks` call so they execute concurrently — never serialize independent work one by one/u);
-		assert.match(directive, /neither another subagent nor main may repeat or edit that scope/u);
-		assert.match(directive, /Leave `wait` omitted \(background mode\) by default so subagents run concurrently while main immediately continues its own disjoint work in parallel instead of waiting/u);
-		assert.match(directive, /`subagent_message` to steer or continue a run/u);
+		assert.match(directive, /Main judges difficulty and owns planning, integration, final checks, and release/u);
+		assert.match(directive, /Call delegation tools directly, outside `codemode`.*Researcher receives read-only lookups/u);
+		assert.match(directive, /Batch independent phases in one `subagent\(\{ tasks \}\)` call within the free slots \(5 maximum\)\. Sequence dependent phases/u);
+		assert.match(directive, /disjoint scope.*Leave an owned phase to its current run/u);
+		assert.match(directive, /Omit `wait` for background work in TUI\/RPC.*Use `wait: true` when the next step depends on this result/u);
+		assert.match(directive, /`subagent_message` to steer a running child or give a completed run a focused correction/u);
+		assert.match(directive, /In a partial batch, leave accepted runs alone and address only the failed launches/u);
 		assert.doesNotMatch(directive, /workflow/iu);
 		assert.doesNotMatch(directive, /Active phase leases:/u);
 
@@ -86,6 +86,7 @@ describe("renderSections", () => {
 
 	it("shows all five concurrent active leases and five recent settled phases while bounding overflow", () => {
 		const directive = renderSections(loadBuiltinAgents(), [
+			lease({ id: 8, state: "parked", task: "An older interrupted owner" }),
 			lease({ id: 1, state: "completed" }),
 			lease({ id: 2, state: "completed" }),
 			lease({ id: 3, state: "completed" }),
@@ -104,8 +105,8 @@ describe("renderSections", () => {
 			assert.match(directive, new RegExp(`#${id} `, "u"));
 		}
 		assert.match(directive, /#13 worker \(settling\): Apply focused edit/u);
-		assert.match(directive, /2 more active leases omitted/u);
-		assert.doesNotMatch(directive, /#18|#19/u);
+		assert.match(directive, /3 more active leases omitted/u);
+		assert.doesNotMatch(directive, /#8 |#18 |#19 /u);
 		assert.doesNotMatch(directive, /#1 /u);
 		assert.match(directive, /Recent settled phases[\s\S]*#2 [\s\S]*#3 [\s\S]*#4 [\s\S]*#12 researcher \(completed\)[\s\S]*#16 researcher \(failed\)/u);
 	});
@@ -113,18 +114,21 @@ describe("renderSections", () => {
 	it("keeps launch receipts short and clear", () => {
 		const sources = [lease({ id: 21, agentName: "worker", task: "Implement duplicate rejection" })];
 		const single = formatPhaseLeaseReceipt(sources);
-		assert.match(single, /^Active phase lease:/u);
+		assert.match(single, /^Accepted 1 subagent run$/mu);
 		assert.match(single, /#21 worker \(running\): Implement duplicate rejection/u);
-		assert.match(single, /Do not duplicate it/u);
+		assert.match(single, /Continue only disjoint work/u);
 		assert.doesNotMatch(single, /never blocks|dispatch more|keep working/u);
 	});
 
 	it("lists every run a parallel launch started", () => {
-		const batch = formatPhaseLeaseReceipt([21, 22, 23, 24].map((id) => lease({ id, task: `Inspect module ${id}` })));
-		assert.match(batch, /^Active phase leases:/u);
+		const batch = formatPhaseLeaseReceipt([
+			...[21, 22, 23, 24].map((id) => lease({ id, task: `Inspect module ${id}` })),
+			lease({ id: 25, state: "completed", task: "Inspect the last module" }),
+		]);
+		assert.match(batch, /^Accepted 5 subagent runs$/mu);
 		for (const id of [21, 22, 23, 24]) assert.match(batch, new RegExp(`#${id} researcher \\(running\\): Inspect module ${id}`, "u"));
+		assert.match(batch, /#25 researcher \(completed\): Inspect the last module/u);
 		assert.doesNotMatch(batch, /omitted/u);
-		assert.match(batch, /Do not duplicate them/u);
 	});
 });
 
@@ -137,5 +141,7 @@ describe("duplicateDispatchRemedy", () => {
 		assert.match(duplicateDispatchRemedy(lease({ id: 6, state: "parked" })), /subagent_stop\(\{ id: "6" \}\)/u);
 		assert.match(duplicateDispatchRemedy(lease({ id: 7, state: "completed", retired: true })), /still stopping/u);
 		assert.match(duplicateDispatchRemedy(lease({ id: 8 })), /let it finish or steer it/u);
+		assert.match(duplicateDispatchRemedy(lease({ id: 9, lifecycleOperation: "settle" })), /after integration/u);
+		assert.match(duplicateDispatchRemedy(lease({ id: 10, state: "queued" })), /still starting/u);
 	});
 });

@@ -1,5 +1,16 @@
 # Changelog
 
+## 7.0.5
+
+- Shorten the main and child prompts with clear routing, brief, and review steps.
+  Keep live work visible ahead of older interrupted runs in the prompt.
+- Apply a batch working directory to every task unless it overrides the path.
+  Reject empty or mixed single and batch requests before reserving runs, and
+  report accepted runs alongside any launch failures.
+- Show awaited run progress, worktree integration, and failed launches in the
+  terminal. Expanding the tool result shows the available output and recovery details.
+- Keep model and settings details readable and pageable in short or narrow terminals.
+
 ## 7.0.4
 
 ### Changes and fixes

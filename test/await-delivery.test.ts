@@ -3,12 +3,13 @@ import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, it } from "node:test";
-import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
+import type { ExtensionAPI, Theme } from "@earendil-works/pi-coding-agent";
 import { registerSubagentTool } from "../src/delegation/dispatch.ts";
 import { emptyUsage, RunControl, type RunResult } from "../src/execution/run-control.ts";
 import type { DispatchCore } from "../src/lifecycle/dispatch-core.ts";
 import { createRuntime, type SubagentThread } from "../src/lifecycle/runtime.ts";
 import { registerLookupTools } from "../src/lifecycle/tools.ts";
+import { failedStartResult } from "../src/presentation/format.ts";
 import { monitor } from "../src/presentation/monitor.ts";
 
 function deferred() {
@@ -17,7 +18,9 @@ function deferred() {
 	return { promise, resolve };
 }
 
-async function harness() {
+const theme = { fg: (_name: string, value: string) => value, bold: (value: string) => value } as Theme;
+
+async function harness(unavailableTask?: string) {
 	const root = await mkdtemp(join(tmpdir(), "pi-await-delivery-"));
 	const tools = new Map<string, any>();
 	const messages: any[] = [];
@@ -31,8 +34,8 @@ async function harness() {
 	const ids: number[] = [];
 	const routes: string[] = [];
 	let stops = 0;
-	const thread = (id: number, task: string, state: "running" | "completed"): SubagentThread => ({
-		id, generation: 1, agentName: "researcher", task, cwd: root, executionCwd: root,
+	const thread = (id: number, task: string, state: "running" | "completed", cwd = root): SubagentThread => ({
+		id, generation: 1, agentName: "researcher", task, cwd, executionCwd: cwd,
 		isolation: "shared", state, control: new RunControl(task, 1),
 		generationCompletion: Promise.resolve(), lifecycleVersion: 0, elapsedMs: 0,
 		finalizeIsolation: async () => undefined,
@@ -41,12 +44,13 @@ async function harness() {
 	const core = {
 		setEnvironment() {},
 		makeDetails: (mode: string) => (results: RunResult[]) => ({ mode, results }),
-		async startBackground(agent: string, task: string, _cwd: string, _isolation: string, options: any) {
+		async startBackground(agent: string, task: string, cwd: string, _isolation: string, options: any) {
+			if (task === unavailableTask) return failedStartResult(agent, task, "Configured model is unavailable");
 			const id = monitor.addRun(agent, task);
 			ids.push(id);
 			routes.push(options.deliveryRoute);
 			runtime.claimRunDelivery(id, options.deliveryRoute);
-			const current = thread(id, task, "running");
+			const current = thread(id, task, "running", cwd);
 			const token = current.control.beginAttempt();
 			current.control.attach(token, { stop: async () => { stops++; } });
 			current.control.updateAttemptPhase(token, "running");
@@ -79,7 +83,10 @@ async function harness() {
 		});
 	};
 	return {
-		runtime, messages, ids, routes, started, finish, invoke, stops: () => stops,
+		root, runtime, messages, ids, routes, started, finish, invoke, stops: () => stops,
+		renderDispatchResult: (result: unknown, options: { expanded: boolean; isPartial: boolean }) =>
+			tools.get("subagent").renderResult(result, options, theme).render(120).join("\n"),
+		renderDispatchCall: (params: unknown) => tools.get("subagent").renderCall(params, theme).render(120).join("\n"),
 		async cleanup() { await runtime.shutdown(); monitor.clear(); await rm(root, { recursive: true, force: true }); },
 	};
 }
@@ -87,20 +94,56 @@ async function harness() {
 it("returns final states and failure evidence for an awaited parallel batch", async () => {
 	const h = await harness();
 	try {
+		const updates: unknown[] = [];
 		const pending = h.invoke("subagent", { agent: undefined, task: undefined, wait: true, tasks: [
 			{ agent: "researcher", task: "Inspect first caller" },
 			{ agent: "researcher", task: "Inspect second caller" },
-		] }, true);
+		] }, true, undefined, updates);
 		await h.started.promise;
 		await new Promise<void>((resolve) => setImmediate(resolve));
 		assert.equal(h.ids.length, 2);
+		monitor.setIsolation(h.ids[0]!, "worktree", "finalizing");
+		const progress = h.renderDispatchResult(updates.at(-1), { expanded: false, isPartial: true });
+		assert.match(progress, /Waiting in-turn on 2 runs.*#\d+ integrating.*#\d+ running/u);
 		h.finish(h.ids[0]!);
 		h.finish(h.ids[1]!, true);
 		const result = await pending;
 		assert.equal(result.isError, true);
 		assert.deepEqual(result.details.results.map((entry: RunResult) => entry.exitCode), [0, 1]);
 		assert.match(result.content[0].text, /Caller verification failed/u);
+		assert.match(h.renderDispatchResult(result, { expanded: false, isPartial: false }), /failed · Caller verification failed/u);
+		assert.match(h.renderDispatchResult(result, { expanded: true, isPartial: false }), /Verified caller evidence/u);
 		assert.equal(h.messages.length, 0);
+	} finally { await h.cleanup(); }
+});
+
+it("applies a batch cwd and keeps accepted run IDs visible beside launch failures", async () => {
+	const h = await harness("Use offline model");
+	try {
+		const tasks = [
+			{ agent: "researcher", task: "Inspect package" },
+			{ agent: "worker", task: "Use offline model" },
+			{ agent: "researcher", task: "Inspect package", cwd: "nested" },
+		];
+		const result = await h.invoke("subagent", { agent: undefined, task: undefined, cwd: "packages", tasks }, true);
+		assert.deepEqual(h.ids.map((id) => h.runtime.threads.get(id)?.cwd), [join(h.root, "packages"), join(h.root, "packages", "nested")]);
+		assert.match(result.content[0].text, /^Accepted 2 subagent runs/u);
+		for (const id of h.ids) assert.ok(result.content[0].text.includes(`#${id} researcher`));
+		assert.match(result.content[0].text, /tasks\[1\] \(worker\) failed to start/u);
+		assert.match(h.renderDispatchResult(result, { expanded: false, isPartial: false }), /worker · not started · Configured model is unavailable/u);
+	} finally { await h.cleanup(); }
+});
+
+it("rejects ambiguous batches before allocation and renders the error text", async () => {
+	const h = await harness();
+	try {
+		const tasks = Array.from({ length: 5 }, (_, index) => ({ agent: "researcher", task: `Inspect module ${index + 1}` }));
+		assert.match(h.renderDispatchCall({ tasks }), /Inspect module 5/u);
+		await assert.rejects(h.invoke("subagent", { tasks, task: undefined }, true), /omit top-level agent and task/u);
+		await assert.rejects(h.invoke("subagent", { tasks: [] }, true), /non-empty tasks array/u);
+		assert.deepEqual(h.ids, []);
+		const error = { content: [{ type: "text", text: "No runs were started." }] };
+		assert.match(h.renderDispatchResult(error, { expanded: false, isPartial: false }), /No runs were started/u);
 	} finally { await h.cleanup(); }
 });
 

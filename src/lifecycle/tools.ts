@@ -237,7 +237,7 @@ export function registerLookupTools(pi: ExtensionAPI, runtime: SubagentRuntime, 
 			let fallbackReason = context === "auto" && !sourceFile ? "Retained session is unavailable." : undefined;
 			let copyDir: string | undefined;
 			try {
-				dispatchCore.setEnvironment({ ctx, config: await loadConfig(runtime.configPath), agents: loadBuiltinAgents() });
+				const config = await loadConfig(runtime.configPath);
 				if (sourceFile) {
 					const root = join(getProjectRoot(runtime.configPath, thread.cwd), "sessions");
 					await mkdir(root, { recursive: true });
@@ -253,8 +253,13 @@ export function registerLookupTools(pi: ExtensionAPI, runtime: SubagentRuntime, 
 						fallbackReason = "Retained session became unavailable before it could be copied.";
 					}
 				}
+				// Another dispatch can update the shared environment while the session
+				// is copied. Set this caller's context immediately before admission.
+				dispatchCore.setEnvironment({ ctx, config, agents: loadBuiltinAgents() });
 				if (_signal?.aborted) throw new Error("Follow-up cancelled before dispatch.");
-				if (thread.retired || thread.lifecycleOperation || thread.state !== "completed") throw new Error("The source run changed while the follow-up was prepared.");
+				if (runtime.threads.get(thread.id) !== thread || thread.retired || thread.lifecycleOperation || thread.state !== "completed") {
+					throw new Error("The source run changed while the follow-up was prepared.");
+				}
 				const selectedContext = copyDir ? "session" : "summary";
 				const task = copyDir
 					? `Follow-up to run #${thread.id}:\n${params.message}`
