@@ -14,7 +14,7 @@ import type { CompletionMessageItem } from "./completion.ts";
 import { DEFAULT_IDLE_TIMEOUT_SEC, DEFAULT_MAX_RESULT_LINES, loadConfig } from "../configuration/config.ts";
 import { dispatchFailedResult, failedStartResult, formatCompletionBlock, queuedResult } from "../presentation/format.ts";
 import { formatTaskSummary, monitor } from "../presentation/monitor.ts";
-import { duplicateDispatchRemedy, findDuplicateDispatch } from "../delegation/prompt.ts";
+import { duplicatePhaseConflict } from "../delegation/prompt.ts";
 import { persistRecoveryRecords, recoveryRecordFromFinalization } from "../isolation/recovery.ts";
 import { type SubagentRuntime, type SubagentThread, type ThreadState } from "./runtime.ts";
 import {
@@ -104,16 +104,8 @@ export function createBackgroundDispatcher(options: BackgroundDispatcherOptions)
 				isolation,
 			};
 		}
-		const duplicate = findDuplicateDispatch(runtime.threads.values(), task, originalCwd);
-		if (duplicate) {
-			// A phase stays owned across reloads: an interrupted run keeps its claim
-			// until it is retired, so "let it finish" is wrong advice for a parked
-			// owner and leaves the caller with no way forward. A retired owner is
-			// still releasing its child or worktree after subagent_stop.
-			const owner = duplicate.source;
-			return failedStartResult(agentName, task,
-				`Run #${owner.id} (${owner.agentName}) already owns this logical phase (${owner.state}). ${duplicateDispatchRemedy(owner)}`);
-		}
+		const duplicate = duplicatePhaseConflict(runtime.threads.values(), task, originalCwd);
+		if (duplicate) return failedStartResult(agentName, task, duplicate);
 		const capacityConflict = concurrencyAdmissionConflict(runtime, 1);
 		if (capacityConflict) {
 			return failedStartResult(agentName, task, `Subagent dispatch rejected: ${capacityConflict}`);
@@ -237,6 +229,7 @@ export function createBackgroundDispatcher(options: BackgroundDispatcherOptions)
 						resolveAgentBeforeLaunch: resolveLiveAgentTools,
 						agentName,
 						task,
+						stdinText: startOptions.stdinText,
 						cwd: executionCwd,
 						thinkingLevel: activeRoute.thinkingLevel,
 						signal: backgroundSignal,

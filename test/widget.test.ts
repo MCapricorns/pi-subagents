@@ -66,8 +66,30 @@ describe("widget layout priorities", () => {
 		const narrow = formatSubagentWidgetLines([busy], plainTheme, 48, 10_000);
 		assert.match(narrow[2]!, /read src\/configuration\/config.ts/u);
 		assert.doesNotMatch(narrow[2]!, /test\//u, "omit metadata rather than showing half a model id");
-		const applying = { ...run(9), integrationStatus: "finalizing" as const };
-		assert.match(formatSubagentWidgetLines([applying], plainTheme, 42, 10_000)[1]!, /applying/u);
+	});
+
+	it("counts worktree application separately from running and starting in both layouts", () => {
+		const applying = { isolation: "worktree", integrationStatus: "finalizing" } as const;
+		const runs = [run(1), { ...run(2), ...applying }, { ...run(3, "queued"), ...applying }];
+		for (const width of [42, 100]) {
+			const lines = formatSubagentWidgetLines(runs, plainTheme, width, 10_000);
+			assert.match(lines[0]!, /1 running/u);
+			assert.match(lines[0]!, /2 applying/u);
+			assert.doesNotMatch(lines[0]!, /starting/u);
+			for (const id of [2, 3]) assert.match(lines.join("\n"), new RegExp("#" + id + " worker.*applying", "u"));
+			assert.ok(lines.every((line) => visibleWidth(line) <= width));
+		}
+	});
+
+	it("keeps failure and interruption visible while a worktree is being finalized", () => {
+		const applying = { isolation: "worktree", integrationStatus: "finalizing" } as const;
+		const runs = [{ ...run(1, "interrupting"), ...applying }, { ...run(2, "failed"), ...applying }];
+		for (const width of [42, 100]) {
+			const lines = formatSubagentWidgetLines(runs, plainTheme, width, 10_000);
+			assert.match(lines[0]!, /1 failed.*1 interrupting/u);
+			assert.match(lines[1]!, /#2 worker.*failed/u);
+			assert.match(lines.join("\n"), /#1 worker.*interrupting/u);
+		}
 	});
 
 	it("fits ANSI-styled CJK identities and causes at every width without dropping the line bound", () => {

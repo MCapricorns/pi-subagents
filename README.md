@@ -131,9 +131,10 @@ by the extension. No automatic review score certifies a worker's result.
 
 ## Briefs and calls
 
-A useful brief names the **outcome**, **acceptance criteria**, **relevant paths and
-evidence**, **write boundary**, **checks**, **return conditions**, and **expected
-result**. Pass established facts forward and assign only missing work.
+Start the brief with the **outcome**. Give a researcher the question to answer,
+where to look, and what evidence to return. Give a worker the paths it owns,
+the acceptance criteria, the exact checks, and when to return for replanning.
+Pass established facts forward so the child can start with the remaining work.
 
 ```ts
 subagent({
@@ -157,8 +158,11 @@ that directory. Top-level `isolation` is the default for tasks that omit their
 own. Duplicate normalized tasks in the same directory are rejected while an
 active or settled run owns them. Use its result or continue it with `subagent_message`.
 
-A batch receipt lists the accepted run IDs and any tasks that failed to start.
-Address the failed launches individually while the accepted runs proceed.
+A background receipt lists the accepted run IDs, the number of dispatch slots
+still free across the session, and any tasks that failed to start. Main also
+sees the available count alongside its phase leases. Runs applying a worktree
+or parked after interruption keep ownership of their task and release their slot.
+Address failed launches individually while the accepted runs proceed.
 
 Leave `wait` omitted (`false` in TUI/RPC) by default so subagents run in the
 background while main immediately continues its own disjoint work in parallel.
@@ -169,9 +173,11 @@ until background results wake it automatically.
 Results are delivered once, after integration. Awaited failures are tool errors.
 Answers exceeding 40 lines or 8,000 characters link their full-result artifact.
 The terminal card shows live progress for awaited runs, including worktree
-integration, and gives each accepted run its own status row. Expand the tool
-output with Ctrl+O in Pi's default keybindings to read the result and recovery
-details.
+integration, and gives each accepted run its own status row. Collapsed calls
+keep each task preview on one line. Press Ctrl+O with
+Pi's default keybindings to read the full brief, the resolved working directory
+and requested isolation for each dispatch, and the result or recovery details.
+Expanded steering and follow-up calls also show the full instruction.
 
 | Tool | Purpose |
 | --- | --- |
@@ -183,8 +189,10 @@ details.
 
 Follow-ups use `context: "auto"` by default: a private copy of the retained session,
 or an explicit summary fallback when it expired. `context: "session"` requires full
-history. Continuations retain the session ID/cache key and re-read files in their
-current workspace. Summary continuations cannot rely on omitted history.
+history. A session continuation retains its session ID and cache key. A summary
+continuation receives the new objective, the earlier result, and referenced files.
+Both use the current workspace. Repeating the same instruction for the same
+source run refers to the same phase across all three context choices.
 
 Steering waits for a matching RPC acknowledgement. Received/queued means Pi queued
 the instruction, not that the model acted on it. A rejected or missing
@@ -216,8 +224,9 @@ new/resume/fork/reload, and shutdown stop old work and retain interrupted eviden
 for recovery.
 
 The task widget shows status, elapsed time, model, thinking, tokens, and worktree
-state in at most ten lines. Independent workers can start together; only
-integration into the original checkout is serialized.
+state in at most ten lines. The overview, task rows, and waiting tool card use
+`applying` while a finished child's worktree is being integrated. Independent
+workers can start together. Integration into the original checkout is serialized.
 
 ## Pi integration
 

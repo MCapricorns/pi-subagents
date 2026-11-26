@@ -52,6 +52,7 @@ describe("renderSections", () => {
 		assert.match(directive, /Call delegation tools directly, outside `codemode`.*Researcher receives read-only lookups/u);
 		assert.match(directive, /Batch independent phases in one `subagent\(\{ tasks \}\)` call within the free slots \(5 maximum\)\. Sequence dependent phases/u);
 		assert.match(directive, /disjoint scope.*Leave an owned phase to its current run/u);
+		assert.match(directive, /For research, name the question, sources, and evidence needed.*For implementation, name the owned paths/u);
 		assert.match(directive, /Omit `wait` for background work in TUI\/RPC.*Use `wait: true` when the next step depends on this result/u);
 		assert.match(directive, /`subagent_message` to steer a running child or give a completed run a focused correction/u);
 		assert.match(directive, /In a partial batch, leave accepted runs alone and address only the failed launches/u);
@@ -75,6 +76,7 @@ describe("renderSections", () => {
 		assert.match(stable ?? "", /- researcher: /u);
 		assert.doesNotMatch(stable ?? "", /Active phase leases/u);
 		assert.match(sections[DELEGATION_LEASE_SECTION] ?? "", /#3 researcher \(running\)/u);
+		assert.match(sections[DELEGATION_LEASE_SECTION] ?? "", /4\/5 free/u);
 
 		installDelegationSections(sections, loadBuiltinAgents(), [lease({ id: 3, task: "Map a different entry point" })]);
 		assert.equal(sections[DELEGATION_SECTION], stable);
@@ -99,33 +101,41 @@ describe("renderSections", () => {
 			lease({ id: 15, task: "Inspect worktree lock" }),
 			lease({ id: 16, state: "failed" }),
 			lease({ id: 17, task: "Inspect widget rows" }),
-			lease({ id: 18, task: "Overflow lease A" }),
-			lease({ id: 19, task: "Overflow lease B" }),
+			lease({ id: 18, state: "queued", task: "Check the public entry point" }),
+			lease({ id: 19, lifecycleOperation: "stop", task: "Release the previous worktree" }),
 		]);
-		for (const id of [11, 13, 14, 15, 17]) {
+		for (const id of [11, 14, 15, 17, 18]) {
 			assert.match(directive, new RegExp(`#${id} `, "u"));
 		}
-		assert.match(directive, /#13 worker \(settling\): Apply focused edit/u);
+		assert.match(directive, /Dispatch slots: 0\/5 free/u);
 		assert.match(directive, /3 more active leases omitted/u);
-		assert.doesNotMatch(directive, /#8 |#18 |#19 /u);
+		assert.doesNotMatch(directive, /#8 |#13 |#19 /u);
 		assert.doesNotMatch(directive, /#1 /u);
 		assert.match(directive, /Recent settled phases[\s\S]*#2 [\s\S]*#3 [\s\S]*#4 [\s\S]*#12 researcher \(completed\)[\s\S]*#16 researcher \(failed\)/u);
 	});
 
-	it("keeps launch receipts short and clear", () => {
-		const sources = [lease({ id: 21, agentName: "worker", task: "Implement duplicate rejection" })];
-		const single = formatPhaseLeaseReceipt(sources);
+	it("counts other calls' occupied slots while listing only the newly accepted run", () => {
+		const threads = new Map([
+			[18, lease({ id: 18, state: "parked" })],
+			[19, lease({ id: 19, lifecycleOperation: "settle" })],
+			[20, lease({ id: 20, state: "interrupting" })],
+			[21, lease({ id: 21, agentName: "worker", task: "Implement duplicate rejection" })],
+		]);
+		const single = formatPhaseLeaseReceipt([21], threads);
 		assert.match(single, /^Accepted 1 subagent run$/mu);
 		assert.match(single, /#21 worker \(running\): Implement duplicate rejection/u);
+		assert.match(single, /Dispatch slots: 3\/5 free/u);
+		assert.doesNotMatch(single, /#18|#19|#20/u);
 		assert.match(single, /Continue only disjoint work/u);
 		assert.doesNotMatch(single, /never blocks|dispatch more|keep working/u);
 	});
 
 	it("lists every run a parallel launch started", () => {
-		const batch = formatPhaseLeaseReceipt([
+		const sources = [
 			...[21, 22, 23, 24].map((id) => lease({ id, task: `Inspect module ${id}` })),
 			lease({ id: 25, state: "completed", task: "Inspect the last module" }),
-		]);
+		];
+		const batch = formatPhaseLeaseReceipt(sources.map((source) => source.id), new Map(sources.map((source) => [source.id, source])));
 		assert.match(batch, /^Accepted 5 subagent runs$/mu);
 		for (const id of [21, 22, 23, 24]) assert.match(batch, new RegExp(`#${id} researcher \\(running\\): Inspect module ${id}`, "u"));
 		assert.match(batch, /#25 researcher \(completed\): Inspect the last module/u);

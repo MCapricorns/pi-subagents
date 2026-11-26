@@ -1,5 +1,16 @@
 # Changelog
 
+## 7.0.7
+
+- Show free dispatch slots in background launch receipts and the main prompt.
+  When the ownership list fills up, show runs occupying slots first.
+- Tailor briefs to the role. A summary follow-up gives the child its current
+  objective and earlier evidence while keeping the same phase identity as a
+  retained-session follow-up. Switching context cannot start the same phase twice.
+- Expand a terminal dispatch card to inspect each full brief, directory, and
+  isolation setting. The task widget counts worktree application separately
+  from running children.
+
 ## 7.0.6
 
 - Show Escape cancellation progress and per-run statistics in the terminal before

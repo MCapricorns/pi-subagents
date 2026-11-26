@@ -4,21 +4,22 @@ import { copyFile, mkdir, mkdtemp, rm } from "node:fs/promises";
 import { basename, join } from "node:path";
 import type { Message } from "@earendil-works/pi-ai";
 import type { ExtensionAPI, Theme } from "@earendil-works/pi-coding-agent";
-import { Text } from "@earendil-works/pi-tui";
+import { Text, TruncatedText } from "@earendil-works/pi-tui";
 import { Type } from "typebox";
 import { DEFAULT_MAX_RESULT_LINES, loadConfig } from "../configuration/config.ts";
 import { loadBuiltinAgents } from "../delegation/agents.ts";
+import { duplicatePhaseConflict, formatDispatchSlots } from "../delegation/prompt.ts";
 import { findSessionFile, getProjectRoot, getResultOutput, isFailedResult, sessionExists } from "../execution/spawn.ts";
 import { writeTempOwnerMarker } from "../isolation/temp-hygiene.ts";
 import type { DispatchCore } from "./dispatch-core.ts";
 import { awaitRunResults, WaitSchema } from "./await-results.ts";
 import { cancelActiveWork, isSettlingThread } from "./cancellation.ts";
 import { stopThreads } from "./stop.ts";
-import { formatCompletionBlock } from "../presentation/format.ts";
+import { formatCompletionBlock, formatExpandedBrief } from "../presentation/format.ts";
 import { emptyUsage } from "../execution/run-control.ts";
 import { formatDuration, formatTaskSummary, monitor } from "../presentation/monitor.ts";
 import type { SubagentRuntime, SubagentThread } from "./runtime.ts";
-import { concurrencyAdmissionConflict, projectResultsRoot } from "./thread-shared.ts";
+import { concurrencyAdmissionConflict, dispatchCapacity, projectResultsRoot } from "./thread-shared.ts";
 import { getResultError } from "../execution/spawn.ts";
 
 function renderFirstLine(result: { content?: unknown }, label: string, theme: Theme): Text {
@@ -63,17 +64,18 @@ function buildSummaryFollowUp(thread: SubagentThread, message: string): string {
 	const bounded = prior.length > 4_000 ? prior.slice(0, 4_000) + "\n…(truncated; read the files for detail)" : prior;
 	const files = touchedPaths(thread.lastResult?.messages);
 	return [
-		`Earlier run #${thread.id} (${thread.agentName}) was briefed with:`,
-		formatTaskSummary(thread.task, 1_200, false),
-		"",
-		"It finished with:",
-		bounded,
-		...(files.length ? ["", "Files it touched:", files.map((path) => `- ${path}`).join("\n")] : []),
-		"",
-		"Continue with this instruction:",
+		`Current objective for this follow-up to run #${thread.id}:`,
 		message,
 		"",
-		"You did not witness the earlier session. Verify the files before relying on them, and state any assumption this summary does not support.",
+		"Use the earlier findings as evidence. Verify relevant files in the current workspace before editing.",
+		"",
+		"Earlier objective:",
+		formatTaskSummary(thread.task, 1_200, false),
+		"",
+		"Earlier result:",
+		bounded,
+		...(thread.lastResult?.resultFile ? [`Full result: ${thread.lastResult.resultFile}`] : []),
+		...(files.length ? ["", "Files referenced in earlier tool calls:", ...files.map((path) => `- ${path}`)] : []),
 	].join("\n");
 }
 
@@ -189,7 +191,7 @@ export function registerLookupTools(pi: ExtensionAPI, runtime: SubagentRuntime, 
 	pi.registerTool({
 		name: "subagent_message",
 		label: "Subagent Message",
-		description: "Steer a running subagent, or continue a successfully completed run with a new bounded step in the same role and workspace (within the 5-active-subagent limit). Steering waits for the child's RPC acknowledgement and reports queued or handled by an input hook; receipt is not proof of model execution, and status retains the latest acknowledgement. A continuation chooses its history with the context parameter. Omit wait so main continues disjoint work in parallel without duplicating leased scopes; use wait:true only when no disjoint main work remains (one-shot print/JSON sessions wait by default).",
+		description: "Steer a running child or give a completed run its next bounded objective in the same role and workspace. Steering reports the child's acknowledgement. A continuation uses one dispatch slot. Choose its history with context and use the returned run ID for further work.",
 		exposure: "model-only",
 		executionMode: "parallel",
 		parameters: Type.Object({
@@ -226,6 +228,9 @@ export function registerLookupTools(pi: ExtensionAPI, runtime: SubagentRuntime, 
 					: "messages require a running or successfully completed run. Results arrive automatically."}`);
 			}
 			if (!dispatchCore) return fail("Follow-up dispatch is unavailable in this process.");
+			const task = `Follow-up to run #${thread.id}:\n${params.message}`;
+			const duplicate = duplicatePhaseConflict(runtime.threads.values(), task, thread.cwd);
+			if (duplicate) return fail(duplicate);
 			const capacityConflict = concurrencyAdmissionConflict(runtime, 1);
 			if (capacityConflict) return fail(`Could not continue #${thread.id}: ${capacityConflict}`);
 			const context = params.context ?? "auto";
@@ -261,13 +266,12 @@ export function registerLookupTools(pi: ExtensionAPI, runtime: SubagentRuntime, 
 					throw new Error("The source run changed while the follow-up was prepared.");
 				}
 				const selectedContext = copyDir ? "session" : "summary";
-				const task = copyDir
-					? `Follow-up to run #${thread.id}:\n${params.message}`
-					: buildSummaryFollowUp(thread, params.message);
 				const wait = params.wait ?? (ctx.hasUI === false);
 				const result = await dispatchCore.startBackground(thread.agentName, task, thread.cwd, thread.isolation, {
 					deliveryRoute: wait ? "await" : "background",
-					...(copyDir ? { resumeSession: { sessionId: thread.sessionId!, sessionDir: copyDir } } : {}),
+					...(copyDir
+						? { resumeSession: { sessionId: thread.sessionId!, sessionDir: copyDir } }
+						: { stdinText: buildSummaryFollowUp(thread, params.message) }),
 				});
 				if (result.runId === undefined) throw new Error(result.errorMessage || "Follow-up dispatch failed.");
 				copyDir = undefined;
@@ -286,16 +290,20 @@ export function registerLookupTools(pi: ExtensionAPI, runtime: SubagentRuntime, 
 						...(_signal?.aborted || !settled || isFailedResult(settled) ? { isError: true } : {}),
 					};
 				}
+				const { available } = dispatchCapacity(runtime.threads.values());
 				return {
-					content: [{ type: "text" as const, text: `${receipt} started; results arrive automatically. Do not duplicate its scope; continue disjoint work in main, then use the result to finish the task.` }], details,
+					content: [{ type: "text" as const, text: `${receipt} started.\n${formatDispatchSlots(available)} Continue disjoint work until its result arrives.` }], details,
 				};
 			} catch (error) {
 				if (copyDir) await rm(copyDir, { recursive: true, force: true }).catch(() => undefined);
 				return fail(`Could not continue #${thread.id}: ${error instanceof Error ? error.message : String(error)}`);
 			}
 		},
-		renderCall(args, theme) {
-			return new Text(`${theme.fg("toolTitle", theme.bold("subagent_message "))}${theme.fg("accent", `#${args.id ?? "?"}`)} ${theme.fg("dim", formatTaskSummary(args.message ?? "", 80, false))}`, 0, 0);
+		renderCall(args, theme, { expanded }) {
+			const heading = theme.fg("toolTitle", theme.bold("subagent_message ")) + theme.fg("accent", `#${args.id ?? "?"}`);
+			const message = typeof args.message === "string" ? args.message : "";
+			if (expanded) return new Text(message ? heading + "\n" + formatExpandedBrief(message) : heading, 0, 0);
+			return new TruncatedText(heading + " " + theme.fg("dim", formatTaskSummary(message, 80, false)));
 		},
 		renderResult(result, options, theme) {
 			if (options.expanded) return new Text(result.content.map((part) => part.type === "text" ? part.text : "").join("\n"), 0, 0);

@@ -1,6 +1,6 @@
 {
   "name": "@ferris1225/pi-subagents",
-  "version": "7.0.6",
+  "version": "7.0.7",
   "description": "Lead/worker orchestration for Pi: main plans and reviews, configurable workers execute with retained sessions and Git worktree isolation.",
   "type": "module",
   "license": "MIT",

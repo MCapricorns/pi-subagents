@@ -10,7 +10,7 @@ import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { emptyUsage, RunControl, type AttemptControl } from "../src/execution/run-control.ts";
 import { createRuntime, type SubagentRuntime, type SubagentThread, type ThreadState } from "../src/lifecycle/runtime.ts";
 import { registerLookupTools } from "../src/lifecycle/tools.ts";
-import type { DispatchCore } from "../src/lifecycle/dispatch-core.ts";
+import { createDispatchCore, type DispatchCore } from "../src/lifecycle/dispatch-core.ts";
 import { formatCompletionBlock } from "../src/presentation/format.ts";
 import { monitor } from "../src/presentation/monitor.ts";
 
@@ -38,7 +38,7 @@ function harness(configPath = join(tmpdir(), `pi-subagents-control-${process.pid
 		sendMessage: (message: unknown) => sent.push(message),
 	} as unknown as ExtensionAPI;
 	const runtime = createRuntime(pi, configPath);
-	registerLookupTools(pi, runtime, dispatchCore);
+	registerLookupTools(pi, runtime, dispatchCore ?? createDispatchCore(runtime));
 	return { runtime, tools, sent };
 }
 
@@ -66,7 +66,7 @@ function makeThread(id: number, state: ThreadState = "running"): SubagentThread 
 
 async function execute(tool: RegisteredTool, params: Record<string, unknown> = {}, signal = new AbortController().signal): Promise<any> {
 	return tool.execute("call-1", params, signal, () => undefined, {
-		cwd: process.cwd(), ui: { notify: () => undefined },
+		cwd: process.cwd(), scopedModels: [], modelRegistry: { getAvailable: () => [] }, ui: { notify: () => undefined },
 	});
 }
 
@@ -375,9 +375,8 @@ describe("subagent_message", () => {
 					assert.match(response.details.fallbackReason, /session.*unavailable/iu);
 					assert.match(resultText(response), /summary.*session.*unavailable/iu);
 					assert.equal(captured[4].resumeSession, undefined);
-					assert.match(captured[1], /Implemented the cache fix/u);
-					assert.match(captured[1], /Verify the callers/u);
-					assert.match(captured[1], /did not witness the earlier session/u);
+					assert.equal(captured[1], "Follow-up to run #65:\nVerify the callers");
+					assert.match(captured[4].stdinText, /Verify the callers[\s\S]*Implemented the cache fix/u);
 				}
 				assert.equal(existsSync(join(getProjectRoot(join(root, "config.json"), source.cwd), "sessions")), false);
 			} finally { await shutdown(runtime); await rm(root, { recursive: true, force: true }); }
@@ -460,13 +459,11 @@ describe("subagent_message", () => {
 		} finally { await shutdown(runtime); }
 	});
 
-	it("briefs a summary follow-up with the result and touched files instead of copying the session", async () => {
+	it("sends evidence to a summary child and rejects a second launch of the objective with session history", async () => {
 		const root = await mkdtemp(join(tmpdir(), "pi-subagents-summary-"));
-		let captured: any;
-		const core = { setEnvironment() {}, async startBackground(...args: any[]) { captured = args; return { runId: 79 }; } } as unknown as DispatchCore;
-		const { runtime, tools } = harness(join(root, "config.json"), core);
+		const { runtime, tools } = harness(join(root, "config.json"));
 		const source = makeThread(64, "completed");
-		source.agentName = "worker";
+		source.cwd = source.executionCwd = root;
 		source.sessionId = "summary-source";
 		source.sessionDir = join(root, "source");
 		await mkdir(source.sessionDir);
@@ -478,16 +475,42 @@ describe("subagent_message", () => {
 			],
 		};
 		runtime.threads.set(64, source);
+		const previousScript = process.argv[1];
 		try {
-			const response = await execute(tools.get("subagent_message")!, { id: 64, message: "Now add the regression test", context: "summary" });
-			assert.equal(response.isError, undefined);
-			assert.equal(captured[4].resumeSession, undefined);
-			assert.match(captured[1], /Found a race in src\/cache\.ts/u);
-			assert.match(captured[1], /src\/cache\.ts/u);
-			assert.match(captured[1], /Now add the regression test/u);
-			assert.match(captured[1], /did not witness the earlier session/u);
-			assert.equal(existsSync(join(getProjectRoot(join(root, "config.json"), process.cwd()), "sessions")), false, "a summary follow-up must not copy the session");
-		} finally { await shutdown(runtime); await rm(root, { recursive: true, force: true }); }
+			const child = join(root, "echo-brief.mjs");
+			await writeFile(child, `
+import { createInterface } from "node:readline";
+const send = (event) => process.stdout.write(JSON.stringify(event) + "\\n");
+createInterface({ input: process.stdin }).on("line", (line) => {
+  const request = JSON.parse(line);
+  if (request.type !== "prompt") return;
+  send({ type: "agent_start" });
+  send({ type: "message_end", message: { role: "assistant", content: [{ type: "text", text: request.message }], stopReason: "stop" } });
+  send({ type: "agent_settled" });
+});`);
+			process.argv[1] = child;
+			const tool = tools.get("subagent_message")!;
+			const request = { id: 64, message: "Now add the regression test", wait: true };
+			const response = await execute(tool, { ...request, context: "summary" });
+			assert.equal(response.isError, undefined, resultText(response));
+			const followUp = runtime.threads.get(response.details.id)!;
+			assert.equal(followUp.task, "Follow-up to run #64:\nNow add the regression test");
+			assert.equal(followUp.lastResult?.task, followUp.task);
+			assert.match(resultText(response), /Now add the regression test[\s\S]*Found a race in src\/cache\.ts/u);
+			assert.match(resultText(response), /Files referenced in earlier tool calls:\n- src\/cache\.ts/u);
+			const sessions = join(getProjectRoot(runtime.configPath, root), "sessions");
+			const beforeRetry = await readdir(sessions);
+			const retry = await execute(tool, { ...request, context: "session" });
+			assert.equal(retry.isError, true);
+			assert.ok(resultText(retry).includes(`Run #${followUp.id} (worker) already owns this logical phase`));
+			assert.equal(runtime.threads.size, 2);
+			assert.deepEqual(await readdir(sessions), beforeRetry, "the rejected session copy must be reclaimed");
+		} finally {
+			process.argv[1] = previousScript;
+			await runtime.shutdown();
+			monitor.clear();
+			await rm(root, { recursive: true, force: true });
+		}
 	});
 
 	it("allows steering an active run at 5/5 capacity while blocking a 6th follow-up continuation", async () => {

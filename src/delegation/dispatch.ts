@@ -9,19 +9,19 @@
 import { resolve } from "node:path";
 import { stripVTControlCharacters } from "node:util";
 import type { ExtensionAPI, Theme } from "@earendil-works/pi-coding-agent";
-import { Text } from "@earendil-works/pi-tui";
+import { Container, Text, TruncatedText } from "@earendil-works/pi-tui";
 import { Type } from "typebox";
 import { loadBuiltinAgents } from "./agents.ts";
 import { BUILTIN_AGENT_NAMES, DEFAULT_MAX_RESULT_LINES, loadConfig } from "../configuration/config.ts";
 import { stringEnum } from "../configuration/schema.ts";
-import { formatUsage } from "../presentation/format.ts";
+import { formatExpandedBrief, formatUsage } from "../presentation/format.ts";
 import {
 	formatTaskSummary,
 	monitor,
 	statusIcon,
 } from "../presentation/monitor.ts";
 import { duplicateDispatchRemedy, findDuplicateDispatch, formatPhaseLeaseReceipt } from "./prompt.ts";
-import type { SubagentRuntime, SubagentThread } from "../lifecycle/runtime.ts";
+import type { SubagentRuntime } from "../lifecycle/runtime.ts";
 import { cancelActiveWork } from "../lifecycle/cancellation.ts";
 import { awaitRunResults, WaitSchema } from "../lifecycle/await-results.ts";
 import { createDispatchCore, type DispatchCore } from "../lifecycle/dispatch-core.ts";
@@ -46,7 +46,7 @@ const IsolationSchema = Type.Optional(
 );
 
 const TASK_BRIEF_DESCRIPTION =
-	"Self-contained brief with the outcome, acceptance criteria, relevant paths, known evidence, write boundaries, checks, and when to return for replanning. The child has no parent conversation.";
+	"Lead with the outcome. For research, specify the question, sources and evidence. For implementation, include owned paths, acceptance criteria and exact checks. Supply the facts the child needs from this conversation.";
 
 const agentSchema = (description: string) => stringEnum(BUILTIN_AGENT_NAMES, { description });
 
@@ -163,13 +163,6 @@ export function registerSubagentTool(
 ): void {
 	const { startBackground, makeDetails } = core;
 
-	const phaseLeaseReceipt = (runIds: number[]): string =>
-		formatPhaseLeaseReceipt(
-			runIds
-				.map((runId) => runtime.threads.get(runId))
-				.filter((thread): thread is SubagentThread => thread !== undefined),
-		);
-
 	pi.registerTool({
 		name: "subagent",
 		label: "Subagent",
@@ -238,7 +231,7 @@ export function registerSubagentTool(
 			}
 			const failureNotes = failures.length ? `\n\nLaunch failures:\n${failures.join("\n")}` : "";
 			const details = makeDetails(mode)(results);
-			if (!wait) return { content: [{ type: "text", text: phaseLeaseReceipt(ids) + failureNotes }], details };
+			if (!wait) return { content: [{ type: "text", text: formatPhaseLeaseReceipt(ids, runtime.threads) + failureNotes }], details };
 
 			const blocks = await awaitRunResults(runtime, ids, signal, DEFAULT_MAX_RESULT_LINES, ctx.cwd, onUpdate
 				? (text) => onUpdate({ content: [{ type: "text", text }], details }) : undefined);
@@ -252,25 +245,34 @@ export function registerSubagentTool(
 			};
 		},
 
-		renderCall(args, theme) {
-			if (args.tasks && args.tasks.length > 0) {
-				let text = `${theme.fg("toolTitle", theme.bold("subagent "))}${theme.fg("accent", `parallel (${args.tasks.length})`)}`;
-				for (const t of args.tasks.slice(0, MAX_CONCURRENT_SUBAGENTS)) {
-					const preview = formatTaskSummary(t.task, 48);
-					const isolation = defaultIsolationMode(t.agent, t.isolation ?? args.isolation) === "worktree" ? " [worktree]" : "";
-					text += `\n  ${theme.fg("accent", t.agent)}${theme.fg("dim", isolation)} ${theme.fg("dim", preview)}`;
+		renderCall(args, theme, { expanded, cwd }) {
+			const title = theme.fg("toolTitle", theme.bold("subagent "));
+			const batch = Array.isArray(args.tasks) ? args.tasks : undefined;
+			const lines = batch ? [title + theme.fg("accent", `parallel (${batch.length})`)] : [];
+			const baseCwd = expanded ? resolve(cwd, typeof args.cwd === "string" ? args.cwd : ".") : "";
+			// Pi renders streamed arguments before schema validation, including incomplete batch entries.
+			for (const item of (batch ?? [args]).slice(0, MAX_CONCURRENT_SUBAGENTS)) {
+				const role = typeof item?.agent === "string" ? stripVTControlCharacters(item.agent) : "…";
+				const task = typeof item?.task === "string" ? item.task : "";
+				const isolation = item?.isolation ?? args.isolation;
+				const mode = defaultIsolationMode(role, isolation);
+				const badge = mode === "worktree" ? (isolation ? "worktree" : "auto worktree")
+					: (isolation === "shared" || (expanded && role === "researcher")) ? "shared" : "";
+				const heading = (batch ? "  " : title) + theme.fg("accent", role) + (badge ? theme.fg("dim", ` [${badge}]`) : "");
+				if (expanded) {
+					const directory = batch && typeof item?.cwd === "string" ? resolve(baseCwd, item.cwd) : baseCwd;
+					lines.push(heading + theme.fg("dim", ` · ${stripVTControlCharacters(directory)}`));
+					if (task) lines.push(formatExpandedBrief(task));
+				} else {
+					const preview = formatTaskSummary(task, batch ? 48 : 60);
+					lines.push(heading + (preview ? " " + theme.fg("dim", preview) : ""));
 				}
-				if (args.tasks.length > MAX_CONCURRENT_SUBAGENTS) text += `\n  ${theme.fg("dim", `… +${args.tasks.length - MAX_CONCURRENT_SUBAGENTS} more`)}`;
-				return new Text(text, 0, 0);
 			}
-			const task: string = args.task ?? "";
-			const preview = formatTaskSummary(task, 60);
-			const isolation = defaultIsolationMode(args.agent ?? "", args.isolation) === "worktree" ? " [worktree]" : "";
-			return new Text(
-				`${theme.fg("toolTitle", theme.bold("subagent "))}${theme.fg("accent", args.agent ?? "?")}${theme.fg("dim", `${isolation}`)} ${theme.fg("dim", preview)}`,
-				0,
-				0,
-			);
+			if (batch && batch.length > MAX_CONCURRENT_SUBAGENTS) lines.push(theme.fg("dim", `  … +${batch.length - MAX_CONCURRENT_SUBAGENTS} more`));
+			if (expanded) return new Text(lines.join("\n"), 0, 0);
+			const card = new Container();
+			for (const line of lines) card.addChild(new TruncatedText(line));
+			return card;
 		},
 
 		renderResult(result, options, theme) {

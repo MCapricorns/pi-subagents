@@ -673,20 +673,10 @@ export function statusIcon(status: RunStatus, theme: Theme): string {
 	}
 }
 
-/** User-facing lifecycle label used by tool/status rendering. */
-export function statusLabel(status: RunStatus): string {
-	switch (status) {
-		case "queued":
-			return "starting";
-		case "running":
-			return "running";
-		case "interrupting":
-			return "interrupting";
-		case "parked":
-			return "interrupted";
-		case "done":
-			return "done";
-		case "failed":
-			return "stopped";
-	}
+/** The widget and the waiting tool card show the same lifecycle transition. */
+export function statusLabel(run: RunView): string {
+	if (run.integrationStatus === "finalizing" && (run.status === "running" || run.status === "queued")) return "applying";
+	if (run.status === "queued") return "starting";
+	if (run.status === "parked") return "interrupted";
+	return run.status;
 }

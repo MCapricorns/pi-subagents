@@ -29,8 +29,12 @@ function isConcurrencyActiveThread(
 	return thread.state === "queued" || thread.state === "running" || thread.state === "interrupting";
 }
 
-function activeConcurrencyThreads(runtime: Pick<SubagentRuntime, "threads">): SubagentThread[] {
-	return [...runtime.threads.values()].filter(isConcurrencyActiveThread);
+export function dispatchCapacity(threads: Iterable<Pick<SubagentThread, "id" | "state" | "retired" | "lifecycleOperation">>) {
+	const activeIds = new Set<number>();
+	for (const thread of threads) {
+		if (isConcurrencyActiveThread(thread)) activeIds.add(thread.id);
+	}
+	return { activeIds, available: Math.max(0, MAX_CONCURRENT_SUBAGENTS - activeIds.size) };
 }
 
 export function concurrencyAdmissionConflict(
@@ -40,14 +44,13 @@ export function concurrencyAdmissionConflict(
 	if (requestedCount > MAX_CONCURRENT_SUBAGENTS) {
 		return `requested ${requestedCount} tasks, exceeding the maximum concurrency of ${MAX_CONCURRENT_SUBAGENTS}. Batch at most ${MAX_CONCURRENT_SUBAGENTS} independent, disjoint tasks at once; continue disjoint work in main and dispatch remaining phases after active runs finish.`;
 	}
-	const active = activeConcurrencyThreads(runtime);
-	const available = Math.max(0, MAX_CONCURRENT_SUBAGENTS - active.length);
+	const { activeIds, available } = dispatchCapacity(runtime.threads.values());
 	if (requestedCount <= available) return undefined;
-	const activeIds = active.map((thread) => `#${thread.id}`).join(", ");
+	const owners = [...activeIds].map((id) => `#${id}`).join(", ");
 	if (available === 0) {
-		return `concurrency limit of ${MAX_CONCURRENT_SUBAGENTS} active subagents is full (${activeIds} active). Do not duplicate their work; continue disjoint work in main until an active run finishes.`;
+		return `concurrency limit of ${MAX_CONCURRENT_SUBAGENTS} active subagents is full (${owners} active). Do not duplicate their work; continue disjoint work in main until an active run finishes.`;
 	}
-	return `${active.length}/${MAX_CONCURRENT_SUBAGENTS} subagents are already active (${activeIds}), leaving ${available} free slot${available === 1 ? "" : "s"} for ${requestedCount} requested tasks. Dispatch at most ${available} independent task${available === 1 ? "" : "s"} now, or continue disjoint work in main until active runs finish.`;
+	return `${activeIds.size}/${MAX_CONCURRENT_SUBAGENTS} subagents are already active (${owners}), leaving ${available} free slot${available === 1 ? "" : "s"} for ${requestedCount} requested tasks. Dispatch at most ${available} independent task${available === 1 ? "" : "s"} now, or continue disjoint work in main until active runs finish.`;
 }
 
 /** Control operations must never wait forever on a settling generation: the
@@ -112,6 +115,9 @@ export interface DispatchEnvironment {
 export interface StartBackgroundOptions {
 	/** A private copy of a settled session used for a follow-up run. */
 	resumeSession?: { sessionId: string; sessionDir: string };
+	/** Historical evidence and the new instruction for a summary continuation.
+	 * The logical task stays the same whichever history the parent chooses. */
+	stdinText?: string;
 	/** Omitted public isolation may fall back only when no Git baseline exists. */
 	automaticIsolation?: boolean;
 	/** Chosen by the tool call before the queue can start a fast child. */

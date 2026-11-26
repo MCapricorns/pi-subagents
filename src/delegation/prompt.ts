@@ -17,6 +17,7 @@ import type { AgentConfig } from "./agents.ts";
 import { formatCatalogEntry } from "./agents.ts";
 import { ORCHESTRATION_SECTION } from "./orchestration.ts";
 import { MAX_CONCURRENT_SUBAGENTS } from "../execution/background.ts";
+import { dispatchCapacity } from "../lifecycle/thread-shared.ts";
 
 export interface PhaseLeaseSource {
 	id: number;
@@ -104,6 +105,15 @@ export function duplicateDispatchRemedy(owner: PhaseLeaseSource): string {
 	}
 }
 
+/** A follow-up can check ownership before copying history. Fresh admission
+ * checks it again when synchronously reserving the new run. */
+export function duplicatePhaseConflict(sources: Iterable<PhaseLeaseSource>, task: string, cwd: string): string | undefined {
+	const duplicate = findDuplicateDispatch(sources, task, cwd);
+	if (!duplicate) return undefined;
+	const owner = duplicate.source;
+	return `Run #${owner.id} (${owner.agentName}) already owns this logical phase (${owner.state}). ${duplicateDispatchRemedy(owner)}`;
+}
+
 function summarizeLeaseTask(task: string): string {
 	const oneLine = normalizedTask(task);
 	const characters = [...oneLine];
@@ -121,9 +131,10 @@ function leaseLine(source: PhaseLeaseSource): string {
 
 /** Prompt-section view of active leases, bounded so a wide batch cannot grow
  * every later prompt. */
-function formatActivePhaseLeases(sources: Iterable<PhaseLeaseSource>): string {
+function formatActivePhaseLeases(sources: Iterable<PhaseLeaseSource>, slotOwners: ReadonlySet<number>): string {
+	const priority = (source: PhaseLeaseSource) => slotOwners.has(source.id) ? 0 : source.state === "parked" ? 2 : 1;
 	const active = [...sources].filter(isActivePhaseLease)
-		.sort((left, right) => Number(left.state === "parked") - Number(right.state === "parked"));
+		.sort((left, right) => priority(left) - priority(right));
 	if (active.length === 0) return "";
 	const lines = active.slice(0, MAX_ACTIVE_LEASES).map(leaseLine);
 	if (active.length > MAX_ACTIVE_LEASES) {
@@ -134,11 +145,19 @@ function formatActivePhaseLeases(sources: Iterable<PhaseLeaseSource>): string {
 
 /** Launch receipt listing every run the call started, so each id stays
  * addressable for steering, status, and stop. */
-export function formatPhaseLeaseReceipt(sources: Iterable<PhaseLeaseSource>): string {
-	const accepted = [...sources];
+export function formatPhaseLeaseReceipt(runIds: readonly number[], threads: ReadonlyMap<number, PhaseLeaseSource>): string {
+	const accepted = runIds.map((id) => threads.get(id)).filter((source) => source !== undefined);
 	if (accepted.length === 0) return "";
 	const count = accepted.length;
-	return `Accepted ${count} subagent ${count === 1 ? "run" : "runs"}\n${accepted.map(leaseLine).join("\n")}\nContinue only disjoint work. Results return automatically after settlement.`;
+	const { available } = dispatchCapacity(threads.values());
+	return [
+		`Accepted ${count} subagent ${count === 1 ? "run" : "runs"}`, ...accepted.map(leaseLine),
+		formatDispatchSlots(available), "Continue only disjoint work. Results return automatically after settlement.",
+	].join("\n");
+}
+
+export function formatDispatchSlots(available: number): string {
+	return `Dispatch slots: ${available}/${MAX_CONCURRENT_SUBAGENTS} free.`;
 }
 
 function delegationBody(agents: AgentConfig[]): string {
@@ -151,7 +170,7 @@ function delegationBody(agents: AgentConfig[]): string {
 	];
 	const dispatch = [
 		`Use \`subagent({ agent, task })\` for one phase. Batch independent phases in one \`subagent({ tasks })\` call within the free slots (${MAX_CONCURRENT_SUBAGENTS} maximum). Sequence dependent phases. Give each writer a disjoint scope and keep a change with its tests. Leave an owned phase to its current run.`,
-		"Write a self-contained brief. Give the outcome and acceptance criteria, paths or symbols, known evidence, write boundaries, exact checks, and when to return for replanning. Children have no parent conversation. Assign only the remaining work.",
+		"Start each brief with the outcome. For research, name the question, sources, and evidence needed. For implementation, name the owned paths, acceptance criteria, exact checks, and when to return for replanning. Include only the context the child needs.",
 		"Omit `wait` for background work in TUI/RPC. Continue disjoint work, or end the turn and let results wake you after integration. Use `wait: true` when the next step depends on this result and no disjoint work can proceed. Avoid polling. Print/JSON waits by default.",
 	];
 	const review = [
@@ -182,9 +201,12 @@ function buildStableDelegationSection(agents: AgentConfig[], includeEmptyCatalog
 /** Bounded ownership reminder; settled results remain reusable after compaction. */
 function buildActiveLeaseSection(sources: Iterable<PhaseLeaseSource>): string {
 	const all = [...sources];
-	const activeLeases = formatActivePhaseLeases(all);
+	const { activeIds, available } = dispatchCapacity(all);
+	const activeLeases = formatActivePhaseLeases(all, activeIds);
 	const recent = all.filter(isSettledLease).slice(-MAX_RECENT_SETTLED_LEASES).map(leaseLine).join("\n");
+	if (!activeLeases && !recent) return "";
 	return [
+		formatDispatchSlots(available),
 		...(activeLeases ? [`Active phase leases:\n${activeLeases}`] : []),
 		...(recent ? [`Recent settled phases — reuse results via subagent_status; continue only unfinished work:\n${recent}`] : []),
 	].join("\n");

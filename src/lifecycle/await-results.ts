@@ -90,8 +90,7 @@ export async function awaitRunResults(
 				if (settled) return `#${id} ${isFailedResult(settled) ? "failed" : "done"}`;
 				const live = monitor.findRun(id);
 				if (!live) return `#${id} …`;
-				const state = live.integrationStatus === "finalizing" ? "integrating" : live.status === "failed" ? "failed" : statusLabel(live.status);
-				return `#${id} ${state}`;
+				return `#${id} ${statusLabel(live)}`;
 			});
 			const text = `Waiting in-turn on ${runIds.length} run${runIds.length === 1 ? "" : "s"} · ${parts.join(", ")}`;
 			// The monitor notifies on every usage and activity change; this line

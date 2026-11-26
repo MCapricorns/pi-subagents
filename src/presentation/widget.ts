@@ -4,7 +4,7 @@ import type { ExtensionContext, Theme } from "@earendil-works/pi-coding-agent";
 import { truncateToWidth, visibleWidth } from "@earendil-works/pi-tui";
 import {
 	formatElapsed, formatTaskSummary, formatUsageCompact,
-	isRunActiveStatus, monitor, statusIcon, type RunView,
+	isRunActiveStatus, monitor, statusIcon, statusLabel, type RunView,
 } from "./monitor.ts";
 
 const SUBAGENTS_WIDGET_ID = "pi-subagents";
@@ -20,9 +20,9 @@ function worktreeBadge(run: RunView): string | undefined {
 }
 
 /** Identity owns at least half the row. Drop telemetry before losing it. */
-function splitLine(left: string, right: string, theme: Theme, width: number, preserveLeft = false): string {
+function splitLine(left: string, right: string, theme: Theme, width: number): string {
 	const budget = width - visibleWidth(right) - 2;
-	if (!right || budget < Math.min(28, Math.ceil(width / 2)) || (preserveLeft && visibleWidth(left) > budget)) return truncateToWidth(left, width, "…");
+	if (!right || budget < Math.min(28, Math.ceil(width / 2))) return truncateToWidth(left, width, "…");
 	const clipped = truncateToWidth(left, budget, "…");
 	return clipped + " ".repeat(width - visibleWidth(clipped) - visibleWidth(right)) + theme.fg("dim", right);
 }
@@ -41,9 +41,9 @@ function metadata(run: RunView): string[] {
 		formatUsageCompact(run.usage), worktreeBadge(run)].filter((part): part is string => Boolean(part));
 }
 
-function detailLine(activity: string | undefined, run: RunView | undefined, theme: Theme, width: number): string | undefined {
-	const parts = activity ? ["↳ " + formatTaskSummary(activity, Math.max(1, width - 6), false)] : [];
-	for (const part of run ? metadata(run) : []) {
+function detailLine(run: RunView, theme: Theme, width: number): string | undefined {
+	const parts = run.activity ? ["↳ " + formatTaskSummary(run.activity, Math.max(1, width - 6), false)] : [];
+	for (const part of metadata(run)) {
 		if (visibleWidth([...parts, part].join(SEPARATOR)) > width - 4) break;
 		parts.push(part);
 	}
@@ -51,17 +51,17 @@ function detailLine(activity: string | undefined, run: RunView | undefined, them
 }
 
 function runRow(run: RunView, theme: Theme, width: number, now: number): TaskRow {
-	const state = run.status === "queued" ? "starting" : run.integrationStatus === "finalizing" ? "applying" : run.status;
+	const state = statusLabel(run);
 	const label = run.label ?? formatTaskSummary(run.task, Math.max(1, width - 18));
-	const narrowState = width < 60 && (run.status === "queued" || run.integrationStatus === "finalizing") ? " · " + state : "";
-	const identity = statusIcon(run.status, theme) + " " + theme.fg("dim", "#" + run.id) + " " + run.agent + narrowState + " · " + label;
+	const narrowState = width < 60 && state !== "running" ? " · " + state : "";
+	const identity = statusIcon(state === "applying" ? "running" : run.status, theme) + " " + theme.fg("dim", "#" + run.id) + " " + run.agent + narrowState + " · " + label;
 	const elapsed = formatElapsed(run, now);
 	const primary = splitLine(identity, width >= 60 ? [state, elapsed].filter(Boolean).join(SEPARATOR) : elapsed, theme, width);
 	return {
-		primary, detail: detailLine(run.activity, run, theme, width),
+		primary, detail: detailLine(run, theme, width),
 		requiredDetail: run.status === "failed" && Boolean(run.activity),
 		priority: run.status === "failed" ? 0 : run.status === "interrupting" ? 1 : run.status === "running" ? 2 : 3,
-		state: run.status,
+		state,
 	};
 }
 
@@ -106,8 +106,8 @@ export function formatSubagentWidgetLines(
 	const rows = visible.map((run) => runRow(run, theme, width, now));
 	const states = new Map<string, number>();
 	for (const row of rows) states.set(row.state, (states.get(row.state) ?? 0) + 1);
-	const counts = ["failed", "interrupting", "running", "queued"]
-		.filter((state) => states.has(state)).map((state) => states.get(state) + " " + (state === "queued" ? "starting" : state));
+	const counts = ["failed", "interrupting", "running", "applying", "starting"]
+		.filter((state) => states.has(state)).map((state) => states.get(state) + " " + state);
 	const overview = theme.bold("Subagents") + theme.fg("dim", "  " + counts.join(SEPARATOR));
 	return renderBoard(rows, theme, width, overview);
 }

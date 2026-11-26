@@ -88,7 +88,9 @@ async function harness(unavailableTask?: string) {
 		root, runtime, messages, stopSummaries, ids, routes, started, finish, invoke, stops: () => stops,
 		renderDispatchResult: (result: unknown, options: { expanded: boolean; isPartial: boolean }) =>
 			tools.get("subagent").renderResult(result, options, theme).render(120).join("\n"),
-		renderDispatchCall: (params: unknown) => tools.get("subagent").renderCall(params, theme).render(120).join("\n"),
+		renderDispatchCall: (params: unknown, expanded = false, width = Math.max(120, root.length + 80)) =>
+			tools.get("subagent").renderCall(params, theme, { expanded, cwd: root }).render(width)
+				.map((line: string) => line.trimEnd()).join("\n"),
 		async cleanup() { await runtime.shutdown(); monitor.clear(); await rm(root, { recursive: true, force: true }); },
 	};
 }
@@ -106,7 +108,9 @@ it("returns final states and failure evidence for an awaited parallel batch", as
 		assert.equal(h.ids.length, 2);
 		monitor.setIsolation(h.ids[0]!, "worktree", "finalizing");
 		const progress = h.renderDispatchResult(updates.at(-1), { expanded: false, isPartial: true });
-		assert.match(progress, /Waiting in-turn on 2 runs.*#\d+ integrating.*#\d+ running/u);
+		assert.match(progress, /Waiting in-turn on 2 runs.*#\d+ applying.*#\d+ running/u);
+		monitor.setStatus(h.ids[0]!, "interrupting");
+		assert.match(h.renderDispatchResult(updates.at(-1), { expanded: false, isPartial: true }), /#\d+ interrupting.*#\d+ running/u);
 		h.finish(h.ids[0]!);
 		h.finish(h.ids[1]!, true);
 		const result = await pending;
@@ -130,9 +134,41 @@ it("applies a batch cwd and keeps accepted run IDs visible beside launch failure
 		const result = await h.invoke("subagent", { agent: undefined, task: undefined, cwd: "packages", tasks }, true);
 		assert.deepEqual(h.ids.map((id) => h.runtime.threads.get(id)?.cwd), [join(h.root, "packages"), join(h.root, "packages", "nested")]);
 		assert.match(result.content[0].text, /^Accepted 2 subagent runs/u);
+		assert.match(result.content[0].text, /Dispatch slots: 3\/5 free/u);
 		for (const id of h.ids) assert.ok(result.content[0].text.includes(`#${id} researcher`));
 		assert.match(result.content[0].text, /tasks\[1\] \(worker\) failed to start/u);
 		assert.match(h.renderDispatchResult(result, { expanded: false, isPartial: false }), /worker · not started · Configured model is unavailable/u);
+	} finally { await h.cleanup(); }
+});
+
+it("expands the original brief and the directory each task will use, including while arguments stream", async () => {
+	const h = await harness();
+	try {
+		const brief = "Fix the cache in src/cache.ts.\nKeep unrelated keys.\nRun the regression suite.";
+		const args = { cwd: "packages", tasks: [
+			{ agent: "worker", task: brief, cwd: "api" },
+			{ agent: "researcher", task: "\x1b[31mTrace the public caller.\x1b[0m" },
+		] };
+		const preview = h.renderDispatchCall(args);
+		assert.doesNotMatch(preview, /Run the regression suite/u);
+		const narrow = h.renderDispatchCall({ tasks: [
+			{ agent: "researcher", task: "确认哪些入口会读取派遣结果，并列出每个入口所在的文件和调用位置。" },
+			{ agent: "worker", task: brief },
+		] }, false, 42).split("\n");
+		assert.equal(narrow.length, 3, "keep one preview row per task");
+		assert.match(narrow[1]!, /researcher.*确认/u);
+		assert.match(narrow[2]!, /worker/u);
+		const expanded = h.renderDispatchCall(args, true);
+		assert.ok(expanded.includes(join(h.root, "packages", "api")));
+		assert.ok(expanded.includes(join(h.root, "packages") + "\n"));
+		assert.match(expanded, /auto worktree[\s\S]*Fix the cache in src\/cache\.ts\.\n\s+Keep unrelated keys\.\n\s+Run the regression suite\./u);
+		assert.doesNotMatch(expanded, /\x1b/u);
+		const single = h.renderDispatchCall({ agent: "worker", task: brief, cwd: "packages", isolation: "shared" }, true);
+		assert.ok(single.includes(join(h.root, "packages") + "\n"));
+		assert.match(single, /worker \[shared\]/u);
+		for (const open of [false, true]) {
+			assert.match(h.renderDispatchCall({ tasks: [{ agent: "worker" }, {}] }, open, 42), /parallel \(2\)/u);
+		}
 	} finally { await h.cleanup(); }
 });
 
@@ -180,6 +216,7 @@ for (const name of ["subagent", "subagent_message"]) {
 			try {
 				const result = await h.invoke(name, { wait: false }, false);
 				assert.equal(result.isError, undefined);
+				assert.match(result.content[0].text, /Dispatch slots: 4\/5 free/u);
 				assert.deepEqual(h.routes, ["background"]);
 				assert.equal(h.runtime.settledRuns.size, 0);
 				h.finish(h.ids[0]!);

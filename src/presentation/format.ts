@@ -4,6 +4,7 @@
  */
 
 import { readFileSync } from "node:fs";
+import { stripVTControlCharacters } from "node:util";
 import type { AgentConfig } from "../delegation/agents.ts";
 import { formatUsageCompact, runLabel, shrinkRunLabel } from "./monitor.ts";
 import { emptyUsage } from "../execution/run-control.ts";
@@ -60,6 +61,12 @@ export function dispatchFailedResult(agent: AgentConfig, task: string, error: un
 export function formatUsage(usage: UsageStats): string {
 	const turns = usage.turns ? `${usage.turns} turn${usage.turns > 1 ? "s" : ""}` : undefined;
 	return [turns, formatUsageCompact(usage)].filter(Boolean).join(" ");
+}
+
+/** Preserve the brief's paragraphs and indentation when a Pi tool card expands. */
+export function formatExpandedBrief(task: string): string {
+	return stripVTControlCharacters(task).replace(/\r\n?/gu, "\n").split("\n")
+		.map((line) => line && "    " + line).join("\n");
 }
 
 interface CompletionFormatOptions {
