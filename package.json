@@ -1,6 +1,6 @@
 {
   "name": "@ferris1225/pi-subagents",
-  "version": "7.0.5",
+  "version": "7.0.6",
   "description": "Lead/worker orchestration for Pi: main plans and reviews, configurable workers execute with retained sessions and Git worktree isolation.",
   "type": "module",
   "license": "MIT",
@@ -36,8 +36,11 @@
     ]
   },
   "scripts": {
-    "check": "tsc --noEmit && npm test",
+    "check": "npm run check:unused && npm test",
+    "check:unused": "tsc --noEmit && knip",
+    "check:staged": "node scripts/check-staged.mjs",
     "test": "node --test --test-concurrency=4 test/*.test.ts",
+    "prepare": "node scripts/install-git-hooks.mjs",
     "prepack": "npm run check"
   },
   "peerDependencies": {
@@ -51,6 +54,7 @@
     "@earendil-works/pi-coding-agent": "1.5.2",
     "@earendil-works/pi-tui": "1.5.2",
     "@types/node": "^22.10.0",
+    "knip": "6.48.0",
     "typebox": "^1.3.27",
     "typescript": "^5.9.0"
   },

@@ -109,6 +109,10 @@ subagent nor main repeats or edits that scope. Questions and review-only request
 implementation. Explicit requests to work in main take precedence. Parallel workers require independent
 scope and disjoint write ownership; a fix and its regression tests share an owner.
 
+For an authorized push of code changes, main proactively delegates a read-only
+audit of the diff. It removes confirmed dead code within the task's scope and
+runs the project's checks before committing and pushing.
+
 There are two roles, each using its own model/thinking settings:
 
 | Scope | Tool parameter | Access |
@@ -201,13 +205,15 @@ worktree. Integration applies only its delta, is serialized per repository,
 and preserves the caller's index, branch, and HEAD. Failures retain recovery
 artifacts. Worktrees isolate Git changes, not permissions.
 
-Escape cancels unfinished workers without waking main. Main receives a cancellation
-receipt on the next user turn. A worker whose child already finished and is only
-integrating its worktree is not cancelled: it settles normally, and its real
-result, like any result already queued for delivery, arrives on the next user
-turn. `subagent_stop({ all: true })` also leaves such runs alone. Tree navigation,
-new/resume/fork/reload, and shutdown stop old work; interrupted evidence remains
-available for recovery.
+Escape stops unfinished workers when it cancels a parent turn. Pi's terminal
+shows which runs are stopping, then saves their elapsed time, model usage, and
+worktree status in the transcript as available. A finished worker that is still
+applying its worktree continues integrating and reports progress.
+`subagent_stop({ all: true })` also lets those integrations finish. Main receives
+the cancellation receipt and any deferred results the next time you send a
+message. Tree navigation,
+new/resume/fork/reload, and shutdown stop old work and retain interrupted evidence
+for recovery.
 
 The task widget shows status, elapsed time, model, thinking, tokens, and worktree
 state in at most ten lines. Independent workers can start together; only
@@ -274,12 +280,22 @@ npm ci
 npm run check
 ```
 
+`npm run check:unused` runs TypeScript's unused declaration checks and Knip's
+checks for unused files, exports, and dependencies. It runs before the tests in
+`npm run check`. The release review also asks a read-only subagent to inspect
+the diff and report dead code with evidence before main commits.
+
+`npm ci` installs the repository's pre-commit hook in a checkout without custom
+hooks. The hook runs the same check on the staged files, so unstaged edits stay
+out of the check. If you already use a custom pre-commit hook, add
+`npm run check:staged` to it to use the staged check.
+
 Runtime modules live in `src/`: configuration/UI, orchestration prompts,
 execution, lifecycle, isolation/recovery, and presentation. Native integration tests
 use a local fixture provider and do not consume paid model requests.
 
-Pushes of an unpublished version to `main` run checks on Windows, macOS, and
-Linux, then [publish to npm and create a GitHub Release](./.github/workflows/publish.yml).
-Do not publish locally.
+Pull requests and pushes to `main` run the checks on Windows, macOS, and Linux.
+A passing push of an unpublished version to `main` publishes to npm and creates
+a GitHub Release through the [publish workflow](./.github/workflows/publish.yml).
 
 [Changelog](./CHANGELOG.md) · [MIT license](./LICENSE)

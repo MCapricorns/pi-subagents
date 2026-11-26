@@ -25,7 +25,8 @@ process.stdin.on("data", (chunk) => {
     if (command.type !== "prompt") continue;
     send({ type: "response", id: command.id, command: "prompt", success: true, data: { disposition: "started" } });
     send({ type: "agent_start" });
-    send({ type: "message_end", message: { role: "assistant", content: [{ type: "text", text: "finished work" }], stopReason: "stop" } });
+    send({ type: "message_end", message: { role: "assistant", content: [{ type: "text", text: "finished work" }], stopReason: "stop",
+      provider: "fixture", model: "bench", usage: { input: 33, output: 7, cost: { total: 0.0003 } } } });
     send({ type: "agent_settled" });
   }
 });`;
@@ -36,6 +37,7 @@ async function settlingRun() {
 	const root = await mkdtemp(join(tmpdir(), "pi-subagents-settling-"));
 	const previousScript = process.argv[1];
 	const sent: Array<{ message: any; options: any }> = [];
+	const notices: string[] = [];
 	const pi = {
 		on: () => undefined, getActiveTools: () => ["read", "write"], getAllTools: () => [],
 		sendMessage: (message: unknown, options: unknown) => sent.push({ message, options }),
@@ -45,8 +47,10 @@ async function settlingRun() {
 	await writeFile(child, CHILD, "utf8");
 	process.argv[1] = child;
 	const core = createDispatchCore(runtime);
+	const context = { cwd: root, mode: "tui", scopedModels: [], modelRegistry: { getAvailable: () => [] },
+		ui: { notify: (message: string) => notices.push(message) } } as unknown as ExtensionContext;
 	core.setEnvironment({
-		ctx: { cwd: root, scopedModels: [], modelRegistry: { getAvailable: () => [] }, ui: { notify: () => undefined } } as unknown as ExtensionContext,
+		ctx: context,
 		config: DEFAULT_CONFIG,
 		agents: loadBuiltinAgents(),
 	});
@@ -71,7 +75,7 @@ async function settlingRun() {
 		monitor.clear();
 		await rm(root, { recursive: true, force: true });
 	};
-	return { root, pi, runtime, thread, sent, settling, release, cleanup };
+	return { root, pi, runtime, thread, sent, notices, context, settling, release, cleanup };
 }
 
 describe("cancellation during settlement", () => {
@@ -80,9 +84,11 @@ describe("cancellation during settlement", () => {
 		try {
 			await h.settling;
 			assert.equal(h.thread.lifecycleOperation, "settle");
-			await cancelActiveWork(h.runtime, "Parent run was cancelled.");
+			h.thread.isolation = "worktree";
+			await cancelActiveWork(h.runtime, "Parent run was cancelled.", { context: h.context });
 			assert.equal(h.thread.retired, undefined, "a finished run is not cancelled");
 			assert.equal(h.sent.some(({ message }) => message.customType === "subagent-cancelled"), false);
+			assert.deepEqual(h.notices, [`#${h.thread.id} worker finished and is applying worktree changes.`]);
 			h.release();
 			await h.thread.generationCompletion;
 			h.runtime.completionBatcher.flush();
@@ -93,6 +99,8 @@ describe("cancellation during settlement", () => {
 			assert.match(results[0]!.message.content, /finished work/u);
 			assert.doesNotMatch(results[0]!.message.content, /aborted|cancelled/iu);
 			assert.deepEqual(results[0]!.options, { deliverAs: "nextTurn", triggerTurn: false });
+			assert.equal(h.notices.length, 2);
+			assert.match(h.notices[1]!, /^✓ #\d+ worker · fixture\/bench.*↑33 ↓7 \$0\.0003/u);
 		} finally { await h.cleanup(); }
 	});
 
@@ -101,9 +109,12 @@ describe("cancellation during settlement", () => {
 		const pi = { on: () => undefined, getActiveTools: () => [], getAllTools: () => [], sendMessage: (message: unknown, options: unknown) => sent.push({ message, options }) } as unknown as ExtensionAPI;
 		const root = await mkdtemp(join(tmpdir(), "pi-subagents-held-"));
 		const runtime = createRuntime(pi, join(root, "pi-subagents.json"));
+		const notices: string[] = [];
+		const context = { mode: "tui", ui: { notify: (text: string) => notices.push(text) } } as unknown as ExtensionContext;
 		try {
 			runtime.completionBatcher.push({ agent: "worker", block: "### [worker] completed\n\nheld success" });
-			await cancelActiveWork(runtime, "Parent run was cancelled.");
+			await cancelActiveWork(runtime, "Parent run was cancelled.", { context });
+			assert.deepEqual(notices, ["1 completed subagent result ready for your next message."]);
 			runtime.completionBatcher.flush();
 			assert.equal(sent.length, 1);
 			assert.match(sent[0]!.message.content, /held success/u);

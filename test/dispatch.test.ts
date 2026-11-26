@@ -305,7 +305,6 @@ describe("duplicate dispatch", () => {
 			setEnvironment() {},
 			makeDetails: (mode) => (results) => ({ mode, results }),
 			finishRun() {},
-			makeLiveHandler: () => () => undefined,
 			async startBackground(agentName, task) {
 				startedCount++;
 				return {

@@ -57,7 +57,7 @@ const runtime = createRuntime(pi, configPath);
 await restoreDurableThreads(runtime, cwd);
 const thread = {
  id: monitor.reserveRunId(), generation: 1, agentName: "worker", task: "live window",
- cwd, executionCwd: cwd, isolation: "shared", state: "running", control: new RunControl("live window", 1),
+ cwd, executionCwd: cwd, isolation: "shared", state: "running", control: new RunControl("live window"),
  generationCompletion: Promise.resolve(), lifecycleVersion: 0, elapsedMs: 1, finalizeIsolation: async () => undefined,
 };
 runtime.threads.set(thread.id, thread);

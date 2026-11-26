@@ -55,6 +55,7 @@ describe("renderSections", () => {
 		assert.match(directive, /Omit `wait` for background work in TUI\/RPC.*Use `wait: true` when the next step depends on this result/u);
 		assert.match(directive, /`subagent_message` to steer a running child or give a completed run a focused correction/u);
 		assert.match(directive, /In a partial batch, leave accepted runs alone and address only the failed launches/u);
+		assert.match(directive, /For an authorized push of code changes, first delegate a read-only audit.*Remove confirmed dead code within scope.*Run project checks before committing and pushing/u);
 		assert.doesNotMatch(directive, /workflow/iu);
 		assert.doesNotMatch(directive, /Active phase leases:/u);
 

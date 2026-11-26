@@ -23,6 +23,7 @@ it("deletes storage only for /subagents-cleanup without an unknown argument", as
 		},
 		registerCommand: (name: string, command: { handler: CommandHandler }) => commands.set(name, command.handler),
 		registerMessageRenderer: () => undefined,
+		registerEntryRenderer: () => undefined,
 		registerTool: () => undefined,
 		getActiveTools: () => [],
 		getAllTools: () => [],

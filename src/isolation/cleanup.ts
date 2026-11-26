@@ -46,8 +46,6 @@ function directoryBytes(path: string): number {
 }
 
 interface CleanupUsage {
-	/** Absolute path of the extension's durable root. */
-	root: string;
 	/** Per-project usage, largest first. */
 	projects: Array<{ path: string; bytes: number; sessions: number; worktrees: number }>;
 	totalBytes: number;
@@ -70,7 +68,7 @@ export function measureDurableUsage(root: string): CleanupUsage {
 	try {
 		projects = readdirSync(root, { withFileTypes: true });
 	} catch {
-		return { root, projects: [], totalBytes: 0 };
+		return { projects: [], totalBytes: 0 };
 	}
 	const measured = projects
 		.filter((entry) => entry.isDirectory() && !entry.isSymbolicLink() && !entry.name.endsWith(".lock"))
@@ -85,7 +83,6 @@ export function measureDurableUsage(root: string): CleanupUsage {
 		})
 		.sort((left, right) => right.bytes - left.bytes);
 	return {
-		root,
 		projects: measured,
 		totalBytes: measured.reduce((sum, project) => sum + project.bytes, 0),
 	};

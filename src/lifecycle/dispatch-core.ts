@@ -22,7 +22,6 @@ export interface DispatchCore {
 	startBackground: StartBackgroundInternal;
 	/** Stamp a terminal monitor state and toast the result once. */
 	finishRun: (runId: number, status: "done" | "failed", opts?: { silent?: boolean }) => void;
-	makeLiveHandler: (runId: number, generation?: number) => (event: SubagentLiveEvent) => void;
 	makeDetails: (mode: "single" | "parallel") => (results: SingleResult[]) => SubagentDetails;
 }
 
@@ -145,7 +144,6 @@ export function createDispatchCore(runtime: SubagentRuntime): DispatchCore {
 		},
 		startBackground,
 		finishRun,
-		makeLiveHandler,
 		makeDetails,
 	};
 }

@@ -115,8 +115,6 @@ export interface WorktreeFinalization {
 	/** True once the patch was successfully applied to the original worktree. */
 	integrated: boolean;
 	hadChanges: boolean;
-	/** Repository a recovery path can prune stale worktree metadata against. */
-	originalRoot?: string;
 	worktreePath?: string;
 	patchPath?: string;
 	error?: string;
@@ -546,7 +544,6 @@ class GitWorktreeIsolation implements WorktreeIsolation {
 			status: "retained",
 			integrated,
 			hadChanges,
-			originalRoot: this.originalRoot,
 			...(existsSync(this.worktreePath) ? { worktreePath: this.worktreePath } : {}),
 			...(patchWritten && existsSync(this.patchPath) ? { patchPath: this.patchPath } : {}),
 			error,

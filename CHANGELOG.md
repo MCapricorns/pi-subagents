@@ -1,5 +1,14 @@
 # Changelog
 
+## 7.0.6
+
+- Show Escape cancellation progress and per-run statistics in the terminal before
+  the next user message. Finished workers report pending integration and retain
+  normal result delivery.
+- Gate staged commits, pull requests, and publishing on unused-code checks.
+  The main-agent prompt delegates a dead-code review before an authorized push.
+  Clean up confirmed unused code before committing.
+
 ## 7.0.5
 
 - Shorten the main and child prompts with clear routing, brief, and review steps.

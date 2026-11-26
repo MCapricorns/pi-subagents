@@ -25,6 +25,8 @@ import type { RunControl, SteeringReceipt } from "../execution/run-control.ts";
 import { isFailedResult, type SingleResult } from "../execution/spawn.ts";
 import type { IsolationMode, WorktreeFinalization, WorktreeIsolation } from "../isolation/worktree.ts";
 
+export const CANCELLATION_STATS_ENTRY = "subagent-cancellation-stats";
+
 export type ThreadState = "queued" | "running" | "interrupting" | "parked" | "completed" | "failed" | "stopped";
 
 type ThreadLifecycleOperation = "stop" | "settle";
@@ -86,13 +88,13 @@ export interface SubagentRuntime {
 	/** Cancelling a parent must not wake it again with old child results. */
 	suppressCompletions: boolean;
 	discardCompletions: () => void;
-	/** Hand held completions to the next user turn without waking the parent. */
-	deferPendingCompletions: () => void;
+	/** Hand held completions to the next user turn and return the number queued. */
+	deferPendingCompletions: () => number;
 	/** Route a run that already finished its child to the next user turn, even
 	 * while completions are suppressed: its result is real and must not be lost. */
 	deferRunDelivery: (runId: number) => void;
-	/** Record cancellation for the next user turn without waking the parent. */
-	recordCancellation: (runIds: number[]) => void;
+	/** Show optional terminal stats and queue the cancellation receipt for the next user turn. */
+	recordCancellation: (runIds: number[], stats?: string[]) => void;
 	/** Resolves when the load-time durable restore pass has finished. Everything
 	 * that answers "which threads exist" awaits it — the lookup tools, a fresh
 	 * dispatch before it allocates a run id, and the restored-thread notice — so
@@ -160,13 +162,23 @@ export function createRuntime(pi: ExtensionAPI, configPath: string): SubagentRun
 		getToolInfos: () => pi.getAllTools(),
 		sessionActive: true,
 		suppressCompletions: false,
-		recordCancellation: (runIds) => {
+		recordCancellation: (runIds, stats) => {
 			if (!runIds.length) return;
+			let display = true;
+			if (stats) {
+				try {
+					// Custom entries render immediately and stay out of model context.
+					pi.appendEntry(CANCELLATION_STATS_ENTRY, stats);
+					display = false;
+				} catch {
+					/* Keep the next-turn receipt visible if the entry could not be saved. */
+				}
+			}
 			const targets = "runs " + runIds.map((id) => `#${id}`).join(", ");
 			pi.sendMessage({
 				customType: "subagent-cancelled",
 				content: `Parent cancellation stopped ${targets}. These runs are already cancelled; no further subagent_stop is needed. Do not restart cancelled work unless the user requests it. Partial edits and retained integration artifacts may remain; inspect them only if continuing the task.`,
-				display: true,
+				display,
 				details: { runIds },
 			}, { deliverAs: "nextTurn", triggerTurn: false });
 		},
@@ -179,6 +191,7 @@ export function createRuntime(pi: ExtensionAPI, configPath: string): SubagentRun
 			const pending = [...runtime.completionBatcher.dispose(), ...heldCompletions];
 			heldCompletions = [];
 			sendNextTurn(pending);
+			return pending.length;
 		},
 		deferRunDelivery: (runId) => {
 			deferredRuns.add(runId);

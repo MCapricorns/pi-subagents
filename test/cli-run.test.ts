@@ -45,7 +45,7 @@ process.stdin.on("data", chunk => {
 `, "utf8");
 	try {
 		process.argv[1] = child;
-		const control = new RunControl("Test native Pi", 1);
+		const control = new RunControl("Test native Pi");
 		let steering: Promise<SteeringReceipt> | undefined;
 		const result = await runCliAgentAttempt({
 			defaultCwd: root, agent: { name: "worker", description: "test", systemPrompt: "" },
@@ -135,7 +135,7 @@ describe("child launch arguments", () => {
 
 describe("stable steering receipts", () => {
 	it("preserves the receipt returned by the attached attempt", async () => {
-		const control = new RunControl("Fixture", 1);
+		const control = new RunControl("Fixture");
 		const token = control.beginAttempt();
 		const receipt: SteeringReceipt = { requestId: "native-7", disposition: "handled", acknowledgedAt: 123 };
 		control.attach(token, { stop: async () => {}, steer: async () => receipt });
@@ -333,7 +333,7 @@ globalThis.collectUi = (cmd) => {
 		const previousScript = process.argv[1];
 		try {
 			process.argv[1] = join(root, "must-not-run.mjs");
-			const control = new RunControl("Prepared then stopped", 1);
+			const control = new RunControl("Prepared then stopped");
 			// A non-empty system prompt makes the attempt await a prompt-file write
 			// before spawning; the stop lands inside that window.
 			const pending = runCliAgentAttempt({

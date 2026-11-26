@@ -85,7 +85,7 @@ describe("automatic cleanup", () => {
 		return {
 			id, generation: 1, agentName: "researcher", task: "parked research",
 			cwd: process.cwd(), executionCwd: process.cwd(), isolation: "shared",
-			state, control: new RunControl("parked research", 1),
+			state, control: new RunControl("parked research"),
 			generationCompletion: Promise.resolve(), lifecycleVersion: 0, elapsedMs: 0,
 			sessionDir, sessionId: "session-" + id,
 			finalizeIsolation: async () => undefined,

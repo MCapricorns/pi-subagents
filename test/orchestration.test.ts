@@ -45,7 +45,7 @@ it("resets old settings and installs live orchestration without changing the sta
 		},
 		registerCommand: (name: string) => commands.push(name),
 		registerTool: (tool: any) => tools.set(tool.name, tool),
-		registerMessageRenderer() {}, getActiveTools: () => ["read", "write"], getAllTools: () => [], sendMessage() {},
+		registerMessageRenderer() {}, registerEntryRenderer() {}, getActiveTools: () => ["read", "write"], getAllTools: () => [], sendMessage() {},
 	} as unknown as ExtensionAPI;
 	t.after(async () => {
 		for (const handler of handlers.get("session_shutdown") ?? []) await handler({}, ctx);

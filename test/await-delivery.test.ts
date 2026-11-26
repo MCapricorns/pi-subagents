@@ -24,11 +24,13 @@ async function harness(unavailableTask?: string) {
 	const root = await mkdtemp(join(tmpdir(), "pi-await-delivery-"));
 	const tools = new Map<string, any>();
 	const messages: any[] = [];
+	const stopSummaries: string[][] = [];
 	const started = deferred();
 	const pi = {
 		on() {}, getActiveTools: () => ["read"], getAllTools: () => [],
 		registerTool: (tool: any) => tools.set(tool.name, tool),
 		sendMessage: (message: any) => messages.push(message),
+		appendEntry: (_type: string, stats: string[]) => stopSummaries.push(stats),
 	} as unknown as ExtensionAPI;
 	const runtime = createRuntime(pi, join(root, "config.json"));
 	const ids: number[] = [];
@@ -36,7 +38,7 @@ async function harness(unavailableTask?: string) {
 	let stops = 0;
 	const thread = (id: number, task: string, state: "running" | "completed", cwd = root): SubagentThread => ({
 		id, generation: 1, agentName: "researcher", task, cwd, executionCwd: cwd,
-		isolation: "shared", state, control: new RunControl(task, 1),
+		isolation: "shared", state, control: new RunControl(task),
 		generationCompletion: Promise.resolve(), lifecycleVersion: 0, elapsedMs: 0,
 		finalizeIsolation: async () => undefined,
 	});
@@ -79,11 +81,11 @@ async function harness(unavailableTask?: string) {
 	const invoke = (name: string, params: Record<string, unknown>, hasUI: boolean, signal = new AbortController().signal, updates: any[] = []) => {
 		const task = name === "subagent" ? { agent: "researcher", task: "Verify caller evidence" } : { id: 900, message: "Verify caller evidence", context: "summary" };
 		return tools.get(name).execute("call", { ...task, ...params }, signal, (update: any) => updates.push(update), {
-			cwd: root, hasUI, ui: { notify() {} },
+			cwd: root, hasUI, mode: hasUI ? "tui" : "print", ui: { notify() {} },
 		});
 	};
 	return {
-		root, runtime, messages, ids, routes, started, finish, invoke, stops: () => stops,
+		root, runtime, messages, stopSummaries, ids, routes, started, finish, invoke, stops: () => stops,
 		renderDispatchResult: (result: unknown, options: { expanded: boolean; isPartial: boolean }) =>
 			tools.get("subagent").renderResult(result, options, theme).render(120).join("\n"),
 		renderDispatchCall: (params: unknown) => tools.get("subagent").renderCall(params, theme).render(120).join("\n"),
@@ -225,6 +227,8 @@ for (const name of ["subagent", "subagent_message"]) {
 				assert.equal(h.stops(), 1);
 				assert.equal(h.runtime.settledListeners.size, 0);
 				assert.equal(h.messages.filter((message) => message.customType === "subagent-result").length, 0);
+				assert.equal(h.stopSummaries[0]?.[0], "Stopped 1 subagent run");
+				assert.equal(h.messages.find((message) => message.customType === "subagent-cancelled")?.display, false);
 			} finally { await h.cleanup(); }
 		});
 	});

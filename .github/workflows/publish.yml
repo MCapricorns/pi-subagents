@@ -1,12 +1,13 @@
 name: Publish
 
 on:
+  pull_request:
   push:
     branches: [main]
   workflow_dispatch:
 
 concurrency:
-  group: publish-npm
+  group: ${{ github.event_name == 'pull_request' && github.ref || 'publish-npm' }}
   cancel-in-progress: false
 
 jobs:
@@ -31,6 +32,7 @@ jobs:
       - run: npm run check
 
   publish:
+    if: github.event_name != 'pull_request' && github.ref == 'refs/heads/main'
     needs: check
     runs-on: ubuntu-latest
     permissions:

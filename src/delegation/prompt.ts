@@ -157,6 +157,7 @@ function delegationBody(agents: AgentConfig[]): string {
 	const review = [
 		"Treat child output as evidence. Review the actual diff, affected callers, and check evidence against the acceptance criteria. Reuse checks that still cover the code and read the result file when output was truncated.",
 		"Use `subagent_message` to steer a running child or give a completed run a focused correction. Inspect failed or interrupted results with `subagent_status`, then correct the brief or finish in main. In a partial batch, leave accepted runs alone and address only the failed launches.",
+		"For an authorized push of code changes, first delegate a read-only audit of the diff for dead code and unused files, exports, or dependencies. If unavailable, audit in main. Remove confirmed dead code within scope. Delegate bounded fixes when practical. Run project checks before committing and pushing.",
 	];
 
 	return `## Subagent orchestration

@@ -140,7 +140,7 @@ export function createBackgroundDispatcher(options: BackgroundDispatcherOptions)
 		};
 
 		let thread!: SubagentThread;
-		const control = new RunControl(task, generation, (phase) => {
+		const control = new RunControl(task, (phase) => {
 			if (runtime.threads.get(runId)?.generation !== generation || phase === "settled") return;
 			const state: ThreadState =
 				phase === "queued" || phase === "starting"

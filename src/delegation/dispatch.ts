@@ -242,7 +242,7 @@ export function registerSubagentTool(
 
 			const blocks = await awaitRunResults(runtime, ids, signal, DEFAULT_MAX_RESULT_LINES, ctx.cwd, onUpdate
 				? (text) => onUpdate({ content: [{ type: "text", text }], details }) : undefined);
-			if (signal?.aborted) await cancelActiveWork(runtime, "Parent run was cancelled.");
+			if (signal?.aborted) await cancelActiveWork(runtime, "Parent run was cancelled.", { context: ctx });
 			else runtime.completeAwaitDelivery(ids);
 			const settled = results.map((result) => result.runId === undefined ? result : runtime.settledRuns.get(result.runId) ?? result);
 			return {

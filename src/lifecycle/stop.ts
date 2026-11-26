@@ -63,10 +63,15 @@ export async function stopThreads(runtime: SubagentRuntime, targets: readonly nu
 	// An isolated stop may need the repository lane for final integration;
 	// cancelling all holders first prevents stop-all from waiting behind a
 	// later run that this same operation has not interrupted yet.
-	const interruptionPromises = claimed.map(({ thread, stopMessage, controller }) => {
+	const interruptions = claimed.map(({ runId, thread, stopMessage, controller }) => {
 		const stopping = thread.control.stop(stopMessage).catch(() => undefined);
 		runtime.backgroundQueue.cancel(controller);
-		return stopping;
+		// Capture each duration as its child stops. A sibling may spend much
+		// longer integrating its worktree before we can remove this monitor row.
+		const captureElapsed = quiesced(stopping).then(() => {
+			thread.elapsedMs = monitor.getElapsedMs(runId) ?? thread.elapsedMs;
+		});
+		return { stopping, captureElapsed };
 	});
 
 	const stopped: string[] = [];
@@ -93,7 +98,8 @@ export async function stopThreads(runtime: SubagentRuntime, targets: readonly nu
 		// unkillable child can stall even process termination. Stop owns the
 		// lifecycle synchronously, so a stuck tail settles silently after we
 		// proceed; none of its late paths can publish a second result.
-		await quiesced(interruptionPromises[claimIndex]);
+		const interruption = interruptions[claimIndex]!;
+		await interruption.captureElapsed;
 		if (!(await quiesced(completion))) runtime.backgroundQueue.cancel(controller);
 		if (runtime.runControllers.get(runId) === controller) runtime.runControllers.delete(runId);
 		if (thread.queueController === controller) thread.queueController = undefined;
@@ -127,7 +133,7 @@ export async function stopThreads(runtime: SubagentRuntime, targets: readonly nu
 					exitCode: 1,
 					messages: [],
 					stderr: stopMessage,
-					usage: emptyUsage(),
+					usage: run?.usage ?? emptyUsage(),
 					model: run?.model,
 					thinking: run?.thinking,
 					projectCwd: thread.cwd,
@@ -186,7 +192,7 @@ export async function stopThreads(runtime: SubagentRuntime, targets: readonly nu
 		if (thread.durableId) await removeThreadRecord(runtime.configPath, thread.durableId, thread.cwd).catch(() => undefined);
 		// Returning from a bounded stop retires context, but cannot release a
 		// writer or phase lease while a child or Git tail can still change files.
-		void Promise.allSettled([interruptionPromises[claimIndex]!, completion, finalizationCompletion]).then(() => {
+		void Promise.allSettled([interruption.stopping, completion, finalizationCompletion]).then(() => {
 			if (thread.lifecycleVersion === stopVersion && thread.lifecycleOperation === "stop") {
 				thread.lifecycleOperation = undefined;
 			}

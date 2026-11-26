@@ -278,7 +278,7 @@ export function registerLookupTools(pi: ExtensionAPI, runtime: SubagentRuntime, 
 					const blocks = await awaitRunResults(runtime, [result.runId], _signal, DEFAULT_MAX_RESULT_LINES, thread.cwd, (text) => {
 						onUpdate?.({ content: [{ type: "text", text }], details });
 					});
-					if (_signal?.aborted) await cancelActiveWork(runtime, "Parent run was cancelled.");
+					if (_signal?.aborted) await cancelActiveWork(runtime, "Parent run was cancelled.", { context: ctx });
 					else runtime.completeAwaitDelivery([result.runId]);
 					const settled = runtime.settledRuns.get(result.runId);
 					return {

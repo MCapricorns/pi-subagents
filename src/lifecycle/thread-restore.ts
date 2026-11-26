@@ -58,7 +58,7 @@ function createRestoredThread(
 		isolation: record.isolation,
 		worktree,
 		state,
-		control: new RunControl(record.task, record.generation),
+		control: new RunControl(record.task),
 		generationCompletion: Promise.resolve(),
 		lifecycleVersion: 0,
 		elapsedMs: record.elapsedMs,

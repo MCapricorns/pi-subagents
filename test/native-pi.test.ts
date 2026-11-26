@@ -67,7 +67,7 @@ export default async (pi) => {
 };
 `, "utf8");
 				process.argv[1] = fileURLToPath(new URL("./cli.js", import.meta.resolve("@earendil-works/pi-coding-agent")));
-				const control = new RunControl("Test native session preservation", 1);
+				const control = new RunControl("Test native session preservation");
 				let workspaceRoot = root;
 				if (aliased) {
 					const target = join(root, "workspace");

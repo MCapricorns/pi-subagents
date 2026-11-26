@@ -56,7 +56,7 @@ function makeThread(id: number, state: ThreadState = "running"): SubagentThread 
 		executionCwd: process.cwd(),
 		isolation: "shared",
 		state,
-		control: new RunControl("Implement the original objective", 1),
+		control: new RunControl("Implement the original objective"),
 		generationCompletion: Promise.resolve(),
 		lifecycleVersion: 0,
 		elapsedMs: 0,

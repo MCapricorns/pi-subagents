@@ -101,16 +101,13 @@ export class RunControl {
 	private stopRequested = false;
 	private stopMessage = "Subagent was aborted";
 	private childPids = new Set<number>();
-	readonly generation: number;
 	private readonly onPhase?: (phase: RunControlPhase) => void;
 
 	constructor(
 		objective: string,
-		generation: number,
 		onPhase?: (phase: RunControlPhase) => void,
 	) {
 		this.objective = objective;
-		this.generation = generation;
 		this.onPhase = onPhase;
 	}
 
