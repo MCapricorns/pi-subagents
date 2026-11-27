@@ -484,4 +484,17 @@ describe("cross-project session isolation", () => {
 			}
 		});
 	});
+
+	it("restores a working-directory override when reopening its parent project", async () => {
+		await withFixture(async (root, configPath) => {
+			const project = await createRepository(root);
+			await writeThreadManifest(configPath, project.cwd, [threadRecord(project.cwd, { parentCwd: project.repository })]);
+			const runtime = createRuntime(fakePi(), configPath);
+			try {
+				assert.deepEqual(await restoreDurableThreads(runtime, project.repository), [71]);
+				assert.equal(runtime.threads.get(71)?.cwd, project.cwd);
+			} finally { await runtime.shutdown(); }
+			assert.equal((await readThreadRecords(configPath))[0]?.parentCwd, project.repository);
+		});
+	});
 });

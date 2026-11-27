@@ -3,7 +3,7 @@
 import type { ExtensionContext } from "@earendil-works/pi-coding-agent";
 import {
 	BUILTIN_AGENT_NAMES, DEFAULT_AGENT_SETTINGS, DEFAULT_THINKING_LEVEL, errorMessage, getConfigPath,
-	initializeConfig, loadConfig, saveConfig, type ThinkingLevel,
+	initializeConfig, loadConfig, updateConfig, type ThinkingLevel,
 } from "./config.ts";
 import {
 	CURRENT_MAIN_MODEL, availableModelsInScope, buildModelPickerItems, currentModelRef,
@@ -59,10 +59,10 @@ export async function runSetup(ctx: ExtensionContext, configPath: string = getCo
 					buildModelPickerItems({ models, configuredRef: settings.model, mainRef: currentModelRef(ctx) }),
 					settings.model ?? CURRENT_MAIN_MODEL);
 				if (picked === undefined) continue;
-				const next = await loadConfig(configPath);
-				if (picked === CURRENT_MAIN_MODEL) delete next[role].model;
-				else next[role].model = picked;
-				await saveConfig(next, configPath);
+				await updateConfig(configPath, (next) => {
+					if (picked === CURRENT_MAIN_MODEL) delete next[role].model;
+					else next[role].model = picked;
+				});
 				status = title + " model saved";
 			} else if (choice === role + ".thinking") {
 				const levels = supportedThinkingLevels(model);
@@ -80,12 +80,10 @@ export async function runSetup(ctx: ExtensionContext, configPath: string = getCo
 				});
 				const picked = await promptSelectOne(ctx, title + " thinking", "Reasoning effort for the selected model", items, settings.thinking);
 				if (picked === undefined) continue;
-				const next = await loadConfig(configPath);
-				next[role].thinking = picked as ThinkingLevel;
-				await saveConfig(next, configPath);
+				await updateConfig(configPath, (next) => { next[role].thinking = picked as ThinkingLevel; });
 				status = title + " thinking saved";
 			} else if (choice === role + ".reset") {
-				await saveConfig({ ...await loadConfig(configPath), [role]: { ...DEFAULT_AGENT_SETTINGS } }, configPath);
+				await updateConfig(configPath, (next) => { next[role] = { ...DEFAULT_AGENT_SETTINGS }; });
 				status = title + " defaults restored";
 			}
 		}
@@ -104,7 +102,7 @@ export async function ensureDefaultConfig(
 		if (!result) return;
 		const action = result === "reset" ? "overwrote the old config with independent role settings at "
 			: result === "replaced-unreadable" ? "replaced the unreadable config with default role settings at "
-				: result === "repaired" ? "removed invalid model references (those roles now follow main) at "
+			: result === "repaired" ? "repaired invalid role settings at "
 					: "initialized role settings at ";
 		ctx.ui.notify(
 			"pi-subagents: " + action + configPath

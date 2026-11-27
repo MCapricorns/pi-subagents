@@ -35,7 +35,7 @@ export function createDispatchCore(runtime: SubagentRuntime): DispatchCore {
 	// Terminal rows stay in the monitor until the next beginTurn so the footer
 	// can count them beside siblings that are still live. The widget ignores
 	// them. Repeated publication of the same settlement is a no-op.
-	const publishedEndedAt = new Map<number, number>();
+	const publishedEndedAt = new WeakMap<object, number>();
 	const finishRun = (
 		runId: number,
 		status: "done" | "failed",
@@ -44,9 +44,8 @@ export function createDispatchCore(runtime: SubagentRuntime): DispatchCore {
 		const run = monitor.findRun(runId);
 		if (!run) return;
 		monitor.setStatus(runId, status); // stamps endedAt for the elapsed time
-		const endedAt = monitor.findRun(runId)?.endedAt;
-		if (endedAt !== undefined && publishedEndedAt.get(runId) === endedAt) return;
-		if (endedAt !== undefined) publishedEndedAt.set(runId, endedAt);
+		if (publishedEndedAt.get(run) === run.endedAt) return;
+		if (run.endedAt !== undefined) publishedEndedAt.set(run, run.endedAt);
 		// Settlement is the natural moment to reclaim disk: a burst of runs costs
 		// one paced sweep, and every live or parked thread stays protected.
 		if (runtime.sessionActive) {
@@ -67,26 +66,11 @@ export function createDispatchCore(runtime: SubagentRuntime): DispatchCore {
 	// only updates monitor state; the queue task owns terminal removal,
 	// notification, and lifecycle decisions.
 	const makeLiveHandler = (runId: number, generation?: number) => {
-		// Every child turn reports "running"; the manifest is rewritten only when
-		// what it records for recovery (session path, child pids) actually changed.
-		let checkpointKey: string | undefined;
 		return (e: SubagentLiveEvent): void => {
 			if (generation !== undefined && runtime.threads.get(runId)?.generation !== generation) return;
 			switch (e.kind) {
 				case "status":
 					monitor.setStatus(runId, e.status);
-					// A fresh running segment refreshes the durable checkpoint (session
-					// path plus child pids) so a crash mid-generation still restores.
-					if (e.status === "running") {
-						const thread = runtime.threads.get(runId);
-						if (thread?.sessionId && thread.sessionDir) {
-							const key = `${thread.sessionDir}\0${thread.control.getChildPids().join(",")}`;
-							if (key !== checkpointKey) {
-								checkpointKey = key;
-								persistThreadCheckpoint(runtime, thread, "parked");
-							}
-						}
-					}
 					break;
 				case "model":
 					monitor.setModel(runId, e.model);
@@ -98,10 +82,10 @@ export function createDispatchCore(runtime: SubagentRuntime): DispatchCore {
 				case "session": {
 					runtime.retainSession({ sessionDir: e.sessionDir });
 					const thread = runtime.threads.get(runId);
-					if (thread && (generation === undefined || runtime.threads.get(runId)?.generation === generation)) {
+					if (thread) {
 						thread.sessionId = e.sessionId;
 						thread.sessionDir = e.sessionDir;
-						persistThreadCheckpoint(runtime, thread, "parked");
+						if (!thread.retired && runtime.sessionActive) persistThreadCheckpoint(runtime, thread, "parked");
 					}
 					break;
 				}

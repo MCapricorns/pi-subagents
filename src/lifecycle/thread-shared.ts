@@ -58,17 +58,18 @@ export function concurrencyAdmissionConflict(
  * per-Git-command timeouts) or wait behind the managed repository lane. After
  * this deadline the control path owns the lifecycle synchronously and proceeds
  * while the stuck tail settles silently in the background. */
-export const CONTROL_QUIESCE_TIMEOUT_MS = 20_000;
+const CONTROL_QUIESCE_TIMEOUT_MS = 20_000;
 
 /** Resolve true when the promise settles, or false after the bounded deadline. */
-export function quiesced(promise: Promise<unknown>, timeoutMs: number = CONTROL_QUIESCE_TIMEOUT_MS): Promise<boolean> {
+export function quiesced(promise: Promise<unknown>): Promise<boolean> {
+	let timer: ReturnType<typeof setTimeout> | undefined;
 	return Promise.race([
 		promise.then(() => true, () => true),
 		new Promise<boolean>((resolve) => {
-			const timer = setTimeout(() => resolve(false), timeoutMs);
+			timer = setTimeout(() => resolve(false), CONTROL_QUIESCE_TIMEOUT_MS);
 			timer.unref();
 		}),
-	]);
+	]).finally(() => clearTimeout(timer));
 }
 
 /** Best-effort recovery checkpoint. Interrupted work retains its artifacts;
@@ -120,6 +121,8 @@ export interface StartBackgroundOptions {
 	stdinText?: string;
 	/** Omitted public isolation may fall back only when no Git baseline exists. */
 	automaticIsolation?: boolean;
+	/** Snapshots shared by isolated tasks from the same batch. */
+	baselineCache?: Map<string, string>;
 	/** Chosen by the tool call before the queue can start a fast child. */
 	deliveryRoute?: "background" | "await";
 }

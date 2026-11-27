@@ -43,20 +43,21 @@ describe("renderSections", () => {
 	it("renders the orchestration, parallel concurrency, non-duplication, and background-wait contract within budget", () => {
 		const roles = loadBuiltinAgents();
 		const directive = renderSections(roles);
-		assert.ok(directive.length < 2_600, `directive is ${directive.length} characters`);
+		assert.ok(directive.length < 2_100, `directive is ${directive.length} characters`);
 		for (const role of roles) {
 			assert.equal(directive.split(role.description).length - 1, 1);
 			assert.ok(!directive.includes(role.systemPrompt));
 		}
-		assert.match(directive, /Main judges difficulty and owns planning, integration, final checks, and release/u);
-		assert.match(directive, /Call delegation tools directly, outside `codemode`.*Researcher receives read-only lookups/u);
-		assert.match(directive, /Batch independent phases in one `subagent\(\{ tasks \}\)` call within the free slots \(5 maximum\)\. Sequence dependent phases/u);
-		assert.match(directive, /disjoint scope.*Leave an owned phase to its current run/u);
-		assert.match(directive, /For research, name the question, sources, and evidence needed.*For implementation, name the owned paths/u);
-		assert.match(directive, /Omit `wait` for background work in TUI\/RPC.*Use `wait: true` when the next step depends on this result/u);
+		assert.match(directive, /Main judges difficulty and owns the plan, integration, review, final checks, and release/u);
+		assert.match(directive, /Call delegation tools directly, outside `codemode`/u);
+		assert.match(directive, /Batch independent phases in one `subagent\(\{ tasks \}\)` call within free slots \(5 maximum\)\. Sequence dependencies/u);
+		assert.match(directive, /disjoint files.*Leave leased work to its owner/u);
+		assert.match(directive, /For research, give the question, sources, and evidence needed.*For implementation, give owned paths/u);
+		assert.match(directive, /Omit `wait` in TUI\/RPC.*Use `wait: true` when the result is needed and no disjoint work remains/u);
+		assert.match(directive, /Review the integrated diff, callers, acceptance criteria, and check evidence/u);
 		assert.match(directive, /`subagent_message` to steer a running child or give a completed run a focused correction/u);
-		assert.match(directive, /In a partial batch, leave accepted runs alone and address only the failed launches/u);
-		assert.match(directive, /For an authorized push of code changes, first delegate a read-only audit.*Remove confirmed dead code within scope.*Run project checks before committing and pushing/u);
+		assert.match(directive, /Address only failed launches in a partial batch/u);
+		assert.match(directive, /For an authorized push, delegate a read-only audit.*Remove confirmed dead code and run project checks before committing and pushing/u);
 		assert.doesNotMatch(directive, /workflow/iu);
 		assert.doesNotMatch(directive, /Active phase leases:/u);
 

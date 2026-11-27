@@ -30,8 +30,10 @@ export async function awaitRunResults(
 		return new Promise((resolve) => {
 			let done = false;
 			let unsub: (() => void) | undefined;
+			let missingTimer: ReturnType<typeof setTimeout> | undefined;
 			const cleanup = (): void => {
 				if (unsub) unsub();
+				clearTimeout(missingTimer);
 				signal?.removeEventListener("abort", onAbort);
 				const listeners = runtime.settledListeners.get(runId);
 				if (listeners) {
@@ -57,10 +59,10 @@ export async function awaitRunResults(
 					finish({ note: `run #${runId} was interrupted; inspect retained work with subagent_status and finish it in main` });
 					return;
 				}
-				if (!live) {
+				if (!live && missingTimer === undefined) {
 					// Removal is followed synchronously by registerRunResult in the
 					// finishing task; re-check on the next tick so the result wins.
-					setTimeout(() => {
+					missingTimer = setTimeout(() => {
 						const late = runtime.settledRuns.get(runId);
 						if (late) finish({ result: late });
 						else finish({ note: `run #${runId} was removed before its result was recorded (cancelled or session ended)` });
@@ -76,7 +78,10 @@ export async function awaitRunResults(
 			listeners.add(onSettled);
 			unsub = monitor.subscribe(onMonitor);
 			if (signal?.aborted) onAbort();
-			else signal?.addEventListener("abort", onAbort, { once: true });
+			else {
+				signal?.addEventListener("abort", onAbort, { once: true });
+				onMonitor();
+			}
 		});
 	};
 	// One shared subscription drives the progress line: each waiter already

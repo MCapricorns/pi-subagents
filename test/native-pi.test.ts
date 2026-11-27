@@ -172,6 +172,7 @@ export default function (pi) {
  const register = (info) => pi.registerTool({ ...info, label: info.name, description: "fixture lookup " + info.name,
   parameters: Type.Object({}), async execute() { return { content: [{ type: "text", text: "executed " + info.name }], details: undefined }; } });
  register({ name: "mcp__visible__search", exposure: "direct", annotations: { readOnlyHint: true } });
+ register({ name: "fixture_changed", exposure: "direct", annotations: { readOnlyHint: false } });
  register({ name: "inactive_direct", exposure: "direct" });
  register({ name: "mcp__inactive__direct", exposure: "direct" });
  register({ name: "subagent", exposure: "codemode" });
@@ -202,6 +203,7 @@ export default function (pi) {
      }
      assert.ok(declared.has("read") && declared.has("mcp__visible__search"), "Parent active tools must survive");
      assert.ok(!declared.has("inactive_direct") && !declared.has("mcp__inactive__direct") && !declared.has("subagent"));
+     if (researcher) assert.ok(!declared.has("fixture_changed"), "Child tool metadata must still prove read-only access");
      let content;
      if (current === 1 && startup) {
       assert.ok(!declared.has("codemode") && !declared.has("fixture_writer"));
@@ -263,9 +265,10 @@ export default function (pi) {
 `, "utf8");
 				process.argv[1] = fileURLToPath(new URL("./cli.js", import.meta.resolve("@earendil-works/pi-coding-agent")));
 				const agent = resolveAgentTools(loadBuiltinAgents().find(entry => entry.name === role)!,
-					["read", "codemode", "mcp__visible__search"], [
+					["read", "codemode", "mcp__visible__search", ...(role === "researcher" ? ["fixture_changed"] : [])], [
 						{ name: "codemode", reachesTools: () => "all" },
 						{ name: "mcp__visible__search", annotations: { readOnlyHint: true } }, ...indirect,
+						{ name: "fixture_changed", annotations: { readOnlyHint: true } },
 					]);
 				const result = await runWorker({
 					defaultCwd: root, cwd: root, agent: { ...agent, model: "fixture/tools", systemPrompt: "Exercise inherited tools." },

@@ -9,12 +9,13 @@
  * reclaims what no manifest claims, without touching parked recovery work.
  */
 
-import { existsSync, type Dirent, readdirSync, rmSync, statSync } from "node:fs";
+import { type Dirent, lstatSync, readdirSync, rmdirSync, rmSync, statSync } from "node:fs";
 import { join } from "node:path";
 import { getSubagentsRoot, sweepProjectResultArtifacts } from "../execution/spawn.ts";
 import { pruneStaleProjectRoots, readReferencedDurablePaths, readThreadRecords } from "../lifecycle/durable.ts";
 import type { SubagentRuntime } from "../lifecycle/runtime.ts";
 import { isProcessAlive, readTempOwnerMarker, sweepProjectDurableDirs, sweepProjectTempDirs } from "./temp-hygiene.ts";
+import { isPathInside } from "./worktree.ts";
 
 /** Bytes a directory tree occupies, without following symlinks. */
 function directoryBytes(path: string): number {
@@ -88,32 +89,6 @@ export function measureDurableUsage(root: string): CleanupUsage {
 	};
 }
 
-function removeEmptySessionCopies(path: string, claimed: readonly string[]): void {
-	let entries: Dirent[];
-	try {
-		entries = readdirSync(join(path, "sessions"), { withFileTypes: true });
-	} catch {
-		return;
-	}
-	for (const entry of entries) {
-		if (!entry.isDirectory() || entry.isSymbolicLink()) continue;
-		if (!entry.name.startsWith("pi-subagent-session-")) continue;
-		const dir = join(path, "sessions", entry.name);
-		if (claimed.some((claim) => claim.startsWith(dir))) continue;
-		// The earlier orphan sweep kept live owners; this pass must honor the
-		// same guard while a fresh child has not written its first prompt yet.
-		const owner = readTempOwnerMarker(dir);
-		if (owner && isProcessAlive(owner.pid)) continue;
-		let files = 0;
-		try {
-			files = readdirSync(dir).filter((name) => name !== "owner.json").length;
-		} catch {
-			continue;
-		}
-		if (files === 0) rmSync(dir, { recursive: true, force: true });
-	}
-}
-
 interface CleanupResult {
 	before: CleanupUsage;
 	after: CleanupUsage;
@@ -131,20 +106,19 @@ export async function runStorageCleanup(configPath: string, options: { now?: num
 	const root = options.root ?? getSubagentsRoot(configPath);
 	const before = measureDurableUsage(root);
 	const records = await readThreadRecords(configPath);
-	const claimed = await readReferencedDurablePaths(configPath);
-	const keep = (path: string) => [...claimed].some((claim) => path.startsWith(claim) || claim.startsWith(path));
+	const claimed = await readReferencedDurablePaths(configPath, records);
+	const protectedPaths = [...claimed];
+	const keep = (path: string) => protectedPaths.some((claim) => isPathInside(path, claim) || isPathInside(claim, path));
 
 	sweepProjectTempDirs(root);
 	sweepProjectDurableDirs(root, { keep, isAlive: isProcessAlive });
 	sweepProjectResultArtifacts(root, { now: options.now });
-	for (const project of before.projects) removeEmptySessionCopies(project.path, [...claimed]);
 	const removedProjects = await pruneStaleProjectRoots(configPath, { referenced: claimed, now: options.now }).catch(() => [] as string[]);
 
-	// A project directory that just lost its last artifact should disappear too.
+	// Remove empty roots only if no new artifacts appeared during cleanup.
 	for (const project of before.projects) {
-		if (!existsSync(project.path)) continue;
 		try {
-			if (readdirSync(project.path).length === 0) rmSync(project.path, { recursive: true, force: true });
+			rmdirSync(project.path);
 		} catch {
 			/* best-effort */
 		}
@@ -211,13 +185,13 @@ function hasForeignLiveOwner(path: string): boolean {
 interface SettledSession {
 	path: string;
 	mtimeMs: number;
-	bytes: number;
 }
 
 function settledSessions(projectRoot: string): SettledSession[] {
 	const dir = join(projectRoot, "sessions");
 	let entries: Dirent[];
 	try {
+		if (!lstatSync(dir).isDirectory()) return [];
 		entries = readdirSync(dir, { withFileTypes: true });
 	} catch {
 		return [];
@@ -234,54 +208,34 @@ function settledSessions(projectRoot: string): SettledSession[] {
 				for (const file of readdirSync(path, { withFileTypes: true })) {
 					if (file.isFile()) mtimeMs = Math.max(mtimeMs, statSync(join(path, file.name)).mtimeMs);
 				}
-				return [{ path, mtimeMs, bytes: directoryBytes(path) }];
+				return [{ path, mtimeMs }];
 			} catch {
 				return [];
 			}
 		});
 }
 
-/** Delete settled-session copies that nothing references: not a parked record,
- * not a live or resumed thread, and older than the retention window. */
+/** Reclaim expired sessions, then the oldest eligible sessions under budget
+ * pressure. A single inventory serves both retention rules. */
 function reclaimSettledSessions(
-	projectRoot: string,
-	protectedPaths: readonly string[],
+	project: CleanupUsage["projects"][number],
+	keep: (path: string) => boolean,
 	now: number,
 	maxAgeMs: number,
-): number {
-	let freed = 0;
-	for (const session of settledSessions(projectRoot)) {
-		if (now - session.mtimeMs < Math.max(maxAgeMs, RECENT_SESSION_FLOOR_MS)) continue;
-		if (protectedPaths.some((kept) => kept.startsWith(session.path) || session.path.startsWith(kept))) continue;
-		try {
-			rmSync(session.path, { recursive: true, force: true });
-			freed += session.bytes;
-		} catch {
-			/* a locked directory waits for the next pass */
-		}
-	}
-	return freed;
-}
-
-/** Delete the oldest settled sessions until the project fits its budget. */
-function enforceProjectBudget(
-	projectRoot: string,
-	protectedPaths: readonly string[],
-	now: number,
 	budgetBytes: number,
 ): number {
-	let used = directoryBytes(projectRoot);
-	if (used <= budgetBytes) return 0;
+	const ageLimit = Math.max(maxAgeMs, RECENT_SESSION_FLOOR_MS);
 	let freed = 0;
-	for (const session of settledSessions(projectRoot).sort((left, right) => left.mtimeMs - right.mtimeMs)) {
-		if (used - freed <= budgetBytes) break;
-		if (now - session.mtimeMs < RECENT_SESSION_FLOOR_MS) continue;
-		if (protectedPaths.some((kept) => kept.startsWith(session.path) || session.path.startsWith(kept))) continue;
+	for (const session of settledSessions(project.path).sort((left, right) => left.mtimeMs - right.mtimeMs)) {
+		const age = now - session.mtimeMs;
+		if (age < RECENT_SESSION_FLOOR_MS || (age < ageLimit && project.bytes - freed <= budgetBytes)) break;
+		if (keep(session.path)) continue;
 		try {
+			const bytes = directoryBytes(session.path);
 			rmSync(session.path, { recursive: true, force: true });
-			freed += session.bytes;
+			freed += bytes;
 		} catch {
-			/* best-effort */
+			/* a locked directory waits for the next pass */
 		}
 	}
 	return freed;
@@ -320,26 +274,19 @@ export async function runAutomaticCleanup(
 		return { freedBytes: 0, skipped: true };
 	}
 	const protectedPaths = protectedSessionPaths(runtime, claimed);
-	const keep = (path: string) => protectedPaths.some((kept) => path.startsWith(kept) || kept.startsWith(path));
+	const keep = (path: string) => protectedPaths.some((kept) => isPathInside(path, kept) || isPathInside(kept, path));
 	const before = measureDurableUsage(root).totalBytes;
 
 	sweepProjectTempDirs(root);
 	sweepProjectDurableDirs(root, { keep, isAlive: isProcessAlive });
-	sweepProjectResultArtifacts(root);
-	let projects: Dirent[] = [];
-	try {
-		projects = readdirSync(root, { withFileTypes: true });
-	} catch {
-		projects = [];
+	sweepProjectResultArtifacts(root, { now });
+	const afterSweep = measureDurableUsage(root);
+	let freedBytes = before - afterSweep.totalBytes;
+	for (const project of afterSweep.projects) {
+		freedBytes += reclaimSettledSessions(project, keep, now,
+			options.maxSessionAgeMs ?? SETTLED_SESSION_MAX_AGE_MS, options.budgetBytes ?? PROJECT_BUDGET_BYTES);
 	}
-	for (const project of projects) {
-		if (!project.isDirectory() || project.isSymbolicLink() || project.name.endsWith(".lock")) continue;
-		const path = join(root, project.name);
-		reclaimSettledSessions(path, protectedPaths, now, options.maxSessionAgeMs ?? SETTLED_SESSION_MAX_AGE_MS);
-		enforceProjectBudget(path, protectedPaths, now, options.budgetBytes ?? PROJECT_BUDGET_BYTES);
-	}
-	const after = measureDurableUsage(root).totalBytes;
-	return { freedBytes: Math.max(0, before - after), skipped: false };
+	return { freedBytes: Math.max(0, freedBytes), skipped: false };
 }
 
 /** Reset the pacing clock so the next settlement performs a real pass. */

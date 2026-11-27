@@ -17,6 +17,7 @@ async function withChild(
 	env?: NodeJS.ProcessEnv,
 	onUiResponse?: string,
 	timeoutMs = 10_000,
+	idleTimeoutMs = 0,
 ): Promise<void> {
 	const root = await mkdtemp(join(tmpdir(), "pi-subagents-cli-test-"));
 	const child = join(root, "child.mjs");
@@ -49,7 +50,7 @@ process.stdin.on("data", chunk => {
 		let steering: Promise<SteeringReceipt> | undefined;
 		const result = await runCliAgentAttempt({
 			defaultCwd: root, agent: { name: "worker", description: "test", systemPrompt: "" },
-			agentName: "worker", task: "Test native Pi", thinkingLevel: "off", idleTimeoutMs: 0,
+			agentName: "worker", task: "Test native Pi", thinkingLevel: "off", idleTimeoutMs,
 			scratchRoot: join(root, "tmp"), prompt: "Test native Pi", control, env,
 			signal: AbortSignal.timeout(timeoutMs), startupTimeoutMs: 5_000,
 			onLive: (event) => {
@@ -395,6 +396,31 @@ setTimeout(() => process.stdout.write(record.slice(17) + JSON.stringify({ type: 
 			assert.ok(result.stderr.length <= CHILD_STDERR_MAX_CHARS, `stderr is ${result.stderr.length} characters`);
 			assert.match(result.stderr, /LAST-LINE\n$/u);
 		});
+	});
+
+	it("keeps answer and file evidence without retaining large tool results", async () => {
+		await withChild(`
+assistant("toolUse", "Partial finding");
+send({ type: "tool_execution_start", toolName: "read", args: { path: "src/cache.ts" } });
+send({ type: "message_end", message: { role: "toolResult", content: [{ type: "text", text: "x".repeat(1024 * 1024) }] } });
+assistant("error", "", "Provider unavailable");
+send({ type: "agent_settled" });`, (result) => {
+			assert.equal(result.messages.length, 2);
+			assert.ok(result.messages.every((message) => message.role === "assistant"));
+			assert.deepEqual(result.referencedFiles, ["src/cache.ts"]);
+			assert.equal(result.usage.turns, 2);
+			assert.equal(isModelLevelFailure(result), true);
+			assert.match(getResultOutput(result), /Provider unavailable[\s\S]*Partial finding/u);
+		});
+	});
+
+	it("keeps an idle timeout failure when a late answer arrives during termination", { skip: process.platform === "win32" }, async () => {
+		await withChild(`
+process.once("SIGTERM", () => { assistant("stop", "Late answer"); send({ type: "agent_settled" }); });`, (result) => {
+			assert.equal(result.exitCode, 1);
+			assert.equal(result.stopReason, "error");
+			assert.match(getResultOutput(result), /Subagent idle timeout[\s\S]*Late answer/u);
+		}, false, undefined, undefined, undefined, 5_000, 750);
 	});
 
 	it("does not report a truncated final answer as success", async () => {

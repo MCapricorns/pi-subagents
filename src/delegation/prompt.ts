@@ -75,12 +75,12 @@ export function findDuplicateDispatch(
 ): DuplicateDispatch | undefined {
 	const taskKey = normalizedTask(task);
 	const cwdKey = normalizedCwd(cwd);
-	const matches = [...sources].filter((source) =>
-		normalizedCwd(source.cwd) === cwdKey && normalizedTask(source.task) === taskKey,
-	);
-	const active = matches.find(isActivePhaseLease);
-	if (active) return { source: active, kind: "active" };
-	const settled = matches.find(isSettledLease);
+	let settled: PhaseLeaseSource | undefined;
+	for (const source of sources) {
+		if (normalizedCwd(source.cwd) !== cwdKey || normalizedTask(source.task) !== taskKey) continue;
+		if (isActivePhaseLease(source)) return { source, kind: "active" };
+		if (!settled && isSettledLease(source)) settled = source;
+	}
 	return settled ? { source: settled, kind: "settled" } : undefined;
 }
 
@@ -162,21 +162,19 @@ export function formatDispatchSlots(available: number): string {
 
 function delegationBody(agents: AgentConfig[]): string {
 	const catalog = agents.length > 0 ? agents.map(formatCatalogEntry).join("\n") : "- (none enabled)";
-	const readOnly = agents.some((agent) => agent.name === "researcher") ? " Researcher receives read-only lookups only." : "";
 	const routing = [
-		"Main judges difficulty and owns planning, integration, final checks, and release. Honor the user's scope and requests to work in main. Questions and review-only requests authorize investigation, with implementation requiring a request for changes.",
-		"Delegate simple, bounded work by default when it saves main's context or lets independent work proceed. Investigate enough to decide the approach. Keep tightly coupled, tiny, or high-uncertainty work in main when briefing and handoff would cost more.",
-		`Call delegation tools directly, outside \`codemode\`. Child tools come from this session's reachable tools, including \`codemode\` where supported.${readOnly}`,
+		"Main judges difficulty and owns the plan, integration, review, final checks, and release. Honor the user's scope and requests to work in main. Review-only requests authorize investigation. Implement when authorized.",
+		"Delegate simple, bounded work by default. Keep design decisions, tightly coupled work, and tasks with costly handoffs in main. Call delegation tools directly, outside `codemode`.",
 	];
 	const dispatch = [
-		`Use \`subagent({ agent, task })\` for one phase. Batch independent phases in one \`subagent({ tasks })\` call within the free slots (${MAX_CONCURRENT_SUBAGENTS} maximum). Sequence dependent phases. Give each writer a disjoint scope and keep a change with its tests. Leave an owned phase to its current run.`,
-		"Start each brief with the outcome. For research, name the question, sources, and evidence needed. For implementation, name the owned paths, acceptance criteria, exact checks, and when to return for replanning. Include only the context the child needs.",
-		"Omit `wait` for background work in TUI/RPC. Continue disjoint work, or end the turn and let results wake you after integration. Use `wait: true` when the next step depends on this result and no disjoint work can proceed. Avoid polling. Print/JSON waits by default.",
+		`Use \`subagent({ agent, task })\` for one phase. Batch independent phases in one \`subagent({ tasks })\` call within free slots (${MAX_CONCURRENT_SUBAGENTS} maximum). Sequence dependencies. Give each writer disjoint files and keep a change with its tests. Leave leased work to its owner.`,
+		"Start each brief with the outcome and established facts. For research, give the question, sources, and evidence needed. For implementation, give owned paths, acceptance criteria, exact checks, and when to return for replanning.",
+		"Omit `wait` in TUI/RPC and continue disjoint work or end the turn. Results wake main after integration. Use `wait: true` when the result is needed and no disjoint work remains. Avoid polling. Print/JSON waits by default.",
 	];
 	const review = [
-		"Treat child output as evidence. Review the actual diff, affected callers, and check evidence against the acceptance criteria. Reuse checks that still cover the code and read the result file when output was truncated.",
-		"Use `subagent_message` to steer a running child or give a completed run a focused correction. Inspect failed or interrupted results with `subagent_status`, then correct the brief or finish in main. In a partial batch, leave accepted runs alone and address only the failed launches.",
-		"For an authorized push of code changes, first delegate a read-only audit of the diff for dead code and unused files, exports, or dependencies. If unavailable, audit in main. Remove confirmed dead code within scope. Delegate bounded fixes when practical. Run project checks before committing and pushing.",
+		"Review the integrated diff, callers, acceptance criteria, and check evidence. Reuse checks that cover the current code and retrieve linked results when needed.",
+		"Use `subagent_message` to steer a running child or give a completed run a focused correction. Inspect failures and interruptions with `subagent_status` before re-briefing or taking over. Address only failed launches in a partial batch.",
+		"For an authorized push, delegate a read-only audit of the diff for unused code, files, exports, and dependencies. Audit in main if delegation is unavailable. Remove confirmed dead code and run project checks before committing and pushing.",
 	];
 
 	return `## Subagent orchestration

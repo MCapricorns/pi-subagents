@@ -9,7 +9,7 @@
 
 import { randomUUID } from "node:crypto";
 import { join, resolve } from "node:path";
-import { isWriteCapableAgent, resolveAgentTools, type AgentConfig } from "../delegation/agents.ts";
+import { resolveAgentTools } from "../delegation/agents.ts";
 import type { CompletionMessageItem } from "./completion.ts";
 import { DEFAULT_IDLE_TIMEOUT_SEC, DEFAULT_MAX_RESULT_LINES, loadConfig } from "../configuration/config.ts";
 import { dispatchFailedResult, failedStartResult, formatCompletionBlock, queuedResult } from "../presentation/format.ts";
@@ -88,17 +88,10 @@ export function createBackgroundDispatcher(options: BackgroundDispatcherOptions)
 		const baseEnvironment = getEnvironment();
 		const runCtx = baseEnvironment.ctx;
 		const runConfig = baseEnvironment.config;
-		const discoveredAgent = baseEnvironment.agents.find((candidate) => candidate.name === agentName);
-		if (!discoveredAgent) return failedStartResult(agentName, task, `Unknown agent: "${agentName}".`);
-		// Admission reads the catalog once; each child launch reads the live one
-		// again, like the active tool set, so a server that connected meanwhile
-		// is classified by its own annotations.
-		const toolInfos = runtime.getToolInfos();
-		const resolveLiveAgentTools = (candidate: AgentConfig): AgentConfig =>
-			resolveAgentTools(candidate, runtime.getActiveTools(), runtime.getToolInfos());
-		const agent = resolveLiveAgentTools(discoveredAgent);
+		const agent = baseEnvironment.agents.find((candidate) => candidate.name === agentName);
+		if (!agent) return failedStartResult(agentName, task, `Unknown agent: "${agentName}".`);
 		const originalCwd = resolve(cwd ?? runCtx.cwd);
-		if (isolation === "worktree" && !isWriteCapableAgent(agent, toolInfos)) {
+		if (isolation === "worktree" && agent.name === "researcher") {
 			return {
 				...failedStartResult(agentName, task, `Agent "${agentName}" is read-only; worktree isolation is available only to write-capable agents such as worker.`),
 				isolation,
@@ -143,6 +136,9 @@ export function createBackgroundDispatcher(options: BackgroundDispatcherOptions)
 							? "stopped"
 							: "running";
 			thread.state = state;
+			if (phase === "starting" && !thread.retired && thread.sessionId && thread.sessionDir) {
+				persistThreadCheckpoint(runtime, thread, "parked");
+			}
 			if (state === "queued") monitor.setStatus(runId, "queued");
 			else if (state === "interrupting") monitor.setStatus(runId, "interrupting");
 			else if (state === "running") monitor.setStatus(runId, "running");
@@ -155,6 +151,7 @@ export function createBackgroundDispatcher(options: BackgroundDispatcherOptions)
 			agentName: agent.name,
 			task,
 			cwd: originalCwd,
+			parentCwd: resolve(runCtx.cwd),
 			executionCwd,
 			thinkingLevel,
 			isolation,
@@ -180,7 +177,10 @@ export function createBackgroundDispatcher(options: BackgroundDispatcherOptions)
 			if (isolation === "worktree" && !worktree) {
 				let prepared: WorktreeIsolation | undefined;
 				try {
-					prepared = await createWorktreeIsolation(originalCwd, { tempBaseDir: worktreesRoot });
+					prepared = await createWorktreeIsolation(originalCwd, {
+						tempBaseDir: worktreesRoot,
+						baselineCache: startOptions.baselineCache,
+					});
 				} catch (error) {
 					if (!startOptions.automaticIsolation || !(error instanceof WorktreeUnavailableError)) throw error;
 					if (runtime.threads.get(runId)?.generation !== generation || backgroundSignal.aborted) return;
@@ -207,26 +207,23 @@ export function createBackgroundDispatcher(options: BackgroundDispatcherOptions)
 					installCurrentLifecycle();
 				}
 			}
-			// Re-read model preferences after asynchronous worktree preparation.
-			let activeRoute = route;
-			const activeIdleTimeoutMs = DEFAULT_IDLE_TIMEOUT_SEC * 1000;
-			try {
-				const startConfig = await loadConfig(runtime.configPath);
-				activeRoute = resolveDispatchModelRoute(agent, startConfig, runCtx);
-				monitor.setModel(runId, activeRoute.agent.model);
-				monitor.setThinking(runId, activeRoute.thinkingLevel);
-			} catch {
-				/* keep the dispatch-time route when fresh config is unavailable */
-			}
-			const launchAgent = worktree ? withWorktreeSystemPrompt(activeRoute.agent, worktree) : activeRoute.agent;
 			let result: SingleResult;
 			try {
+				// Re-read preferences after worktree preparation. Invalid settings
+				// block launch just as they do during admission.
+				const startConfig = await loadConfig(runtime.configPath);
+				const activeRoute = resolveDispatchModelRoute(agent, startConfig, runCtx);
 				if (activeRoute.error) throw new Error(activeRoute.error);
+				thread.thinkingLevel = activeRoute.thinkingLevel;
+				monitor.setModel(runId, activeRoute.agent.model);
+				monitor.setThinking(runId, activeRoute.thinkingLevel);
+				const launchAgent = worktree ? withWorktreeSystemPrompt(activeRoute.agent, worktree) : activeRoute.agent;
 				result = await runWorker(
 					{
 						defaultCwd: executionCwd,
 						agent: launchAgent,
-						resolveAgentBeforeLaunch: resolveLiveAgentTools,
+						resolveAgentBeforeLaunch: (candidate) =>
+							resolveAgentTools(candidate, runtime.getActiveTools(), runtime.getToolInfos()),
 						agentName,
 						task,
 						stdinText: startOptions.stdinText,
@@ -235,7 +232,7 @@ export function createBackgroundDispatcher(options: BackgroundDispatcherOptions)
 						signal: backgroundSignal,
 						onLive,
 						control,
-						idleTimeoutMs: activeIdleTimeoutMs,
+						idleTimeoutMs: DEFAULT_IDLE_TIMEOUT_SEC * 1_000,
 						sessionRoot: sessionsRoot,
 						...(startOptions.resumeSession ?? {}),
 						scratchRoot,
@@ -270,22 +267,16 @@ export function createBackgroundDispatcher(options: BackgroundDispatcherOptions)
 			runtime.retainSession(result);
 			monitor.setModel(runId, result.model);
 			monitor.setThinking(runId, result.thinking);
-			// Checkpoint the session location durably: a crash or reload before
-			// settlement still restores this thread with its retained context.
-			if (result.sessionId && result.sessionDir) {
-				persistThreadCheckpoint(runtime, thread, "parked");
-			}
-
-			const lifecycleInterrupted = (): boolean =>
-				thread.lifecycleOperation === "stop" || thread.state === "stopped";
 			// Stop owns publication once it claims the lifecycle. Leave the partial
 			// result on the thread for that owner to finalize and deliver once.
-			if (lifecycleInterrupted()) return;
+			if (thread.lifecycleOperation === "stop" || thread.state === "stopped") return;
 
 			// A shutdown can win in the microtask gap after the child
 			// settles. Never replace the stable top-level session with an
 			// aborted partial.
 			if (backgroundSignal.aborted || !runtime.sessionActive) return;
+			// A crash during integration still restores the retained context.
+			if (result.sessionId && result.sessionDir) persistThreadCheckpoint(runtime, thread, "parked");
 
 			// Claim terminal settlement synchronously before the first slow await.
 			// Shutdown therefore either wins while the child is still active, or is rejected
@@ -451,10 +442,23 @@ export function installThreadLifecycle(thread: SubagentThread, deps: ThreadLifec
 				"finalizing",
 				worktreeGroupId(generationWorktree),
 			);
-			generationFinalization = generationWorktree.finalize();
+			generationFinalization = generationWorktree.finalize().then(async (finalization) => {
+				monitor.setIsolation(runId, "worktree", finalization.status, worktreeGroupId(generationWorktree));
+				if (finalization.status === "retained") {
+					try {
+						thread.notifyIsolationFailure?.(finalization);
+					} catch {
+						/* notification failures do not hide retained artifacts */
+					}
+					// Save recovery before any caller removes the parked checkpoint.
+					await persistRecoveryRecords(runtime.configPath, [
+						recoveryRecordFromFinalization(runId, finalization, thread.durableId!),
+					]).catch(() => undefined);
+				}
+				return finalization;
+			});
 		}
 		const finalization = await generationFinalization;
-		monitor.setIsolation(runId, "worktree", finalization.status, worktreeGroupId(generationWorktree));
 		if (result) {
 			result.runId = runId;
 			result.isolation = "worktree";
@@ -478,21 +482,6 @@ export function installThreadLifecycle(thread: SubagentThread, deps: ThreadLifec
 					: integrationMessage;
 				result.stderr = result.stderr ? `${result.stderr.trimEnd()}\n${integrationMessage}` : integrationMessage;
 			}
-		}
-		if (finalization.status === "retained") {
-			if (!thread.isolationFailureNotified) {
-				thread.isolationFailureNotified = true;
-				try {
-					thread.notifyIsolationFailure?.(finalization);
-				} catch {
-					/* notification failures do not hide retained artifacts */
-				}
-			}
-			// Every retained finalization gets a durable recovery record, so the
-			// artifacts stay findable even when the owning process dies next.
-			void persistRecoveryRecords(runtime.configPath, [
-				recoveryRecordFromFinalization(runId, finalization, thread.durableId!),
-			]).catch(() => undefined);
 		}
 		return finalization;
 	};

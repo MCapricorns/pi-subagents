@@ -18,7 +18,10 @@ export interface RunResult {
 	agent: string;
 	task: string;
 	exitCode: number;
+	/** Assistant messages needed for the answer and final disposition. Pi's
+	 * retained session owns the full transcript. */
 	messages: Message[];
+	referencedFiles?: string[];
 	stderr: string;
 	usage: UsageStats;
 	model?: string;
@@ -51,12 +54,12 @@ export interface RunResult {
 }
 
 export type SubagentLiveEvent =
-	| { kind: "status"; status: "queued" | "running" | "interrupting" | "done" | "failed" }
+	| { kind: "status"; status: "running" | "interrupting" }
 	| { kind: "model"; model?: string; thinking?: ThinkingLevel }
 	| { kind: "usage"; usage: UsageStats; model?: string }
 	| { kind: "session"; sessionId: string; sessionDir: string }
-	| { kind: "tool_start"; toolCallId?: string; toolName: string; args: unknown }
-	| { kind: "tool_end"; toolCallId?: string; toolName: string; isError: boolean }
+	| { kind: "tool_start"; toolName: string; args: unknown }
+	| { kind: "tool_end"; toolName: string; isError: boolean }
 	| { kind: "thinking" }
 	| { kind: "text" };
 

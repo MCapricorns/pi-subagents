@@ -485,6 +485,8 @@ export class MonitorStore {
 		const run = this.find(id);
 		if (!run) return;
 		const previousStatus = run.status;
+		const terminal = status === "parked" || status === "done" || status === "failed";
+		if (previousStatus === status && (!terminal || run.endedAt !== undefined)) return;
 		const wasExecuting = previousStatus === "running" || previousStatus === "interrupting";
 		const isExecuting = status === "running" || status === "interrupting";
 		const now = Date.now();
@@ -497,7 +499,7 @@ export class MonitorStore {
 			run.elapsedMs += Math.max(0, now - run.activeSince);
 			run.activeSince = undefined;
 		}
-		if ((status === "parked" || status === "done" || status === "failed") && run.endedAt === undefined) {
+		if (terminal && run.endedAt === undefined) {
 			run.endedAt = now;
 		}
 		this.notify();
@@ -513,7 +515,7 @@ export class MonitorStore {
 	/** Record the model of the current attempt. */
 	setModel(id: number, model?: string): void {
 		const run = this.find(id);
-		if (!run || !model) return;
+		if (!run || !model || run.model === model) return;
 		run.model = model;
 		this.notify();
 	}
@@ -521,7 +523,7 @@ export class MonitorStore {
 	/** Record the capability-clamped thinking level for the active model. */
 	setThinking(id: number, thinking?: string): void {
 		const run = this.find(id);
-		if (!run || !thinking) return;
+		if (!run || !thinking || run.thinking === thinking) return;
 		run.thinking = thinking;
 		this.notify();
 	}
@@ -553,13 +555,12 @@ export class MonitorStore {
 	/** Record a failed tool; successful completions keep their last activity
 	 * until the next model event supplies a more useful description. */
 	recordToolEnd(id: number, toolName: string, isError: boolean): void {
+		if (!isError) return;
 		const run = this.find(id);
 		if (!run) return;
-		if (isError) {
-			const failed = `✗ ${sanitizeActivityText(toolName) || "tool"} failed`;
-			run.activity = failed;
-			this.pushRecentActivity(run, failed);
-		}
+		const failed = `✗ ${sanitizeActivityText(toolName) || "tool"} failed`;
+		run.activity = failed;
+		this.pushRecentActivity(run, failed);
 		this.notify();
 	}
 

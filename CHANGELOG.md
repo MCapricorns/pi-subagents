@@ -1,5 +1,24 @@
 # Changelog
 
+## 7.0.8
+
+- Shorten the main, Researcher, and Worker prompts. Keep phase ownership,
+  check evidence, and main's review responsibilities explicit. Show the
+  effective thinking level alongside each live model assignment.
+- Share one Git snapshot across a batch in the same checkout and HEAD.
+  Retain patches when checkpoint creation fails and preserve restored
+  checkpoint references across restarts. Restore interrupted runs in the
+  parent session when tasks use a working-directory override.
+- Keep full transcripts in Pi's retained sessions and retain compact answers,
+  diagnostics, and file references in the parent. Reuse cleanup inventories
+  across retention rules and skip linked storage directories during deletion.
+- Preserve valid role settings when repairing malformed configuration and
+  serialize settings updates across Pi windows. Recheck settings and
+  Researcher tool metadata at child launch.
+- Preserve idle timeout failures, make repeated stops idempotent, wait for
+  slow children to exit before integrating their worktrees, and refresh
+  expired result links on exact status lookups.
+
 ## 7.0.7
 
 - Show free dispatch slots in background launch receipts and the main prompt.

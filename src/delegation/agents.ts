@@ -22,7 +22,7 @@ export interface AgentConfig {
 const SHELL_TOOL_NAMES = new Set(["bash", "powershell"]);
 /** Pi's own retrieval builtins. They carry no annotations, so they are the only
  * names that are read-only without the host saying so. */
-const BUILTIN_READ_ONLY_TOOL_NAMES = ["read", "grep", "find", "ls"] as const;
+export const BUILTIN_READ_ONLY_TOOL_NAMES = ["read", "grep", "find", "ls"] as const;
 const BUILTIN_READ_ONLY_TOOL_SET: ReadonlySet<string> = new Set(BUILTIN_READ_ONLY_TOOL_NAMES);
 export const SUBAGENT_TOOL_NAMES = [
 	"subagent",
@@ -37,12 +37,12 @@ const SUBAGENT_TOOL_NAME_SET = new Set<string>(SUBAGENT_TOOL_NAMES);
 export type ToolMetadata = Pick<ToolInfo, "name" | "annotations" | "reachesTools"> & {
 	/** How the model reaches the tool; absent metadata is treated as declared. */
 	exposure?: ToolInfo["exposure"];
+	sourceInfo?: Pick<ToolInfo["sourceInfo"], "source">;
 };
 
 /** Exposures callable through a script or `tool_search` without activation. */
 const INDIRECT_EXPOSURES: ReadonlySet<string> = new Set(["codemode", "deferred"]);
-/** Live tool metadata keyed by name. Read-only and write capability come from it
- * instead of a maintained list of extension or MCP tool names. */
+/** Live tool metadata keyed by name for read-only checks. */
 type ToolInfoIndex = ReadonlyMap<string, ToolMetadata>;
 
 function indexToolInfos(toolInfos?: readonly ToolMetadata[]): ToolInfoIndex {
@@ -55,8 +55,9 @@ function indexToolInfos(toolInfos?: readonly ToolMetadata[]): ToolInfoIndex {
  * shells, and this package's own controls are never read-only for a role. */
 function isReadOnlyTool(tool: ToolMetadata): boolean {
 	if (SHELL_TOOL_NAMES.has(tool.name) || SUBAGENT_TOOL_NAME_SET.has(tool.name)) return false;
-	if (tool.reachesTools) return false;
-	return tool.annotations?.readOnlyHint === true || BUILTIN_READ_ONLY_TOOL_SET.has(tool.name);
+	if (tool.reachesTools || tool.annotations?.destructiveHint) return false;
+	return tool.annotations?.readOnlyHint
+		?? (BUILTIN_READ_ONLY_TOOL_SET.has(tool.name) && (tool.sourceInfo?.source ?? "builtin") === "builtin");
 }
 
 function isReadOnlyToolName(name: string, index: ToolInfoIndex): boolean {
@@ -72,39 +73,24 @@ export function resolveAgentTools(
 	activeToolNames: readonly string[],
 	toolInfos?: readonly ToolMetadata[],
 ): AgentConfig {
-	const active = [...new Set(activeToolNames)].filter((tool) => !SUBAGENT_TOOL_NAME_SET.has(tool));
+	const active = new Set(activeToolNames.filter((tool) => !SUBAGENT_TOOL_NAME_SET.has(tool)));
 	const toolIndex = indexToolInfos(toolInfos);
 	const indirect = [...toolIndex.values()]
 		.filter((tool) => tool.exposure && INDIRECT_EXPOSURES.has(tool.exposure) && !SUBAGENT_TOOL_NAME_SET.has(tool.name))
 		.map((tool) => tool.name)
-		.filter((name) => !active.includes(name))
+		.filter((name) => !active.has(name))
 		.sort();
 	if (agent.name !== "researcher") return { ...agent, tools: [...active, ...indirect] };
 	// Researcher uses the live catalog's read-only classification. Codemode and
 	// tool_search are excluded because they can reach tools outside that set.
-	const tools = active.filter((tool) => isReadOnlyToolName(tool, toolIndex));
+	const activeNames = [...active];
+	const tools = activeNames.filter((tool) => isReadOnlyToolName(tool, toolIndex));
 	// The child explicitly activates these after registration, without giving
 	// researcher an orchestrating tool that could also reach writers.
-	if (active.some((tool) => toolIndex.get(tool)?.reachesTools)) {
+	if (activeNames.some((tool) => toolIndex.get(tool)?.reachesTools)) {
 		tools.push(...indirect.filter((name) => isReadOnlyToolName(name, toolIndex)));
 	}
 	return { ...agent, tools };
-}
-
-/** Filesystem-write capability used by worktree admission. Researcher is a hard
- * read-only boundary. An unresolved tools list means the child inherits
- * arbitrary active tools and is therefore mutable; for a resolved list only
- * proven read-only tools count as safe — shells, tool-reaching tools, and tools
- * without a read-only annotation stay mutable. */
-export function isWriteCapableAgent(
-	agent: Pick<AgentConfig, "name" | "tools">,
-	toolInfos?: readonly ToolMetadata[],
-): boolean {
-	if (agent.name === "researcher") return false;
-	if (agent.name === "worker") return true;
-	if (!agent.tools) return true;
-	const toolIndex = indexToolInfos(toolInfos);
-	return agent.tools.some((tool) => !isReadOnlyToolName(tool, toolIndex));
 }
 
 /** The fixed built-in catalog, in setup order. */

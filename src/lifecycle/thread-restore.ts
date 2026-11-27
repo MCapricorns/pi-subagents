@@ -53,6 +53,7 @@ function createRestoredThread(
 		agentName: record.agentName,
 		task: record.task,
 		cwd: record.cwd,
+		parentCwd: record.parentCwd,
 		executionCwd: record.executionCwd,
 		...(record.thinkingLevel ? { thinkingLevel: record.thinkingLevel as ThinkingLevel } : {}),
 		isolation: record.isolation,
@@ -72,10 +73,6 @@ function createRestoredThread(
 	return thread;
 }
 
-function belongsToSessionProject(configPath: string, cwd: string, record: ThreadRecord): boolean {
-	return samePath(getProjectRoot(configPath, record.cwd), getProjectRoot(configPath, cwd));
-}
-
 /** Rebuild interrupted records for this session's checkout after reload.
  * Other projects' parked threads stay on disk for their own window; this process
  * must not restore them or kill their children. Records with a live owner or
@@ -84,11 +81,15 @@ function belongsToSessionProject(configPath: string, cwd: string, record: Thread
 export async function restoreDurableThreads(runtime: SubagentRuntime, cwd: string): Promise<number[]> {
 	const records = await readThreadRecords(runtime.configPath);
 	const restoredIds: number[] = [];
-	const localRecords = records.filter((record) => belongsToSessionProject(runtime.configPath, cwd, record));
+	const projectRoot = getProjectRoot(runtime.configPath, cwd);
+	const localRecords = records.filter((record) =>
+		samePath(projectRoot, getProjectRoot(runtime.configPath, record.parentCwd ?? record.cwd)),
+	);
+	const restoredIdentities = new Set([...runtime.threads.values()].map((thread) => thread.durableId));
 	for (const record of localRecords) monitor.ensureNextIdAbove(record.runId);
 	for (let record of localRecords) {
 		const identity = record.durableId;
-		if ([...runtime.threads.values()].some((thread) => thread.durableId === identity)) continue;
+		if (restoredIdentities.has(identity)) continue;
 		// Another Pi window may own this checkpoint, and PID reuse means a live
 		// recorded child is not proof of ownership. Never kill either on restore.
 		if (isCurrentBoot(record) && (
@@ -104,13 +105,13 @@ export async function restoreDurableThreads(runtime: SubagentRuntime, cwd: strin
 		}
 		// Keep validated recovery paths even when their files are temporarily
 		// missing or unreadable. Availability is checked when a session is used.
-		record = { ...record, durableId: identity };
 		const worktree = record.worktree && await isThreadSourceAvailable(record)
 			? await restoreWorktreeIsolation(record.worktree).catch(() => undefined)
 			: undefined;
 		const restorationFailed = record.isolation === "worktree" && record.worktree !== undefined && !worktree;
 		const thread = createRestoredThread(runtime, record, worktree, restorationFailed ? "failed" : "parked");
 		runtime.threads.set(record.runId, thread);
+		restoredIdentities.add(identity);
 		if (thread.sessionDir) runtime.sessionDirs.add(thread.sessionDir);
 		if (restorationFailed) {
 			const reason = `Run #${record.runId}'s recorded worktree could not be restored; isolated edits may be unavailable. The durable record and any remaining artifacts were kept for manual recovery by main.`;

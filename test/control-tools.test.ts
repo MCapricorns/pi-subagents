@@ -156,6 +156,12 @@ describe("subagent_status", () => {
 				assert.equal(run.cwd, process.cwd());
 			}
 			assert.equal((await readdir(resultRoot)).length, 1);
+			const expired = thread.lastResult.resultFile!;
+			await rm(expired);
+			const refreshed = await execute(tools.get("subagent_status")!, { id: 8 });
+			const [run] = refreshed.details.runs;
+			assert.notEqual(run.resultFile, expired);
+			assert.equal(await readFile(run.resultFile, "utf8"), output);
 			assert.equal(sent.length, 0);
 		} finally { await shutdown(runtime); await rm(root, { recursive: true, force: true }); }
 	});
@@ -470,8 +476,9 @@ describe("subagent_message", () => {
 		await writeFile(join(source.sessionDir, "2026_summary-source.jsonl"), "context");
 		source.lastResult = {
 			agent: "worker", task: source.task, exitCode: 0, stderr: "", usage: emptyUsage(),
+			referencedFiles: ["src/cache.ts"],
 			messages: [
-				{ role: "assistant", content: [{ type: "text", text: "Found a race in src/cache.ts" }, { type: "toolCall", name: "read", arguments: { path: "src/cache.ts" } }], stopReason: "stop" } as never,
+				{ role: "assistant", content: [{ type: "text", text: "Found a race in src/cache.ts" }], stopReason: "stop" } as never,
 			],
 		};
 		runtime.threads.set(64, source);
@@ -567,7 +574,9 @@ describe("subagent_stop", () => {
 			assert.match(JSON.stringify(sent), /Partial edits are in src\/index.ts/);
 			assert.equal(sent.length, 1);
 			assert.doesNotMatch(resultText(response), /Integration is still settling/);
-			await execute(tools.get("subagent_stop")!, { id: "31" });
+			const repeated = await execute(tools.get("subagent_stop")!, { id: "31" });
+			assert.match(resultText(repeated), /already stopped/u);
+			assert.equal(stops, 1);
 			assert.equal(sent.length, 1, "retiring the same run twice must not redeliver its result");
 		} finally { await shutdown(runtime); await rm(root, { recursive: true, force: true }); }
 	});
@@ -615,6 +624,34 @@ describe("subagent_stop", () => {
 			await stopping;
 			assert.equal(runtime.settledRuns.size, 2);
 		} finally { release.resolve(); await shutdown(runtime); await rm(root, { recursive: true, force: true }); }
+	});
+
+	it("keeps the isolated checkout until a timed-out child finishes stopping", async (t) => {
+		const root = await mkdtemp(join(tmpdir(), "pi-subagents-slow-stop-"));
+		const { runtime, tools } = harness(join(root, "config.json"));
+		const release = deferred();
+		const thread = makeThread(43);
+		thread.isolation = "worktree";
+		thread.generationCompletion = release.promise;
+		let finalized = false;
+		thread.finalizeIsolation = async () => { finalized = true; return undefined; };
+		attachRunning(thread.control, { stop: () => release.promise });
+		runtime.threads.set(thread.id, thread);
+		const schedule = globalThis.setTimeout;
+		t.mock.method(globalThis, "setTimeout", (callback: () => void, delay?: number) => schedule(callback, delay === 20_000 ? 10 : delay));
+		const keepAlive = schedule(() => undefined, 2_000);
+		try {
+			await execute(tools.get("subagent_stop")!, { id: "43" });
+			assert.equal(finalized, false, "the child can still write after the stop deadline");
+			release.resolve();
+			await thread.generationCompletion;
+			assert.equal(finalized, true);
+		} finally {
+			clearTimeout(keepAlive);
+			release.resolve();
+			await shutdown(runtime);
+			await rm(root, { recursive: true, force: true });
+		}
 	});
 
 	it("requires an exact numeric id and does not prefix-match other runs", async () => {

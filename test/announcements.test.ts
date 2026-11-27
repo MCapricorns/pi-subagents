@@ -4,7 +4,7 @@ import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { describe, it } from "node:test";
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
-import { DEFAULT_CONFIG, loadConfig, saveConfig } from "../src/configuration/config.ts";
+import { DEFAULT_CONFIG, loadConfig, updateConfig } from "../src/configuration/config.ts";
 import { getRecoveryManifestPath } from "../src/isolation/recovery.ts";
 import { createRuntime } from "../src/lifecycle/runtime.ts";
 import { registerAnnouncements } from "../src/presentation/announcements.ts";
@@ -22,7 +22,7 @@ describe("session-start recovery announcements", () => {
 		const notices: string[] = [];
 		const widgets: string[] = [];
 		try {
-			await saveConfig({ ...DEFAULT_CONFIG, worker: { model: "fixture/missing", thinking: "medium" } }, configPath);
+			await updateConfig(configPath, (config) => { config.worker.model = "fixture/missing"; });
 			const path = getRecoveryManifestPath(configPath);
 			await mkdir(dirname(path), { recursive: true });
 			await writeFile(path, "{unfinished");
@@ -55,7 +55,7 @@ describe("session-start recovery announcements", () => {
 		const scoped = { provider: "test", id: "scoped" };
 		const outside = { provider: "test", id: "outside" };
 		try {
-			await saveConfig({ ...DEFAULT_CONFIG, worker: { model: "test/outside", thinking: "high" } }, configPath);
+			await updateConfig(configPath, (config) => { config.worker = { model: "test/outside", thinking: "high" }; });
 			registerAnnouncements(pi, runtime);
 			await handlers.get("session_start")!({}, {
 				cwd: root, mode: "print", hasUI: false,

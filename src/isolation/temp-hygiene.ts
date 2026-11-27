@@ -21,7 +21,7 @@
  * reusing process exits or the age cap catches the directory.
  */
 
-import { type Dirent, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { type Dirent, lstatSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 
 export const TEMP_OWNER_FILE_NAME = "owner.json";
@@ -124,6 +124,7 @@ function sweepOrphanTempDirs(
 	const prefixes = options.prefixes ?? TEMP_DIR_PREFIXES;
 	let entries: Dirent[];
 	try {
+		if (!lstatSync(rootDir).isDirectory()) return 0;
 		entries = readdirSync(rootDir, { withFileTypes: true });
 	} catch {
 		return 0;

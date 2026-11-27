@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
-import { existsSync } from "node:fs";
+import { existsSync, writeFileSync } from "node:fs";
 import { mkdtemp, readFile, realpath, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -104,6 +104,16 @@ describe("automatic isolation and current roles", () => {
 		assert.equal(result.exitCode, 0, result.errorMessage ?? result.stderr);
 		assert.ok(prompt.includes(`temporary detached Git worktree at ${thread.executionCwd}, a snapshot of the original checkout ${await realpath(h.project)}.`), prompt);
 		assert.match(prompt, /map every brief path under the original checkout to the same relative path here/u);
+	});
+
+	it("fails a queued launch if settings become invalid during worktree preparation", async (t) => {
+		const h = await harness(t, "committed");
+		const { result } = await h.run({ agent: "worker", task: "Write output" }, () => {
+			writeFileSync(h.runtime.configPath, "{unfinished edit");
+		});
+		assert.equal(result.exitCode, 1);
+		assert.match(result.errorMessage ?? "", /Subagent settings are invalid or unsupported/u);
+		assert.equal(existsSync(join(h.project, "output.txt")), false);
 	});
 
 	for (const repository of ["none", "unborn"] as const) {

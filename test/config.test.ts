@@ -6,7 +6,7 @@ import { join } from "node:path";
 import { describe, it, type TestContext } from "node:test";
 import {
 	BUILTIN_AGENT_NAMES, DEFAULT_CONFIG, DEFAULT_IDLE_TIMEOUT_SEC, DEFAULT_MAX_RESULT_LINES,
-	initializeConfig, loadConfig, normalizeConfig, saveConfig,
+	initializeConfig, loadConfig, normalizeConfig, updateConfig,
 } from "../src/configuration/config.ts";
 
 async function fixture(t: TestContext) {
@@ -37,7 +37,7 @@ describe("worker configuration", () => {
 	it("creates missing settings once and keeps current settings untouched", async (t) => {
 		const { path } = await fixture(t);
 		assert.equal(await initializeConfig(path), "created");
-		await saveConfig({ ...DEFAULT_CONFIG, worker: { model: "test/worker", thinking: "high" } }, path);
+		await updateConfig(path, (config) => { config.worker = { model: "test/worker", thinking: "high" }; });
 		const time = new Date("2000-01-01T00:00:00Z");
 		await utimes(path, time, time);
 		const before = await stat(path);
@@ -85,6 +85,29 @@ describe("worker configuration", () => {
 		const results = await Promise.all([initializeConfig(path), initializeConfig(path), initializeConfig(path)]);
 		assert.equal(results.filter((result) => result === "reset").length, 1);
 		assert.deepEqual(await loadConfig(path), DEFAULT_CONFIG);
+	});
+
+	it("serializes updates to independent roles without losing either change", async (t) => {
+		const { path } = await fixture(t);
+		await Promise.all([
+			updateConfig(path, (config) => { config.researcher.model = "test/search"; }),
+			updateConfig(path, (config) => { config.worker.thinking = "high"; }),
+		]);
+		assert.deepEqual(await loadConfig(path), {
+			...DEFAULT_CONFIG, researcher: { thinking: "medium", model: "test/search" }, worker: { thinking: "high" },
+		});
+	});
+
+	it("keeps a malformed current-version role untouched until setup repairs it", async (t) => {
+		const { path } = await fixture(t);
+		const researcher = { model: "test/search", thinking: "high" };
+		const raw = JSON.stringify({ version: 2, researcher, worker: null });
+		await writeFile(path, raw);
+		await assert.rejects(loadConfig(path), /invalid or unsupported/u);
+		assert.equal(await initializeConfig(path), undefined);
+		assert.equal(await readFile(path, "utf8"), raw);
+		assert.equal(await initializeConfig(path, { repair: true }), "repaired");
+		assert.deepEqual(await loadConfig(path), { ...DEFAULT_CONFIG, researcher });
 	});
 
 	it("rejects and preserves invalid current-version model references without silently choosing main", async (t) => {

@@ -1,8 +1,8 @@
 /** Run inspection, steering, completed-run follow-ups, and destructive cancellation. */
 
+import { existsSync } from "node:fs";
 import { copyFile, mkdir, mkdtemp, rm } from "node:fs/promises";
 import { basename, join } from "node:path";
-import type { Message } from "@earendil-works/pi-ai";
 import type { ExtensionAPI, Theme } from "@earendil-works/pi-coding-agent";
 import { Text, TruncatedText } from "@earendil-works/pi-tui";
 import { Type } from "typebox";
@@ -32,37 +32,14 @@ function renderFirstLine(result: { content?: unknown }, label: string, theme: Th
 	return new Text(`${theme.fg("toolTitle", theme.bold(label))}${theme.fg("dim", firstLine.slice(0, 60))}`, 0, 0);
 }
 
-/** Files a finished run read or changed, recovered from its recorded tool
- * calls. A new child cannot see that history, so naming the paths is the
- * difference between a useful brief and a blind restart. */
-function touchedPaths(messages: readonly Message[] | undefined): string[] {
-	const paths = new Set<string>();
-	const visit = (value: unknown, depth: number): void => {
-		if (depth > 3 || !value || typeof value !== "object") return;
-		for (const [key, child] of Object.entries(value as Record<string, unknown>)) {
-			if (/^(path|paths|file|files|file_path|target|pattern)$/u.test(key)) {
-				for (const candidate of Array.isArray(child) ? child : [child]) {
-					if (typeof candidate === "string" && candidate.length <= 200 && /[\\/.]/u.test(candidate)) paths.add(candidate);
-				}
-				continue;
-			}
-			visit(child, depth + 1);
-		}
-	};
-	for (const message of messages ?? []) {
-		const content = (message as { content?: unknown }).content;
-		if (Array.isArray(content)) for (const part of content) visit(part, 0);
-	}
-	return [...paths].slice(0, 20);
-}
-
 /** Brief for a summary follow-up: what the run was asked, what it delivered,
  * which files it touched, and the new instruction — bounded so a long result
  * cannot become the whole context. */
 function buildSummaryFollowUp(thread: SubagentThread, message: string): string {
 	const prior = thread.lastResult ? getResultOutput(thread.lastResult) : "(no recorded result)";
 	const bounded = prior.length > 4_000 ? prior.slice(0, 4_000) + "\n…(truncated; read the files for detail)" : prior;
-	const files = touchedPaths(thread.lastResult?.messages);
+	const files = thread.lastResult?.referencedFiles ?? [];
+	const resultFile = thread.lastResult?.resultFile;
 	return [
 		`Current objective for this follow-up to run #${thread.id}:`,
 		message,
@@ -74,7 +51,7 @@ function buildSummaryFollowUp(thread: SubagentThread, message: string): string {
 		"",
 		"Earlier result:",
 		bounded,
-		...(thread.lastResult?.resultFile ? [`Full result: ${thread.lastResult.resultFile}`] : []),
+		...(resultFile && existsSync(resultFile) ? [`Full result: ${resultFile}`] : []),
 		...(files.length ? ["", "Files referenced in earlier tool calls:", ...files.map((path) => `- ${path}`)] : []),
 	].join("\n");
 }
@@ -97,9 +74,16 @@ export function registerLookupTools(pi: ExtensionAPI, runtime: SubagentRuntime, 
 		}),
 		async execute(_toolCallId, params) {
 			await runtime.durableRestore;
-			const threads = [...runtime.threads.values()]
-				.filter((thread) => params.id === undefined || thread.id === params.id)
-				.sort((left, right) => left.id - right.id);
+			const selected = params.id === undefined ? undefined : runtime.threads.get(params.id);
+			const retainedResult = selected && (runtime.settledRuns.get(selected.id) ?? selected.lastResult);
+			const evidence = selected && retainedResult && retainedResult.exitCode !== -1
+				? retainedResult.resultFile && existsSync(retainedResult.resultFile)
+					? `Read the retained result: ${retainedResult.resultFile}`
+					: formatCompletionBlock(retainedResult, DEFAULT_MAX_RESULT_LINES, { resultRoot: projectResultsRoot(runtime.configPath, selected.cwd) })
+				: "";
+			const threads = params.id === undefined
+				? [...runtime.threads.values()].sort((left, right) => left.id - right.id)
+				: selected ? [selected] : [];
 			const runs = threads.map((thread) => {
 				const live = monitor.findRun(thread.id);
 				const result = runtime.settledRuns.get(thread.id) ?? thread.lastResult;
@@ -124,7 +108,7 @@ export function registerLookupTools(pi: ExtensionAPI, runtime: SubagentRuntime, 
 					exitCode: result?.exitCode,
 					stopReason: result?.stopReason,
 					errorMessage: result ? getResultError(result) : state === "failed" ? "No failure reason was recorded." : undefined,
-					resultFile: result?.resultFile,
+					resultFile: result?.resultFile && existsSync(result.resultFile) ? result.resultFile : undefined,
 					sessionDir: thread.retired ? undefined : thread.sessionDir ?? result?.sessionDir,
 					followUpContext: state === "completed"
 						? thread.sessionDir && thread.sessionId && sessionExists(thread.sessionDir, thread.sessionId) ? "session" : "summary"
@@ -162,13 +146,6 @@ export function registerLookupTools(pi: ExtensionAPI, runtime: SubagentRuntime, 
 					if (paths.length > 0) lines.push(`  ${paths.join("\n  ")}`);
 					return lines.join("\n");
 				}).join("\n");
-			const selected = params.id === undefined ? undefined : runtime.threads.get(params.id);
-			const retainedResult = selected ? runtime.settledRuns.get(selected.id) ?? selected.lastResult : undefined;
-			const evidence = retainedResult && retainedResult.exitCode !== -1
-				? retainedResult.resultFile
-					? `Read the retained result: ${retainedResult.resultFile}`
-					: formatCompletionBlock(retainedResult, DEFAULT_MAX_RESULT_LINES, { resultRoot: projectResultsRoot(runtime.configPath, selected!.cwd) })
-				: "";
 			const sections = [text, evidence].filter((section) => section.trim().length > 0);
 			return {
 				content: [{
@@ -279,9 +256,8 @@ export function registerLookupTools(pi: ExtensionAPI, runtime: SubagentRuntime, 
 				const receipt = `Follow-up #${result.runId} from #${thread.id} with ${contextNote}${fallbackReason ? ` (${fallbackReason})` : ""}`;
 				const details = { id: result.runId, sourceId: thread.id, context: selectedContext, ...(fallbackReason ? { fallbackReason } : {}) };
 				if (wait) {
-					const blocks = await awaitRunResults(runtime, [result.runId], _signal, DEFAULT_MAX_RESULT_LINES, thread.cwd, (text) => {
-						onUpdate?.({ content: [{ type: "text", text }], details });
-					});
+					const blocks = await awaitRunResults(runtime, [result.runId], _signal, DEFAULT_MAX_RESULT_LINES, thread.cwd, onUpdate
+						? (text) => onUpdate({ content: [{ type: "text", text }], details }) : undefined);
 					if (_signal?.aborted) await cancelActiveWork(runtime, "Parent run was cancelled.", { context: ctx });
 					else runtime.completeAwaitDelivery([result.runId]);
 					const settled = runtime.settledRuns.get(result.runId);
@@ -360,6 +336,9 @@ export function registerLookupTools(pi: ExtensionAPI, runtime: SubagentRuntime, 
 				})
 				: [...runtime.threads.keys()];
 			const requestedId = params.all === true ? undefined : parseExactRunId(params.id);
+			if (requestedId !== undefined && runtime.threads.get(requestedId)?.retired) {
+				return { content: [{ type: "text", text: `Run #${requestedId} is already stopped.` }], details: {} };
+			}
 			const targets = params.all === true
 				? candidateIds
 				: requestedId !== undefined && candidateIds.includes(requestedId) ? [requestedId] : [];

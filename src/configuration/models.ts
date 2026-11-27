@@ -131,6 +131,11 @@ export function buildModelPickerItems(options: {
 		const ref = modelRef(model);
 		if (!byRef.has(ref)) byRef.set(ref, model);
 	}
+	const nameCounts = new Map<string, number>();
+	for (const model of byRef.values()) {
+		const key = `${model.provider}\0${model.name.trim() || model.id}`;
+		nameCounts.set(key, (nameCounts.get(key) ?? 0) + 1);
+	}
 	const configuredRef = cleanModelRef(options.configuredRef);
 
 	const refs = [...byRef.keys()]
@@ -152,8 +157,7 @@ export function buildModelPickerItems(options: {
 		const tags = [ref === configuredRef ? "configured" : "", ref === mainRef ? "current main" : ""]
 			.filter(Boolean);
 		const name = model.name.trim() || model.id;
-		const duplicateName = [...byRef.values()].some((other) =>
-			other.id !== model.id && other.provider === model.provider && (other.name.trim() || other.id) === name);
+		const duplicateName = (nameCounts.get(`${model.provider}\0${name}`) ?? 0) > 1;
 		items.push({
 			value: ref,
 			label: name + " · " + model.provider + (duplicateName ? " (" + model.id + ")" : ""),

@@ -6,6 +6,7 @@ import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { describe, it } from "node:test";
 import { promisify } from "node:util";
+import { runCommand, type CommandRunner } from "../src/isolation/git-command.ts";
 import {
 	createWorktreeIsolation,
 	isPathInside,
@@ -37,10 +38,13 @@ async function callerState(cwd: string) {
 }
 
 async function withRepository(
-	run: (repository: string, isolate: (cwd?: string) => Promise<WorktreeIsolation>) => Promise<void>,
+	run: (repository: string, isolate: (
+		cwd?: string, options?: Omit<Parameters<typeof createWorktreeIsolation>[1], "tempBaseDir">,
+	) => Promise<WorktreeIsolation>) => Promise<void>,
+	directoryName = "repository",
 ): Promise<void> {
 	const root = await mkdtemp(join(tmpdir(), "pi-worktree-baseline-"));
-	const repository = join(root, "repository");
+	const repository = join(root, directoryName);
 	const worktrees: WorktreeIsolation[] = [];
 	try {
 		await mkdir(repository);
@@ -53,8 +57,8 @@ async function withRepository(
 		await writeFile(join(repository, "deleted.txt"), "delete me\n");
 		await git(repository, "add", ".");
 		await git(repository, "commit", "-m", "Initial fixture");
-		await run(repository, async (cwd = repository) => {
-			const worktree = await createWorktreeIsolation(cwd, { tempBaseDir: join(root, "worktrees") });
+		await run(repository, async (cwd = repository, options) => {
+			const worktree = await createWorktreeIsolation(cwd, { ...options, tempBaseDir: join(root, "worktrees") });
 			worktrees.push(worktree);
 			return worktree;
 		});
@@ -133,6 +137,30 @@ describe("worktree caller baselines (real Git)", () => {
 			assert.equal(checkpoint.baseHead, second.head);
 			assert.equal(await git(repository, "show", checkpoint.commit + ":module.ts"), moduleB.trim());
 			assert.equal(await git(repository, "show", checkpoint.baseHead + ":module.ts"), moduleA.trim());
+			const snapshot = worktreeSnapshot(second)!;
+			const restored = await restoreWorktreeIsolation(snapshot);
+			assert.ok(restored);
+			assert.deepEqual(worktreeSnapshot(restored), snapshot, "a restored checkpoint keeps its Git references");
+			assert.deepEqual(await restored.finalize(), { status: "integrated", integrated: true, hadChanges: true });
+			assert.equal(await readFile(join(repository, "module.ts"), "utf8"), moduleB);
+		});
+	});
+
+	it("retains a patch when its recovery checkpoint commit fails", async () => {
+		await withRepository(async (repository, isolate) => {
+			const runner: CommandRunner = (command, args, options) => {
+				if (args.includes("pi-subagents isolated checkpoint")) throw new Error("checkpoint creation unavailable");
+				return runCommand(command, args, options);
+			};
+			const worktree = await isolate(undefined, { runner });
+			await writeFile(join(worktree.cwd, "tracked.txt"), "isolated edit\n");
+			const outcome = await worktree.finalize();
+			assert.equal(outcome.status, "retained");
+			assert.equal(outcome.hadChanges, true);
+			assert.match(outcome.error ?? "", /checkpoint creation unavailable/u);
+			assert.equal(outcome.patchPath, worktree.patchPath);
+			assert.match(await readFile(worktree.patchPath, "utf8"), /\+isolated edit/u);
+			assert.equal(await readFile(join(repository, "tracked.txt"), "utf8"), "committed\n");
 		});
 	});
 
@@ -164,7 +192,15 @@ describe("worktree caller baselines (real Git)", () => {
 		await withRepository(async (repository, isolate) => {
 			await writeFile(join(repository, "tracked.txt"), "shared baseline\n");
 			const before = await callerState(repository);
-			const worktrees = await Promise.all(Array.from({ length: 5 }, () => isolate()));
+			const baselineCache = new Map<string, string>();
+			let baselineCommits = 0;
+			const runner: CommandRunner = (command, args, options) => {
+				if (args.includes("pi-subagents caller baseline")) baselineCommits++;
+				return runCommand(command, args, options);
+			};
+			const worktrees = await Promise.all(Array.from({ length: 5 }, () => isolate(undefined, { baselineCache, runner })));
+			assert.equal(baselineCommits, 1);
+			assert.equal(new Set(worktrees.map((worktree) => worktree.head)).size, 1);
 			await Promise.all(
 				worktrees.map((worktree, index) =>
 					writeFile(join(worktree.cwd, `parallel-${index}.txt`), `worker-${index}\n`),
@@ -187,5 +223,12 @@ describe("worktree caller baselines (real Git)", () => {
 		assert.equal(isPathInside(root, join(root, "..cache", "file")), true);
 		assert.equal(isPathInside(root, resolve("other")), false);
 		assert.equal(isPathInside(root, dirname(root)), false);
+	});
+
+	it("discovers checkouts whose directory name ends in a space", { skip: process.platform === "win32" }, async () => {
+		await withRepository(async (_repository, isolate) => {
+			const worktree = await isolate();
+			assert.equal(await readFile(join(worktree.cwd, "tracked.txt"), "utf8"), "committed\n");
+		}, "repository ");
 	});
 });

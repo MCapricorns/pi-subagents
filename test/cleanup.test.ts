@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { existsSync, utimesSync } from "node:fs";
-import { appendFile, mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
+import { appendFile, mkdir, mkdtemp, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, it } from "node:test";
@@ -77,6 +77,40 @@ describe("storage cleanup", () => {
 			const result = await runStorageCleanup(configPath);
 			assert.equal(existsSync(join(session, `2026-01-01T00-00-00.000Z_${sessionId}.jsonl`)), true);
 			assert.equal(result.parkedRecords, 1);
+		});
+	});
+
+	it("keeps a new empty session while its owner marker is being written", async () => {
+		await fixture(async (configPath, cwd) => {
+			const sessionsRoot = join(getProjectRoot(configPath, cwd), "sessions");
+			await mkdir(sessionsRoot, { recursive: true });
+			const fresh = await mkdtemp(join(sessionsRoot, "pi-subagent-session-"));
+			const stale = await mkdtemp(join(sessionsRoot, "pi-subagent-session-"));
+			const old = new Date(Date.now() - 8 * 24 * 60 * 60 * 1_000);
+			utimesSync(stale, old, old);
+
+			await runStorageCleanup(configPath);
+
+			assert.equal(existsSync(fresh), true);
+			assert.equal(existsSync(stale), false);
+		});
+	});
+
+	it("keeps artifacts outside the managed tree when a storage directory is linked", async () => {
+		await fixture(async (configPath, cwd) => {
+			const root = getProjectRoot(configPath, cwd);
+			const sessions = join(cwd, "sessions");
+			const session = join(sessions, "pi-subagent-session-external");
+			await mkdir(session, { recursive: true });
+			await writeFile(join(session, "owner.json"), JSON.stringify({ pid: 2_147_483_647, createdAt: 0 }));
+			const transcript = join(session, "transcript.jsonl");
+			await writeFile(transcript, "external transcript");
+			await mkdir(root, { recursive: true });
+			await symlink(sessions, join(root, "sessions"), "junction");
+			const now = Date.now() + 3_600_000;
+			await runAutomaticCleanup({ configPath, threads: new Map() }, { force: true, now, budgetBytes: 0 });
+			await runStorageCleanup(configPath, { now });
+			assert.equal(existsSync(transcript), true);
 		});
 	});
 });

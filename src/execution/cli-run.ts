@@ -8,7 +8,7 @@ import { StringDecoder } from "node:string_decoder";
 import { fileURLToPath } from "node:url";
 import type { Message, Usage } from "@earendil-works/pi-ai";
 import type { JsonAgentSessionEvent } from "@earendil-works/pi-coding-agent";
-import { SUBAGENT_TOOL_NAMES, type AgentConfig } from "../delegation/agents.ts";
+import { BUILTIN_READ_ONLY_TOOL_NAMES, SUBAGENT_TOOL_NAMES, type AgentConfig } from "../delegation/agents.ts";
 import type { ThinkingLevel } from "../configuration/config.ts";
 import { writeTempOwnerMarker } from "../isolation/temp-hygiene.ts";
 import { terminateProcessTree } from "./process-tree.ts";
@@ -19,6 +19,7 @@ const DEPTH_ENV_VAR = "PI_SUBAGENT_DEPTH";
 const MCP_TOOL_PREFIX = "mcp__";
 const SUBAGENT_KILL_GRACE_MS = 5_000;
 const CLI_STARTUP_TIMEOUT_MS = 60_000;
+const MAX_REFERENCED_FILES = 20;
 export const CHILD_STDERR_MAX_CHARS = 32_000;
 const HIDDEN_CONSOLE_PATH = fileURLToPath(new URL("./hidden-console.cjs", import.meta.url));
 
@@ -106,6 +107,22 @@ function extractToolErrorText(content: unknown): string {
 		.slice(-3)
 		.map((line) => (line.length > 200 ? `${line.slice(0, 200)}…` : line))
 		.join("\n");
+}
+
+/** Keep compact path evidence for summary follow-ups without retaining tool payloads. */
+function recordReferencedFiles(files: Set<string>, value: unknown, depth = 0): void {
+	if (depth > 3 || files.size >= MAX_REFERENCED_FILES || !value || typeof value !== "object") return;
+	for (const [key, child] of Object.entries(value)) {
+		if (/^(path|paths|file|files|file_path|filePath|target|pattern)$/u.test(key)) {
+			for (const candidate of Array.isArray(child) ? child : [child]) {
+				if (typeof candidate === "string" && candidate.length <= 200 && /[\\/.]/u.test(candidate)) files.add(candidate);
+				if (files.size >= MAX_REFERENCED_FILES) return;
+			}
+		} else {
+			recordReferencedFiles(files, child, depth + 1);
+			if (files.size >= MAX_REFERENCED_FILES) return;
+		}
+	}
 }
 
 /** Hand the agent body to the child as a file rather than inline argv text.
@@ -219,13 +236,19 @@ export async function runCliAgentAttempt(options: RunCliAttemptOptions): Promise
 			await writeFile(toolActivationPath, `
 export default function (pi) {
  const approved = new Set(${JSON.stringify(agent.tools)});
+ const builtins = new Set(${JSON.stringify(BUILTIN_READ_ONLY_TOOL_NAMES)});
  const activate = () => {
-  const active = pi.getActiveTools();
-  const registered = pi.getAllTools();
-  const late = registered.filter(tool => approved.has(tool.name) &&
-   (tool.exposure === "codemode" || tool.exposure === "deferred") && !active.includes(tool.name));
-  if (late.length) pi.setActiveTools([...active, ...late.map(tool => tool.name)]);
-  return [...approved].every(name => registered.some(tool => tool.name === name));
+  const active = new Set(pi.getActiveTools());
+  const registered = new Map(pi.getAllTools().map(tool => [tool.name, tool]));
+  const next = [];
+  for (const name of approved) {
+   const tool = registered.get(name);
+   if (!tool || tool.reachesTools || tool.annotations?.destructiveHint) continue;
+   const readOnly = tool.annotations?.readOnlyHint ?? (builtins.has(name) && tool.sourceInfo?.source === "builtin");
+   if (readOnly && (active.has(name) || tool.exposure === "codemode" || tool.exposure === "deferred")) next.push(name);
+  }
+  if (next.length !== active.size || next.some(name => !active.has(name))) pi.setActiveTools(next);
+  return [...approved].every(name => registered.has(name));
  };
  pi.on("before_agent_start", async () => {
   // Match Pi's bounded first-prompt wait for direct MCP tools. These tools
@@ -268,6 +291,7 @@ export default function (pi) {
 		let closed = false;
 		let settled = false;
 		let stopping = false;
+		let idleTimedOut = false;
 		let postSettlementKill = false;
 		let lastActivityAt = Date.now();
 		let forceKillTimer: ReturnType<typeof setTimeout> | undefined;
@@ -275,6 +299,8 @@ export default function (pi) {
 		let idleTimer: ReturnType<typeof setInterval> | undefined;
 		let startupTimer: ReturnType<typeof setTimeout> | undefined;
 		let nextRequestId = 0;
+		let lastAnswer: Message | undefined;
+		const referencedFiles = new Set<string>();
 		const pendingSteers = new Map<string, { resolve: (receipt: SteeringReceipt) => void; reject: (error: Error) => void }>();
 		let resolveClosed!: () => void;
 		const processClosed = new Promise<void>((resolve) => { resolveClosed = resolve; });
@@ -379,19 +405,23 @@ export default function (pi) {
 				if (type === "thinking_delta" || type === "text_delta") emit({ kind: type === "thinking_delta" ? "thinking" : "text" });
 			} else if (event.type === "tool_execution_start") {
 				result.activityObserved = true;
-				emit({ kind: "tool_start", toolCallId: event.toolCallId, toolName: event.toolName, args: event.args });
+				recordReferencedFiles(referencedFiles, event.args);
+				emit({ kind: "tool_start", toolName: event.toolName, args: event.args });
 			} else if (event.type === "tool_execution_end") {
-				emit({ kind: "tool_end", toolCallId: event.toolCallId, toolName: event.toolName, isError: event.isError });
+				emit({ kind: "tool_end", toolName: event.toolName, isError: event.isError });
 				if (event.isError) (result.failedTools ??= []).push({ toolName: event.toolName, error: extractToolErrorText(event.result?.content) });
 			} else if (event.type === "message_end" && event.message) {
 				result.activityObserved = true;
 				const message = event.message;
-				if (message.role === "assistant" || message.role === "user" || message.role === "toolResult") result.messages.push(message as Message);
 				if (message.role === "assistant") {
+					const content = message.content?.filter((part) => part.type === "text") ?? [];
+					const latest: Message = { ...message, content };
+					if (content.some((part) => part.text.trim())) lastAnswer = latest;
+					result.messages = lastAnswer && lastAnswer !== latest ? [lastAnswer, latest] : [latest];
 					result.usage.turns++;
 					addUsage(message.usage);
 					if (message.provider && message.model) result.model = message.provider + "/" + message.model;
-					if (!stopping) {
+					if (!stopping && !idleTimedOut && !result.dispatchFailed) {
 						result.stopReason = message.stopReason;
 						result.errorMessage = message.errorMessage;
 					}
@@ -449,14 +479,15 @@ export default function (pi) {
 				const error = "Subagent JSON process exited " + (settled ? "after settlement" : "before settling") + " (" + detail + ").";
 				result.errorMessage = [result.errorMessage, error, result.stderr.trim()].filter(Boolean).join("\n");
 				result.stopReason = "error";
-				if (!result.errorMessage.startsWith("Subagent idle timeout")) result.dispatchFailed = true;
+				if (!idleTimedOut) result.dispatchFailed = true;
 			}
 			if (!stopping && result.stopReason === "length") result.errorMessage = "Subagent answer was truncated at the model output limit.";
-			if (!stopping && settled && !result.messages.some((message) => message.role === "assistant")) {
+			if (!stopping && settled && result.messages.length === 0) {
 				result.stopReason = "error";
 				result.errorMessage ??= "Subagent settled without an assistant answer.";
 				result.dispatchFailed = true;
 			}
+			if (referencedFiles.size > 0) result.referencedFiles = [...referencedFiles];
 			result.exitCode = result.dispatchFailed || result.stopReason === "error" || result.stopReason === "aborted" || result.stopReason === "length" ? 1 : 0;
 			resolveClosed();
 		});
@@ -464,13 +495,14 @@ export default function (pi) {
 		// handlers first so its queued error and close still settle this attempt.
 		proc.stdout?.on("data", (chunk: Buffer) => {
 			lastActivityAt = Date.now();
-			stdoutBuffer += stdoutDecoder.write(chunk);
+			const text = stdoutDecoder.write(chunk);
 			let start = 0;
-			for (let lf = stdoutBuffer.indexOf("\n"); lf !== -1; lf = stdoutBuffer.indexOf("\n", start)) {
-				processLine(stdoutBuffer.slice(start, lf));
+			for (let lf = text.indexOf("\n"); lf !== -1; lf = text.indexOf("\n", start)) {
+				processLine(stdoutBuffer + text.slice(start, lf));
+				stdoutBuffer = "";
 				start = lf + 1;
 			}
-			if (start) stdoutBuffer = stdoutBuffer.slice(start);
+			stdoutBuffer += text.slice(start);
 		});
 		proc.stderr?.on("data", (chunk: Buffer) => { result.stderr = appendBoundedStderr(result.stderr, stderrDecoder.write(chunk)); });
 		proc.stdin?.on("error", (error) => {
@@ -486,7 +518,8 @@ export default function (pi) {
 		}, options.startupTimeoutMs ?? CLI_STARTUP_TIMEOUT_MS);
 		if (options.idleTimeoutMs > 0) {
 			idleTimer = setInterval(() => {
-				if (settled || stopping || closed || Date.now() - lastActivityAt < options.idleTimeoutMs) return;
+				if (settled || stopping || closed || forceKillTimer || Date.now() - lastActivityAt < options.idleTimeoutMs) return;
+				idleTimedOut = true;
 				result.errorMessage = "Subagent idle timeout: no activity for " + Math.ceil(options.idleTimeoutMs / 1000) + " seconds.";
 				result.stopReason = "error";
 				terminate();

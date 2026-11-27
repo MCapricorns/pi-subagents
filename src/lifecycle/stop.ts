@@ -8,7 +8,7 @@ import type { WorktreeFinalization } from "../isolation/worktree.ts";
 import { monitor } from "../presentation/monitor.ts";
 import { removeThreadRecord } from "./durable.ts";
 import type { SubagentRuntime, SubagentThread } from "./runtime.ts";
-import { CONTROL_QUIESCE_TIMEOUT_MS, quiesced } from "./thread-shared.ts";
+import { quiesced } from "./thread-shared.ts";
 
 export async function stopThreads(runtime: SubagentRuntime, targets: readonly number[], reason?: string) {
 	const completionResults: SingleResult[] = [];
@@ -29,7 +29,7 @@ export async function stopThreads(runtime: SubagentRuntime, targets: readonly nu
 	}> = [];
 	for (const runId of targets) {
 		const thread = runtime.threads.get(runId);
-		if (!thread) continue;
+		if (!thread || thread.retired) continue;
 		const previousState = thread.state;
 		const wasQueued = previousState === "queued";
 		const wasActive = thread.lifecycleOperation !== undefined || ["queued", "running", "interrupting"].includes(previousState);
@@ -42,8 +42,8 @@ export async function stopThreads(runtime: SubagentRuntime, targets: readonly nu
 		const completion = thread.generationCompletion;
 		let releaseQuiescence!: () => void;
 		const stopCompletion = new Promise<void>((resolve) => { releaseQuiescence = resolve; });
-		// A repeated stop must also wait for this owner's finalization, even if
-		// the bounded control call has already returned a partial result.
+		// Ownership lasts through finalization even if the bounded control call
+		// has already returned a partial result.
 		thread.generationCompletion = Promise.allSettled([completion, stopCompletion]).then(() => undefined);
 		const stopMessage = reason ?? (wasQueued
 			? "Stopped by subagent_stop before the run started."
@@ -63,15 +63,17 @@ export async function stopThreads(runtime: SubagentRuntime, targets: readonly nu
 	// An isolated stop may need the repository lane for final integration;
 	// cancelling all holders first prevents stop-all from waiting behind a
 	// later run that this same operation has not interrupted yet.
-	const interruptions = claimed.map(({ runId, thread, stopMessage, controller }) => {
+	const interruptions = claimed.map(({ runId, thread, stopMessage, controller, completion, wasSettling }) => {
 		const stopping = thread.control.stop(stopMessage).catch(() => undefined);
 		runtime.backgroundQueue.cancel(controller);
+		const childFinished = Promise.allSettled([stopping, completion]);
+		const ready = wasSettling ? Promise.resolve(true) : quiesced(childFinished);
 		// Capture each duration as its child stops. A sibling may spend much
 		// longer integrating its worktree before we can remove this monitor row.
 		const captureElapsed = quiesced(stopping).then(() => {
 			thread.elapsedMs = monitor.getElapsedMs(runId) ?? thread.elapsedMs;
 		});
-		return { stopping, captureElapsed };
+		return { stopping, childFinished, ready, captureElapsed };
 	});
 
 	const stopped: string[] = [];
@@ -100,7 +102,7 @@ export async function stopThreads(runtime: SubagentRuntime, targets: readonly nu
 		// proceed; none of its late paths can publish a second result.
 		const interruption = interruptions[claimIndex]!;
 		await interruption.captureElapsed;
-		if (!(await quiesced(completion))) runtime.backgroundQueue.cancel(controller);
+		const ready = await interruption.ready;
 		if (runtime.runControllers.get(runId) === controller) runtime.runControllers.delete(runId);
 		if (thread.queueController === controller) thread.queueController = undefined;
 
@@ -145,14 +147,11 @@ export async function stopThreads(runtime: SubagentRuntime, targets: readonly nu
 			const worktree = thread.worktree;
 			let finalization: WorktreeFinalization | undefined;
 			try {
-				finalizationCompletion = thread.finalizeIsolation(generation, stoppedResult);
-				finalization = await Promise.race([
-					finalizationCompletion,
-					new Promise<undefined>((resolve) => {
-						const timer = setTimeout(() => resolve(undefined), CONTROL_QUIESCE_TIMEOUT_MS);
-						timer.unref();
-					}),
-				]);
+				const finalize = () => thread.finalizeIsolation(generation, stoppedResult);
+				// A slow child can still write. Keep its checkout intact until it
+				// exits, then integrate the final contents from the background tail.
+				finalizationCompletion = ready ? finalize() : interruption.childFinished.then(finalize);
+				if (ready && await quiesced(finalizationCompletion)) finalization = await finalizationCompletion;
 			} catch {
 				/* an unexpected finalize rejection must not block the stop */
 			}
@@ -186,13 +185,14 @@ export async function stopThreads(runtime: SubagentRuntime, targets: readonly nu
 		// status and completion, but it must no longer occupy the active widget.
 		monitor.removeRun(runId);
 		if (stoppedResult) completionResults.push(stoppedResult);
-		runtime.retireThreadSession(thread);
+		if (ready) runtime.retireThreadSession(thread);
 		// The destructive retire removes the durable record with the session;
 		// an id never resurrects after subagent_stop.
 		if (thread.durableId) await removeThreadRecord(runtime.configPath, thread.durableId, thread.cwd).catch(() => undefined);
 		// Returning from a bounded stop retires context, but cannot release a
 		// writer or phase lease while a child or Git tail can still change files.
 		void Promise.allSettled([interruption.stopping, completion, finalizationCompletion]).then(() => {
+			if (!ready) runtime.retireThreadSession(thread);
 			if (thread.lifecycleVersion === stopVersion && thread.lifecycleOperation === "stop") {
 				thread.lifecycleOperation = undefined;
 			}

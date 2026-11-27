@@ -8,7 +8,7 @@
  */
 
 import { createHash, randomUUID } from "node:crypto";
-import { type Dirent, mkdirSync, readdirSync, realpathSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { type Dirent, lstatSync, mkdirSync, readdirSync, realpathSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { mkdir, mkdtemp, rm } from "node:fs/promises";
 import { basename, dirname, join, resolve } from "node:path";
 import type { Message } from "@earendil-works/pi-ai";
@@ -100,6 +100,7 @@ function pruneResultArtifacts(
 	const maxFiles = Math.max(0, Math.floor(options.maxFilesPerProject ?? RESULT_ARTIFACT_MAX_FILES_PER_PROJECT));
 	let entries: Dirent[];
 	try {
+		if (!lstatSync(resultsDir).isDirectory()) return;
 		entries = readdirSync(resultsDir, { withFileTypes: true });
 	} catch {
 		return;

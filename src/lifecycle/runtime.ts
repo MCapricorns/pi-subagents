@@ -40,6 +40,8 @@ export interface SubagentThread {
 	task: string;
 	/** Caller-facing cwd in the original worktree. */
 	cwd: string;
+	/** Directory of the Pi session that dispatched this run. */
+	parentCwd?: string;
 	/** Actual child cwd (the equivalent path inside an isolated worktree). */
 	executionCwd: string;
 	thinkingLevel?: ThinkingLevel;
@@ -71,7 +73,6 @@ export interface SubagentThread {
 	/** All owners finalize under the same original-repository lane. */
 	finalizeIsolation: (generation: number, result?: SingleResult) => Promise<WorktreeFinalization | undefined>;
 	notifyIsolationFailure?: (finalization: WorktreeFinalization) => void;
-	isolationFailureNotified?: boolean;
 }
 
 export interface SubagentRuntime {
@@ -79,9 +80,7 @@ export interface SubagentRuntime {
 	backgroundQueue: BackgroundTaskQueue;
 	/** Live parent tool names from ExtensionAPI, read again for each child launch. */
 	getActiveTools: () => string[];
-	/** Live metadata for the registered tools, read again for each child launch.
-	 * Read-only role policy and write capability come from it, never from a
-	 * hardcoded list of extension or MCP tool names. */
+	/** Live metadata used to filter the tools reachable by each child. */
 	getToolInfos: () => ToolInfo[];
 	/** False after session_shutdown; guards delivery and queue work. */
 	sessionActive: boolean;
@@ -297,7 +296,6 @@ export function createRuntime(pi: ExtensionAPI, configPath: string): SubagentRun
 			runtime.sessionActive = false;
 			const shutdownThreads = [...runtime.threads.values()];
 			const liveStates = new Set(["queued", "running", "interrupting"]);
-			const previousStates = new Map(shutdownThreads.map((thread) => [thread.id, thread.state] as const));
 			// Invalidate pending lifecycle claims synchronously before the first await.
 			// A generation already inside its settlement keeps its own claim: it
 			// finalizes its worktree and persists its terminal record itself.
@@ -307,12 +305,12 @@ export function createRuntime(pi: ExtensionAPI, configPath: string): SubagentRun
 				liveStates.has(thread.state),
 			);
 			for (const thread of shutdownThreads) {
+				if (thread.lifecycleOperation === "settle") continue;
 				thread.lifecycleVersion++;
 				if (thread.retired) {
 					thread.lifecycleOperation = "stop";
 					continue;
 				}
-				if (thread.lifecycleOperation === "settle") continue;
 				// Unlike subagent_stop, shutdown interrupts to the last checkpoint and
 				// preserves session/worktree artifacts for manual recovery.
 				thread.lifecycleOperation = "stop";
@@ -348,10 +346,9 @@ export function createRuntime(pi: ExtensionAPI, configPath: string): SubagentRun
 					});
 					continue;
 				}
-				const previous = previousStates.get(thread.id) ?? thread.state;
 				let state: "parked" | "completed" | "failed";
-				if (previous === "completed" || previous === "failed") {
-					state = previous;
+				if (thread.state === "completed" || thread.state === "failed") {
+					state = thread.state;
 				} else if (thread.lifecycleOperation === "settle" && thread.lastResult) {
 					state = isFailedResult(thread.lastResult) ? "failed" : "completed";
 				} else {

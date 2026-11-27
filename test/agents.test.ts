@@ -2,7 +2,6 @@ import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 import {
 	formatCatalogEntry,
-	isWriteCapableAgent,
 	loadBuiltinAgents,
 	resolveAgentTools,
 	type ToolMetadata,
@@ -34,15 +33,13 @@ describe("loadBuiltinAgents", () => {
 		for (const agent of agents) {
 			assert.equal(agent.model, undefined);
 			assert.equal(agent.tools, undefined);
-			assert.match(agent.systemPrompt, /do not dispatch agents, bump versions, commit, push, publish, tag, or release/u);
+			assert.match(agent.systemPrompt, /Leave delegation, version bumps, commits, pushes, publishing, tags, and releases to main/u);
 			assert.doesNotMatch(formatCatalogEntry(agent), /[\r\n]/u);
 		}
-		assert.equal(isWriteCapableAgent(researcher), false);
 		assert.doesNotMatch(researcher.systemPrompt, /script tool/u);
 		assert.match(researcher.systemPrompt, /^Answer: [\s\S]*^Evidence: /mu);
 
-		assert.equal(isWriteCapableAgent(worker), true);
-		assert.match(worker.systemPrompt, /directly, or through a script tool/u);
+		assert.match(worker.systemPrompt, /Use direct tools or a script tool as declared/u);
 		assert.match(worker.systemPrompt, /^Status: done, partial, or blocked[\s\S]*^Changes: [\s\S]*^Checks: /mu);
 	});
 });
@@ -75,6 +72,17 @@ describe("resolveAgentTools", () => {
 			"subagent_status",
 		], infos);
 		assert.deepEqual(resolved.tools, ["read", "grep", "mcp__docs__search", "docs_search"]);
+	});
+
+	it("rejects extensions that reuse built-in names without a read-only declaration", () => {
+		const researcher = loadBuiltinAgents().find((agent) => agent.name === "researcher")!;
+		const resolved = resolveAgentTools(researcher, ["read", "grep", "ls", "find"], [
+			{ ...tool("read"), sourceInfo: { source: "local" } },
+			tool("grep", { readOnlyHint: false }),
+			tool("ls", { readOnlyHint: true, destructiveHint: true }),
+			{ ...tool("find"), sourceInfo: { source: "builtin" } },
+		]);
+		assert.deepEqual(resolved.tools, ["find"]);
 	});
 
 	it("keeps codemode for broad roles and out of read-only roles", () => {
@@ -137,14 +145,5 @@ describe("resolveAgentTools", () => {
 		}
 		// Pi keeps registered indirect tools callable independently of activation.
 		assert.deepEqual(resolveAgentTools(worker, ["read"], infos).tools, ["read", "extension_deferred", "mcp__indirect__search"]);
-	});
-
-	it("treats tools without a read-only proof as potentially write-capable", () => {
-		const infos = [READ_ONLY, tool("db_write", { readOnlyHint: false }), tool("codemode", undefined, () => "all")];
-		assert.equal(isWriteCapableAgent({ name: "custom", tools: ["read", "grep"] }), false);
-		assert.equal(isWriteCapableAgent({ name: "custom", tools: ["read", "docs_search"] }, infos), false);
-		assert.equal(isWriteCapableAgent({ name: "custom", tools: ["read", "custom_repository_tool"] }), true);
-		assert.equal(isWriteCapableAgent({ name: "custom", tools: ["read", "db_write"] }, infos), true);
-		assert.equal(isWriteCapableAgent({ name: "custom", tools: ["read", "codemode"] }, infos), true);
 	});
 });

@@ -74,10 +74,10 @@ Each role's model and thinking are saved independently.
 An unavailable or out-of-scope model stays configured and blocks only its role until
 availability is restored or you select another model. Provider failures return
 to main with evidence; the extension never starts a main-model worker as a retry.
-Unreadable settings or an invalid model reference also stop new dispatches instead
-of silently selecting main. Startup leaves such a file untouched and warns; repair
-it by hand or run `/subagents-setup`, which replaces an unreadable file with
-defaults or clears only the invalid model reference. A UTF-8 BOM is accepted.
+Unreadable settings, a malformed current-version role, or an invalid model reference
+pause new dispatches. Startup keeps the file and shows a warning. Repair it
+by hand or run `/subagents-setup` to preserve valid role settings and restore
+defaults for invalid fields. A UTF-8 BOM is accepted.
 
 ## How orchestration works
 
@@ -96,6 +96,9 @@ defaults or clears only the invalid model reference. A UTF-8 BOM is accepted.
 4. **Main corrects or accepts.** Focused corrections go back to the owning worker
    through its retained session. Main repairs an invalid plan or takes over when
    assumptions fail. It owns final validation, release, and the user-facing answer.
+
+Main sees each role's current model and effective thinking level beside the
+orchestration instructions.
 
 Simple edits, fixes, tests, docs, and bounded research go to cheaper workers by
 default. Main decides what is simple enough for the configured worker; there is
@@ -208,8 +211,9 @@ Explicit `isolation: "worktree"` requires isolation; `"shared"` writes directly
 in the caller's checkout.
 
 Each worktree snapshots current tracked and non-ignored untracked files,
-including uncommitted work. The child is told how original paths map into its
-worktree. Integration applies only its delta, is serialized per repository,
+including uncommitted work. Parallel tasks in one batch that share a checkout and
+HEAD reuse the same starting snapshot. Each child still has its own worktree and
+working directory. Integration applies only its delta, is serialized per repository,
 and preserves the caller's index, branch, and HEAD. Failures retain recovery
 artifacts. Worktrees isolate Git changes, not permissions.
 
@@ -221,7 +225,8 @@ applying its worktree continues integrating and reports progress.
 the cancellation receipt and any deferred results the next time you send a
 message. Tree navigation,
 new/resume/fork/reload, and shutdown stop old work and retain interrupted evidence
-for recovery.
+for recovery. Interrupted runs are restored for their parent session's directory,
+including tasks dispatched with a separate `cwd`.
 
 The task widget shows status, elapsed time, model, thinking, tokens, and worktree
 state in at most ten lines. The overview, task rows, and waiting tool card use
@@ -231,6 +236,8 @@ workers can start together. Integration into the original checkout is serialized
 ## Pi integration
 
 Workers run the native Pi CLI in RPC mode with piped I/O and retained sessions.
+Pi keeps the full transcript in the child session. Main retains the final answer,
+usage, diagnostics, and referenced files for status and summary follow-ups.
 Delegation/control tools are model-only: call them directly, outside codemode.
 Workers inherit reachable tools without activating unrelated direct tools; researcher
 gets only tools whose metadata proves them read-only.

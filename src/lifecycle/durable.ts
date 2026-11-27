@@ -80,6 +80,7 @@ export interface ThreadRecord {
 	agentName: string;
 	task: string;
 	cwd: string;
+	parentCwd?: string;
 	executionCwd: string;
 	/** Resolved (clamped) level of the last generation. */
 	thinkingLevel?: string;
@@ -175,6 +176,8 @@ function normalizeRecord(value: unknown): ThreadRecord | undefined {
 		agentName: raw.agentName,
 		task: raw.task,
 		cwd: raw.cwd,
+		...(typeof raw.parentCwd === "string" && isAbsolute(raw.parentCwd) && resolve(raw.parentCwd) === raw.parentCwd
+			? { parentCwd: raw.parentCwd } : {}),
 		executionCwd: raw.executionCwd,
 		...(typeof raw.thinkingLevel === "string" && raw.thinkingLevel ? { thinkingLevel: raw.thinkingLevel } : {}),
 		isolation: raw.isolation,
@@ -399,6 +402,7 @@ export function threadRecordFromThread(
 		agentName: thread.agentName,
 		task: thread.task,
 		cwd: thread.cwd,
+		...(thread.parentCwd ? { parentCwd: thread.parentCwd } : {}),
 		executionCwd: thread.executionCwd,
 		...(thread.thinkingLevel ? { thinkingLevel: thread.thinkingLevel } : {}),
 		isolation: thread.isolation,
@@ -502,10 +506,9 @@ function referencedDurablePaths(records: readonly ThreadRecord[]): Set<string> {
  * for several sweeps compute it once and pass it along. A read failure throws
  * instead of yielding an empty set: sweeps fail closed, never deleting claimed
  * work because its manifest was momentarily unreadable. */
-export async function readReferencedDurablePaths(configPath: string): Promise<Set<string>> {
-	const records = await readThreadRecords(configPath);
+export async function readReferencedDurablePaths(configPath: string, records?: readonly ThreadRecord[]): Promise<Set<string>> {
+	const referenced = referencedDurablePaths(records ?? await readThreadRecords(configPath));
 	const recoveryRecords = await readRecoveryRecords(configPath);
-	const referenced = referencedDurablePaths(records);
 	for (const path of await referencedRecoveryPaths(configPath, recoveryRecords)) referenced.add(path);
 	return referenced;
 }

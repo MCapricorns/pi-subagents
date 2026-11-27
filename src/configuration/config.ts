@@ -1,8 +1,9 @@
 /** Independent role settings. Legacy configuration is replaced with defaults; a broken current file is kept until setup repairs it. */
 
-import { mkdir, readFile, rename, rm, writeFile } from "node:fs/promises";
+import { mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
-import { getAgentDir, withFileMutationQueue } from "@earendil-works/pi-coding-agent";
+import { getAgentDir } from "@earendil-works/pi-coding-agent";
+import { replaceManifestFile, withManifestMutation } from "../isolation/manifest-mutation.ts";
 
 const CONFIG_VERSION = 2;
 export const BUILTIN_AGENT_NAMES = ["researcher", "worker"] as const;
@@ -32,20 +33,20 @@ export function getConfigPath(agentDir: string = getAgentDir()): string {
 	return join(agentDir, "pi-subagents.json");
 }
 
-function isCurrentConfig(raw: unknown): raw is Record<string, unknown> {
-	return typeof raw === "object" && raw !== null && !Array.isArray(raw)
-		&& (raw as Record<string, unknown>).version === CONFIG_VERSION
-		&& BUILTIN_AGENT_NAMES.every((role) => {
-			const settings = (raw as Record<string, unknown>)[role];
-			return typeof settings === "object" && settings !== null && !Array.isArray(settings);
-		});
+function isObject(raw: unknown): raw is Record<string, unknown> {
+	return typeof raw === "object" && raw !== null && !Array.isArray(raw);
+}
+
+function isCurrentVersion(raw: unknown): raw is Record<string, unknown> {
+	return isObject(raw) && raw.version === CONFIG_VERSION;
 }
 
 export function normalizeConfig(raw: unknown): SubagentsConfig {
 	const config: SubagentsConfig = { version: CONFIG_VERSION, researcher: { ...DEFAULT_AGENT_SETTINGS }, worker: { ...DEFAULT_AGENT_SETTINGS } };
-	if (!isCurrentConfig(raw)) return config;
+	if (!isCurrentVersion(raw)) return config;
 	for (const role of BUILTIN_AGENT_NAMES) {
-		const settings = raw[role] as Record<string, unknown>;
+		const settings = raw[role];
+		if (!isObject(settings)) continue;
 		if (typeof settings.model === "string") {
 			const model = settings.model.trim();
 			const slash = model.indexOf("/");
@@ -80,7 +81,7 @@ async function writeConfig(config: SubagentsConfig, configPath: string): Promise
 	const temporaryPath = configPath + "." + process.pid + "." + Date.now() + ".tmp";
 	try {
 		await writeFile(temporaryPath, JSON.stringify(config, null, 2) + "\n", "utf8");
-		await rename(temporaryPath, configPath);
+		await replaceManifestFile(temporaryPath, configPath);
 	} finally {
 		await rm(temporaryPath, { force: true }).catch(() => undefined);
 	}
@@ -96,18 +97,20 @@ export async function initializeConfig(
 	configPath: string = getConfigPath(),
 	options: { repair?: boolean } = {},
 ): Promise<ConfigInitialization | undefined> {
-	return withFileMutationQueue(configPath, async () => {
+	return withManifestMutation(configPath, async () => {
 		const stored = await readStoredConfig(configPath);
 		if (stored.parseError) {
 			if (!options.repair) return undefined;
 			await writeConfig(normalizeConfig(undefined), configPath);
 			return "replaced-unreadable";
 		}
-		if (isCurrentConfig(stored.raw)) {
+		if (isCurrentVersion(stored.raw)) {
 			const raw = stored.raw;
 			const normalized = normalizeConfig(raw);
-			const invalid = BUILTIN_AGENT_NAMES.some((role) =>
-				(raw[role] as Record<string, unknown>).model !== undefined && !normalized[role].model);
+			const invalid = BUILTIN_AGENT_NAMES.some((role) => {
+				const settings = raw[role];
+				return !isObject(settings) || (settings.model !== undefined && !normalized[role].model);
+			});
 			if (!options.repair || !invalid) return undefined;
 			await writeConfig(normalized, configPath);
 			return "repaired";
@@ -121,20 +124,25 @@ export async function initializeConfig(
 export async function loadConfig(configPath: string = getConfigPath()): Promise<SubagentsConfig> {
 	const stored = await readStoredConfig(configPath);
 	if (!stored.exists) return normalizeConfig(undefined);
-	if (!isCurrentConfig(stored.raw)) {
+	const raw = stored.raw;
+	if (!isCurrentVersion(raw) || BUILTIN_AGENT_NAMES.some((role) => !isObject(raw[role]))) {
 		throw new Error("Subagent settings are invalid or unsupported. Repair the file or run /subagents-setup to replace it with the current configuration.");
 	}
-	const config = normalizeConfig(stored.raw);
+	const config = normalizeConfig(raw);
 	for (const role of BUILTIN_AGENT_NAMES) {
-		if ((stored.raw[role] as Record<string, unknown>).model !== undefined && !config[role].model) {
+		if ((raw[role] as Record<string, unknown>).model !== undefined && !config[role].model) {
 			throw new Error(`Invalid ${role} model reference. Use provider/model-id, remove model to explicitly follow main, or run /subagents-setup to clear it.`);
 		}
 	}
 	return config;
 }
 
-export async function saveConfig(config: SubagentsConfig, configPath: string = getConfigPath()): Promise<void> {
-	await withFileMutationQueue(configPath, () => writeConfig(normalizeConfig(config), configPath));
+export async function updateConfig(configPath: string, update: (config: SubagentsConfig) => void): Promise<void> {
+	await withManifestMutation(configPath, async () => {
+		const config = await loadConfig(configPath);
+		update(config);
+		await writeConfig(normalizeConfig(config), configPath);
+	});
 }
 
 export function errorMessage(error: unknown): string {

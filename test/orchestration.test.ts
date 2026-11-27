@@ -6,7 +6,7 @@ import { it } from "node:test";
 import type { Api, Model } from "@earendil-works/pi-ai";
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import registerExtension from "../index.ts";
-import { DEFAULT_CONFIG, loadConfig, saveConfig } from "../src/configuration/config.ts";
+import { DEFAULT_CONFIG, loadConfig, updateConfig } from "../src/configuration/config.ts";
 import { ORCHESTRATION_SECTION } from "../src/delegation/orchestration.ts";
 import { DELEGATION_SECTION } from "../src/delegation/prompt.ts";
 import { monitor } from "../src/presentation/monitor.ts";
@@ -69,17 +69,17 @@ it("resets old settings and installs live orchestration without changing the sta
 	const stable = sections[DELEGATION_SECTION];
 	assert.match(stable!, /Main judges difficulty/u);
 	assert.match(stable!, /Delegate simple, bounded work by default/u);
-	assert.match(sections[ORCHESTRATION_SECTION]!, /researcher follows main's model/u);
-	await saveConfig({ ...DEFAULT_CONFIG, worker: { model: "fixture/worker", thinking: "low" } }, configPath);
+	assert.match(sections[ORCHESTRATION_SECTION]!, /researcher: fixture\/main \(follows main\)/u);
+	await updateConfig(configPath, (config) => { config.worker = { model: "fixture/worker", thinking: "low" }; });
 	await before(event, ctx);
 	assert.equal(sections[DELEGATION_SECTION], stable);
-	assert.match(sections[ORCHESTRATION_SECTION]!, /Main judges difficulty, plans, handles complex work, and reviews: fixture\/main/u);
-	assert.match(sections[ORCHESTRATION_SECTION]!, /worker: fixture\/worker \(thinking preference: low/u);
+	assert.match(sections[ORCHESTRATION_SECTION]!, /Main model: fixture\/main/u);
+	assert.match(sections[ORCHESTRATION_SECTION]!, /worker: fixture\/worker · thinking low/u);
 	assert.equal(sections.custom, "Preserve another extension");
 
 	const scoped = { ...ctx, scopedModels: [{ model: main, thinkingLevel: "high" }] } as ExtensionContext;
 	await before(event, scoped);
-	assert.match(sections[ORCHESTRATION_SECTION]!, /worker dispatch is blocked/u);
+	assert.match(sections[ORCHESTRATION_SECTION]!, /worker: dispatch blocked while fixture\/worker is unavailable/u);
 	assert.equal(sections[DELEGATION_SECTION], stable);
 	await assert.rejects(
 		tools.get("subagent").execute("blocked-worker", { agent: "worker", task: "Write a file", wait: true }, new AbortController().signal, undefined, scoped),

@@ -211,6 +211,7 @@ export function registerSubagentTool(
 
 			monitor.beginTurn();
 			core.setEnvironment({ ctx, config, agents: loadBuiltinAgents() });
+			const baselineCache = prepared.length > 1 ? new Map<string, string>() : undefined;
 			// Reserve the whole batch in this turn before any other tool admission runs.
 			const results = await Promise.all(prepared.map((item) => startBackground(
 				item.agent, item.task, item.cwd,
@@ -218,6 +219,7 @@ export function registerSubagentTool(
 				{
 					deliveryRoute: wait ? "await" : "background",
 					automaticIsolation: item.isolation === undefined,
+					baselineCache,
 				},
 			)));
 			const ids = results.flatMap((result) => result.exitCode === -1 && result.runId !== undefined ? [result.runId] : []);
@@ -277,7 +279,7 @@ export function registerSubagentTool(
 
 		renderResult(result, options, theme) {
 			const details = result.details as SubagentDetails | undefined;
-			if (options.isPartial || options.expanded || !details?.results.length) {
+			if (options.isPartial || options.expanded || !details?.results?.length) {
 				const text = stripVTControlCharacters(result.content.flatMap((part) => part.type === "text" ? [part.text] : []).join("\n"));
 				return new Text(options.isPartial ? theme.fg("muted", text) : text, 0, 0);
 			}

@@ -76,18 +76,10 @@ interface WorktreeCheckpoint {
 	baseHead: string;
 	/** Synthetic commit whose tree is the generation's complete final state. */
 	commit: string;
-	/** Binary delta from baseHead, retained for size checks and diagnostics. */
-	patch: Buffer;
 }
 
-interface WorktreeCheckpointRef {
-	baseHead: string;
-	commit: string;
-}
-
-/** Persistable projection of one worktree handle: enough to rebuild the
- * handle after a reload or restart. Patch bytes are deliberately omitted;
- * the checkpoint commit remains in the shared repository as recovery evidence. */
+/** Persistable projection of one worktree handle. Its checkpoint commit
+ * remains in the shared repository as recovery evidence. */
 export interface WorktreeSnapshot {
 	originalCwd: string;
 	originalRoot: string;
@@ -98,7 +90,7 @@ export interface WorktreeSnapshot {
 	head: string;
 	integrationBaseHead: string;
 	state: "active" | "retained" | "integrated" | "no_changes";
-	checkpoint?: WorktreeCheckpointRef;
+	checkpoint?: WorktreeCheckpoint;
 }
 
 interface WorktreeCreateOptions {
@@ -106,6 +98,8 @@ interface WorktreeCreateOptions {
 	/** Parent directory for the worktree group: the project-scoped durable
 	 * worktrees root, so isolation never lands in the OS temp directory. */
 	tempBaseDir: string;
+	/** Immutable baselines shared only by tasks in one parallel dispatch. */
+	baselineCache?: Map<string, string>;
 }
 
 export type WorktreeFinalizationStatus = "integrated" | "no_changes" | "retained";
@@ -157,10 +151,6 @@ class WorktreeSetupError extends Error {
 }
 
 const ERROR_OUTPUT_MAX = 8_000;
-
-function cloneCheckpoint(checkpoint: WorktreeCheckpoint): WorktreeCheckpoint {
-	return { ...checkpoint, patch: Buffer.from(checkpoint.patch) };
-}
 
 function outputText(result: CommandResult): string {
 	const text = (result.stderr.length > 0 ? result.stderr : result.stdout).toString("utf8").trim();
@@ -301,7 +291,7 @@ async function resolveRepositoryLocation(
 			`Worktree isolation requires cwd to be inside a Git worktree/repository: ${error instanceof Error ? error.message : String(error)}`,
 		);
 	}
-	const reportedRoot = topLevel.stdout.toString("utf8").trim();
+	const reportedRoot = topLevel.stdout.toString("utf8").replace(/\r?\n$/u, "");
 	if (!reportedRoot) {
 		throw new WorktreeSetupError(`Git repository discovery for ${originalCwd} returned no top-level path.`);
 	}
@@ -395,7 +385,11 @@ class GitWorktreeIsolation implements WorktreeIsolation {
 		this.integrationBaseHead = integrationBaseHead;
 		if (restored) {
 			this.currentState = restored.state;
-			if (restored.checkpoint) this.continuationCheckpoint = cloneCheckpoint(restored.checkpoint);
+			if (restored.checkpoint) this.continuationCheckpoint = { ...restored.checkpoint };
+			if (restored.state === "integrated" || restored.state === "no_changes") {
+				const integrated = restored.state === "integrated";
+				this.finalization = Promise.resolve({ status: restored.state, integrated, hadChanges: integrated });
+			}
 		}
 	}
 
@@ -404,7 +398,7 @@ class GitWorktreeIsolation implements WorktreeIsolation {
 	}
 
 	getContinuationCheckpoint(): WorktreeCheckpoint | undefined {
-		return this.continuationCheckpoint ? cloneCheckpoint(this.continuationCheckpoint) : undefined;
+		return this.continuationCheckpoint && { ...this.continuationCheckpoint };
 	}
 
 	discard(): Promise<void> {
@@ -462,10 +456,7 @@ class GitWorktreeIsolation implements WorktreeIsolation {
 		);
 	}
 
-	private async createCheckpoint(patch: Buffer): Promise<WorktreeCheckpoint> {
-		if (patch.length === 0) {
-			return { baseHead: this.head, commit: this.head, patch: Buffer.alloc(0) };
-		}
+	private async createCheckpoint(): Promise<WorktreeCheckpoint> {
 		await runGit(
 			this.runner,
 			this.worktreePath,
@@ -494,21 +485,28 @@ class GitWorktreeIsolation implements WorktreeIsolation {
 		);
 		const commitId = commit.stdout.toString("utf8").trim();
 		if (!commitId) throw new Error("Git returned no isolated checkpoint commit id.");
-		return { baseHead: this.head, commit: commitId, patch: Buffer.from(patch) };
+		return { baseHead: this.head, commit: commitId };
 	}
 
 	private async finalizeOnce(): Promise<WorktreeFinalization> {
 		let hadChanges = false;
-		let patchWritten = false;
 		let integrated = false;
 		try {
 			const diff = await this.collectChanges();
-			this.continuationCheckpoint = await this.createCheckpoint(diff.stdout);
 			hadChanges = diff.stdout.length > 0;
 			if (hadChanges) {
-				await writeFile(this.patchPath, diff.stdout, { flag: "wx" });
-				patchWritten = true;
+				try {
+					await writeFile(this.patchPath, diff.stdout, { flag: "wx" });
+				} catch (error) {
+					if ((error as NodeJS.ErrnoException).code !== "EEXIST") {
+						await rm(this.patchPath, { force: true }).catch(() => undefined);
+					}
+					throw error;
+				}
 			}
+			this.continuationCheckpoint = hadChanges
+				? await this.createCheckpoint()
+				: { baseHead: this.head, commit: this.head };
 			const cleanupError = await runInRepositoryWorktreeLock(this.originalRoot, async () => {
 				if (hadChanges) integrated = await this.applyPatchThreeWay();
 				return removeWorktreeGroupUnlocked(
@@ -517,7 +515,7 @@ class GitWorktreeIsolation implements WorktreeIsolation {
 				);
 			});
 			if (cleanupError) {
-				return this.retainedResult(hadChanges, integrated, patchWritten, cleanupError);
+				return this.retainedResult(hadChanges, integrated, cleanupError);
 			}
 			return {
 				status: hadChanges ? "integrated" : "no_changes",
@@ -528,7 +526,6 @@ class GitWorktreeIsolation implements WorktreeIsolation {
 			return this.retainedResult(
 				hadChanges,
 				integrated,
-				patchWritten,
 				error instanceof Error ? error.message : String(error),
 			);
 		}
@@ -537,7 +534,6 @@ class GitWorktreeIsolation implements WorktreeIsolation {
 	private retainedResult(
 		hadChanges: boolean,
 		integrated: boolean,
-		patchWritten: boolean,
 		error: string,
 	): WorktreeFinalization {
 		return {
@@ -545,7 +541,7 @@ class GitWorktreeIsolation implements WorktreeIsolation {
 			integrated,
 			hadChanges,
 			...(existsSync(this.worktreePath) ? { worktreePath: this.worktreePath } : {}),
-			...(patchWritten && existsSync(this.patchPath) ? { patchPath: this.patchPath } : {}),
+			...(existsSync(this.patchPath) ? { patchPath: this.patchPath } : {}),
 			error,
 		};
 	}
@@ -734,7 +730,8 @@ export async function createWorktreeIsolation(
 	let added = false;
 	try {
 		const baseline = await runInRepositoryWorktreeLock(target.originalRoot, async () => {
-			const commit = await createWorktreeBaseline(target, tempDir, runner);
+			const cacheKey = `${target.originalRoot}\0${target.head}`;
+			const commit = options.baselineCache?.get(cacheKey) ?? await createWorktreeBaseline(target, tempDir, runner);
 			await runGit(
 				runner,
 				target.originalRoot,
@@ -742,6 +739,7 @@ export async function createWorktreeIsolation(
 				`Creating detached worktree from ${target.originalRoot}`,
 			);
 			added = true;
+			options.baselineCache?.set(cacheKey, commit);
 			return commit;
 		});
 		const isolatedCwd = target.relativeCwd ? join(worktreePath, target.relativeCwd) : worktreePath;
@@ -817,9 +815,7 @@ export function worktreeSnapshot(worktree: WorktreeIsolation): WorktreeSnapshot 
 		head: worktree.head,
 		integrationBaseHead: worktree.integrationBaseHead,
 		state,
-		...(checkpoint && checkpoint.patch.length > 0
-			? { checkpoint: { baseHead: checkpoint.baseHead, commit: checkpoint.commit } }
-			: {}),
+		...(checkpoint && checkpoint.commit !== checkpoint.baseHead ? { checkpoint } : {}),
 	};
 }
 
@@ -844,7 +840,7 @@ export function normalizeWorktreeSnapshot(value: unknown): WorktreeSnapshot | nu
 	if (raw.state !== "active" && raw.state !== "retained" && raw.state !== "integrated" && raw.state !== "no_changes") {
 		return null;
 	}
-	let checkpoint: WorktreeCheckpointRef | undefined;
+	let checkpoint: WorktreeCheckpoint | undefined;
 	if (raw.checkpoint && typeof raw.checkpoint === "object") {
 		const rawCheckpoint = raw.checkpoint as Record<string, unknown>;
 		if (typeof rawCheckpoint.baseHead !== "string" || !rawCheckpoint.baseHead) return null;
@@ -891,9 +887,7 @@ export async function restoreWorktreeIsolation(
 		snapshot.integrationBaseHead,
 		{
 			state: snapshot.state,
-			...(snapshot.checkpoint
-				? { checkpoint: { ...snapshot.checkpoint, patch: Buffer.alloc(0) } }
-				: {}),
+			checkpoint: snapshot.checkpoint,
 		},
 	);
 }
